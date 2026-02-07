@@ -101,6 +101,14 @@ codeforge serve --mcp
 
 Pre-development — research and design phase. See [PRD.md](PRD.md) for the full product requirements document.
 
+## 2026 Priority Alignment
+
+- **P0:** ship Phase 1 MVP (workspace scaffold, tree-sitter parsing, AST chunking, BM25 index, CLI `init/search/symbols`, incremental updates).
+- **P1:** semantic + hybrid retrieval and REST integration for ForgePipe workflows.
+- **P2:** graph intelligence, MCP/gRPC depth, and production benchmark hardening.
+
+See `ROADMAP.md` for the synchronized project roadmap.
+
 ## License
 
 TBD
