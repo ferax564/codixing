@@ -1,5 +1,29 @@
 # CodeForge Roadmap
 
+## Organization Goal
+
+Ship CodeForge as the retrieval backbone for ForgePipe AI workflows. Prioritize retrieval correctness, indexing stability, and predictable latency before advanced features.
+
+## Task Mapping
+
+| Task | Description | Status | Dependencies |
+|------|-------------|--------|--------------|
+| `CF-A1` | Phase 1 scaffold + BM25 contract-compatible stub for ForgePipe integration | **Done** | — |
+| `CF-A2` | Hybrid retrieval + REST API for ForgePipe worker integration | Planned | `FP-A2` contract schema freeze |
+
+## Success Gates
+
+### Phase 1 (Met)
+- [x] MVP returns relevant symbol-aware results reliably on real repositories
+- [x] Index updates are incremental and stable under active file changes
+
+### Phase 2
+- [ ] ForgePipe can execute a code-aware workflow template using CodeForge as a worker
+- [ ] Hybrid retrieval (BM25 + vector) measurably improves recall over BM25-only
+- [ ] REST API serves <50ms p99 on 1M+ LoC codebases
+
+---
+
 ## Phase 1: Foundation — COMPLETE
 
 **Delivered:** February 2026
