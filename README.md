@@ -167,9 +167,18 @@ cargo clippy --workspace -- -D warnings
 cargo fmt --all
 ```
 
+## Retrieval Strategies (Planned)
+
+| Strategy | Use Case | Target Latency |
+|----------|----------|----------------|
+| `instant` | Autocomplete, inline suggestions | <10ms p99 |
+| `fast` | Chat Q&A, quick lookups | <50ms p99 |
+| `thorough` | Complex code understanding | <200ms p99 |
+| `deep` | Architecture analysis, cross-repo | <2s p99 |
+
 ## 2026 Priority Alignment
 
-- **P0:** ship Phase 1 MVP (workspace scaffold, tree-sitter parsing, AST chunking, BM25 index, CLI `init/search/symbols`, incremental updates).
+- **P0:** ~~ship Phase 1 MVP~~ — **DONE** (111 tests, 10 languages, BM25 search, CLI, file watcher)
 - **P1:** semantic + hybrid retrieval and REST integration for ForgePipe workflows.
 - **P2:** graph intelligence, MCP/gRPC depth, and production benchmark hardening.
 

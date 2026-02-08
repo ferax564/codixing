@@ -113,8 +113,8 @@ codeforge/
 
 ## Priority Alignment (2026)
 
-- **P0:** implement Phase 1 MVP (workspace scaffold, tree-sitter parsing, AST chunking, BM25 index, CLI `init/search/symbols`, incremental updates, persistence).
-- **P1:** semantic + hybrid retrieval and REST server path for ForgePipe workflow integration.
+- **P0:** ~~implement Phase 1 MVP~~ — **DONE** (111 tests, 10 languages, BM25 search, CLI, file watcher, persistence)
+- **P1:** semantic + hybrid retrieval and REST server path for ForgePipe workflow integration (`CF-A2`, blocked on `FP-A2` contract schema freeze).
 - **P2:** graph intelligence, MCP/gRPC depth, and production benchmark hardening.
 
 Roadmap reference: `ROADMAP.md`.
