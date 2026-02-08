@@ -1,53 +1,85 @@
 # CodeForge Roadmap
 
-Last updated: 2026-02-07
+## Phase 1: Foundation — COMPLETE
 
-## Current State
+**Delivered:** February 2026
+**Tests:** 97 unit + 14 integration = 111 total
 
-- Product definition is complete in PRD form.
-- Implementation has not started; this project is the organization's main capability gap.
+Core indexing and BM25 retrieval end-to-end.
 
-## Organization Goal
+- [x] Cargo workspace scaffold (core, cli, server crates)
+- [x] Error types (`CodeforgeError` with thiserror) and configuration (`IndexConfig`, `ChunkConfig`)
+- [x] Language trait + Rust implementation (reference pattern)
+- [x] Tier 1 languages: Python, TypeScript/TSX/JS, Go, Java, C, C++, C#
+- [x] Tree-sitter parser with DashMap-based incremental tree cache
+- [x] cAST recursive split-then-merge chunker (AST-aware, never splits functions)
+- [x] Tantivy BM25 index with custom CodeTokenizer (camelCase/snake_case/dot.path splitting)
+- [x] DashMap-based symbol table with bitcode persistence
+- [x] Index persistence to `.codeforge/` directory (JSON config/meta, bitcode symbols/hashes, tantivy native)
+- [x] Engine facade: `init`, `open`, `search`, `symbols`, `reindex_file`, `remove_file`, `watch`, `save`
+- [x] BM25Retriever implementing the Retriever trait
+- [x] CLI commands: `codeforge init`, `codeforge search`, `codeforge symbols`
+- [x] File watcher (notify) with 100ms debounce, exclude patterns, supported-extension filtering
+- [x] Integration test suite: multi-language indexing, search accuracy, chunker verification, watcher lifecycle
 
-- Ship a practical Phase 1 MVP quickly, then integrate it into ForgePipe workflows.
-- Prioritize retrieval correctness, indexing stability, and predictable latency before advanced features.
+---
 
-## Next Priorities
+## Phase 2: Semantic Search — Planned
 
-### P0 (Now - Phase 1 MVP)
+**Goal:** Vector search and hybrid retrieval operational.
 
-1. Initialize workspace/crates (`core`, `cli`, `server`) with baseline CI.
-2. Implement Tier-1 tree-sitter parsing pipeline.
-3. Implement AST-aware chunking and BM25 indexing.
-4. Ship CLI MVP:
-   - `init`
-   - `search` (BM25)
-   - `symbols`
-5. Implement incremental file update path and index persistence.
-6. Add baseline test corpus and latency/recall sanity checks.
+- [ ] ONNX Runtime integration for local embedding inference
+- [ ] HNSW vector index with incremental updates (`hnsw_rs` or `instant-distance`)
+- [ ] Dual-embedding pipeline (NLP + code embeddings)
+- [ ] Hybrid retrieval: BM25 + vector with Reciprocal Rank Fusion (RRF)
+- [ ] Maximal Marginal Relevance (MMR) deduplication
+- [ ] Token budget management with `tiktoken-rs`
+- [ ] Context enrichment (scope chains, signatures, imports in output)
+- [ ] AI-optimized output formatter
+- [ ] REST API server (axum)
+- [ ] Retrieval strategy presets: `instant`, `fast`, `thorough`
 
-### Phase A Task Mapping (Current)
+---
 
-1. `CF-A1`: Phase 1 scaffold + BM25 contract-compatible stub for ForgePipe integration.
+## Phase 3: Graph Intelligence — Planned
 
-Dependencies:
+**Goal:** Code graph unlocks structural understanding.
 
-1. `FP-A2` contract schema freeze for compatibility tests.
+- [ ] Definition/reference extraction from tree-sitter ASTs
+- [ ] Import resolvers for Tier 1 languages
+- [ ] petgraph-based code graph with persistence
+- [ ] PageRank scoring for file/symbol relevance
+- [ ] Repo map generation (Aider-style, token-budgeted)
+- [ ] Graph-boosted retrieval (graph signal fused into ranking)
+- [ ] CLI: `graph`, `callers`, `callees`, `dependencies`
+- [ ] Incremental graph updates on file change
 
-### P1 (Next - Phase 2)
+---
 
-1. Add vector index and hybrid retrieval fusion.
-2. Add token-budgeted output formatting for agent workflows.
-3. Expose REST API for ForgePipe worker integration.
+## Phase 4: Agent Integration — Planned
 
-### P2 (Later - Phase 3+)
+**Goal:** First-class AI agent support.
 
-1. Graph intelligence and repo-map features.
-2. MCP/gRPC integrations and multi-repo operations.
-3. Production hardening and benchmark program against retrieval competitors.
+- [ ] MCP server implementation (code_search, find_symbol, get_references, get_repo_map)
+- [ ] gRPC API for high-performance integrations
+- [ ] Cross-encoder reranking (optional, via ONNX)
+- [ ] Multi-repo support (index and query across repositories)
+- [ ] Git-aware features (branch-relative search, blame, diff-aware re-indexing)
+- [ ] WebSocket streaming for real-time index updates
+- [ ] `deep` retrieval strategy (multi-hop graph traversal)
 
-## Success Gates
+---
 
-- Phase 1 MVP returns relevant symbol-aware results reliably on real repositories.
-- Index updates are incremental and stable under active file changes.
-- ForgePipe can execute a code-aware workflow template using CodeForge as a worker.
+## Phase 5: Production Hardening — Planned
+
+**Goal:** Enterprise-ready reliability and performance.
+
+- [ ] Comprehensive benchmarks (vs. Aider, Cline, Cursor retrieval layers)
+- [ ] Fuzzing and property-based testing
+- [ ] Memory profiling and optimization
+- [ ] Cross-platform CI (Linux, macOS, Windows)
+- [ ] Documentation: architecture guide, API reference, integration tutorials
+- [ ] Plugin/extension system for custom retrieval strategies
+- [ ] Tier 2 language support (Ruby, PHP, Swift, Kotlin, Scala, Zig, etc.)
+- [ ] Optional Qdrant backend for distributed deployments
+- [ ] Telemetry and observability (OpenTelemetry)

@@ -1,0 +1,33 @@
+[package]
+name = "codeforge-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Core engine for CodeForge — AST parsing, indexing, and retrieval"
+
+[dependencies]
+tree-sitter.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-python.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-typescript.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-java.workspace = true
+tree-sitter-c.workspace = true
+tree-sitter-cpp.workspace = true
+tree-sitter-c-sharp.workspace = true
+
+tantivy.workspace = true
+notify.workspace = true
+dashmap.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bitcode.workspace = true
+xxhash-rust.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
