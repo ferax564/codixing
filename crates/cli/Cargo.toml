@@ -1,0 +1,18 @@
+[package]
+name = "codeforge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "CLI for CodeForge — code retrieval engine for AI agents"
+
+[[bin]]
+name = "codeforge"
+path = "src/main.rs"
+
+[dependencies]
+codeforge-core = { path = "../core" }
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

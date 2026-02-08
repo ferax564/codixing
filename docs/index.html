@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CodeForge — Code Retrieval Engine for AI Agents</title>
+    <style>
+        :root {
+            --bg: #0a0a0f;
+            --surface: #12121a;
+            --border: #1e1e2e;
+            --text: #e0e0e8;
+            --text-dim: #8888a0;
+            --accent: #6366f1;
+            --accent-glow: #818cf830;
+            --green: #22c55e;
+            --orange: #f59e0b;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 960px;
+            margin: 0 auto;
+            padding: 0 24px;
+        }
+
+        /* Hero */
+        .hero {
+            padding: 80px 0 60px;
+            text-align: center;
+        }
+
+        .hero h1 {
+            font-size: 3.2rem;
+            font-weight: 800;
+            letter-spacing: -0.03em;
+            margin-bottom: 16px;
+            background: linear-gradient(135deg, #e0e0e8 0%, #6366f1 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .hero .tagline {
+            font-size: 1.25rem;
+            color: var(--text-dim);
+            max-width: 600px;
+            margin: 0 auto 32px;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .badge-complete {
+            background: #22c55e20;
+            color: var(--green);
+            border: 1px solid #22c55e40;
+        }
+
+        /* Code block */
+        .code-block {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 24px 28px;
+            margin: 40px auto;
+            max-width: 640px;
+            text-align: left;
+            font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            line-height: 1.8;
+            overflow-x: auto;
+        }
+
+        .code-block .comment { color: #6b7280; }
+        .code-block .cmd { color: var(--green); }
+        .code-block .output { color: var(--text-dim); }
+
+        /* Features grid */
+        .features {
+            padding: 60px 0;
+        }
+
+        .features h2 {
+            text-align: center;
+            font-size: 1.8rem;
+            margin-bottom: 40px;
+            font-weight: 700;
+        }
+
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+        }
+
+        .feature-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 24px;
+            transition: border-color 0.2s;
+        }
+
+        .feature-card:hover {
+            border-color: var(--accent);
+            box-shadow: 0 0 20px var(--accent-glow);
+        }
+
+        .feature-card h3 {
+            font-size: 1.05rem;
+            margin-bottom: 8px;
+            font-weight: 600;
+        }
+
+        .feature-card p {
+            color: var(--text-dim);
+            font-size: 0.9rem;
+        }
+
+        /* Languages */
+        .languages {
+            padding: 60px 0;
+            text-align: center;
+        }
+
+        .languages h2 {
+            font-size: 1.8rem;
+            margin-bottom: 12px;
+            font-weight: 700;
+        }
+
+        .languages .subtitle {
+            color: var(--text-dim);
+            margin-bottom: 32px;
+        }
+
+        .lang-tags {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 10px;
+        }
+
+        .lang-tag {
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            background: var(--surface);
+            border: 1px solid var(--border);
+        }
+
+        .lang-tag.active {
+            border-color: var(--accent);
+            background: #6366f115;
+        }
+
+        /* Stats */
+        .stats {
+            padding: 60px 0;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+            text-align: center;
+        }
+
+        @media (max-width: 640px) {
+            .stats-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+
+        .stat-item .number {
+            font-size: 2rem;
+            font-weight: 800;
+            color: var(--accent);
+        }
+
+        .stat-item .label {
+            font-size: 0.85rem;
+            color: var(--text-dim);
+            margin-top: 4px;
+        }
+
+        /* Roadmap */
+        .roadmap {
+            padding: 60px 0;
+        }
+
+        .roadmap h2 {
+            text-align: center;
+            font-size: 1.8rem;
+            margin-bottom: 40px;
+            font-weight: 700;
+        }
+
+        .roadmap-item {
+            display: flex;
+            gap: 20px;
+            padding: 20px 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .roadmap-item:last-child { border-bottom: none; }
+
+        .roadmap-phase {
+            min-width: 100px;
+            font-weight: 700;
+            font-size: 0.9rem;
+        }
+
+        .roadmap-desc {
+            flex: 1;
+        }
+
+        .roadmap-desc h4 {
+            font-size: 1rem;
+            margin-bottom: 4px;
+        }
+
+        .roadmap-desc p {
+            color: var(--text-dim);
+            font-size: 0.85rem;
+        }
+
+        .roadmap-status {
+            min-width: 90px;
+            text-align: right;
+        }
+
+        /* Footer */
+        .footer {
+            padding: 40px 0;
+            text-align: center;
+            border-top: 1px solid var(--border);
+            color: var(--text-dim);
+            font-size: 0.85rem;
+        }
+
+        .footer a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+
+        .footer a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Hero -->
+        <section class="hero">
+            <h1>CodeForge</h1>
+            <p class="tagline">
+                Ultra-fast code retrieval engine for AI agents.
+                Structure-aware parsing, BM25 search, and AI-optimized output in a single Rust binary.
+            </p>
+            <span class="badge badge-complete">Phase 1 Complete</span>
+        </section>
+
+        <!-- Quick Start -->
+        <div class="code-block">
+            <div><span class="comment"># Index any codebase</span></div>
+            <div><span class="cmd">$ codeforge init .</span></div>
+            <div><span class="output">Indexed 28 files, 136 chunks, 370 symbols in 0.27s</span></div>
+            <br>
+            <div><span class="comment"># Search with natural language</span></div>
+            <div><span class="cmd">$ codeforge search "authentication handler"</span></div>
+            <div><span class="output">1. src/auth.rs [L12-L45] (Rust) score=14.2</span></div>
+            <div><span class="output">   fn verify_token(token: &str) -> Result&lt;Claims&gt;</span></div>
+            <br>
+            <div><span class="comment"># Explore symbols</span></div>
+            <div><span class="cmd">$ codeforge symbols Engine</span></div>
+            <div><span class="output">Struct   Engine    src/engine.rs    L35-L44</span></div>
+            <div><span class="output">Impl     Engine    src/engine.rs    L45-L284</span></div>
+        </div>
+
+        <!-- Features -->
+        <section class="features">
+            <h2>Built for AI Agents</h2>
+            <div class="feature-grid">
+                <div class="feature-card">
+                    <h3>AST-Aware Chunking</h3>
+                    <p>Tree-sitter parsing across 10 language families. Functions are never split in half. The cAST algorithm recursively splits and merges to produce semantically complete chunks.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Code-Aware Search</h3>
+                    <p>Custom tokenizer splits camelCase, snake_case, and dot.path identifiers. BM25 ranking via Tantivy means searching for "parse config" finds parseConfig, parse_config, and ParseConfigError.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Concurrent Symbol Table</h3>
+                    <p>DashMap-backed symbol lookup with exact match, prefix search, and fuzzy pattern matching. Thread-safe for parallel indexing with zero contention.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Incremental Indexing</h3>
+                    <p>File watcher with 100ms debounce detects changes instantly. Only modified files are re-parsed and re-indexed. Sub-500ms from save to searchable.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Single Binary</h3>
+                    <p>No JVM, no Docker, no external databases, no Python. Pure Rust with zero runtime dependencies. Just one binary that works everywhere.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>111 Tests</h3>
+                    <p>97 unit tests + 14 integration tests covering multi-language indexing, search accuracy, chunker boundaries, and file watcher lifecycle. All passing, zero warnings.</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Stats -->
+        <section class="stats">
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <div class="number">10</div>
+                    <div class="label">Languages</div>
+                </div>
+                <div class="stat-item">
+                    <div class="number">111</div>
+                    <div class="label">Tests</div>
+                </div>
+                <div class="stat-item">
+                    <div class="number">0.27s</div>
+                    <div class="label">Index Time (28 files)</div>
+                </div>
+                <div class="stat-item">
+                    <div class="number">0</div>
+                    <div class="label">Runtime Deps</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Languages -->
+        <section class="languages">
+            <h2>10 Languages, One Engine</h2>
+            <p class="subtitle">Full AST parsing and entity extraction for every Tier 1 language</p>
+            <div class="lang-tags">
+                <span class="lang-tag active">Rust</span>
+                <span class="lang-tag active">Python</span>
+                <span class="lang-tag active">TypeScript</span>
+                <span class="lang-tag active">JavaScript</span>
+                <span class="lang-tag active">TSX</span>
+                <span class="lang-tag active">Go</span>
+                <span class="lang-tag active">Java</span>
+                <span class="lang-tag active">C</span>
+                <span class="lang-tag active">C++</span>
+                <span class="lang-tag active">C#</span>
+                <span class="lang-tag">Ruby</span>
+                <span class="lang-tag">PHP</span>
+                <span class="lang-tag">Swift</span>
+                <span class="lang-tag">Kotlin</span>
+                <span class="lang-tag">Scala</span>
+                <span class="lang-tag">Zig</span>
+            </div>
+        </section>
+
+        <!-- Roadmap -->
+        <section class="roadmap">
+            <h2>Roadmap</h2>
+            <div class="roadmap-item">
+                <div class="roadmap-phase">Phase 1</div>
+                <div class="roadmap-desc">
+                    <h4>Foundation</h4>
+                    <p>AST parsing, cAST chunking, BM25 search, symbol table, CLI, file watcher, persistence</p>
+                </div>
+                <div class="roadmap-status">
+                    <span class="badge badge-complete">Complete</span>
+                </div>
+            </div>
+            <div class="roadmap-item">
+                <div class="roadmap-phase">Phase 2</div>
+                <div class="roadmap-desc">
+                    <h4>Semantic Search</h4>
+                    <p>Vector embeddings, HNSW index, hybrid BM25+vector retrieval with RRF, REST API</p>
+                </div>
+                <div class="roadmap-status">
+                    <span class="badge" style="background:#f59e0b20;color:var(--orange);border:1px solid #f59e0b40">Next</span>
+                </div>
+            </div>
+            <div class="roadmap-item">
+                <div class="roadmap-phase">Phase 3</div>
+                <div class="roadmap-desc">
+                    <h4>Graph Intelligence</h4>
+                    <p>Code dependency graph, PageRank relevance, Aider-style repo maps</p>
+                </div>
+                <div class="roadmap-status"></div>
+            </div>
+            <div class="roadmap-item">
+                <div class="roadmap-phase">Phase 4</div>
+                <div class="roadmap-desc">
+                    <h4>Agent Integration</h4>
+                    <p>MCP server, gRPC API, multi-repo support, git-aware features</p>
+                </div>
+                <div class="roadmap-status"></div>
+            </div>
+            <div class="roadmap-item">
+                <div class="roadmap-phase">Phase 5</div>
+                <div class="roadmap-desc">
+                    <h4>Production Hardening</h4>
+                    <p>Benchmarks, fuzzing, Tier 2 languages, distributed deployment</p>
+                </div>
+                <div class="roadmap-status"></div>
+            </div>
+        </section>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>CodeForge is open source. <a href="https://github.com/ferax564/codeforge">GitHub</a></p>
+        </footer>
+    </div>
+</body>
+</html>

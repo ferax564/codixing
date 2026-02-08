@@ -1,0 +1,18 @@
+pub mod chunker;
+pub mod config;
+pub mod engine;
+pub mod error;
+pub mod index;
+pub mod language;
+pub mod parser;
+pub mod persistence;
+pub mod retriever;
+pub mod symbols;
+pub mod watcher;
+
+// Re-export primary public API types.
+pub use config::IndexConfig;
+pub use engine::{Engine, IndexStats};
+pub use error::{CodeforgeError, Result};
+pub use retriever::{SearchQuery, SearchResult};
+pub use symbols::Symbol;
