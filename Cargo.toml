@@ -37,6 +37,9 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 tower = { version = "0.5", features = ["util"] }
 http = "1"
 
+# ANN search
+instant-distance = "0.6"
+
 # Concurrency
 dashmap = "6"
 rayon = "1"

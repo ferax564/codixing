@@ -26,6 +26,7 @@ tree-sitter-c.workspace = true
 tree-sitter-cpp.workspace = true
 tree-sitter-c-sharp.workspace = true
 
+instant-distance.workspace = true
 tantivy.workspace = true
 petgraph.workspace = true
 notify.workspace = true
