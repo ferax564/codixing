@@ -51,6 +51,21 @@ enum Command {
         #[arg(short, long)]
         file: Option<String>,
     },
+
+    /// Show code graph statistics and top symbols by PageRank.
+    Graph,
+
+    /// List symbols that call (reference) the given symbol.
+    Callers {
+        /// Symbol name to look up.
+        symbol: String,
+    },
+
+    /// List symbols that are called (referenced) by the given symbol.
+    Callees {
+        /// Symbol name to look up.
+        symbol: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -68,6 +83,9 @@ fn main() -> Result<()> {
         Command::Init { path, languages } => cmd_init(path, languages),
         Command::Search { query, limit, file } => cmd_search(query, limit, file),
         Command::Symbols { filter, file } => cmd_symbols(filter, file),
+        Command::Graph => cmd_graph(),
+        Command::Callers { symbol } => cmd_callers(symbol),
+        Command::Callees { symbol } => cmd_callees(symbol),
     }
 }
 
@@ -151,6 +169,128 @@ fn cmd_search(query: String, limit: usize, file: Option<String>) -> Result<()> {
     Ok(())
 }
 
+fn cmd_graph() -> Result<()> {
+    let root = std::env::current_dir().context("cannot determine current directory")?;
+    let mut engine = Engine::open(&root).with_context(|| {
+        format!(
+            "no index found at {} — run `codeforge init` first",
+            root.display()
+        )
+    })?;
+
+    let graph = engine.build_graph().context("failed to build code graph")?;
+    println!(
+        "Graph: {} nodes, {} edges",
+        graph.node_count(),
+        graph.edge_count()
+    );
+
+    let scores = graph.pagerank(0.85, 20);
+    let mut ranked: Vec<_> = scores.iter().collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let top = ranked.iter().take(10);
+    for (rank, (idx, score)) in top.enumerate() {
+        if let Some(node) = graph.get_node(**idx) {
+            println!(
+                "{}. {} ({}) PageRank={:.6}",
+                rank + 1,
+                node.name,
+                node.file,
+                score,
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_callers(symbol: String) -> Result<()> {
+    let root = std::env::current_dir().context("cannot determine current directory")?;
+    let mut engine = Engine::open(&root).with_context(|| {
+        format!(
+            "no index found at {} — run `codeforge init` first",
+            root.display()
+        )
+    })?;
+
+    let graph = engine.build_graph().context("failed to build code graph")?;
+    let symbol_lower = symbol.to_lowercase();
+
+    let matches: Vec<_> = graph
+        .node_indices()
+        .filter(|idx| {
+            graph
+                .get_node(*idx)
+                .map(|n| n.name.to_lowercase().contains(&symbol_lower))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    if matches.is_empty() {
+        eprintln!("No symbol matching \"{}\"", symbol);
+        return Ok(());
+    }
+
+    for idx in matches {
+        let node = graph.get_node(idx).unwrap();
+        println!("{} ({})", node.name, node.file);
+        let callers = graph.callers(idx);
+        if callers.is_empty() {
+            println!("  (no callers)");
+        } else {
+            for caller in &callers {
+                println!("  <- {} ({})", caller.name, caller.file);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_callees(symbol: String) -> Result<()> {
+    let root = std::env::current_dir().context("cannot determine current directory")?;
+    let mut engine = Engine::open(&root).with_context(|| {
+        format!(
+            "no index found at {} — run `codeforge init` first",
+            root.display()
+        )
+    })?;
+
+    let graph = engine.build_graph().context("failed to build code graph")?;
+    let symbol_lower = symbol.to_lowercase();
+
+    let matches: Vec<_> = graph
+        .node_indices()
+        .filter(|idx| {
+            graph
+                .get_node(*idx)
+                .map(|n| n.name.to_lowercase().contains(&symbol_lower))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    if matches.is_empty() {
+        eprintln!("No symbol matching \"{}\"", symbol);
+        return Ok(());
+    }
+
+    for idx in matches {
+        let node = graph.get_node(idx).unwrap();
+        println!("{} ({})", node.name, node.file);
+        let callees = graph.callees(idx);
+        if callees.is_empty() {
+            println!("  (no callees)");
+        } else {
+            for callee in &callees {
+                println!("  -> {} ({})", callee.name, callee.file);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn cmd_symbols(filter: String, file: Option<String>) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
     let engine = Engine::open(&root).with_context(|| {
@@ -189,4 +329,34 @@ fn cmd_symbols(filter: String, file: Option<String>) -> Result<()> {
     eprintln!("\n{} symbol(s) found.", symbols.len());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn cli_parses_graph_command() {
+        let cli = Cli::try_parse_from(["codeforge", "graph"]).unwrap();
+        assert!(matches!(cli.command, Command::Graph));
+    }
+
+    #[test]
+    fn cli_parses_callers_command() {
+        let cli = Cli::try_parse_from(["codeforge", "callers", "main"]).unwrap();
+        match cli.command {
+            Command::Callers { symbol } => assert_eq!(symbol, "main"),
+            _ => panic!("expected Callers"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_callees_command() {
+        let cli = Cli::try_parse_from(["codeforge", "callees", "process"]).unwrap();
+        match cli.command {
+            Command::Callees { symbol } => assert_eq!(symbol, "process"),
+            _ => panic!("expected Callees"),
+        }
+    }
 }

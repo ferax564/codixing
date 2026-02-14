@@ -508,8 +508,8 @@ mod tests {
             .unwrap();
 
         // With graph boost
-        let boosted = HybridRetriever::new(&tantivy, &vector_index, &embedder)
-            .with_graph_boost(&graph, 5.0); // Strong weight to make effect obvious
+        let boosted =
+            HybridRetriever::new(&tantivy, &vector_index, &embedder).with_graph_boost(&graph, 5.0); // Strong weight to make effect obvious
         let boosted_results = boosted
             .search(&SearchQuery::new("target_fn").with_limit(10))
             .unwrap();
