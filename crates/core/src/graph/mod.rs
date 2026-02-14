@@ -1,4 +1,5 @@
 pub mod extract;
+pub mod persistence;
 pub mod types;
 pub use extract::{DefinitionInfo, ReferenceInfo};
 pub use types::*;
@@ -12,7 +13,7 @@ use petgraph::graph::{DiGraph, NodeIndex};
 /// and edges are [`ReferenceKind`]s. It supports querying callers and callees
 /// of any symbol.
 pub struct CodeGraph {
-    inner: DiGraph<SymbolNode, ReferenceKind>,
+    pub(crate) inner: DiGraph<SymbolNode, ReferenceKind>,
 }
 
 impl CodeGraph {
@@ -40,6 +41,22 @@ impl CodeGraph {
             file: file.to_string(),
             kind,
             line: None,
+        })
+    }
+
+    /// Add a symbol node with a line number and return its index.
+    pub fn add_symbol_with_line(
+        &mut self,
+        name: &str,
+        file: &str,
+        kind: SymbolKind,
+        line: usize,
+    ) -> NodeIndex {
+        self.inner.add_node(SymbolNode {
+            name: name.to_string(),
+            file: file.to_string(),
+            kind,
+            line: Some(line),
         })
     }
 

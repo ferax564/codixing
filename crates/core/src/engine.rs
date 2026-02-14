@@ -11,6 +11,9 @@ use crate::chunker::Chunker;
 use crate::chunker::cast::CastChunker;
 use crate::config::IndexConfig;
 use crate::error::{CodeforgeError, Result};
+use crate::graph::CodeGraph;
+use crate::graph::extract::{extract_definitions, extract_references};
+use crate::graph::persistence::{load_graph, save_graph};
 use crate::index::TantivyIndex;
 use crate::language::{Language, SemanticEntity, detect_language};
 use crate::parser::Parser;
@@ -41,6 +44,8 @@ pub struct Engine {
     symbols: SymbolTable,
     /// Per-file chunk counts, used for stats.
     file_chunk_counts: HashMap<String, usize>,
+    /// Lazily-built code graph.
+    graph: Option<CodeGraph>,
 }
 
 impl Engine {
@@ -122,6 +127,7 @@ impl Engine {
             tantivy,
             symbols,
             file_chunk_counts,
+            graph: None,
         })
     }
 
@@ -150,6 +156,26 @@ impl Engine {
         let meta = store.load_meta()?;
         let file_chunk_counts = HashMap::new(); // Not persisted; rebuilt on reindex.
 
+        // Load persisted graph if available.
+        let graph = if store.graph_path().exists() {
+            match load_graph(&store.graph_path()) {
+                Ok(g) => {
+                    info!(
+                        nodes = g.node_count(),
+                        edges = g.edge_count(),
+                        "loaded code graph"
+                    );
+                    Some(g)
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to load code graph, skipping");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         info!(
             files = meta.file_count,
             chunks = meta.chunk_count,
@@ -164,6 +190,7 @@ impl Engine {
             tantivy,
             symbols,
             file_chunk_counts,
+            graph,
         })
     }
 
@@ -179,6 +206,98 @@ impl Engine {
     /// If `file` is provided, also filters by file path.
     pub fn symbols(&self, filter: &str, file: Option<&str>) -> Result<Vec<Symbol>> {
         Ok(self.symbols.filter(filter, file))
+    }
+
+    /// Access the code graph, if it has been built.
+    pub fn graph(&self) -> Option<&CodeGraph> {
+        self.graph.as_ref()
+    }
+
+    /// Build a code graph from all indexed files.
+    ///
+    /// Walks the project source files, extracts definitions and references
+    /// using tree-sitter, creates graph nodes for each definition, and
+    /// resolves references to definition nodes by name matching.
+    pub fn build_graph(&mut self) -> Result<&CodeGraph> {
+        let root = &self.config.root.clone();
+        let files = walk_source_files(root, &self.config)?;
+
+        let mut graph = CodeGraph::new();
+
+        // First pass: extract all definitions and add them as nodes.
+        // We collect (name -> NodeIndex) for reference resolution.
+        let mut name_to_nodes: HashMap<String, Vec<petgraph::graph::NodeIndex>> = HashMap::new();
+
+        for path in &files {
+            let source = match fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            let lang = match detect_language(path) {
+                Some(l) => l,
+                None => continue,
+            };
+
+            let rel_path = path.strip_prefix(root).unwrap_or(path);
+            let rel_str = normalize_path(rel_path);
+
+            let defs = extract_definitions(&source, &rel_str, &lang);
+            for def in &defs {
+                let idx =
+                    graph.add_symbol_with_line(&def.name, &def.file, def.kind.clone(), def.line);
+                name_to_nodes.entry(def.name.clone()).or_default().push(idx);
+            }
+        }
+
+        // Second pass: extract references and resolve to definition nodes.
+        for path in &files {
+            let source = match fs::read_to_string(path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            let lang = match detect_language(path) {
+                Some(l) => l,
+                None => continue,
+            };
+
+            let rel_path = path.strip_prefix(root).unwrap_or(path);
+            let rel_str = normalize_path(rel_path);
+
+            let defs = extract_definitions(&source, &rel_str, &lang);
+            let refs = extract_references(&source, &rel_str, &lang);
+
+            // For each reference, find the definition node that contains this
+            // reference (by line range) and the target definition node (by name).
+            for reference in &refs {
+                // Find the source node: the definition in this file whose range
+                // contains the reference line.
+                let source_node = find_enclosing_definition(&defs, reference.line, &name_to_nodes);
+
+                // Find target nodes by name.
+                let target_name = &reference.target_name;
+                let target_nodes = name_to_nodes.get(target_name);
+
+                if let (Some(src_idx), Some(targets)) = (source_node, target_nodes) {
+                    for &tgt_idx in targets {
+                        // Avoid self-edges.
+                        if src_idx != tgt_idx {
+                            graph.add_reference(src_idx, tgt_idx, reference.kind.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        info!(
+            nodes = graph.node_count(),
+            edges = graph.edge_count(),
+            "built code graph"
+        );
+
+        self.graph = Some(graph);
+        Ok(self.graph.as_ref().unwrap())
     }
 
     /// Re-index a single file (after modification).
@@ -312,6 +431,11 @@ impl Engine {
         };
         self.store.save_meta(&meta)?;
 
+        // Persist code graph if built.
+        if let Some(ref graph) = self.graph {
+            save_graph(graph, &self.store.graph_path())?;
+        }
+
         Ok(())
     }
 }
@@ -319,6 +443,34 @@ impl Engine {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/// Find the definition that encloses a given line number.
+///
+/// Returns the `NodeIndex` of the closest definition whose line is at or before
+/// the reference line. This is a heuristic: we pick the last definition that
+/// starts before or at the reference line.
+fn find_enclosing_definition(
+    defs: &[crate::graph::extract::DefinitionInfo],
+    ref_line: usize,
+    name_to_nodes: &HashMap<String, Vec<petgraph::graph::NodeIndex>>,
+) -> Option<petgraph::graph::NodeIndex> {
+    // Find the last definition whose line <= ref_line.
+    let mut best: Option<&crate::graph::extract::DefinitionInfo> = None;
+    for def in defs {
+        if def.line <= ref_line {
+            match best {
+                None => best = Some(def),
+                Some(b) if def.line >= b.line => best = Some(def),
+                _ => {}
+            }
+        }
+    }
+
+    let def = best?;
+    let nodes = name_to_nodes.get(&def.name)?;
+    // Return the first node that matches (from this file).
+    nodes.first().copied()
+}
 
 /// Shared context passed to `process_file` to avoid too-many-arguments.
 struct IndexContext<'a> {
@@ -599,6 +751,124 @@ pub fn unique_new_function() -> bool {
         assert!(
             !results.is_empty(),
             "expected to find newly added function after reindex"
+        );
+    }
+
+    #[test]
+    fn engine_builds_graph_from_indexed_files() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let src_dir = root.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        fs::write(
+            src_dir.join("main.rs"),
+            "fn main() { greet(); }\nfn greet() {}\n",
+        )
+        .unwrap();
+
+        let config = IndexConfig::new(&root);
+        let mut engine = Engine::init(&root, config).unwrap();
+
+        // Graph should be None before build.
+        assert!(engine.graph().is_none());
+
+        engine.build_graph().unwrap();
+        let graph = engine.graph().unwrap();
+        // Should find at least main and greet as definitions.
+        assert!(
+            graph.node_count() >= 2,
+            "expected at least 2 nodes, got {}",
+            graph.node_count()
+        );
+    }
+
+    #[test]
+    fn engine_build_graph_creates_edges() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let src_dir = root.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        fs::write(
+            src_dir.join("main.rs"),
+            "fn main() { greet(); }\nfn greet() {}\n",
+        )
+        .unwrap();
+
+        let config = IndexConfig::new(&root);
+        let mut engine = Engine::init(&root, config).unwrap();
+        engine.build_graph().unwrap();
+        let graph = engine.graph().unwrap();
+
+        // main calls greet, so there should be at least 1 edge.
+        assert!(
+            graph.edge_count() >= 1,
+            "expected at least 1 edge (main->greet), got {}",
+            graph.edge_count()
+        );
+    }
+
+    #[test]
+    fn graph_persistence_round_trip() {
+        use crate::graph::persistence::{load_graph, save_graph};
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let src_dir = root.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        fs::write(
+            src_dir.join("main.rs"),
+            "fn main() { greet(); }\nfn greet() {}\n",
+        )
+        .unwrap();
+
+        let config = IndexConfig::new(&root);
+        let mut engine = Engine::init(&root, config).unwrap();
+        engine.build_graph().unwrap();
+
+        let graph = engine.graph().unwrap();
+        let original_nodes = graph.node_count();
+        let original_edges = graph.edge_count();
+
+        // Save and load.
+        let graph_path = dir.path().join("graph.json");
+        save_graph(graph, &graph_path).unwrap();
+        let loaded = load_graph(&graph_path).unwrap();
+
+        assert_eq!(loaded.node_count(), original_nodes);
+        assert_eq!(loaded.edge_count(), original_edges);
+    }
+
+    #[test]
+    fn open_loads_persisted_graph() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let src_dir = root.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        fs::write(
+            src_dir.join("main.rs"),
+            "fn main() { greet(); }\nfn greet() {}\n",
+        )
+        .unwrap();
+
+        // Init, build graph, save.
+        {
+            let config = IndexConfig::new(&root);
+            let mut engine = Engine::init(&root, config).unwrap();
+            engine.build_graph().unwrap();
+            engine.save().unwrap();
+        }
+
+        // Re-open — should load graph.
+        let engine = Engine::open(&root).unwrap();
+        let graph = engine.graph();
+        assert!(graph.is_some(), "expected graph to be loaded on open");
+        assert!(
+            graph.unwrap().node_count() >= 2,
+            "expected at least 2 nodes after loading"
         );
     }
 }
