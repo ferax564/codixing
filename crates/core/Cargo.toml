@@ -27,6 +27,7 @@ tree-sitter-cpp.workspace = true
 tree-sitter-c-sharp.workspace = true
 
 tantivy.workspace = true
+petgraph.workspace = true
 notify.workspace = true
 dashmap.workspace = true
 rayon.workspace = true

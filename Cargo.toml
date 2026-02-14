@@ -24,6 +24,9 @@ tree-sitter-c-sharp = "0.23"
 # Search
 tantivy = "0.22"
 
+# Graph
+petgraph = "0.7"
+
 # File watching
 notify = "8"
 
