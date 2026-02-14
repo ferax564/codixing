@@ -71,6 +71,11 @@ impl CodeGraph {
         self.inner.add_edge(from, to, kind);
     }
 
+    /// Return an iterator over all node indices in the graph.
+    pub fn node_indices(&self) -> petgraph::graph::NodeIndices {
+        self.inner.node_indices()
+    }
+
     /// Return all symbols that the given node references (outgoing edges).
     pub fn callees(&self, id: NodeIndex) -> Vec<&SymbolNode> {
         self.inner

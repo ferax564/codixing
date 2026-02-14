@@ -16,8 +16,11 @@ impl CodeGraph {
         }
 
         let initial = 1.0 / n as f64;
-        let mut scores: HashMap<NodeIndex, f64> =
-            self.inner.node_indices().map(|idx| (idx, initial)).collect();
+        let mut scores: HashMap<NodeIndex, f64> = self
+            .inner
+            .node_indices()
+            .map(|idx| (idx, initial))
+            .collect();
 
         for _ in 0..iterations {
             let mut new_scores: HashMap<NodeIndex, f64> = self
