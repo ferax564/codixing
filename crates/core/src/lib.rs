@@ -1,5 +1,6 @@
 pub mod chunker;
 pub mod config;
+pub mod embeddings;
 pub mod engine;
 pub mod error;
 pub mod index;
@@ -8,6 +9,7 @@ pub mod parser;
 pub mod persistence;
 pub mod retriever;
 pub mod symbols;
+pub mod tokenizer;
 pub mod watcher;
 
 // Re-export primary public API types.
@@ -16,3 +18,4 @@ pub use engine::{Engine, IndexStats};
 pub use error::{CodeforgeError, Result};
 pub use retriever::{SearchQuery, SearchResult};
 pub use symbols::Symbol;
+pub use tokenizer::{ApproxTokenCounter, ContextBudget, ContextSnippet, TokenCounter};

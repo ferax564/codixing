@@ -32,6 +32,9 @@ pub enum CodeforgeError {
 
     #[error("watcher error: {0}")]
     Watcher(#[from] notify::Error),
+
+    #[error("embedding error: {0}")]
+    Embedding(String),
 }
 
 /// Convenience alias used throughout the crate.

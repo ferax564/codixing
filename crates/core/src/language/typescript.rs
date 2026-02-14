@@ -383,7 +383,7 @@ class Greeter {
             .iter()
             .filter(|e| e.kind == EntityKind::Method)
             .collect();
-        assert!(methods.len() >= 1);
+        assert!(!methods.is_empty());
     }
 
     #[test]

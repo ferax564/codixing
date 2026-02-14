@@ -445,7 +445,7 @@ T max(T a, T b) {
             .filter(|e| e.kind == EntityKind::Function)
             .collect();
         // Should find the template function
-        assert!(fns.len() >= 1);
+        assert!(!fns.is_empty());
         assert!(fns.iter().any(|f| f.name == "max"));
     }
 }

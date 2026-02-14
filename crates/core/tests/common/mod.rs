@@ -1,5 +1,7 @@
 //! Shared test helpers for integration tests.
 
+#![allow(dead_code)]
+
 use std::fs;
 use std::path::Path;
 
