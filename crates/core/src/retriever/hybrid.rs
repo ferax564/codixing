@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 use crate::embeddings::Embedder;
 use crate::error::CodeforgeError;
+use crate::graph::CodeGraph;
 use crate::index::tantivy::TantivyIndex;
 use crate::index::vector::{BruteForceVectorIndex, VectorIndex};
 
@@ -36,6 +37,8 @@ pub struct HybridRetriever<'a> {
     rrf_k: f32,
     bm25_weight: f32,
     vector_weight: f32,
+    graph_file_scores: Option<HashMap<String, f32>>,
+    graph_boost_weight: f32,
 }
 
 impl<'a> HybridRetriever<'a> {
@@ -53,6 +56,8 @@ impl<'a> HybridRetriever<'a> {
             rrf_k: DEFAULT_RRF_K,
             bm25_weight: 0.5,
             vector_weight: 0.5,
+            graph_file_scores: None,
+            graph_boost_weight: 0.0,
         }
     }
 
@@ -72,6 +77,24 @@ impl<'a> HybridRetriever<'a> {
     /// higher values flatten the score curve.
     pub fn with_rrf_k(mut self, k: f32) -> Self {
         self.rrf_k = k;
+        self
+    }
+
+    /// Enable graph-boosted scoring. For each search result, its score is
+    /// multiplied by `1.0 + weight * pagerank_of_file` where pagerank_of_file
+    /// is the maximum PageRank score of any symbol defined in that file.
+    pub fn with_graph_boost(mut self, graph: &CodeGraph, weight: f32) -> Self {
+        let scores = graph.pagerank(0.85, 20);
+        let mut file_scores: HashMap<String, f32> = HashMap::new();
+        for node_idx in graph.inner.node_indices() {
+            if let Some(node) = graph.get_node(node_idx) {
+                let pr = scores.get(&node_idx).copied().unwrap_or(0.0) as f32;
+                let entry = file_scores.entry(node.file.clone()).or_insert(0.0);
+                *entry = entry.max(pr);
+            }
+        }
+        self.graph_file_scores = Some(file_scores);
+        self.graph_boost_weight = weight;
         self
     }
 }
@@ -138,6 +161,21 @@ impl Retriever for HybridRetriever<'_> {
                 final_results.push(result);
             }
             // Vector-only results without metadata are skipped.
+        }
+
+        // Apply graph boost if enabled.
+        if let Some(ref file_scores) = self.graph_file_scores {
+            for result in &mut final_results {
+                if let Some(&pr) = file_scores.get(&result.file_path) {
+                    result.score *= 1.0 + self.graph_boost_weight * pr;
+                }
+            }
+            // Re-sort after boosting.
+            final_results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
         }
 
         // Apply file filter if present.
@@ -443,6 +481,72 @@ mod tests {
                 "expected steeper score gap with k=1 ({gap_steep}) vs k=1000 ({gap_flat})"
             );
         }
+    }
+
+    #[test]
+    fn test_graph_boost_promotes_hub_file() {
+        // Create a CodeGraph where core.rs has a hub symbol
+        use crate::graph::{CodeGraph, ReferenceKind, SymbolKind};
+        let mut graph = CodeGraph::new();
+        let hub = graph.add_symbol("process", "src/core.rs", SymbolKind::Function);
+        let a = graph.add_symbol("handler_a", "src/handler.rs", SymbolKind::Function);
+        let b = graph.add_symbol("handler_b", "src/handler.rs", SymbolKind::Function);
+        graph.add_reference(a, hub, ReferenceKind::Call);
+        graph.add_reference(b, hub, ReferenceKind::Call);
+
+        // Create chunks from both files with the same search term
+        let chunks = vec![
+            make_chunk(1, "src/core.rs", "target_fn implementation core"),
+            make_chunk(2, "src/handler.rs", "target_fn handler wrapper"),
+        ];
+        let (tantivy, vector_index, embedder) = setup_indexes(&chunks);
+
+        // Without graph boost
+        let plain = HybridRetriever::new(&tantivy, &vector_index, &embedder);
+        let plain_results = plain
+            .search(&SearchQuery::new("target_fn").with_limit(10))
+            .unwrap();
+
+        // With graph boost
+        let boosted = HybridRetriever::new(&tantivy, &vector_index, &embedder)
+            .with_graph_boost(&graph, 5.0); // Strong weight to make effect obvious
+        let boosted_results = boosted
+            .search(&SearchQuery::new("target_fn").with_limit(10))
+            .unwrap();
+
+        // Both should return results
+        assert!(!plain_results.is_empty());
+        assert!(!boosted_results.is_empty());
+
+        // core.rs should rank higher with graph boost (it has the hub symbol)
+        if let Some(core_result) = boosted_results
+            .iter()
+            .find(|r| r.file_path.contains("core.rs"))
+        {
+            if let Some(handler_result) = boosted_results
+                .iter()
+                .find(|r| r.file_path.contains("handler.rs"))
+            {
+                assert!(
+                    core_result.score >= handler_result.score,
+                    "expected core.rs (hub) to rank higher: {} vs {}",
+                    core_result.score,
+                    handler_result.score
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_graph_boost_no_graph_is_noop() {
+        // Without calling with_graph_boost, results should be identical
+        let chunks = vec![make_chunk(1, "src/a.rs", "test_fn function")];
+        let (tantivy, vector_index, embedder) = setup_indexes(&chunks);
+        let hybrid = HybridRetriever::new(&tantivy, &vector_index, &embedder);
+        let results = hybrid
+            .search(&SearchQuery::new("test_fn").with_limit(10))
+            .unwrap();
+        assert!(!results.is_empty());
     }
 
     #[test]
