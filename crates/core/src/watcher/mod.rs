@@ -255,7 +255,7 @@ mod tests {
 
         // Create files with unsupported extensions.
         fs::write(root.join("data.txt"), "hello").unwrap();
-        fs::write(root.join("image.png"), &[0x89, 0x50, 0x4E, 0x47]).unwrap();
+        fs::write(root.join("image.png"), [0x89, 0x50, 0x4E, 0x47]).unwrap();
 
         // Also create a valid file.
         fs::write(root.join("code.rs"), "fn code() {}").unwrap();

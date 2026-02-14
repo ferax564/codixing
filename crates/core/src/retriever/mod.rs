@@ -1,4 +1,7 @@
 pub mod bm25;
+pub mod hybrid;
+
+pub use hybrid::HybridRetriever;
 
 use serde::{Deserialize, Serialize};
 

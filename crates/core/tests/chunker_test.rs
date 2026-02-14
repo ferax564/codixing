@@ -71,8 +71,12 @@ fn all_bytes_covered_in_chunks() {
         // Build coverage bitmap.
         let mut covered = vec![false; source.len()];
         for chunk in &chunks {
-            for i in chunk.byte_start..chunk.byte_end {
-                covered[i] = true;
+            for item in covered
+                .iter_mut()
+                .take(chunk.byte_end)
+                .skip(chunk.byte_start)
+            {
+                *item = true;
             }
         }
 

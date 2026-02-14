@@ -6,7 +6,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::Parser;
-use codeforge_core::{CodeforgeError, Engine, IndexConfig, SearchQuery};
+use codeforge_core::{CodeforgeError, ContextBudget, Engine, IndexConfig, SearchQuery};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::info;
@@ -173,28 +173,40 @@ async fn context_handler(Json(req): Json<AdapterRequest>) -> Result<Json<Value>,
         .unwrap_or(2048)
         .clamp(128, 65_536) as usize;
 
-    let mut snippets = Vec::new();
-    let mut remaining = token_budget;
+    let mut budget = ContextBudget::new(token_budget);
 
     if let Some(query_text) = extract_query_text(&req.config) {
         let query = parse_search_query(&req.config, false)?;
         let results = engine.search(query).map_err(map_engine_error)?;
         for result in results {
-            if remaining == 0 {
+            if budget.remaining() == 0 {
                 break;
             }
-
-            let snippet = trim_to_budget(&result.content, remaining);
-            remaining = remaining.saturating_sub(snippet.len());
-            snippets.push(json!({
-                "path": result.file_path,
-                "start_line": result.line_start,
-                "end_line": result.line_end,
-                "score": result.score,
-                "signature": result.signature,
-                "content": snippet,
-            }));
+            budget.try_add(
+                result.file_path,
+                result.language,
+                result.content,
+                result.line_start,
+                result.line_end,
+                result.score,
+            );
         }
+
+        let snippets: Vec<Value> = budget
+            .into_snippets()
+            .into_iter()
+            .map(|s| {
+                json!({
+                    "path": s.file_path,
+                    "start_line": s.line_start,
+                    "end_line": s.line_end,
+                    "score": s.score,
+                    "language": s.language,
+                    "content": s.content,
+                    "token_count": s.token_count,
+                })
+            })
+            .collect();
 
         return Ok(Json(json!({
             "operation": "context_retrieval",
@@ -221,21 +233,35 @@ async fn context_handler(Json(req): Json<AdapterRequest>) -> Result<Json<Value>,
         .map_err(map_engine_error)?;
 
     for symbol in symbols {
-        if remaining == 0 {
+        if budget.remaining() == 0 {
             break;
         }
         let signature = symbol.signature.unwrap_or_default();
-        let snippet = trim_to_budget(&signature, remaining);
-        remaining = remaining.saturating_sub(snippet.len());
-        snippets.push(json!({
-            "path": symbol.file_path,
-            "start_line": symbol.line_start,
-            "end_line": symbol.line_end,
-            "score": 0.0,
-            "signature": snippet,
-            "content": "",
-        }));
+        budget.try_add(
+            symbol.file_path,
+            String::new(),
+            signature,
+            symbol.line_start as u64,
+            symbol.line_end as u64,
+            0.0,
+        );
     }
+
+    let snippets: Vec<Value> = budget
+        .into_snippets()
+        .into_iter()
+        .map(|s| {
+            json!({
+                "path": s.file_path,
+                "start_line": s.line_start,
+                "end_line": s.line_end,
+                "score": s.score,
+                "signature": s.content,
+                "content": "",
+                "token_count": s.token_count,
+            })
+        })
+        .collect();
 
     Ok(Json(json!({
         "operation": "context_retrieval",
@@ -380,24 +406,6 @@ fn map_engine_error(err: CodeforgeError) -> ApiError {
         }
         _ => ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     }
-}
-
-fn trim_to_budget(input: &str, max_len: usize) -> String {
-    if input.len() <= max_len {
-        return input.to_string();
-    }
-
-    let mut count = 0usize;
-    let mut out = String::new();
-    for ch in input.chars() {
-        let width = ch.len_utf8();
-        if count + width > max_len {
-            break;
-        }
-        out.push(ch);
-        count += width;
-    }
-    out
 }
 
 #[cfg(test)]

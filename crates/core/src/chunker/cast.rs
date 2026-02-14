@@ -422,8 +422,12 @@ fn five() { 5 }
         // Verify all non-whitespace content appears in some chunk.
         let mut covered = vec![false; src.len()];
         for chunk in &chunks {
-            for i in chunk.byte_start..chunk.byte_end {
-                covered[i] = true;
+            for item in covered
+                .iter_mut()
+                .take(chunk.byte_end)
+                .skip(chunk.byte_start)
+            {
+                *item = true;
             }
         }
         // Every non-whitespace byte should be covered.
