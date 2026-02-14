@@ -1,4 +1,6 @@
+pub mod extract;
 pub mod types;
+pub use extract::{DefinitionInfo, ReferenceInfo};
 pub use types::*;
 
 use petgraph::Direction;

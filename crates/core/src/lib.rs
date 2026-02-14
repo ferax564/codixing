@@ -17,7 +17,7 @@ pub mod watcher;
 pub use config::IndexConfig;
 pub use engine::{Engine, IndexStats};
 pub use error::{CodeforgeError, Result};
-pub use graph::{CodeGraph, ReferenceKind, SymbolKind, SymbolNode};
+pub use graph::{CodeGraph, DefinitionInfo, ReferenceInfo, ReferenceKind, SymbolKind, SymbolNode};
 pub use retriever::{SearchQuery, SearchResult};
 pub use symbols::Symbol;
 pub use tokenizer::{ApproxTokenCounter, ContextBudget, ContextSnippet, TokenCounter};
