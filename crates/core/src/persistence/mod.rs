@@ -13,6 +13,7 @@ const META_FILE: &str = "meta.json";
 const TANTIVY_DIR: &str = "tantivy";
 const SYMBOLS_FILE: &str = "symbols.bin";
 const TREE_HASHES_FILE: &str = "tree_hashes.bin";
+const GRAPH_FILE: &str = "graph.json";
 
 /// Index metadata persisted alongside the index.
 ///
@@ -110,6 +111,11 @@ impl IndexStore {
     /// Path to the `tree_hashes.bin` file.
     pub fn tree_hashes_path(&self) -> PathBuf {
         self.codeforge_dir().join(TREE_HASHES_FILE)
+    }
+
+    /// Path to the `graph.json` file.
+    pub fn graph_path(&self) -> PathBuf {
+        self.codeforge_dir().join(GRAPH_FILE)
     }
 
     /// Save the [`IndexConfig`] to `config.json`.
