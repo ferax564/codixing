@@ -1,4 +1,5 @@
 pub mod extract;
+pub mod pagerank;
 pub mod persistence;
 pub mod types;
 pub use extract::{DefinitionInfo, ReferenceInfo};
