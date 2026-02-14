@@ -6,6 +6,29 @@ use serde::{Deserialize, Serialize};
 use super::{CodeGraph, ReferenceKind, SymbolNode};
 use crate::error::{CodeforgeError, Result};
 
+// ---------------------------------------------------------------------------
+// Binary (bitcode) persistence
+// ---------------------------------------------------------------------------
+
+/// Save a `CodeGraph` to a binary (bitcode) file.
+///
+/// Significantly faster and more compact than JSON for large graphs.
+pub fn save_graph_binary(graph: &CodeGraph, path: &Path) -> Result<()> {
+    let sg = graph.to_serializable();
+    let bytes = bitcode::serialize(&sg)
+        .map_err(|e| CodeforgeError::Serialization(format!("failed to serialize graph: {e}")))?;
+    fs::write(path, bytes)?;
+    Ok(())
+}
+
+/// Load a `CodeGraph` from a binary (bitcode) file.
+pub fn load_graph_binary(path: &Path) -> Result<CodeGraph> {
+    let bytes = fs::read(path)?;
+    let sg: SerializableGraph = bitcode::deserialize(&bytes)
+        .map_err(|e| CodeforgeError::Serialization(format!("failed to deserialize graph: {e}")))?;
+    Ok(CodeGraph::from_serializable(&sg))
+}
+
 /// Serializable representation of a `CodeGraph`.
 ///
 /// `petgraph::DiGraph` is not directly serializable with serde, so we convert
@@ -115,5 +138,62 @@ mod tests {
 
         let result = load_graph(&path);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn binary_save_and_load_round_trip() {
+        let mut graph = CodeGraph::new();
+        let a = graph.add_symbol("main", "src/main.rs", SymbolKind::Function);
+        let b = graph.add_symbol("helper", "src/lib.rs", SymbolKind::Function);
+        graph.add_reference(a, b, ReferenceKind::Call);
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("graph.bin");
+
+        save_graph_binary(&graph, &path).unwrap();
+        let loaded = load_graph_binary(&path).unwrap();
+
+        assert_eq!(loaded.node_count(), 2);
+        assert_eq!(loaded.edge_count(), 1);
+    }
+
+    #[test]
+    fn binary_empty_graph_round_trip() {
+        let graph = CodeGraph::new();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("graph.bin");
+
+        save_graph_binary(&graph, &path).unwrap();
+        let loaded = load_graph_binary(&path).unwrap();
+
+        assert_eq!(loaded.node_count(), 0);
+        assert_eq!(loaded.edge_count(), 0);
+    }
+
+    #[test]
+    fn binary_smaller_than_json() {
+        let mut graph = CodeGraph::new();
+        for i in 0..100 {
+            let a = graph.add_symbol(&format!("fn_{i}"), &format!("src/mod_{i}.rs"), SymbolKind::Function);
+            if i > 0 {
+                let prev = petgraph::graph::NodeIndex::new(i - 1);
+                graph.add_reference(prev, a, ReferenceKind::Call);
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let json_path = dir.path().join("graph.json");
+        let bin_path = dir.path().join("graph.bin");
+
+        save_graph(&graph, &json_path).unwrap();
+        save_graph_binary(&graph, &bin_path).unwrap();
+
+        let json_size = std::fs::metadata(&json_path).unwrap().len();
+        let bin_size = std::fs::metadata(&bin_path).unwrap().len();
+
+        assert!(
+            bin_size < json_size,
+            "binary ({bin_size}) should be smaller than JSON ({json_size})"
+        );
     }
 }

@@ -14,7 +14,7 @@ use std::path::Path;
 use crate::error::CodeforgeError;
 
 /// A stored vector with its associated chunk ID.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct VectorEntry {
     /// The chunk this vector belongs to.
     pub chunk_id: u64,
@@ -99,6 +99,41 @@ impl BruteForceVectorIndex {
             return 0.0;
         }
         dot / (norm_a * norm_b)
+    }
+}
+
+/// Binary-serializable container for a vector index.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct VectorIndexData {
+    pub(crate) dimension: usize,
+    pub(crate) entries: Vec<VectorEntry>,
+}
+
+impl BruteForceVectorIndex {
+    /// Save the index using bitcode binary serialization (faster + smaller than JSON).
+    pub fn save_binary(&self, path: &Path) -> Result<(), CodeforgeError> {
+        let data = VectorIndexData {
+            dimension: self.dimension,
+            entries: self.entries.clone(),
+        };
+        let bytes = bitcode::serialize(&data).map_err(|e| {
+            CodeforgeError::Embedding(format!("failed to serialize vector index: {e}"))
+        })?;
+        std::fs::write(path, bytes)?;
+        Ok(())
+    }
+
+    /// Load the index from a bitcode binary file.
+    pub fn load_binary(path: &Path) -> Result<Self, CodeforgeError> {
+        let bytes = std::fs::read(path)?;
+        let data: VectorIndexData = bitcode::deserialize(&bytes).map_err(|e| {
+            CodeforgeError::Embedding(format!("failed to deserialize vector index: {e}"))
+        })?;
+        let mut index = Self::new(data.dimension);
+        for entry in data.entries {
+            index.add(entry.chunk_id, entry.vector)?;
+        }
+        Ok(index)
     }
 }
 
@@ -346,5 +381,44 @@ mod tests {
         assert_eq!(idx.len(), 1);
         let results = idx.search(&[0.0, 1.0, 0.0], 1).unwrap();
         assert_eq!(results[0].chunk_id, 2);
+    }
+
+    #[test]
+    fn binary_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vectors.bin");
+
+        let mut idx = BruteForceVectorIndex::new(3);
+        idx.add(1, vec![1.0, 0.0, 0.0]).unwrap();
+        idx.add(2, vec![0.0, 1.0, 0.0]).unwrap();
+        idx.save_binary(&path).unwrap();
+
+        let loaded = BruteForceVectorIndex::load_binary(&path).unwrap();
+        assert_eq!(loaded.len(), 2);
+        let results = loaded.search(&[1.0, 0.0, 0.0], 1).unwrap();
+        assert_eq!(results[0].chunk_id, 1);
+    }
+
+    #[test]
+    fn binary_smaller_than_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let json_path = dir.path().join("vectors.json");
+        let bin_path = dir.path().join("vectors.bin");
+
+        let mut idx = BruteForceVectorIndex::new(32);
+        for i in 0..100 {
+            let vec: Vec<f32> = (0..32).map(|d| ((i * 7 + d * 13) % 100) as f32 / 100.0).collect();
+            idx.add(i, vec).unwrap();
+        }
+        idx.save(&json_path).unwrap();
+        idx.save_binary(&bin_path).unwrap();
+
+        let json_size = std::fs::metadata(&json_path).unwrap().len();
+        let bin_size = std::fs::metadata(&bin_path).unwrap().len();
+
+        assert!(
+            bin_size < json_size,
+            "binary ({bin_size}) should be smaller than JSON ({json_size})"
+        );
     }
 }
