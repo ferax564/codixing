@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::embeddings::EmbeddingBackend;
+
 /// Which vector index backend to use for semantic search.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -37,6 +39,10 @@ pub struct IndexConfig {
     /// Vector index backend for semantic search.
     #[serde(default)]
     pub vector_backend: VectorBackend,
+
+    /// Embedding backend to use for vector search.
+    #[serde(default)]
+    pub embedding_backend: EmbeddingBackend,
 }
 
 /// Controls the cAST chunking algorithm parameters.
@@ -91,6 +97,7 @@ impl IndexConfig {
             exclude_patterns: default_exclude_patterns(),
             chunk: ChunkConfig::default(),
             vector_backend: VectorBackend::default(),
+            embedding_backend: EmbeddingBackend::default(),
         }
     }
 }

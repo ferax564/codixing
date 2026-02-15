@@ -7,6 +7,10 @@
 //!   (always available).
 //! - [`OnnxEmbedder`] -- ONNX Runtime inference using `all-MiniLM-L6-v2`
 //!   (requires the `vector` feature).
+//! - [`HttpEmbedder`] -- external HTTP embedding API client (Voyage, OpenAI,
+//!   Jina, etc.).
+
+pub mod http;
 
 #[cfg(feature = "vector")]
 mod onnx;
@@ -16,6 +20,8 @@ mod tests;
 
 #[cfg(feature = "vector")]
 pub use onnx::OnnxEmbedder;
+
+use serde::{Deserialize, Serialize};
 
 use crate::error::CodeforgeError;
 
@@ -77,5 +83,40 @@ impl Embedder for MockEmbedder {
 
     fn dimension(&self) -> usize {
         self.dim
+    }
+}
+
+/// Selects which embedding model to use for vector search.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingBackend {
+    /// Built-in mock embedder (32-dim, deterministic -- for testing).
+    #[default]
+    Mock,
+    /// Built-in ONNX all-MiniLM-L6-v2 (384-dim). Requires `vector` feature.
+    Onnx,
+    /// External HTTP embedding API (Voyage, OpenAI, Jina, etc.).
+    External {
+        /// URL of the embedding API endpoint.
+        url: String,
+        /// Model identifier to include in the request body.
+        model: String,
+        /// Embedding vector dimensionality.
+        dimension: usize,
+        /// Optional API key (read from env var name if prefixed with `$`).
+        api_key: Option<String>,
+        /// Batch size for embed_batch calls. Default: 32.
+        batch_size: Option<usize>,
+    },
+}
+
+impl EmbeddingBackend {
+    /// Return the embedding dimensionality for this backend.
+    pub fn dimension(&self) -> usize {
+        match self {
+            Self::Mock => 32,
+            Self::Onnx => 384,
+            Self::External { dimension, .. } => *dimension,
+        }
     }
 }

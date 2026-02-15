@@ -407,7 +407,9 @@ mod tests {
 
         let mut idx = BruteForceVectorIndex::new(32);
         for i in 0..100 {
-            let vec: Vec<f32> = (0..32).map(|d| ((i * 7 + d * 13) % 100) as f32 / 100.0).collect();
+            let vec: Vec<f32> = (0..32)
+                .map(|d| ((i * 7 + d * 13) % 100) as f32 / 100.0)
+                .collect();
             idx.add(i, vec).unwrap();
         }
         idx.save(&json_path).unwrap();
