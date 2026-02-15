@@ -14,6 +14,7 @@ const TANTIVY_DIR: &str = "tantivy";
 const SYMBOLS_FILE: &str = "symbols.bin";
 const TREE_HASHES_FILE: &str = "tree_hashes.bin";
 const GRAPH_FILE: &str = "graph.json";
+const VECTOR_INDEX_FILE: &str = "vectors.bin";
 
 /// Index metadata persisted alongside the index.
 ///
@@ -116,6 +117,11 @@ impl IndexStore {
     /// Path to the `graph.json` file.
     pub fn graph_path(&self) -> PathBuf {
         self.codeforge_dir().join(GRAPH_FILE)
+    }
+
+    /// Path to the `vectors.bin` file (binary-serialized vector index).
+    pub fn vector_index_path(&self) -> PathBuf {
+        self.codeforge_dir().join(VECTOR_INDEX_FILE)
     }
 
     /// Save the [`IndexConfig`] to `config.json`.
