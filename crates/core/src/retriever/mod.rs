@@ -1,5 +1,7 @@
 pub mod bm25;
+pub mod http_reranker;
 pub mod hybrid;
+pub mod reranker;
 
 pub use hybrid::HybridRetriever;
 
