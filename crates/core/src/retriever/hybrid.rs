@@ -5,6 +5,7 @@
 //! to score distribution differences between the two retrieval systems.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::embeddings::Embedder;
 use crate::error::CodeforgeError;
@@ -13,6 +14,7 @@ use crate::index::tantivy::TantivyIndex;
 use crate::index::vector::{BruteForceVectorIndex, VectorIndex};
 
 use super::bm25::BM25Retriever;
+use super::reranker::Reranker;
 use super::{Retriever, SearchQuery, SearchResult};
 
 /// RRF constant (commonly 60 in the literature).
@@ -44,6 +46,7 @@ pub struct HybridRetriever<'a, V: VectorIndex = BruteForceVectorIndex> {
     vector_weight: f32,
     graph_file_scores: Option<HashMap<String, f32>>,
     graph_boost_weight: f32,
+    reranker: Option<Arc<dyn Reranker>>,
 }
 
 impl<'a, V: VectorIndex> HybridRetriever<'a, V> {
@@ -59,6 +62,7 @@ impl<'a, V: VectorIndex> HybridRetriever<'a, V> {
             vector_weight: 0.5,
             graph_file_scores: None,
             graph_boost_weight: 0.0,
+            reranker: None,
         }
     }
 
@@ -78,6 +82,16 @@ impl<'a, V: VectorIndex> HybridRetriever<'a, V> {
     /// higher values flatten the score curve.
     pub fn with_rrf_k(mut self, k: f32) -> Self {
         self.rrf_k = k;
+        self
+    }
+
+    /// Set a reranker to refine results after RRF fusion.
+    ///
+    /// When set, the retriever fetches a wider candidate set (3x the requested
+    /// limit), then passes the candidates through the reranker which scores
+    /// each (query, document) pair and returns the top-k results.
+    pub fn with_reranker(mut self, reranker: Arc<dyn Reranker>) -> Self {
+        self.reranker = Some(reranker);
         self
     }
 
@@ -109,8 +123,9 @@ fn rrf_score(rank: usize, k: f32, weight: f32) -> f32 {
 
 impl<V: VectorIndex> Retriever for HybridRetriever<'_, V> {
     fn search(&self, query: &SearchQuery) -> Result<Vec<SearchResult>, CodeforgeError> {
-        // Fetch more from each source than requested so that fusion has a
-        // richer candidate set.
+        // When a reranker is configured, fetch a wider candidate set so the
+        // reranker has more material to work with.
+        let reranker_active = self.reranker.is_some();
         let fetch_limit = query.limit * 3;
 
         // 1. BM25 search via the existing BM25Retriever.
@@ -149,10 +164,17 @@ impl<V: VectorIndex> Retriever for HybridRetriever<'_, V> {
             // match even weakly.
         }
 
-        // 5. Sort by fused score descending, take top K.
+        // 5. Sort by fused score descending. When a reranker is active, keep
+        //    a wider candidate set (top_k * 3) so the cross-encoder has more
+        //    material to refine. Otherwise, truncate to the final limit.
         let mut fused: Vec<(String, f32)> = score_map.into_iter().collect();
         fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        fused.truncate(query.limit);
+        let pre_rerank_limit = if reranker_active {
+            query.limit * 3
+        } else {
+            query.limit
+        };
+        fused.truncate(pre_rerank_limit);
 
         // 6. Build final results using result_map for metadata.
         let mut final_results = Vec::new();
@@ -177,6 +199,12 @@ impl<V: VectorIndex> Retriever for HybridRetriever<'_, V> {
                     .partial_cmp(&a.score)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
+        }
+
+        // Apply reranker if configured. The reranker scores each (query,
+        // document) pair using a cross-encoder and returns top_k results.
+        if let Some(ref reranker) = self.reranker {
+            final_results = reranker.rerank(&query.query, &final_results, query.limit)?;
         }
 
         // Apply file filter if present.
@@ -686,5 +714,121 @@ mod tests {
                 r.file_path
             );
         }
+    }
+
+    #[test]
+    fn test_hybrid_retriever_with_reranker() {
+        use crate::retriever::reranker::MockReranker;
+
+        let chunks = vec![
+            make_chunk(1, "src/alpha.rs", "alpha search function handler"),
+            make_chunk(2, "src/beta.rs", "beta processing pipeline worker"),
+            make_chunk(3, "src/gamma.rs", "gamma alpha related helper utility"),
+        ];
+
+        let (tantivy, vector_index, embedder) = setup_indexes(&chunks);
+
+        // Without reranker — get the natural RRF ordering.
+        let plain = HybridRetriever::new(&tantivy, &vector_index, &embedder);
+        let plain_results = plain
+            .search(&SearchQuery::new("alpha").with_limit(10))
+            .unwrap();
+        assert!(
+            !plain_results.is_empty(),
+            "expected plain hybrid results"
+        );
+
+        // With reranker — MockReranker assigns scores that reverse the order.
+        // Give the first result a low score and the last result a high score.
+        let reranker = Arc::new(MockReranker::new(vec![0.1, 0.9, 0.5]));
+        let reranked = HybridRetriever::new(&tantivy, &vector_index, &embedder)
+            .with_reranker(reranker);
+        let reranked_results = reranked
+            .search(&SearchQuery::new("alpha").with_limit(10))
+            .unwrap();
+
+        assert!(
+            !reranked_results.is_empty(),
+            "expected reranked hybrid results"
+        );
+
+        // The reranker should have changed the scores. The first result from
+        // plain search gets score 0.1 from the reranker, so it should no
+        // longer be first in the reranked results.
+        if plain_results.len() >= 2 && reranked_results.len() >= 2 {
+            // Verify that the reranker actually changed the ordering by
+            // checking that the top result differs or scores differ.
+            let plain_top = &plain_results[0];
+            let reranked_top = &reranked_results[0];
+
+            // The reranker assigns score 0.9 to the second candidate, which
+            // should now be first.
+            assert!(
+                (reranked_top.score - 0.9).abs() < 1e-6
+                    || reranked_top.chunk_id != plain_top.chunk_id,
+                "expected reranker to change ordering or scores"
+            );
+        }
+
+        // All reranked results should be sorted by score descending.
+        for w in reranked_results.windows(2) {
+            assert!(
+                w[0].score >= w[1].score,
+                "reranked results not sorted: {} < {}",
+                w[0].score,
+                w[1].score
+            );
+        }
+    }
+
+    #[test]
+    fn test_hybrid_retriever_reranker_respects_top_k() {
+        use crate::retriever::reranker::MockReranker;
+
+        let chunks: Vec<Chunk> = (0..10)
+            .map(|i| {
+                make_chunk(
+                    i,
+                    &format!("src/file_{i}.rs"),
+                    &format!("common_search_term handler variant_{i}"),
+                )
+            })
+            .collect();
+
+        let (tantivy, vector_index, embedder) = setup_indexes(&chunks);
+
+        let reranker = Arc::new(MockReranker::new(vec![0.9, 0.8, 0.7, 0.6, 0.5]));
+        let hybrid = HybridRetriever::new(&tantivy, &vector_index, &embedder)
+            .with_reranker(reranker);
+        let results = hybrid
+            .search(&SearchQuery::new("common_search_term").with_limit(3))
+            .unwrap();
+
+        assert!(
+            results.len() <= 3,
+            "expected at most 3 results after reranking, got {}",
+            results.len()
+        );
+    }
+
+    #[test]
+    fn test_hybrid_no_reranker_is_default() {
+        // Verify that not setting a reranker gives the same results as before
+        // (regression guard for the Option<Reranker> field).
+        let chunks = vec![
+            make_chunk(1, "src/a.rs", "test_fn_unchanged function"),
+        ];
+        let (tantivy, vector_index, embedder) = setup_indexes(&chunks);
+        let hybrid = HybridRetriever::new(&tantivy, &vector_index, &embedder);
+        let results = hybrid
+            .search(&SearchQuery::new("test_fn_unchanged").with_limit(10))
+            .unwrap();
+        assert!(!results.is_empty());
+        // Score should be a normal RRF score, not a reranker score.
+        assert!(
+            results[0].score < 1.0,
+            "expected RRF score < 1.0, got {}",
+            results[0].score
+        );
     }
 }
