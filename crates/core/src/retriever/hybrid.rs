@@ -126,7 +126,11 @@ impl<V: VectorIndex> Retriever for HybridRetriever<'_, V> {
         // When a reranker is configured, fetch a wider candidate set so the
         // reranker has more material to work with.
         let reranker_active = self.reranker.is_some();
-        let fetch_limit = query.limit * 3;
+        let fetch_limit = if reranker_active {
+            query.limit * 3
+        } else {
+            query.limit
+        };
 
         // 1. BM25 search via the existing BM25Retriever.
         let bm25_results = {

@@ -160,6 +160,8 @@ impl Reranker for HttpReranker {
                 let mut result = results[item.index].clone();
                 result.score = item.relevance_score as f32;
                 reranked.push(result);
+            } else {
+                warn!(index = item.index, total = results.len(), "reranking API returned out-of-bounds index; skipping");
             }
         }
 
