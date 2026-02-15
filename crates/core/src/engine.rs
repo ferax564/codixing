@@ -10,7 +10,7 @@ use tracing::{debug, info, warn};
 use crate::chunker::Chunker;
 use crate::chunker::cast::CastChunker;
 use crate::config::{IndexConfig, VectorBackend};
-use crate::embeddings::{Embedder, MockEmbedder};
+use crate::embeddings::{Embedder, EmbeddingBackend, MockEmbedder, http::HttpEmbedder};
 use crate::error::{CodeforgeError, Result};
 use crate::graph::CodeGraph;
 use crate::graph::extract::{extract_definitions, extract_references};
@@ -63,6 +63,44 @@ impl DynVectorIndex {
             Self::BruteForce(idx) => idx.save_binary(path),
             Self::Hnsw(idx) => idx.save_binary(path),
         }
+    }
+}
+
+/// Create an embedder from the configured backend.
+fn create_embedder(backend: &EmbeddingBackend) -> Box<dyn Embedder> {
+    match backend {
+        EmbeddingBackend::Mock => Box::new(MockEmbedder::new(backend.dimension())),
+        EmbeddingBackend::Onnx => {
+            #[cfg(feature = "vector")]
+            {
+                use crate::embeddings::OnnxEmbedder;
+                // OnnxEmbedder requires a model directory — use CODEFORGE_MODEL_DIR
+                // env var or fall back to a standard location.
+                let model_dir = std::env::var("CODEFORGE_MODEL_DIR")
+                    .unwrap_or_else(|_| "models/minilm".to_string());
+                Box::new(
+                    OnnxEmbedder::load(std::path::Path::new(&model_dir))
+                        .expect("failed to load ONNX model — set CODEFORGE_MODEL_DIR or ensure models/minilm/ exists"),
+                )
+            }
+            #[cfg(not(feature = "vector"))]
+            {
+                panic!("ONNX embedding backend requires the 'vector' feature to be enabled")
+            }
+        }
+        EmbeddingBackend::External {
+            url,
+            model,
+            dimension,
+            api_key,
+            batch_size,
+        } => Box::new(HttpEmbedder::new(
+            url,
+            model,
+            *dimension,
+            api_key.clone(),
+            batch_size.unwrap_or(32),
+        )),
     }
 }
 
@@ -149,9 +187,8 @@ impl Engine {
         };
         store.save_meta(&meta)?;
 
-        // Build vector index with batch embedding using MockEmbedder.
-        // A real deployment would use OnnxEmbedder when the `vector` feature is enabled.
-        let embedder: Box<dyn Embedder> = Box::new(MockEmbedder::new(32));
+        // Build vector index using the configured embedding backend.
+        let embedder: Box<dyn Embedder> = create_embedder(&config.embedding_backend);
         let chunk_threshold = 10_000;
         let use_hnsw = match &config.vector_backend {
             VectorBackend::Hnsw => true,
@@ -246,7 +283,7 @@ impl Engine {
         };
 
         // Load vector index if persisted.
-        let embedder: Box<dyn Embedder> = Box::new(MockEmbedder::new(32));
+        let embedder: Box<dyn Embedder> = create_embedder(&config.embedding_backend);
         let vector_index = if store.vector_index_path().exists() {
             let use_hnsw = match &config.vector_backend {
                 VectorBackend::Hnsw => true,
@@ -318,16 +355,14 @@ impl Engine {
         // Use the appropriate vector index type.
         match vi {
             DynVectorIndex::BruteForce(bf) => {
-                let mut retriever =
-                    HybridRetriever::new(&self.tantivy, bf, embedder.as_ref());
+                let mut retriever = HybridRetriever::new(&self.tantivy, bf, embedder.as_ref());
                 if let Some(ref graph) = self.graph {
                     retriever = retriever.with_graph_boost(graph, 0.3);
                 }
                 retriever.search(&query)
             }
             DynVectorIndex::Hnsw(hnsw) => {
-                let mut retriever =
-                    HybridRetriever::new(&self.tantivy, hnsw, embedder.as_ref());
+                let mut retriever = HybridRetriever::new(&self.tantivy, hnsw, embedder.as_ref());
                 if let Some(ref graph) = self.graph {
                     retriever = retriever.with_graph_boost(graph, 0.3);
                 }
@@ -1241,5 +1276,58 @@ pub fn unique_new_function() -> bool {
             graph.unwrap().node_count() >= 2,
             "expected at least 2 nodes after loading"
         );
+    }
+
+    #[test]
+    fn engine_config_with_external_backend() {
+        use crate::embeddings::EmbeddingBackend;
+
+        // Verify that IndexConfig with an External embedding backend
+        // serializes and deserializes correctly.
+        let mut config = IndexConfig::new("/tmp/test");
+        config.embedding_backend = EmbeddingBackend::External {
+            url: "https://api.voyageai.com/v1/embeddings".into(),
+            model: "voyage-code-3".into(),
+            dimension: 1024,
+            api_key: Some("$VOYAGE_API_KEY".into()),
+            batch_size: Some(64),
+        };
+
+        let json = serde_json::to_string_pretty(&config).unwrap();
+        let parsed: IndexConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, parsed);
+        assert_eq!(parsed.embedding_backend.dimension(), 1024);
+    }
+
+    #[test]
+    fn engine_uses_mock_backend_by_default() {
+        // Verify that Engine::init() works with default config (Mock backend).
+        let (_dir, root) = setup_project();
+        let config = IndexConfig::new(&root);
+        assert_eq!(
+            config.embedding_backend,
+            crate::embeddings::EmbeddingBackend::Mock
+        );
+
+        let engine = Engine::init(&root, config).unwrap();
+        let results = engine
+            .hybrid_search(SearchQuery::new("add").with_limit(5))
+            .unwrap();
+        assert!(
+            !results.is_empty(),
+            "expected hybrid_search results with default Mock backend"
+        );
+    }
+
+    #[test]
+    fn create_embedder_mock() {
+        use crate::embeddings::EmbeddingBackend;
+
+        let embedder = super::create_embedder(&EmbeddingBackend::Mock);
+        assert_eq!(embedder.dimension(), 32);
+
+        // Should produce valid embeddings.
+        let vec = embedder.embed("hello").unwrap();
+        assert_eq!(vec.len(), 32);
     }
 }

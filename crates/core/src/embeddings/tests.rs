@@ -106,6 +106,106 @@ fn embedder_trait_send_sync() {
     _assert_send_sync::<MockEmbedder>();
 }
 
+mod embedding_backend_tests {
+    use super::super::EmbeddingBackend;
+
+    #[test]
+    fn embedding_backend_dimension() {
+        assert_eq!(EmbeddingBackend::Mock.dimension(), 32);
+        assert_eq!(EmbeddingBackend::Onnx.dimension(), 384);
+        assert_eq!(
+            EmbeddingBackend::External {
+                url: "https://api.example.com/embed".into(),
+                model: "text-embedding-3-small".into(),
+                dimension: 1536,
+                api_key: None,
+                batch_size: None,
+            }
+            .dimension(),
+            1536
+        );
+    }
+
+    #[test]
+    fn embedding_backend_serde_roundtrip() {
+        // Mock
+        let mock = EmbeddingBackend::Mock;
+        let json = serde_json::to_string(&mock).unwrap();
+        let parsed: EmbeddingBackend = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, mock);
+
+        // Onnx
+        let onnx = EmbeddingBackend::Onnx;
+        let json = serde_json::to_string(&onnx).unwrap();
+        let parsed: EmbeddingBackend = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, onnx);
+
+        // External
+        let external = EmbeddingBackend::External {
+            url: "https://api.voyageai.com/v1/embeddings".into(),
+            model: "voyage-code-3".into(),
+            dimension: 1024,
+            api_key: Some("$VOYAGE_API_KEY".into()),
+            batch_size: Some(64),
+        };
+        let json = serde_json::to_string(&external).unwrap();
+        let parsed: EmbeddingBackend = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, external);
+    }
+
+    #[test]
+    fn embedding_backend_default_is_mock() {
+        let backend = EmbeddingBackend::default();
+        assert_eq!(backend, EmbeddingBackend::Mock);
+    }
+
+    #[test]
+    fn index_config_defaults_to_mock() {
+        use crate::config::IndexConfig;
+        let config = IndexConfig::new("/tmp/test");
+        assert_eq!(config.embedding_backend, EmbeddingBackend::Mock);
+    }
+
+    #[test]
+    fn embedding_backend_external_no_optional_fields() {
+        // External with None api_key and batch_size should serde properly.
+        let external = EmbeddingBackend::External {
+            url: "http://localhost:8000/embed".into(),
+            model: "custom-model".into(),
+            dimension: 768,
+            api_key: None,
+            batch_size: None,
+        };
+        let json = serde_json::to_string(&external).unwrap();
+        let parsed: EmbeddingBackend = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, external);
+        assert_eq!(parsed.dimension(), 768);
+    }
+}
+
+mod http_embedder_tests {
+    use super::super::Embedder;
+    use super::super::http::HttpEmbedder;
+
+    #[test]
+    fn http_embedder_constructs() {
+        let embedder = HttpEmbedder::new(
+            "https://api.openai.com/v1/embeddings",
+            "text-embedding-3-small",
+            1536,
+            Some("sk-test-key".into()),
+            32,
+        );
+        assert_eq!(embedder.dimension(), 1536);
+    }
+
+    #[test]
+    fn http_embedder_send_sync() {
+        fn _assert_send_sync<T: Send + Sync>() {}
+        _assert_send_sync::<HttpEmbedder>();
+    }
+}
+
 #[cfg(feature = "vector")]
 mod onnx_tests {
     use super::super::OnnxEmbedder;

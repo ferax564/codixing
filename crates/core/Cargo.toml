@@ -15,6 +15,8 @@ vector = ["dep:ort", "dep:ndarray", "dep:tokenizers"]
 ort = { version = "2.0.0-rc.11", optional = true }
 ndarray = { version = "0.17", optional = true }
 tokenizers = { version = "0.22", optional = true, default-features = false, features = ["fancy-regex"] }
+# HTTP client for external embedding APIs
+reqwest.workspace = true
 tree-sitter.workspace = true
 tree-sitter-rust.workspace = true
 tree-sitter-python.workspace = true

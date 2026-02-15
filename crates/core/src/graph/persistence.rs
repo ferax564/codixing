@@ -174,7 +174,11 @@ mod tests {
     fn binary_smaller_than_json() {
         let mut graph = CodeGraph::new();
         for i in 0..100 {
-            let a = graph.add_symbol(&format!("fn_{i}"), &format!("src/mod_{i}.rs"), SymbolKind::Function);
+            let a = graph.add_symbol(
+                &format!("fn_{i}"),
+                &format!("src/mod_{i}.rs"),
+                SymbolKind::Function,
+            );
             if i > 0 {
                 let prev = petgraph::graph::NodeIndex::new(i - 1);
                 graph.add_reference(prev, a, ReferenceKind::Call);

@@ -49,11 +49,7 @@ pub struct HybridRetriever<'a, V: VectorIndex = BruteForceVectorIndex> {
 impl<'a, V: VectorIndex> HybridRetriever<'a, V> {
     /// Create a new hybrid retriever with default weights (0.5 / 0.5) and
     /// `k = 60`.
-    pub fn new(
-        tantivy: &'a TantivyIndex,
-        vector_index: &'a V,
-        embedder: &'a dyn Embedder,
-    ) -> Self {
+    pub fn new(tantivy: &'a TantivyIndex, vector_index: &'a V, embedder: &'a dyn Embedder) -> Self {
         Self {
             tantivy,
             vector_index,
@@ -641,8 +637,8 @@ mod tests {
         ];
         let (tantivy, hnsw_index, embedder) = setup_hnsw_indexes(&chunks);
 
-        let boosted = HybridRetriever::new(&tantivy, &hnsw_index, &embedder)
-            .with_graph_boost(&graph, 5.0);
+        let boosted =
+            HybridRetriever::new(&tantivy, &hnsw_index, &embedder).with_graph_boost(&graph, 5.0);
         let results = boosted
             .search(&SearchQuery::new("search_target").with_limit(10))
             .unwrap();
