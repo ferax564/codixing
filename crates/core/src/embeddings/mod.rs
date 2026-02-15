@@ -88,7 +88,7 @@ impl Embedder for MockEmbedder {
 
 /// Selects which embedding model to use for vector search.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum EmbeddingBackend {
     /// Built-in mock embedder (32-dim, deterministic -- for testing).
     #[default]

@@ -4,8 +4,10 @@
 //! Cohere, etc.) by sending `POST` requests with `{"model": "...", "input":
 //! [...]}` and parsing `{"data": [{"embedding": [...]}]}` responses.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use super::Embedder;
 use crate::error::CodeforgeError;
@@ -73,14 +75,28 @@ impl HttpEmbedder {
         // Resolve env-var references in api_key.
         let resolved_key = api_key.map(|key| {
             if let Some(var_name) = key.strip_prefix('$') {
-                std::env::var(var_name).unwrap_or(key)
+                match std::env::var(var_name) {
+                    Ok(val) => val,
+                    Err(_) => {
+                        warn!(
+                            var = var_name,
+                            "environment variable not found; using literal string as API key — \
+                             this will likely cause authentication failures"
+                        );
+                        key
+                    }
+                }
             } else {
                 key
             }
         });
 
         Self {
-            client: reqwest::blocking::Client::new(),
+            client: reqwest::blocking::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .connect_timeout(Duration::from_secs(10))
+                .build()
+                .expect("failed to build HTTP client"),
             url: url.to_string(),
             model: model.to_string(),
             dim,
@@ -130,6 +146,15 @@ impl HttpEmbedder {
             .into_iter()
             .map(|item| item.embedding)
             .collect();
+
+        // Validate count: API must return exactly one embedding per input text.
+        if embeddings.len() != texts.len() {
+            return Err(CodeforgeError::Embedding(format!(
+                "expected {} embeddings but got {}",
+                texts.len(),
+                embeddings.len()
+            )));
+        }
 
         // Validate dimensions.
         for (i, emb) in embeddings.iter().enumerate() {

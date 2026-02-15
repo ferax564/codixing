@@ -67,9 +67,9 @@ impl DynVectorIndex {
 }
 
 /// Create an embedder from the configured backend.
-fn create_embedder(backend: &EmbeddingBackend) -> Box<dyn Embedder> {
+fn create_embedder(backend: &EmbeddingBackend) -> Result<Box<dyn Embedder>> {
     match backend {
-        EmbeddingBackend::Mock => Box::new(MockEmbedder::new(backend.dimension())),
+        EmbeddingBackend::Mock => Ok(Box::new(MockEmbedder::new(backend.dimension()))),
         EmbeddingBackend::Onnx => {
             #[cfg(feature = "vector")]
             {
@@ -78,14 +78,15 @@ fn create_embedder(backend: &EmbeddingBackend) -> Box<dyn Embedder> {
                 // env var or fall back to a standard location.
                 let model_dir = std::env::var("CODEFORGE_MODEL_DIR")
                     .unwrap_or_else(|_| "models/minilm".to_string());
-                Box::new(
-                    OnnxEmbedder::load(std::path::Path::new(&model_dir))
-                        .expect("failed to load ONNX model — set CODEFORGE_MODEL_DIR or ensure models/minilm/ exists"),
-                )
+                let embedder = OnnxEmbedder::load(std::path::Path::new(&model_dir))?;
+                Ok(Box::new(embedder))
             }
             #[cfg(not(feature = "vector"))]
             {
-                panic!("ONNX embedding backend requires the 'vector' feature to be enabled")
+                Err(CodeforgeError::Config(
+                    "ONNX embedding backend requires the 'vector' feature to be enabled"
+                        .to_string(),
+                ))
             }
         }
         EmbeddingBackend::External {
@@ -94,13 +95,13 @@ fn create_embedder(backend: &EmbeddingBackend) -> Box<dyn Embedder> {
             dimension,
             api_key,
             batch_size,
-        } => Box::new(HttpEmbedder::new(
+        } => Ok(Box::new(HttpEmbedder::new(
             url,
             model,
             *dimension,
             api_key.clone(),
             batch_size.unwrap_or(32),
-        )),
+        ))),
     }
 }
 
@@ -188,7 +189,7 @@ impl Engine {
         store.save_meta(&meta)?;
 
         // Build vector index using the configured embedding backend.
-        let embedder: Box<dyn Embedder> = create_embedder(&config.embedding_backend);
+        let embedder: Box<dyn Embedder> = create_embedder(&config.embedding_backend)?;
         let chunk_threshold = 10_000;
         let use_hnsw = match &config.vector_backend {
             VectorBackend::Hnsw => true,
@@ -283,7 +284,7 @@ impl Engine {
         };
 
         // Load vector index if persisted.
-        let embedder: Box<dyn Embedder> = create_embedder(&config.embedding_backend);
+        let embedder: Box<dyn Embedder> = create_embedder(&config.embedding_backend)?;
         let vector_index = if store.vector_index_path().exists() {
             let use_hnsw = match &config.vector_backend {
                 VectorBackend::Hnsw => true,
@@ -1323,7 +1324,7 @@ pub fn unique_new_function() -> bool {
     fn create_embedder_mock() {
         use crate::embeddings::EmbeddingBackend;
 
-        let embedder = super::create_embedder(&EmbeddingBackend::Mock);
+        let embedder = super::create_embedder(&EmbeddingBackend::Mock).unwrap();
         assert_eq!(embedder.dimension(), 32);
 
         // Should produce valid embeddings.
