@@ -3,6 +3,19 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// Which vector index backend to use for semantic search.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum VectorBackend {
+    /// Choose automatically: HNSW for >= 10 000 chunks, brute-force otherwise.
+    #[default]
+    Auto,
+    /// Exact cosine-similarity scan. Simple, correct; suitable up to ~100K chunks.
+    BruteForce,
+    /// Approximate nearest-neighbor via HNSW. Sub-linear query time for large corpora.
+    Hnsw,
+}
+
 /// Configuration for the CodeForge index.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IndexConfig {
@@ -20,6 +33,10 @@ pub struct IndexConfig {
     /// Chunking configuration.
     #[serde(default)]
     pub chunk: ChunkConfig,
+
+    /// Vector index backend for semantic search.
+    #[serde(default)]
+    pub vector_backend: VectorBackend,
 }
 
 /// Controls the cAST chunking algorithm parameters.
@@ -73,6 +90,7 @@ impl IndexConfig {
             languages: HashSet::new(),
             exclude_patterns: default_exclude_patterns(),
             chunk: ChunkConfig::default(),
+            vector_backend: VectorBackend::default(),
         }
     }
 }

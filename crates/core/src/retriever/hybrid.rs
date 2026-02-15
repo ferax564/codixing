@@ -30,9 +30,14 @@ const DEFAULT_RRF_K: f32 = 60.0;
 ///
 /// Documents that appear in both result sets receive contributions from both
 /// terms, naturally boosting items that both systems agree are relevant.
-pub struct HybridRetriever<'a> {
+///
+/// The type parameter `V` selects the vector index backend. Defaults to
+/// [`BruteForceVectorIndex`] for backward compatibility; use
+/// [`HnswVectorIndex`](crate::index::hnsw::HnswVectorIndex) for sub-linear
+/// query time on large corpora.
+pub struct HybridRetriever<'a, V: VectorIndex = BruteForceVectorIndex> {
     tantivy: &'a TantivyIndex,
-    vector_index: &'a BruteForceVectorIndex,
+    vector_index: &'a V,
     embedder: &'a dyn Embedder,
     rrf_k: f32,
     bm25_weight: f32,
@@ -41,12 +46,12 @@ pub struct HybridRetriever<'a> {
     graph_boost_weight: f32,
 }
 
-impl<'a> HybridRetriever<'a> {
+impl<'a, V: VectorIndex> HybridRetriever<'a, V> {
     /// Create a new hybrid retriever with default weights (0.5 / 0.5) and
     /// `k = 60`.
     pub fn new(
         tantivy: &'a TantivyIndex,
-        vector_index: &'a BruteForceVectorIndex,
+        vector_index: &'a V,
         embedder: &'a dyn Embedder,
     ) -> Self {
         Self {
@@ -106,7 +111,7 @@ fn rrf_score(rank: usize, k: f32, weight: f32) -> f32 {
     weight / (k + rank as f32)
 }
 
-impl Retriever for HybridRetriever<'_> {
+impl<V: VectorIndex> Retriever for HybridRetriever<'_, V> {
     fn search(&self, query: &SearchQuery) -> Result<Vec<SearchResult>, CodeforgeError> {
         // Fetch more from each source than requested so that fusion has a
         // richer candidate set.
@@ -547,6 +552,115 @@ mod tests {
             .search(&SearchQuery::new("test_fn").with_limit(10))
             .unwrap();
         assert!(!results.is_empty());
+    }
+
+    /// Helper: build a Tantivy + HnswVectorIndex + MockEmbedder from the
+    /// given chunks.  Mirrors `setup_indexes` but uses the HNSW backend.
+    fn setup_hnsw_indexes(
+        chunks: &[Chunk],
+    ) -> (TantivyIndex, crate::index::HnswVectorIndex, MockEmbedder) {
+        let dim = 32;
+        let embedder = MockEmbedder::new(dim);
+        let tantivy = TantivyIndex::create_in_ram().unwrap();
+        let mut vector_index = crate::index::HnswVectorIndex::new(dim);
+
+        for chunk in chunks {
+            tantivy.add_chunk(chunk).unwrap();
+            let embedding = embedder.embed(&chunk.content).unwrap();
+            vector_index.add(chunk.id, embedding).unwrap();
+        }
+        tantivy.commit().unwrap();
+
+        (tantivy, vector_index, embedder)
+    }
+
+    #[test]
+    fn test_hybrid_retriever_with_hnsw() {
+        // Verify that HybridRetriever<HnswVectorIndex> produces correct fused
+        // results, not just HybridRetriever<BruteForceVectorIndex>.
+        let chunks = vec![
+            make_chunk(1, "src/alpha.rs", "alpha search function handler"),
+            make_chunk(2, "src/beta.rs", "beta processing pipeline worker"),
+            make_chunk(3, "src/gamma.rs", "gamma alpha related helper utility"),
+        ];
+
+        let (tantivy, hnsw_index, embedder) = setup_hnsw_indexes(&chunks);
+
+        let hybrid = HybridRetriever::new(&tantivy, &hnsw_index, &embedder);
+        let query = SearchQuery::new("alpha").with_limit(10);
+        let results = hybrid.search(&query).unwrap();
+
+        // Should return results (at least chunks containing "alpha").
+        assert!(
+            !results.is_empty(),
+            "expected HNSW-backed hybrid search to return results"
+        );
+
+        // All results should have positive fused scores.
+        for r in &results {
+            assert!(
+                r.score > 0.0,
+                "expected positive RRF score with HNSW, got {}",
+                r.score
+            );
+        }
+
+        // Results should be sorted by score descending.
+        for w in results.windows(2) {
+            assert!(
+                w[0].score >= w[1].score,
+                "HNSW results not sorted: {} < {}",
+                w[0].score,
+                w[1].score
+            );
+        }
+
+        // The first result should be from a file containing "alpha" in its content.
+        assert!(
+            results[0].file_path.contains("alpha") || results[0].file_path.contains("gamma"),
+            "expected top result from alpha.rs or gamma.rs, got: {}",
+            results[0].file_path,
+        );
+    }
+
+    #[test]
+    fn test_hybrid_hnsw_with_graph_boost() {
+        // Verify that graph boost works with the HNSW backend.
+        use crate::graph::{CodeGraph, ReferenceKind, SymbolKind};
+
+        let mut graph = CodeGraph::new();
+        let hub = graph.add_symbol("core_process", "src/core.rs", SymbolKind::Function);
+        let a = graph.add_symbol("caller_a", "src/caller.rs", SymbolKind::Function);
+        let b = graph.add_symbol("caller_b", "src/caller.rs", SymbolKind::Function);
+        graph.add_reference(a, hub, ReferenceKind::Call);
+        graph.add_reference(b, hub, ReferenceKind::Call);
+
+        let chunks = vec![
+            make_chunk(1, "src/core.rs", "search_target implementation core"),
+            make_chunk(2, "src/caller.rs", "search_target caller wrapper"),
+        ];
+        let (tantivy, hnsw_index, embedder) = setup_hnsw_indexes(&chunks);
+
+        let boosted = HybridRetriever::new(&tantivy, &hnsw_index, &embedder)
+            .with_graph_boost(&graph, 5.0);
+        let results = boosted
+            .search(&SearchQuery::new("search_target").with_limit(10))
+            .unwrap();
+
+        assert!(!results.is_empty(), "expected HNSW+graph results");
+
+        // core.rs has the hub symbol with higher PageRank, so it should score
+        // at least as high as caller.rs.
+        if let Some(core_r) = results.iter().find(|r| r.file_path.contains("core.rs")) {
+            if let Some(caller_r) = results.iter().find(|r| r.file_path.contains("caller.rs")) {
+                assert!(
+                    core_r.score >= caller_r.score,
+                    "expected core.rs (hub) to rank >= caller.rs with HNSW+graph: {} vs {}",
+                    core_r.score,
+                    caller_r.score,
+                );
+            }
+        }
     }
 
     #[test]

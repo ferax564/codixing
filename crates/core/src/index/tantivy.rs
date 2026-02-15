@@ -491,6 +491,37 @@ impl TantivyIndex {
     pub fn fields(&self) -> &SchemaFields {
         &self.fields
     }
+
+    /// Read all chunk IDs and their content from the index.
+    ///
+    /// Used during init to batch-embed chunks into a vector index.
+    pub fn all_chunk_ids_and_content(&self) -> Result<Vec<(u64, String)>> {
+        let searcher = self.reader.searcher();
+        let mut results = Vec::new();
+
+        for segment_reader in searcher.segment_readers() {
+            let store_reader = segment_reader.get_store_reader(1)?;
+            for doc_id in 0..segment_reader.max_doc() {
+                if segment_reader.is_deleted(doc_id) {
+                    continue;
+                }
+                let doc: tantivy::TantivyDocument = store_reader.get(doc_id)?;
+                let chunk_id = doc
+                    .get_first(self.fields.chunk_id)
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                let content = doc
+                    .get_first(self.fields.content)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                results.push((chunk_id, content));
+            }
+        }
+
+        Ok(results)
+    }
 }
 
 // ---------------------------------------------------------------------------

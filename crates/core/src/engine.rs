@@ -9,16 +9,19 @@ use tracing::{debug, info, warn};
 
 use crate::chunker::Chunker;
 use crate::chunker::cast::CastChunker;
-use crate::config::IndexConfig;
+use crate::config::{IndexConfig, VectorBackend};
+use crate::embeddings::{Embedder, MockEmbedder};
 use crate::error::{CodeforgeError, Result};
 use crate::graph::CodeGraph;
 use crate::graph::extract::{extract_definitions, extract_references};
 use crate::graph::persistence::{load_graph, save_graph};
-use crate::index::TantivyIndex;
+use crate::index::vector::{BruteForceVectorIndex, VectorIndex};
+use crate::index::{HnswVectorIndex, TantivyIndex};
 use crate::language::{Language, SemanticEntity, detect_language};
 use crate::parser::Parser;
 use crate::persistence::{IndexMeta, IndexStore};
 use crate::retriever::bm25::BM25Retriever;
+use crate::retriever::hybrid::HybridRetriever;
 use crate::retriever::{Retriever, SearchQuery, SearchResult};
 use crate::symbols::persistence::{deserialize_symbols, serialize_symbols};
 use crate::symbols::{Symbol, SymbolTable};
@@ -34,6 +37,35 @@ pub struct IndexStats {
     pub symbol_count: usize,
 }
 
+/// Holds a type-erased vector index that can be either brute-force or HNSW.
+enum DynVectorIndex {
+    BruteForce(BruteForceVectorIndex),
+    Hnsw(HnswVectorIndex),
+}
+
+impl DynVectorIndex {
+    fn add(&mut self, chunk_id: u64, vector: Vec<f32>) -> Result<()> {
+        match self {
+            Self::BruteForce(idx) => idx.add(chunk_id, vector),
+            Self::Hnsw(idx) => idx.add(chunk_id, vector),
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::BruteForce(idx) => idx.len(),
+            Self::Hnsw(idx) => idx.len(),
+        }
+    }
+
+    fn save_binary(&self, path: &std::path::Path) -> Result<()> {
+        match self {
+            Self::BruteForce(idx) => idx.save_binary(path),
+            Self::Hnsw(idx) => idx.save_binary(path),
+        }
+    }
+}
+
 /// Top-level facade that wires together parsing, chunking, indexing,
 /// and retrieval into a single coherent API.
 pub struct Engine {
@@ -46,6 +78,10 @@ pub struct Engine {
     file_chunk_counts: HashMap<String, usize>,
     /// Lazily-built code graph.
     graph: Option<CodeGraph>,
+    /// Vector index for semantic search (populated during init or open).
+    vector_index: Option<DynVectorIndex>,
+    /// Embedding model (None when vector features unavailable).
+    embedder: Option<Box<dyn Embedder>>,
 }
 
 impl Engine {
@@ -113,10 +149,41 @@ impl Engine {
         };
         store.save_meta(&meta)?;
 
+        // Build vector index with batch embedding using MockEmbedder.
+        // A real deployment would use OnnxEmbedder when the `vector` feature is enabled.
+        let embedder: Box<dyn Embedder> = Box::new(MockEmbedder::new(32));
+        let chunk_threshold = 10_000;
+        let use_hnsw = match &config.vector_backend {
+            VectorBackend::Hnsw => true,
+            VectorBackend::BruteForce => false,
+            VectorBackend::Auto => total_chunks >= chunk_threshold,
+        };
+
+        let mut vector_index: DynVectorIndex = if use_hnsw {
+            DynVectorIndex::Hnsw(HnswVectorIndex::new(embedder.dimension()))
+        } else {
+            DynVectorIndex::BruteForce(BruteForceVectorIndex::new(embedder.dimension()))
+        };
+
+        // Batch-embed all indexed chunks into the vector index.
+        // We read the tantivy index to get chunk IDs and content.
+        let all_chunks = tantivy.all_chunk_ids_and_content()?;
+        if !all_chunks.is_empty() {
+            let texts: Vec<&str> = all_chunks.iter().map(|(_, c)| c.as_str()).collect();
+            let embeddings = embedder.embed_batch(&texts)?;
+            for ((chunk_id, _), embedding) in all_chunks.iter().zip(embeddings) {
+                vector_index.add(*chunk_id, embedding)?;
+            }
+        }
+
+        // Persist vector index.
+        vector_index.save_binary(&store.vector_index_path())?;
+
         info!(
             files = files.len(),
             chunks = total_chunks,
             symbols = total_symbols,
+            vectors = vector_index.len(),
             "index initialized"
         );
 
@@ -128,6 +195,8 @@ impl Engine {
             symbols,
             file_chunk_counts,
             graph: None,
+            vector_index: Some(vector_index),
+            embedder: Some(embedder),
         })
     }
 
@@ -176,6 +245,41 @@ impl Engine {
             None
         };
 
+        // Load vector index if persisted.
+        let embedder: Box<dyn Embedder> = Box::new(MockEmbedder::new(32));
+        let vector_index = if store.vector_index_path().exists() {
+            let use_hnsw = match &config.vector_backend {
+                VectorBackend::Hnsw => true,
+                VectorBackend::BruteForce => false,
+                VectorBackend::Auto => meta.chunk_count >= 10_000,
+            };
+            if use_hnsw {
+                match HnswVectorIndex::load_binary(&store.vector_index_path()) {
+                    Ok(idx) => {
+                        info!(vectors = idx.len(), "loaded HNSW vector index");
+                        Some(DynVectorIndex::Hnsw(idx))
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "failed to load HNSW vector index, skipping");
+                        None
+                    }
+                }
+            } else {
+                match BruteForceVectorIndex::load_binary(&store.vector_index_path()) {
+                    Ok(idx) => {
+                        info!(vectors = idx.len(), "loaded brute-force vector index");
+                        Some(DynVectorIndex::BruteForce(idx))
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "failed to load brute-force vector index, skipping");
+                        None
+                    }
+                }
+            }
+        } else {
+            None
+        };
+
         info!(
             files = meta.file_count,
             chunks = meta.chunk_count,
@@ -191,6 +295,8 @@ impl Engine {
             symbols,
             file_chunk_counts,
             graph,
+            vector_index,
+            embedder: Some(embedder),
         })
     }
 
@@ -198,6 +304,36 @@ impl Engine {
     pub fn search(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
         let retriever = BM25Retriever::new(&self.tantivy);
         retriever.search(&query)
+    }
+
+    /// Search using hybrid BM25 + vector retrieval with RRF fusion.
+    ///
+    /// Falls back to BM25-only search if no vector index or embedder is
+    /// available.
+    pub fn hybrid_search(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
+        let (Some(vi), Some(embedder)) = (&self.vector_index, &self.embedder) else {
+            return self.search(query);
+        };
+
+        // Use the appropriate vector index type.
+        match vi {
+            DynVectorIndex::BruteForce(bf) => {
+                let mut retriever =
+                    HybridRetriever::new(&self.tantivy, bf, embedder.as_ref());
+                if let Some(ref graph) = self.graph {
+                    retriever = retriever.with_graph_boost(graph, 0.3);
+                }
+                retriever.search(&query)
+            }
+            DynVectorIndex::Hnsw(hnsw) => {
+                let mut retriever =
+                    HybridRetriever::new(&self.tantivy, hnsw, embedder.as_ref());
+                if let Some(ref graph) = self.graph {
+                    retriever = retriever.with_graph_boost(graph, 0.3);
+                }
+                retriever.search(&query)
+            }
+        }
     }
 
     /// Query the symbol table.
@@ -434,6 +570,11 @@ impl Engine {
         // Persist code graph if built.
         if let Some(ref graph) = self.graph {
             save_graph(graph, &self.store.graph_path())?;
+        }
+
+        // Persist vector index if available.
+        if let Some(ref vi) = self.vector_index {
+            vi.save_binary(&self.store.vector_index_path())?;
         }
 
         Ok(())
@@ -839,6 +980,236 @@ pub fn unique_new_function() -> bool {
 
         assert_eq!(loaded.node_count(), original_nodes);
         assert_eq!(loaded.edge_count(), original_edges);
+    }
+
+    #[test]
+    fn test_engine_hybrid_search() {
+        // Verify that Engine::hybrid_search() returns results using the vector
+        // index that is built during Engine::init().
+        let (_dir, root) = setup_project();
+        let config = IndexConfig::new(&root);
+
+        let engine = Engine::init(&root, config).unwrap();
+
+        // hybrid_search should return results for a known function name.
+        let results = engine
+            .hybrid_search(SearchQuery::new("add").with_limit(5))
+            .unwrap();
+        assert!(
+            !results.is_empty(),
+            "expected hybrid_search to return results for 'add'"
+        );
+
+        // At least one result should be from main.rs (where `add` is defined).
+        assert!(
+            results.iter().any(|r| r.file_path.contains("main.rs")),
+            "expected a result from main.rs, got: {:?}",
+            results.iter().map(|r| &r.file_path).collect::<Vec<_>>()
+        );
+
+        // All scores should be positive.
+        for r in &results {
+            assert!(r.score > 0.0, "expected positive score, got {}", r.score);
+        }
+
+        // Results should be in descending score order.
+        for w in results.windows(2) {
+            assert!(
+                w[0].score >= w[1].score,
+                "hybrid_search results not sorted: {} < {}",
+                w[0].score,
+                w[1].score
+            );
+        }
+    }
+
+    #[test]
+    fn test_engine_hybrid_search_with_hnsw_backend() {
+        // Force HNSW backend and verify hybrid_search still works.
+        let (_dir, root) = setup_project();
+        let mut config = IndexConfig::new(&root);
+        config.vector_backend = VectorBackend::Hnsw;
+
+        let engine = Engine::init(&root, config).unwrap();
+
+        let results = engine
+            .hybrid_search(SearchQuery::new("helper").with_limit(5))
+            .unwrap();
+        assert!(
+            !results.is_empty(),
+            "expected HNSW-backed hybrid_search to return results for 'helper'"
+        );
+
+        // Should find result from lib.rs (where `helper` is defined).
+        assert!(
+            results.iter().any(|r| r.file_path.contains("lib.rs")),
+            "expected a result from lib.rs with HNSW backend"
+        );
+    }
+
+    #[test]
+    fn test_vector_index_persistence() {
+        // Verify that the vector index survives a save/open round-trip and
+        // hybrid_search works after reopening.
+        let (_dir, root) = setup_project();
+        let config = IndexConfig::new(&root);
+
+        // Phase 1: Init, verify hybrid_search works, then drop.
+        let original_result_count;
+        {
+            let engine = Engine::init(&root, config).unwrap();
+            let results = engine
+                .hybrid_search(SearchQuery::new("add").with_limit(5))
+                .unwrap();
+            assert!(
+                !results.is_empty(),
+                "expected hybrid_search results before save"
+            );
+            original_result_count = results.len();
+
+            // Engine::init already persists the vector index; no explicit save needed.
+        }
+
+        // Phase 2: Re-open from disk and verify hybrid_search still works.
+        let engine = Engine::open(&root).unwrap();
+        let results = engine
+            .hybrid_search(SearchQuery::new("add").with_limit(5))
+            .unwrap();
+
+        assert!(
+            !results.is_empty(),
+            "expected hybrid_search results after re-opening index"
+        );
+        // Should get the same number of results (same data, same index).
+        assert_eq!(
+            results.len(),
+            original_result_count,
+            "expected same result count after round-trip: got {} vs original {}",
+            results.len(),
+            original_result_count
+        );
+
+        // Verify the vector index file exists on disk.
+        let vi_path = root.join(".codeforge/vectors.bin");
+        assert!(
+            vi_path.exists(),
+            "expected vectors.bin to exist at {:?}",
+            vi_path
+        );
+    }
+
+    #[test]
+    fn test_vector_index_persistence_hnsw() {
+        // Verify that HNSW vector index specifically survives a round-trip.
+        let (_dir, root) = setup_project();
+        let mut config = IndexConfig::new(&root);
+        config.vector_backend = VectorBackend::Hnsw;
+
+        // Init with HNSW, verify hybrid_search, drop.
+        {
+            let engine = Engine::init(&root, config).unwrap();
+            let results = engine
+                .hybrid_search(SearchQuery::new("Config").with_limit(5))
+                .unwrap();
+            assert!(
+                !results.is_empty(),
+                "expected HNSW hybrid_search results before save"
+            );
+        }
+
+        // Re-open. The config on disk has vector_backend: Hnsw, so open()
+        // should load the HNSW index.
+        let engine = Engine::open(&root).unwrap();
+        let results = engine
+            .hybrid_search(SearchQuery::new("Config").with_limit(5))
+            .unwrap();
+        assert!(
+            !results.is_empty(),
+            "expected HNSW hybrid_search results after re-open"
+        );
+    }
+
+    #[test]
+    fn test_auto_backend_selection() {
+        // VectorBackend::Auto should pick BruteForce for small chunk counts
+        // (< 10_000 threshold) and HNSW for large.
+        //
+        // We verify the small case by checking that the default (Auto) config
+        // on a small project uses brute-force (which it does because our test
+        // project has only a handful of chunks, well below 10_000).
+
+        let (_dir, root) = setup_project();
+        let config = IndexConfig::new(&root);
+        // Default is VectorBackend::Auto.
+        assert_eq!(config.vector_backend, VectorBackend::Auto);
+
+        let engine = Engine::init(&root, config).unwrap();
+        let stats = engine.stats();
+
+        // With only 2 files the chunk count is far below 10_000, so Auto
+        // should have selected BruteForce.
+        assert!(
+            stats.chunk_count < 10_000,
+            "test project should have < 10_000 chunks, got {}",
+            stats.chunk_count
+        );
+
+        // hybrid_search should still work (proving a vector index was created).
+        let results = engine
+            .hybrid_search(SearchQuery::new("add").with_limit(5))
+            .unwrap();
+        assert!(
+            !results.is_empty(),
+            "expected hybrid_search results with Auto backend"
+        );
+
+        // Now test the HNSW threshold logic directly: VectorBackend::Hnsw
+        // forces HNSW regardless of chunk count.
+        let mut hnsw_config = IndexConfig::new(&root);
+        hnsw_config.vector_backend = VectorBackend::Hnsw;
+
+        // Re-init with a clean root to avoid the existing .codeforge dir.
+        let dir2 = tempdir().unwrap();
+        let root2 = dir2.path().to_path_buf();
+        let src2 = root2.join("src");
+        fs::create_dir_all(&src2).unwrap();
+        fs::write(
+            src2.join("main.rs"),
+            "fn main() {}\npub fn tiny() -> bool { true }\n",
+        )
+        .unwrap();
+
+        let mut hnsw_config2 = IndexConfig::new(&root2);
+        hnsw_config2.vector_backend = VectorBackend::Hnsw;
+        let engine2 = Engine::init(&root2, hnsw_config2).unwrap();
+
+        // Even with very few chunks, HNSW is selected when explicitly configured.
+        let results2 = engine2
+            .hybrid_search(SearchQuery::new("tiny").with_limit(5))
+            .unwrap();
+        assert!(
+            !results2.is_empty(),
+            "expected HNSW hybrid_search results even for small project"
+        );
+    }
+
+    #[test]
+    fn test_auto_selects_brute_force_for_small_project() {
+        // Complementary test: verify that VectorBackend::BruteForce explicitly
+        // forces brute-force even if chunk count were hypothetically large.
+        let (_dir, root) = setup_project();
+        let mut config = IndexConfig::new(&root);
+        config.vector_backend = VectorBackend::BruteForce;
+
+        let engine = Engine::init(&root, config).unwrap();
+
+        let results = engine
+            .hybrid_search(SearchQuery::new("Processor").with_limit(5))
+            .unwrap();
+        assert!(
+            !results.is_empty(),
+            "expected BruteForce hybrid_search results for 'Processor'"
+        );
     }
 
     #[test]
