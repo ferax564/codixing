@@ -146,16 +146,20 @@ impl<V: VectorIndex> Retriever for HybridRetriever<'_, V> {
             query.limit
         };
 
-        // 1. BM25 search via the existing BM25Retriever.
-        let bm25_results = {
-            let bm25_query = SearchQuery::new(query.query.clone()).with_limit(fetch_limit);
-            let bm25 = BM25Retriever::new(self.tantivy);
-            bm25.search(&bm25_query)?
-        };
-
-        // 2. Vector search: embed the query, then find nearest neighbors.
-        let query_embedding = self.embedder.embed(&query.query)?;
-        let vector_results = self.vector_index.search(&query_embedding, fetch_limit)?;
+        // 1+2. Run BM25 and vector search concurrently via rayon::join.
+        let (bm25_result, vector_result) = rayon::join(
+            || {
+                let bm25_query = SearchQuery::new(query.query.clone()).with_limit(fetch_limit);
+                let bm25 = BM25Retriever::new(self.tantivy);
+                bm25.search(&bm25_query)
+            },
+            || {
+                let query_embedding = self.embedder.embed(&query.query)?;
+                self.vector_index.search(&query_embedding, fetch_limit)
+            },
+        );
+        let bm25_results = bm25_result?;
+        let vector_results = vector_result?;
 
         // 3. Accumulate RRF scores per chunk_id. Keep the full SearchResult
         //    from BM25 (it has all the metadata we need).
