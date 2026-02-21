@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::RwLock;
 
 use instant_distance::{Builder, HnswMap, Point, Search};
 
@@ -58,8 +58,9 @@ pub struct HnswVectorIndex {
     dimension: usize,
     /// Cached HNSW graph + the chunk-ID ordering used to build it.
     /// `None` if the index is dirty and needs a rebuild.
-    /// Wrapped in a Mutex for interior mutability in `search(&self, ...)`.
-    hnsw_cache: Mutex<Option<HnswSnapshot>>,
+    /// Wrapped in a RwLock so concurrent searches can share a read lock,
+    /// and only lazy rebuilds need a write lock.
+    hnsw_cache: RwLock<Option<HnswSnapshot>>,
 }
 
 /// A cached HNSW graph snapshot mapping points to chunk IDs.
@@ -74,7 +75,7 @@ impl HnswVectorIndex {
             entries: Vec::new(),
             id_to_idx: HashMap::new(),
             dimension,
-            hnsw_cache: Mutex::new(None),
+            hnsw_cache: RwLock::new(None),
         }
     }
 
@@ -106,8 +107,33 @@ impl HnswVectorIndex {
         for entry in data.entries {
             index.add(entry.chunk_id, entry.vector)?;
         }
-        *index.hnsw_cache.lock().unwrap() = index.build_snapshot();
+        *index.hnsw_cache.write().unwrap() = index.build_snapshot();
         Ok(index)
+    }
+
+    /// Run a search against a pre-built HNSW snapshot.
+    fn search_snapshot(
+        snapshot: &HnswSnapshot,
+        query: &[f32],
+        k: usize,
+    ) -> Result<Vec<VectorSearchResult>, CodeforgeError> {
+        let query_point = EmbeddingPoint {
+            vector: query.to_vec(),
+        };
+        let mut search = Search::default();
+        let results: Vec<VectorSearchResult> = snapshot
+            .map
+            .search(&query_point, &mut search)
+            .take(k)
+            .map(|item| {
+                let similarity = 1.0 - item.distance;
+                VectorSearchResult {
+                    chunk_id: *item.value,
+                    similarity,
+                }
+            })
+            .collect();
+        Ok(results)
     }
 
     /// Build an HNSW snapshot from the current entries.
@@ -148,7 +174,7 @@ impl VectorIndex for HnswVectorIndex {
             self.id_to_idx.insert(chunk_id, idx);
         }
         // Invalidate the HNSW graph.
-        *self.hnsw_cache.lock().unwrap() = None;
+        *self.hnsw_cache.write().unwrap() = None;
         Ok(())
     }
 
@@ -159,7 +185,7 @@ impl VectorIndex for HnswVectorIndex {
         for (idx, entry) in self.entries.iter().enumerate() {
             self.id_to_idx.insert(entry.chunk_id, idx);
         }
-        *self.hnsw_cache.lock().unwrap() = None;
+        *self.hnsw_cache.write().unwrap() = None;
         Ok(())
     }
 
@@ -168,36 +194,26 @@ impl VectorIndex for HnswVectorIndex {
             return Ok(Vec::new());
         }
 
-        // Lazily rebuild the HNSW graph if it was invalidated by mutations.
+        // Fast path: try a read lock first (allows concurrent searches).
         {
-            let mut cache = self.hnsw_cache.lock().unwrap();
+            let cache = self.hnsw_cache.read().unwrap();
+            if cache.is_some() {
+                return Self::search_snapshot(cache.as_ref().unwrap(), query, k);
+            }
+        }
+
+        // Slow path: snapshot is None, acquire write lock to rebuild.
+        {
+            let mut cache = self.hnsw_cache.write().unwrap();
+            // Double-check: another thread may have rebuilt while we waited.
             if cache.is_none() {
                 *cache = self.build_snapshot();
             }
         }
 
-        let cache = self.hnsw_cache.lock().unwrap();
-        let snapshot = cache.as_ref().unwrap();
-
-        let query_point = EmbeddingPoint {
-            vector: query.to_vec(),
-        };
-
-        let mut search = Search::default();
-        let results: Vec<VectorSearchResult> = snapshot
-            .map
-            .search(&query_point, &mut search)
-            .take(k)
-            .map(|item| {
-                let similarity = 1.0 - item.distance;
-                VectorSearchResult {
-                    chunk_id: *item.value,
-                    similarity,
-                }
-            })
-            .collect();
-
-        Ok(results)
+        // Now read lock again for the search.
+        let cache = self.hnsw_cache.read().unwrap();
+        Self::search_snapshot(cache.as_ref().unwrap(), query, k)
     }
 
     fn search_batch(
@@ -206,11 +222,14 @@ impl VectorIndex for HnswVectorIndex {
         k: usize,
     ) -> Result<Vec<Vec<VectorSearchResult>>, CodeforgeError> {
         use rayon::prelude::*;
-        // Ensure the HNSW graph is built before parallel queries.
+        // Ensure the HNSW graph is built before parallel queries use read locks.
         {
-            let mut cache = self.hnsw_cache.lock().unwrap();
-            if cache.is_none() {
-                *cache = self.build_snapshot();
+            let needs_build = self.hnsw_cache.read().unwrap().is_none();
+            if needs_build {
+                let mut cache = self.hnsw_cache.write().unwrap();
+                if cache.is_none() {
+                    *cache = self.build_snapshot();
+                }
             }
         }
         queries.par_iter().map(|q| self.search(q, k)).collect()
@@ -260,7 +279,7 @@ impl VectorIndex for HnswVectorIndex {
             }
         }
         // Pre-build the HNSW graph after loading.
-        *index.hnsw_cache.lock().unwrap() = index.build_snapshot();
+        *index.hnsw_cache.write().unwrap() = index.build_snapshot();
         Ok(index)
     }
 }
@@ -440,6 +459,39 @@ mod tests {
             assert_eq!(batch_result.len(), seq_result.len());
             // HNSW is approximate, so just check the top-1 result matches.
             assert_eq!(batch_result[0].chunk_id, seq_result[0].chunk_id);
+        }
+    }
+
+    #[test]
+    fn hnsw_concurrent_search_with_rwlock() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let mut idx = HnswVectorIndex::new(8);
+        for i in 0..100 {
+            let vec: Vec<f32> = (0..8).map(|d| ((i * 7 + d * 3) % 50) as f32 / 50.0).collect();
+            idx.add(i as u64, vec).unwrap();
+        }
+        // Pre-build the snapshot so all threads use read locks.
+        let _ = idx.search(&[0.5f32; 8], 1).unwrap();
+
+        let idx = Arc::new(idx);
+        let handles: Vec<_> = (0..8)
+            .map(|t| {
+                let idx = Arc::clone(&idx);
+                thread::spawn(move || {
+                    let query: Vec<f32> = (0..8).map(|d| ((t * 11 + d * 5) % 50) as f32 / 50.0).collect();
+                    for _ in 0..100 {
+                        let results = idx.search(&query, 5).unwrap();
+                        assert!(!results.is_empty());
+                        assert!(results.len() <= 5);
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
         }
     }
 
