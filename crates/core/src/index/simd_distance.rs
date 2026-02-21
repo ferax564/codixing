@@ -9,6 +9,18 @@
 //! - **x86_64 with AVX2+FMA**: processes 8 floats/iteration via `_mm256_fmadd_ps`
 //! - **aarch64 with NEON**: processes 4 floats/iteration via `vfmaq_f32`
 //! - **Scalar fallback**: iterator-based, always available
+//!
+//! Feature detection is cached in a `LazyLock<bool>` static to avoid repeated
+//! `cpuid` queries on every distance call.
+
+#[cfg(target_arch = "x86_64")]
+use std::sync::LazyLock;
+
+/// Cached AVX2+FMA feature detection result. Evaluated once on first access.
+#[cfg(target_arch = "x86_64")]
+static HAS_AVX2_FMA: LazyLock<bool> = LazyLock::new(|| {
+    is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")
+});
 
 /// Scalar (non-SIMD) implementations, always available.
 pub mod scalar {
@@ -163,6 +175,45 @@ mod avx2 {
         _mm_cvtss_f32(result)
     }
 
+    /// Squared L2 (Euclidean) distance using AVX2+FMA.
+    ///
+    /// Computes sum((a[i] - b[i])^2) as FMA: diff*diff + acc.
+    ///
+    /// # Safety
+    /// Caller must ensure AVX2 and FMA CPU features are available.
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) unsafe fn l2_distance_squared(a: &[f32], b: &[f32]) -> f32 {
+        let n = a.len();
+        let chunks = n / 8;
+        let remainder = n % 8;
+
+        unsafe {
+            let mut acc = _mm256_setzero_ps();
+            let a_ptr = a.as_ptr();
+            let b_ptr = b.as_ptr();
+
+            for i in 0..chunks {
+                let offset = i * 8;
+                let va = _mm256_loadu_ps(a_ptr.add(offset));
+                let vb = _mm256_loadu_ps(b_ptr.add(offset));
+                let diff = _mm256_sub_ps(va, vb);
+                // acc += diff * diff (FMA)
+                acc = _mm256_fmadd_ps(diff, diff, acc);
+            }
+
+            let mut result = hsum256(acc);
+
+            // Handle remainder with scalar
+            let tail_start = chunks * 8;
+            for j in 0..remainder {
+                let d = a[tail_start + j] - b[tail_start + j];
+                result += d * d;
+            }
+
+            result
+        }
+    }
+
     /// Dot product using AVX2+FMA.
     ///
     /// # Safety
@@ -248,6 +299,40 @@ mod neon {
         }
     }
 
+    /// Squared L2 (Euclidean) distance using NEON intrinsics.
+    ///
+    /// # Safety
+    /// NEON is always available on aarch64, but intrinsics are still unsafe.
+    pub(super) unsafe fn l2_distance_squared(a: &[f32], b: &[f32]) -> f32 {
+        let n = a.len();
+        let chunks = n / 4;
+        let remainder = n % 4;
+
+        unsafe {
+            let mut acc = vdupq_n_f32(0.0);
+            let a_ptr = a.as_ptr();
+            let b_ptr = b.as_ptr();
+
+            for i in 0..chunks {
+                let offset = i * 4;
+                let va = vld1q_f32(a_ptr.add(offset));
+                let vb = vld1q_f32(b_ptr.add(offset));
+                let diff = vsubq_f32(va, vb);
+                acc = vfmaq_f32(acc, diff, diff);
+            }
+
+            let mut result = vaddvq_f32(acc);
+
+            let tail_start = chunks * 4;
+            for j in 0..remainder {
+                let d = a[tail_start + j] - b[tail_start + j];
+                result += d * d;
+            }
+
+            result
+        }
+    }
+
     /// Dot product using NEON intrinsics.
     ///
     /// # Safety
@@ -313,8 +398,8 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 
 /// Dot product of two vectors.
 ///
-/// Uses AVX2+FMA on x86_64 (runtime-detected) or NEON on aarch64, with a scalar
-/// fallback on all other platforms.
+/// Uses AVX2+FMA on x86_64 (cached runtime detection) or NEON on aarch64,
+/// with a scalar fallback on all other platforms.
 ///
 /// # Panics
 /// Panics if `a.len() != b.len()`.
@@ -329,8 +414,8 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
 
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-            // SAFETY: we just verified AVX2+FMA are available.
+        if *HAS_AVX2_FMA {
+            // SAFETY: HAS_AVX2_FMA confirmed AVX2+FMA are available.
             return unsafe { avx2::dot_product(a, b) };
         }
     }
@@ -347,11 +432,35 @@ pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
 
 /// Squared L2 (Euclidean) distance between two vectors.
 ///
-/// Uses scalar implementation (SIMD benefit is smaller for subtract+square pattern).
+/// Uses AVX2+FMA on x86_64 (cached runtime detection) or NEON on aarch64,
+/// with a scalar fallback on all other platforms.
 ///
 /// # Panics
 /// Panics if `a.len() != b.len()`.
 pub fn l2_distance_squared(a: &[f32], b: &[f32]) -> f32 {
+    assert_eq!(
+        a.len(),
+        b.len(),
+        "vector length mismatch: {} vs {}",
+        a.len(),
+        b.len()
+    );
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if *HAS_AVX2_FMA {
+            // SAFETY: HAS_AVX2_FMA confirmed AVX2+FMA are available.
+            return unsafe { avx2::l2_distance_squared(a, b) };
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: NEON is guaranteed on aarch64.
+        return unsafe { neon::l2_distance_squared(a, b) };
+    }
+
+    #[allow(unreachable_code)]
     scalar::l2_distance_squared(a, b)
 }
 
@@ -361,8 +470,8 @@ pub fn l2_distance_squared(a: &[f32], b: &[f32]) -> f32 {
 fn dot_norm_norm_dispatch(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
     #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-            // SAFETY: we just verified AVX2+FMA are available.
+        if *HAS_AVX2_FMA {
+            // SAFETY: HAS_AVX2_FMA confirmed AVX2+FMA are available.
             return unsafe { avx2::dot_norm_norm(a, b) };
         }
     }
@@ -444,6 +553,39 @@ mod tests {
         let a: Vec<f32> = (0..384).map(|i| i as f32).collect();
         let dist = l2_distance_squared(&a, &a);
         assert!(dist.abs() < 1e-5);
+    }
+
+    #[test]
+    fn l2_distance_matches_scalar() {
+        let a: Vec<f32> = (0..384).map(|i| (i as f32 * 0.137).sin()).collect();
+        let b: Vec<f32> = (0..384).map(|i| (i as f32 * 0.251).cos()).collect();
+        let scalar_result = scalar::l2_distance_squared(&a, &b);
+        let simd_result = l2_distance_squared(&a, &b);
+        assert!(
+            (scalar_result - simd_result).abs() < 1e-3,
+            "SIMD L2 {simd_result} != scalar L2 {scalar_result}"
+        );
+    }
+
+    #[test]
+    fn l2_distance_non_power_of_8_length() {
+        let a: Vec<f32> = (0..100).map(|i| (i as f32 * 0.1).sin()).collect();
+        let b: Vec<f32> = (0..100).map(|i| (i as f32 * 0.2).cos()).collect();
+        let scalar_result = scalar::l2_distance_squared(&a, &b);
+        let simd_result = l2_distance_squared(&a, &b);
+        assert!(
+            (scalar_result - simd_result).abs() < 1e-3,
+            "SIMD L2 {simd_result} != scalar L2 {scalar_result} for 100-dim"
+        );
+    }
+
+    #[test]
+    fn l2_distance_basic() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![4.0, 5.0, 6.0];
+        // (4-1)^2 + (5-2)^2 + (6-3)^2 = 9 + 9 + 9 = 27
+        let dist = l2_distance_squared(&a, &b);
+        assert!((dist - 27.0).abs() < 1e-5);
     }
 
     #[test]

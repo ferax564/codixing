@@ -56,7 +56,7 @@ impl<'a> AgenticSearchSession<'a> {
     ///
     /// Returns results formatted as structured text with file paths, line ranges,
     /// scores, and content snippets.
-    pub fn search(&self, query: &str, limit: usize) -> Result<AgenticResult> {
+    pub fn search(&mut self, query: &str, limit: usize) -> Result<AgenticResult> {
         let search_query = SearchQuery::new(query).with_limit(limit);
         let results = self.engine.hybrid_search(search_query)?;
 
@@ -492,7 +492,7 @@ pub trait Processor {
         let config = IndexConfig::new(&root);
         let mut engine = Engine::init(&root, config).unwrap();
 
-        let session = AgenticSearchSession::new(&mut engine);
+        let mut session = AgenticSearchSession::new(&mut engine);
         let result = session.search("add", 5).unwrap();
 
         assert!(!result.content.is_empty());
@@ -510,7 +510,7 @@ pub trait Processor {
         let config = IndexConfig::new(&root);
         let mut engine = Engine::init(&root, config).unwrap();
 
-        let session = AgenticSearchSession::new(&mut engine);
+        let mut session = AgenticSearchSession::new(&mut engine);
         let result = session.search("zzz_nonexistent_symbol_xyz", 5).unwrap();
 
         assert!(result.content.contains("No results found"));
@@ -523,7 +523,7 @@ pub trait Processor {
         let config = IndexConfig::new(&root);
         let mut engine = Engine::init(&root, config).unwrap();
 
-        let session = AgenticSearchSession::new(&mut engine);
+        let mut session = AgenticSearchSession::new(&mut engine);
         let result = session.read_file("src/main.rs", None, None).unwrap();
 
         assert!(result.content.contains("File: src/main.rs"));
@@ -539,7 +539,7 @@ pub trait Processor {
         let config = IndexConfig::new(&root);
         let mut engine = Engine::init(&root, config).unwrap();
 
-        let session = AgenticSearchSession::new(&mut engine);
+        let mut session = AgenticSearchSession::new(&mut engine);
         // Read only lines 3-6 (1-indexed).
         let result = session.read_file("src/main.rs", Some(3), Some(6)).unwrap();
 
@@ -559,7 +559,7 @@ pub trait Processor {
         let config = IndexConfig::new(&root);
         let mut engine = Engine::init(&root, config).unwrap();
 
-        let session = AgenticSearchSession::new(&mut engine);
+        let mut session = AgenticSearchSession::new(&mut engine);
         let result = session.read_file("nonexistent.rs", None, None);
 
         assert!(result.is_err());

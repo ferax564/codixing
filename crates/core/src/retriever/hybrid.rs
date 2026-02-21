@@ -112,6 +112,20 @@ impl<'a, V: VectorIndex> HybridRetriever<'a, V> {
         self.graph_boost_weight = weight;
         self
     }
+
+    /// Enable graph-boosted scoring using pre-computed file scores.
+    ///
+    /// This avoids recomputing PageRank on every query by accepting cached
+    /// file_path -> max_pagerank_score mappings.
+    pub fn with_precomputed_graph_boost(
+        mut self,
+        file_scores: &HashMap<String, f32>,
+        weight: f32,
+    ) -> Self {
+        self.graph_file_scores = Some(file_scores.clone());
+        self.graph_boost_weight = weight;
+        self
+    }
 }
 
 /// Compute the RRF contribution for a single rank position.
