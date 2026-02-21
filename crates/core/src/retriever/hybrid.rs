@@ -737,16 +737,13 @@ mod tests {
         let plain_results = plain
             .search(&SearchQuery::new("alpha").with_limit(10))
             .unwrap();
-        assert!(
-            !plain_results.is_empty(),
-            "expected plain hybrid results"
-        );
+        assert!(!plain_results.is_empty(), "expected plain hybrid results");
 
         // With reranker — MockReranker assigns scores that reverse the order.
         // Give the first result a low score and the last result a high score.
         let reranker = Arc::new(MockReranker::new(vec![0.1, 0.9, 0.5]));
-        let reranked = HybridRetriever::new(&tantivy, &vector_index, &embedder)
-            .with_reranker(reranker);
+        let reranked =
+            HybridRetriever::new(&tantivy, &vector_index, &embedder).with_reranker(reranker);
         let reranked_results = reranked
             .search(&SearchQuery::new("alpha").with_limit(10))
             .unwrap();
@@ -802,8 +799,8 @@ mod tests {
         let (tantivy, vector_index, embedder) = setup_indexes(&chunks);
 
         let reranker = Arc::new(MockReranker::new(vec![0.9, 0.8, 0.7, 0.6, 0.5]));
-        let hybrid = HybridRetriever::new(&tantivy, &vector_index, &embedder)
-            .with_reranker(reranker);
+        let hybrid =
+            HybridRetriever::new(&tantivy, &vector_index, &embedder).with_reranker(reranker);
         let results = hybrid
             .search(&SearchQuery::new("common_search_term").with_limit(3))
             .unwrap();
@@ -819,9 +816,7 @@ mod tests {
     fn test_hybrid_no_reranker_is_default() {
         // Verify that not setting a reranker gives the same results as before
         // (regression guard for the Option<Reranker> field).
-        let chunks = vec![
-            make_chunk(1, "src/a.rs", "test_fn_unchanged function"),
-        ];
+        let chunks = vec![make_chunk(1, "src/a.rs", "test_fn_unchanged function")];
         let (tantivy, vector_index, embedder) = setup_indexes(&chunks);
         let hybrid = HybridRetriever::new(&tantivy, &vector_index, &embedder);
         let results = hybrid

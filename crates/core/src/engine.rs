@@ -494,10 +494,7 @@ impl Engine {
                             // Assign a base score slightly below the lowest
                             // hybrid result so trigram-only hits appear at the
                             // tail unless they are the only results.
-                            let base_score = results
-                                .last()
-                                .map(|r| r.score * 0.9)
-                                .unwrap_or(0.001);
+                            let base_score = results.last().map(|r| r.score * 0.9).unwrap_or(0.001);
 
                             results.push(SearchResult {
                                 chunk_id,
@@ -1655,10 +1652,7 @@ pub fn other_func() -> i32 {
         let results = engine
             .hybrid_search(SearchQuery::new("qux_fn").with_limit(10))
             .unwrap();
-        assert!(
-            !results.is_empty(),
-            "expected results for 'qux_fn'"
-        );
+        assert!(!results.is_empty(), "expected results for 'qux_fn'");
 
         // The result from alpha.rs (containing exact match) should rank first.
         assert!(
