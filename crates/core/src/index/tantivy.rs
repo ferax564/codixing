@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -130,7 +131,18 @@ fn tokenize_code(text: &str) -> Vec<Token> {
         }
 
         let lower_word = word.to_lowercase();
+        // Use a HashSet for O(1) dedup checks instead of Vec::contains() which is O(M).
+        let mut seen: HashSet<String> = HashSet::new();
         let mut sub_tokens: Vec<String> = Vec::new();
+
+        /// Insert a token into `sub_tokens` if not already seen. O(1) lookup.
+        macro_rules! insert_unique {
+            ($seen:expr, $sub_tokens:expr, $val:expr) => {
+                if !$val.is_empty() && $seen.insert($val.clone()) {
+                    $sub_tokens.push($val);
+                }
+            };
+        }
 
         // Check for dot-separated identifiers (e.g., `path.to.module`).
         if word.contains('.') {
@@ -140,25 +152,19 @@ fn tokenize_code(text: &str) -> Vec<Token> {
                     // Each dot-part may itself be camelCase.
                     for camel_part in split_camel(part) {
                         let lp = camel_part.to_lowercase();
-                        if !lp.is_empty() && !sub_tokens.contains(&lp) {
-                            sub_tokens.push(lp);
-                        }
+                        insert_unique!(seen, sub_tokens, lp);
                     }
                 }
                 // Also add the full dot-path (lowercased).
-                if !sub_tokens.contains(&lower_word) {
-                    sub_tokens.push(lower_word.clone());
-                }
+                insert_unique!(seen, sub_tokens, lower_word.clone());
             } else {
                 // Single segment with leading/trailing dots — treat as a plain word.
                 for camel_part in split_camel(&word) {
                     let lp = camel_part.to_lowercase();
-                    if !lp.is_empty() && !sub_tokens.contains(&lp) {
-                        sub_tokens.push(lp);
-                    }
+                    insert_unique!(seen, sub_tokens, lp);
                 }
-                if sub_tokens.len() > 1 && !sub_tokens.contains(&lower_word) {
-                    sub_tokens.push(lower_word.clone());
+                if sub_tokens.len() > 1 {
+                    insert_unique!(seen, sub_tokens, lower_word.clone());
                 }
             }
         } else if word.contains('_') {
@@ -168,25 +174,19 @@ fn tokenize_code(text: &str) -> Vec<Token> {
                 for part in &parts {
                     for camel_part in split_camel(part) {
                         let lp = camel_part.to_lowercase();
-                        if !lp.is_empty() && !sub_tokens.contains(&lp) {
-                            sub_tokens.push(lp);
-                        }
+                        insert_unique!(seen, sub_tokens, lp);
                     }
                 }
                 // Also add the full underscore-joined form.
-                if !sub_tokens.contains(&lower_word) {
-                    sub_tokens.push(lower_word.clone());
-                }
+                insert_unique!(seen, sub_tokens, lower_word.clone());
             } else {
                 // Single segment with leading/trailing underscores.
                 for camel_part in split_camel(&word) {
                     let lp = camel_part.to_lowercase();
-                    if !lp.is_empty() && !sub_tokens.contains(&lp) {
-                        sub_tokens.push(lp);
-                    }
+                    insert_unique!(seen, sub_tokens, lp);
                 }
-                if sub_tokens.len() > 1 && !sub_tokens.contains(&lower_word) {
-                    sub_tokens.push(lower_word.clone());
+                if sub_tokens.len() > 1 {
+                    insert_unique!(seen, sub_tokens, lower_word.clone());
                 }
             }
         } else {
@@ -195,14 +195,10 @@ fn tokenize_code(text: &str) -> Vec<Token> {
             if camel_parts.len() > 1 {
                 for part in &camel_parts {
                     let lp = part.to_lowercase();
-                    if !lp.is_empty() && !sub_tokens.contains(&lp) {
-                        sub_tokens.push(lp);
-                    }
+                    insert_unique!(seen, sub_tokens, lp);
                 }
                 // Add the joined form without separators.
-                if !sub_tokens.contains(&lower_word) {
-                    sub_tokens.push(lower_word.clone());
-                }
+                insert_unique!(seen, sub_tokens, lower_word.clone());
             } else {
                 sub_tokens.push(lower_word.clone());
             }

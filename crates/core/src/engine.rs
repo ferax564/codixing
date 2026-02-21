@@ -124,6 +124,8 @@ pub struct Engine {
     embedder: Option<Box<dyn Embedder>>,
     /// Trigram index for fast exact substring search (short queries).
     trigram_index: TrigramIndex,
+    /// Cached PageRank file scores to avoid recomputing per query.
+    cached_pagerank: Option<HashMap<String, f32>>,
 }
 
 impl Engine {
@@ -249,6 +251,7 @@ impl Engine {
             vector_index: Some(vector_index),
             embedder: Some(embedder),
             trigram_index,
+            cached_pagerank: None,
         })
     }
 
@@ -377,6 +380,7 @@ impl Engine {
             vector_index,
             embedder: Some(embedder),
             trigram_index,
+            cached_pagerank: None,
         })
     }
 
@@ -392,24 +396,39 @@ impl Engine {
     /// available. For short queries (< 10 characters), the trigram index
     /// is consulted first to provide fast exact substring candidates that
     /// are merged additively with the hybrid results.
-    pub fn hybrid_search(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
+    pub fn hybrid_search(&mut self, query: SearchQuery) -> Result<Vec<SearchResult>> {
         let (Some(vi), Some(embedder)) = (&self.vector_index, &self.embedder) else {
             return self.search(query);
         };
+
+        // Lazily compute and cache PageRank file scores on first hybrid_search.
+        if self.graph.is_some() && self.cached_pagerank.is_none() {
+            let graph = self.graph.as_ref().unwrap();
+            let scores = graph.pagerank(0.85, 20);
+            let mut file_scores: HashMap<String, f32> = HashMap::new();
+            for node_idx in graph.inner.node_indices() {
+                if let Some(node) = graph.get_node(node_idx) {
+                    let pr = scores.get(&node_idx).copied().unwrap_or(0.0) as f32;
+                    let entry = file_scores.entry(node.file.clone()).or_insert(0.0);
+                    *entry = entry.max(pr);
+                }
+            }
+            self.cached_pagerank = Some(file_scores);
+        }
 
         // Run the normal hybrid retrieval.
         let mut results = match vi {
             DynVectorIndex::BruteForce(bf) => {
                 let mut retriever = HybridRetriever::new(&self.tantivy, bf, embedder.as_ref());
-                if let Some(ref graph) = self.graph {
-                    retriever = retriever.with_graph_boost(graph, 0.3);
+                if let Some(ref scores) = self.cached_pagerank {
+                    retriever = retriever.with_precomputed_graph_boost(scores, 0.3);
                 }
                 retriever.search(&query)?
             }
             DynVectorIndex::Hnsw(hnsw) => {
                 let mut retriever = HybridRetriever::new(&self.tantivy, hnsw, embedder.as_ref());
-                if let Some(ref graph) = self.graph {
-                    retriever = retriever.with_graph_boost(graph, 0.3);
+                if let Some(ref scores) = self.cached_pagerank {
+                    retriever = retriever.with_precomputed_graph_boost(scores, 0.3);
                 }
                 retriever.search(&query)?
             }
@@ -665,6 +684,8 @@ impl Engine {
 
         self.tantivy.commit()?;
         self.file_chunk_counts.insert(rel_str, chunks.len());
+        // Invalidate cached PageRank (graph structure may have changed).
+        self.cached_pagerank = None;
 
         debug!(path = %abs_path.display(), chunks = chunks.len(), "reindexed file");
         Ok(())
@@ -680,6 +701,8 @@ impl Engine {
         self.symbols.remove_file(&rel_str);
         self.parser.invalidate(path);
         self.file_chunk_counts.remove(&rel_str);
+        // Invalidate cached PageRank (graph structure may have changed).
+        self.cached_pagerank = None;
 
         debug!(path = %path.display(), "removed file from index");
         Ok(())
@@ -989,7 +1012,7 @@ pub trait Processor {
         let (_dir, root) = setup_project();
         let config = IndexConfig::new(&root);
 
-        let engine = Engine::init(&root, config).unwrap();
+        let mut engine = Engine::init(&root, config).unwrap();
         let stats = engine.stats();
 
         assert_eq!(stats.file_count, 2, "expected 2 source files");
@@ -1002,7 +1025,7 @@ pub trait Processor {
         let (_dir, root) = setup_project();
         let config = IndexConfig::new(&root);
 
-        let engine = Engine::init(&root, config).unwrap();
+        let mut engine = Engine::init(&root, config).unwrap();
 
         let results = engine
             .search(SearchQuery::new("add").with_limit(5))
@@ -1021,7 +1044,7 @@ pub trait Processor {
         let (_dir, root) = setup_project();
         let config = IndexConfig::new(&root);
 
-        let engine = Engine::init(&root, config).unwrap();
+        let mut engine = Engine::init(&root, config).unwrap();
 
         let syms = engine.symbols("Config", None).unwrap();
         assert!(
@@ -1038,13 +1061,13 @@ pub trait Processor {
 
         // Init and drop.
         {
-            let engine = Engine::init(&root, config).unwrap();
+            let mut engine = Engine::init(&root, config).unwrap();
             let stats = engine.stats();
             assert!(stats.chunk_count > 0);
         }
 
         // Re-open.
-        let engine = Engine::open(&root).unwrap();
+        let mut engine = Engine::open(&root).unwrap();
         let results = engine
             .search(SearchQuery::new("helper").with_limit(5))
             .unwrap();
@@ -1182,7 +1205,7 @@ pub fn unique_new_function() -> bool {
         let (_dir, root) = setup_project();
         let config = IndexConfig::new(&root);
 
-        let engine = Engine::init(&root, config).unwrap();
+        let mut engine = Engine::init(&root, config).unwrap();
 
         // hybrid_search should return results for a known function name.
         let results = engine
@@ -1223,7 +1246,7 @@ pub fn unique_new_function() -> bool {
         let mut config = IndexConfig::new(&root);
         config.vector_backend = VectorBackend::Hnsw;
 
-        let engine = Engine::init(&root, config).unwrap();
+        let mut engine = Engine::init(&root, config).unwrap();
 
         let results = engine
             .hybrid_search(SearchQuery::new("helper").with_limit(5))
@@ -1250,7 +1273,7 @@ pub fn unique_new_function() -> bool {
         // Phase 1: Init, verify hybrid_search works, then drop.
         let original_result_count;
         {
-            let engine = Engine::init(&root, config).unwrap();
+            let mut engine = Engine::init(&root, config).unwrap();
             let results = engine
                 .hybrid_search(SearchQuery::new("add").with_limit(5))
                 .unwrap();
@@ -1264,7 +1287,7 @@ pub fn unique_new_function() -> bool {
         }
 
         // Phase 2: Re-open from disk and verify hybrid_search still works.
-        let engine = Engine::open(&root).unwrap();
+        let mut engine = Engine::open(&root).unwrap();
         let results = engine
             .hybrid_search(SearchQuery::new("add").with_limit(5))
             .unwrap();
@@ -1300,7 +1323,7 @@ pub fn unique_new_function() -> bool {
 
         // Init with HNSW, verify hybrid_search, drop.
         {
-            let engine = Engine::init(&root, config).unwrap();
+            let mut engine = Engine::init(&root, config).unwrap();
             let results = engine
                 .hybrid_search(SearchQuery::new("Config").with_limit(5))
                 .unwrap();
@@ -1312,7 +1335,7 @@ pub fn unique_new_function() -> bool {
 
         // Re-open. The config on disk has vector_backend: Hnsw, so open()
         // should load the HNSW index.
-        let engine = Engine::open(&root).unwrap();
+        let mut engine = Engine::open(&root).unwrap();
         let results = engine
             .hybrid_search(SearchQuery::new("Config").with_limit(5))
             .unwrap();
@@ -1336,7 +1359,7 @@ pub fn unique_new_function() -> bool {
         // Default is VectorBackend::Auto.
         assert_eq!(config.vector_backend, VectorBackend::Auto);
 
-        let engine = Engine::init(&root, config).unwrap();
+        let mut engine = Engine::init(&root, config).unwrap();
         let stats = engine.stats();
 
         // With only 2 files the chunk count is far below 10_000, so Auto
@@ -1374,7 +1397,7 @@ pub fn unique_new_function() -> bool {
 
         let mut hnsw_config2 = IndexConfig::new(&root2);
         hnsw_config2.vector_backend = VectorBackend::Hnsw;
-        let engine2 = Engine::init(&root2, hnsw_config2).unwrap();
+        let mut engine2 = Engine::init(&root2, hnsw_config2).unwrap();
 
         // Even with very few chunks, HNSW is selected when explicitly configured.
         let results2 = engine2
@@ -1394,7 +1417,7 @@ pub fn unique_new_function() -> bool {
         let mut config = IndexConfig::new(&root);
         config.vector_backend = VectorBackend::BruteForce;
 
-        let engine = Engine::init(&root, config).unwrap();
+        let mut engine = Engine::init(&root, config).unwrap();
 
         let results = engine
             .hybrid_search(SearchQuery::new("Processor").with_limit(5))
@@ -1427,7 +1450,7 @@ pub fn unique_new_function() -> bool {
         }
 
         // Re-open — should load graph.
-        let engine = Engine::open(&root).unwrap();
+        let mut engine = Engine::open(&root).unwrap();
         let graph = engine.graph();
         assert!(graph.is_some(), "expected graph to be loaded on open");
         assert!(
@@ -1467,7 +1490,7 @@ pub fn unique_new_function() -> bool {
             crate::embeddings::EmbeddingBackend::Mock
         );
 
-        let engine = Engine::init(&root, config).unwrap();
+        let mut engine = Engine::init(&root, config).unwrap();
         let results = engine
             .hybrid_search(SearchQuery::new("add").with_limit(5))
             .unwrap();
@@ -1517,7 +1540,7 @@ pub fn other_func() -> i32 {
         .unwrap();
 
         let config = IndexConfig::new(&root);
-        let engine = Engine::init(&root, config).unwrap();
+        let mut engine = Engine::init(&root, config).unwrap();
 
         // "xyz_fn" is 6 chars — below the 10-char trigram threshold.
         let results = engine
@@ -1540,7 +1563,7 @@ pub fn other_func() -> i32 {
         // a longer query still works normally without trigram involvement.
         let (_dir, root) = setup_project();
         let config = IndexConfig::new(&root);
-        let engine = Engine::init(&root, config).unwrap();
+        let mut engine = Engine::init(&root, config).unwrap();
 
         // Short query (3 chars "add") — should trigger trigram path.
         let short_results = engine
@@ -1568,7 +1591,7 @@ pub fn other_func() -> i32 {
         // and still produce correct hybrid results.
         let (_dir, root) = setup_project();
         let config = IndexConfig::new(&root);
-        let engine = Engine::init(&root, config).unwrap();
+        let mut engine = Engine::init(&root, config).unwrap();
 
         let results = engine
             .hybrid_search(SearchQuery::new("helper function").with_limit(10))
@@ -1598,7 +1621,7 @@ pub fn other_func() -> i32 {
 
         // Init and drop.
         {
-            let engine = Engine::init(&root, config).unwrap();
+            let mut engine = Engine::init(&root, config).unwrap();
             let results = engine
                 .hybrid_search(SearchQuery::new("add").with_limit(5))
                 .unwrap();
@@ -1614,7 +1637,7 @@ pub fn other_func() -> i32 {
         );
 
         // Re-open — trigram index should be loaded from persisted file.
-        let engine = Engine::open(&root).unwrap();
+        let mut engine = Engine::open(&root).unwrap();
         let results = engine
             .hybrid_search(SearchQuery::new("add").with_limit(5))
             .unwrap();
@@ -1646,7 +1669,7 @@ pub fn other_func() -> i32 {
         .unwrap();
 
         let config = IndexConfig::new(&root);
-        let engine = Engine::init(&root, config).unwrap();
+        let mut engine = Engine::init(&root, config).unwrap();
 
         // "qux_fn" is 6 chars — triggers trigram path.
         let results = engine

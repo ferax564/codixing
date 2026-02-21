@@ -174,7 +174,7 @@ async fn search_handler(Json(req): Json<AdapterRequest>) -> Result<Json<Value>, 
 
 async fn hybrid_search_handler(Json(req): Json<AdapterRequest>) -> Result<Json<Value>, ApiError> {
     let root = resolve_source_root(&req.source)?;
-    let engine = Engine::open(&root).map_err(map_engine_error)?;
+    let mut engine = Engine::open(&root).map_err(map_engine_error)?;
     let query = parse_search_query(&req.config, true)?;
     let query_text = query.query.clone();
     let results = engine.hybrid_search(query).map_err(map_engine_error)?;
@@ -204,7 +204,7 @@ async fn hybrid_search_handler(Json(req): Json<AdapterRequest>) -> Result<Json<V
 
 async fn context_handler(Json(req): Json<AdapterRequest>) -> Result<Json<Value>, ApiError> {
     let root = resolve_source_root(&req.source)?;
-    let engine = Engine::open(&root).map_err(map_engine_error)?;
+    let mut engine = Engine::open(&root).map_err(map_engine_error)?;
     let token_budget = req
         .config
         .get("token_budget")
@@ -380,7 +380,7 @@ async fn agentic_search_handler(Json(req): Json<AdapterRequest>) -> Result<Json<
         .unwrap_or(10)
         .clamp(1, 100) as usize;
 
-    let session = AgenticSearchSession::new(&mut engine);
+    let mut session = AgenticSearchSession::new(&mut engine);
     let result = session.search(query, limit).map_err(map_engine_error)?;
 
     Ok(Json(json!({
