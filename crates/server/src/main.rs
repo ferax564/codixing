@@ -94,6 +94,7 @@ fn build_app() -> Router {
         .route("/health", get(health_handler))
         .route("/api/v1/index", post(index_handler))
         .route("/api/v1/search", post(search_handler))
+        .route("/api/v1/hybrid-search", post(hybrid_search_handler))
         .route("/api/v1/context", post(context_handler))
 }
 
@@ -157,6 +158,36 @@ async fn search_handler(Json(req): Json<AdapterRequest>) -> Result<Json<Value>, 
 
     Ok(Json(json!({
         "operation": "search",
+        "status": "ok",
+        "query": query_text,
+        "results": mapped,
+    })))
+}
+
+async fn hybrid_search_handler(Json(req): Json<AdapterRequest>) -> Result<Json<Value>, ApiError> {
+    let root = resolve_source_root(&req.source)?;
+    let engine = Engine::open(&root).map_err(map_engine_error)?;
+    let query = parse_search_query(&req.config, true)?;
+    let query_text = query.query.clone();
+    let results = engine.hybrid_search(query).map_err(map_engine_error)?;
+
+    let mapped: Vec<Value> = results
+        .into_iter()
+        .map(|result| {
+            json!({
+                "path": result.file_path,
+                "language": result.language,
+                "score": result.score,
+                "start_line": result.line_start,
+                "end_line": result.line_end,
+                "signature": result.signature,
+                "content": result.content,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "operation": "hybrid_search",
         "status": "ok",
         "query": query_text,
         "results": mapped,
@@ -512,6 +543,34 @@ pub struct RouterConfig {
         assert_eq!(context_body["operation"], "context_retrieval");
         assert_eq!(context_body["status"], "ok");
         assert!(!context_body["snippets"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn hybrid_search_returns_results() {
+        let project = tempdir().unwrap();
+        write_fixture_project(project.path());
+        let source = project.path().to_string_lossy().to_string();
+
+        // Index first
+        let (status, _) = request_json(
+            Method::POST,
+            "/api/v1/index",
+            Some(json!({"source": source, "config": {"op": "index"}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Now query hybrid search
+        let (status, body) = request_json(
+            Method::POST,
+            "/api/v1/hybrid-search",
+            Some(json!({"source": source, "config": {"op": "hybrid_search", "query": "router_handler", "limit": 5}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["operation"], "hybrid_search");
+        assert_eq!(body["status"], "ok");
+        assert!(!body["results"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
