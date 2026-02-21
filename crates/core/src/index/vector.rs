@@ -175,6 +175,10 @@ impl VectorIndex for BruteForceVectorIndex {
     }
 
     fn search(&self, query: &[f32], k: usize) -> Result<Vec<VectorSearchResult>, CodeforgeError> {
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+
         let mut scores: Vec<VectorSearchResult> = self
             .entries
             .iter()
@@ -183,12 +187,24 @@ impl VectorIndex for BruteForceVectorIndex {
                 similarity: Self::cosine_similarity(query, &entry.vector),
             })
             .collect();
-        scores.sort_by(|a, b| {
+
+        let cmp = |a: &VectorSearchResult, b: &VectorSearchResult| {
             b.similarity
                 .partial_cmp(&a.similarity)
                 .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        scores.truncate(k);
+        };
+
+        if scores.len() > k {
+            // O(N) partial sort: partition so that the top-k elements are in
+            // scores[..k], then sort only those k elements for final ordering.
+            scores.select_nth_unstable_by(k - 1, cmp);
+            scores.truncate(k);
+            scores.sort_by(cmp);
+        } else {
+            // N <= k: just sort everything (already O(N log N) with N <= k).
+            scores.sort_by(cmp);
+        }
+
         Ok(scores)
     }
 
@@ -430,6 +446,73 @@ mod tests {
                 assert_eq!(br.chunk_id, sr.chunk_id);
             }
         }
+    }
+
+    #[test]
+    fn search_topk_partial_sort_correctness() {
+        // Verify that the partial-sort optimization returns the same results
+        // as a naive full sort for a non-trivial dataset.
+        let dim = 16;
+        let n: u64 = 500;
+        let k = 10;
+        let mut idx = BruteForceVectorIndex::new(dim);
+        for i in 0..n {
+            let vec: Vec<f32> = (0..dim)
+                .map(|d| ((i as usize * 7 + d * 13) % 100) as f32 / 100.0)
+                .collect();
+            idx.add(i, vec).unwrap();
+        }
+        let query: Vec<f32> = (0..dim).map(|d| (d * 3 % 50) as f32 / 50.0).collect();
+
+        // Run the optimized search (uses select_nth_unstable_by).
+        let results = idx.search(&query, k).unwrap();
+        assert_eq!(results.len(), k);
+
+        // Results must be in descending similarity order.
+        for w in results.windows(2) {
+            assert!(
+                w[0].similarity >= w[1].similarity,
+                "results not sorted: {} < {}",
+                w[0].similarity,
+                w[1].similarity
+            );
+        }
+
+        // The k-th result should have similarity >= all non-selected vectors.
+        let min_topk_sim = results.last().unwrap().similarity;
+        let topk_ids: std::collections::HashSet<u64> =
+            results.iter().map(|r| r.chunk_id).collect();
+        for entry in &idx.entries {
+            if !topk_ids.contains(&entry.chunk_id) {
+                let sim = BruteForceVectorIndex::cosine_similarity(&query, &entry.vector);
+                assert!(
+                    sim <= min_topk_sim + 1e-6,
+                    "non-selected chunk {} has higher similarity ({}) than top-k minimum ({})",
+                    entry.chunk_id,
+                    sim,
+                    min_topk_sim
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn search_k_larger_than_n() {
+        // When k > number of entries, return all entries sorted.
+        let mut idx = BruteForceVectorIndex::new(3);
+        idx.add(1, vec![1.0, 0.0, 0.0]).unwrap();
+        idx.add(2, vec![0.0, 1.0, 0.0]).unwrap();
+        let results = idx.search(&[1.0, 0.0, 0.0], 100).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results[0].similarity >= results[1].similarity);
+    }
+
+    #[test]
+    fn search_k_zero_returns_empty() {
+        let mut idx = BruteForceVectorIndex::new(3);
+        idx.add(1, vec![1.0, 0.0, 0.0]).unwrap();
+        let results = idx.search(&[1.0, 0.0, 0.0], 0).unwrap();
+        assert!(results.is_empty());
     }
 
     #[test]

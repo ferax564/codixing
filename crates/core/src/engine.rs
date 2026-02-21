@@ -401,6 +401,95 @@ impl Engine {
             return self.search(query);
         };
 
+        // For short queries (likely symbol/identifier lookups), try the
+        // trigram index FIRST as a fast pre-filter. If trigram produces
+        // enough exact substring matches, return those directly without
+        // running the full hybrid pipeline.
+        const TRIGRAM_QUERY_THRESHOLD: usize = 10;
+        if query.query.len() < TRIGRAM_QUERY_THRESHOLD && query.query.len() >= 3 {
+            let trigram_matches = self.trigram_index.search(&query.query);
+            let exact_count = trigram_matches.len();
+            if exact_count >= query.limit {
+                // Trigram has enough results -- convert to SearchResults
+                // directly by looking up metadata from Tantivy.
+                let chunk_ids: std::collections::HashSet<u64> =
+                    trigram_matches.iter().take(query.limit * 2).map(|m| m.chunk_id).collect();
+                if let Ok(docs) = self.tantivy.lookup_chunks_by_ids(&chunk_ids) {
+                    let fields = self.tantivy.fields();
+                    let mut results: Vec<SearchResult> = Vec::new();
+                    for doc in docs {
+                        let chunk_id = doc
+                            .get_first(fields.chunk_id)
+                            .and_then(|v| tantivy::schema::Value::as_str(&v))
+                            .unwrap_or("")
+                            .to_string();
+                        let file_path = doc
+                            .get_first(fields.file_path)
+                            .and_then(|v| tantivy::schema::Value::as_str(&v))
+                            .unwrap_or("")
+                            .to_string();
+                        let language = doc
+                            .get_first(fields.language)
+                            .and_then(|v| tantivy::schema::Value::as_str(&v))
+                            .unwrap_or("")
+                            .to_string();
+                        let content = doc
+                            .get_first(fields.content)
+                            .and_then(|v| tantivy::schema::Value::as_str(&v))
+                            .unwrap_or("")
+                            .to_string();
+                        let signature = doc
+                            .get_first(fields.signature)
+                            .and_then(|v| tantivy::schema::Value::as_str(&v))
+                            .unwrap_or("")
+                            .to_string();
+                        let line_start = doc
+                            .get_first(fields.line_start)
+                            .and_then(|v| tantivy::schema::Value::as_u64(&v))
+                            .unwrap_or(0);
+                        let line_end = doc
+                            .get_first(fields.line_end)
+                            .and_then(|v| tantivy::schema::Value::as_u64(&v))
+                            .unwrap_or(0);
+
+                        if let Some(ref filter) = query.file_filter {
+                            if !file_path.contains(filter) {
+                                continue;
+                            }
+                        }
+
+                        // Score by trigram match position (earlier = higher).
+                        let score = trigram_matches
+                            .iter()
+                            .position(|m| m.chunk_id.to_string() == chunk_id)
+                            .map(|pos| 1.0 / (1.0 + pos as f32))
+                            .unwrap_or(0.01);
+
+                        results.push(SearchResult {
+                            chunk_id,
+                            file_path,
+                            language,
+                            score,
+                            line_start,
+                            line_end,
+                            signature,
+                            content,
+                        });
+                    }
+                    results.sort_by(|a, b| {
+                        b.score
+                            .partial_cmp(&a.score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    results.truncate(query.limit);
+                    if !results.is_empty() {
+                        return Ok(results);
+                    }
+                }
+                // Fall through to full hybrid search if lookup failed.
+            }
+        }
+
         // Lazily compute and cache PageRank file scores on first hybrid_search.
         if self.graph.is_some() && self.cached_pagerank.is_none() {
             let graph = self.graph.as_ref().unwrap();
@@ -434,109 +523,26 @@ impl Engine {
             }
         };
 
-        // For short queries (likely symbol/identifier lookups), use the
-        // trigram index to find exact substring matches that BM25 may miss
-        // due to tokenization differences.
-        const TRIGRAM_QUERY_THRESHOLD: usize = 10;
+        // For short queries that didn't have enough trigram results to
+        // short-circuit above, still boost hybrid results that have
+        // trigram matches.
         if query.query.len() < TRIGRAM_QUERY_THRESHOLD && query.query.len() >= 3 {
             let trigram_matches = self.trigram_index.search(&query.query);
             if !trigram_matches.is_empty() {
-                // Collect chunk IDs already in the hybrid results.
-                let existing_ids: std::collections::HashSet<String> =
-                    results.iter().map(|r| r.chunk_id.clone()).collect();
-
-                // Boost existing results that also have trigram matches.
                 let trigram_chunk_ids: std::collections::HashSet<String> = trigram_matches
                     .iter()
                     .map(|m| m.chunk_id.to_string())
                     .collect();
                 for result in &mut results {
                     if trigram_chunk_ids.contains(&result.chunk_id) {
-                        // Trigram-confirmed exact match gets a score boost.
                         result.score *= 1.5;
                     }
                 }
-
-                // Find trigram-only hits that BM25/vector missed.
-                let missing_ids: std::collections::HashSet<u64> = trigram_matches
-                    .iter()
-                    .filter(|m| !existing_ids.contains(&m.chunk_id.to_string()))
-                    .map(|m| m.chunk_id)
-                    .collect();
-
-                if !missing_ids.is_empty() {
-                    // Look up full document metadata from Tantivy.
-                    if let Ok(docs) = self.tantivy.lookup_chunks_by_ids(&missing_ids) {
-                        let fields = self.tantivy.fields();
-                        for doc in docs {
-                            let chunk_id = doc
-                                .get_first(fields.chunk_id)
-                                .and_then(|v| tantivy::schema::Value::as_str(&v))
-                                .unwrap_or("")
-                                .to_string();
-                            let file_path = doc
-                                .get_first(fields.file_path)
-                                .and_then(|v| tantivy::schema::Value::as_str(&v))
-                                .unwrap_or("")
-                                .to_string();
-                            let language = doc
-                                .get_first(fields.language)
-                                .and_then(|v| tantivy::schema::Value::as_str(&v))
-                                .unwrap_or("")
-                                .to_string();
-                            let content = doc
-                                .get_first(fields.content)
-                                .and_then(|v| tantivy::schema::Value::as_str(&v))
-                                .unwrap_or("")
-                                .to_string();
-                            let signature = doc
-                                .get_first(fields.signature)
-                                .and_then(|v| tantivy::schema::Value::as_str(&v))
-                                .unwrap_or("")
-                                .to_string();
-                            let line_start = doc
-                                .get_first(fields.line_start)
-                                .and_then(|v| tantivy::schema::Value::as_u64(&v))
-                                .unwrap_or(0);
-                            let line_end = doc
-                                .get_first(fields.line_end)
-                                .and_then(|v| tantivy::schema::Value::as_u64(&v))
-                                .unwrap_or(0);
-
-                            // Apply file filter if present.
-                            if let Some(ref filter) = query.file_filter {
-                                if !file_path.contains(filter) {
-                                    continue;
-                                }
-                            }
-
-                            // Assign a base score slightly below the lowest
-                            // hybrid result so trigram-only hits appear at the
-                            // tail unless they are the only results.
-                            let base_score = results.last().map(|r| r.score * 0.9).unwrap_or(0.001);
-
-                            results.push(SearchResult {
-                                chunk_id,
-                                file_path,
-                                language,
-                                score: base_score,
-                                line_start,
-                                line_end,
-                                signature,
-                                content,
-                            });
-                        }
-                    }
-                }
-
-                // Re-sort after boosting and adding trigram results.
                 results.sort_by(|a, b| {
                     b.score
                         .partial_cmp(&a.score)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
-
-                // Truncate to the requested limit.
                 results.truncate(query.limit);
             }
         }
@@ -1682,6 +1688,117 @@ pub fn other_func() -> i32 {
             results[0].file_path.contains("alpha.rs"),
             "expected alpha.rs (exact trigram match) to rank first, got: {}",
             results[0].file_path
+        );
+    }
+
+    #[test]
+    fn cached_pagerank_produces_identical_results() {
+        // Build a project with cross-file references so PageRank has
+        // meaningful scores, then verify that the first hybrid_search
+        // (which computes and caches PageRank) and the second call
+        // (which uses the cache) produce identical results.
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let src_dir = root.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        fs::write(
+            src_dir.join("main.rs"),
+            "fn main() { helper(); }\nfn greet() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            src_dir.join("lib.rs"),
+            "pub fn helper() -> bool { true }\n",
+        )
+        .unwrap();
+
+        let config = IndexConfig::new(&root);
+        let mut engine = Engine::init(&root, config).unwrap();
+        engine.build_graph().unwrap();
+
+        // First call computes and caches PageRank.
+        assert!(engine.cached_pagerank.is_none());
+        let results1 = engine
+            .hybrid_search(SearchQuery::new("helper").with_limit(10))
+            .unwrap();
+        assert!(engine.cached_pagerank.is_some());
+
+        // Second call uses the cached scores.
+        let results2 = engine
+            .hybrid_search(SearchQuery::new("helper").with_limit(10))
+            .unwrap();
+
+        // Results should be identical (same scores, same ordering).
+        assert_eq!(results1.len(), results2.len());
+        for (r1, r2) in results1.iter().zip(results2.iter()) {
+            assert_eq!(r1.chunk_id, r2.chunk_id);
+            assert!(
+                (r1.score - r2.score).abs() < 1e-6,
+                "scores differ: {} vs {}",
+                r1.score,
+                r2.score
+            );
+        }
+    }
+
+    #[test]
+    fn reindex_invalidates_pagerank_cache() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let src_dir = root.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        fs::write(src_dir.join("main.rs"), "fn main() {}\nfn add() {}\n").unwrap();
+
+        let config = IndexConfig::new(&root);
+        let mut engine = Engine::init(&root, config).unwrap();
+        engine.build_graph().unwrap();
+
+        // Populate the cache.
+        let _ = engine
+            .hybrid_search(SearchQuery::new("main").with_limit(5))
+            .unwrap();
+        assert!(engine.cached_pagerank.is_some());
+
+        // Reindex a file -- cache should be invalidated.
+        fs::write(
+            src_dir.join("main.rs"),
+            "fn main() {}\nfn new_func() {}\n",
+        )
+        .unwrap();
+        engine.reindex_file(Path::new("src/main.rs")).unwrap();
+        assert!(
+            engine.cached_pagerank.is_none(),
+            "expected PageRank cache to be invalidated after reindex"
+        );
+    }
+
+    #[test]
+    fn remove_file_invalidates_pagerank_cache() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let src_dir = root.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        fs::write(src_dir.join("main.rs"), "fn main() {}\n").unwrap();
+        fs::write(src_dir.join("lib.rs"), "pub fn helper() {}\n").unwrap();
+
+        let config = IndexConfig::new(&root);
+        let mut engine = Engine::init(&root, config).unwrap();
+        engine.build_graph().unwrap();
+
+        // Populate the cache.
+        let _ = engine
+            .hybrid_search(SearchQuery::new("main").with_limit(5))
+            .unwrap();
+        assert!(engine.cached_pagerank.is_some());
+
+        // Remove a file -- cache should be invalidated.
+        engine.remove_file(Path::new("src/lib.rs")).unwrap();
+        assert!(
+            engine.cached_pagerank.is_none(),
+            "expected PageRank cache to be invalidated after remove_file"
         );
     }
 }
