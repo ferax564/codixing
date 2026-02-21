@@ -226,6 +226,9 @@ impl Engine {
             trigram_index.add(*chunk_id, content);
         }
 
+        // Persist trigram index.
+        trigram_index.save_binary(&store.trigram_index_path())?;
+
         info!(
             files = files.len(),
             chunks = total_chunks,
@@ -329,12 +332,31 @@ impl Engine {
             None
         };
 
-        // Rebuild trigram index from existing chunks.
-        let mut trigram_index = TrigramIndex::new();
-        let all_chunks = tantivy.all_chunk_ids_and_content()?;
-        for (chunk_id, content) in &all_chunks {
-            trigram_index.add(*chunk_id, content);
-        }
+        // Load persisted trigram index, falling back to rebuild from Tantivy.
+        let trigram_index = if store.trigram_index_path().exists() {
+            match TrigramIndex::load_binary(&store.trigram_index_path()) {
+                Ok(idx) => {
+                    info!(chunks = idx.len(), "loaded trigram index");
+                    idx
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to load trigram index, rebuilding");
+                    let all_chunks = tantivy.all_chunk_ids_and_content()?;
+                    let mut idx = TrigramIndex::new();
+                    for (chunk_id, content) in &all_chunks {
+                        idx.add(*chunk_id, content);
+                    }
+                    idx
+                }
+            }
+        } else {
+            let all_chunks = tantivy.all_chunk_ids_and_content()?;
+            let mut idx = TrigramIndex::new();
+            for (chunk_id, content) in &all_chunks {
+                idx.add(*chunk_id, content);
+            }
+            idx
+        };
 
         info!(
             files = meta.file_count,
@@ -746,6 +768,10 @@ impl Engine {
         if let Some(ref vi) = self.vector_index {
             vi.save_binary(&self.store.vector_index_path())?;
         }
+
+        // Persist trigram index.
+        self.trigram_index
+            .save_binary(&self.store.trigram_index_path())?;
 
         Ok(())
     }
@@ -1567,9 +1593,9 @@ pub fn other_func() -> i32 {
     }
 
     #[test]
-    fn trigram_index_rebuilt_on_open() {
-        // Verify that the trigram index is rebuilt when opening an
-        // existing index and that short queries still work.
+    fn trigram_index_persisted_on_init_and_loaded_on_open() {
+        // Verify that the trigram index is persisted during init and
+        // loaded from disk during open, and that short queries still work.
         let (_dir, root) = setup_project();
         let config = IndexConfig::new(&root);
 
@@ -1582,7 +1608,15 @@ pub fn other_func() -> i32 {
             assert!(!results.is_empty(), "expected results before save");
         }
 
-        // Re-open — trigram index should be rebuilt from Tantivy data.
+        // Verify the trigram index file exists on disk.
+        let trigram_path = root.join(".codeforge/trigram.bin");
+        assert!(
+            trigram_path.exists(),
+            "expected trigram.bin to exist at {:?}",
+            trigram_path
+        );
+
+        // Re-open — trigram index should be loaded from persisted file.
         let engine = Engine::open(&root).unwrap();
         let results = engine
             .hybrid_search(SearchQuery::new("add").with_limit(5))

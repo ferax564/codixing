@@ -6,6 +6,20 @@
 //! exact substring queries.
 
 use std::collections::HashMap;
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
+use crate::error::{CodeforgeError, Result};
+
+/// Serializable representation of the trigram index data.
+#[derive(Serialize, Deserialize)]
+struct TrigramIndexData {
+    /// Posting lists keyed by trigram bytes.
+    index: Vec<([u8; 3], Vec<u64>)>,
+    /// Stored chunk content for verification of exact matches.
+    chunks: Vec<(u64, String)>,
+}
 
 /// An inverted index mapping 3-byte substrings to chunk IDs for fast exact search.
 pub struct TrigramIndex {
@@ -130,6 +144,31 @@ impl TrigramIndex {
     pub fn is_empty(&self) -> bool {
         self.chunks.is_empty()
     }
+
+    /// Save the trigram index to a binary (bitcode) file.
+    pub fn save_binary(&self, path: &Path) -> Result<()> {
+        let data = TrigramIndexData {
+            index: self.index.iter().map(|(k, v)| (*k, v.clone())).collect(),
+            chunks: self.chunks.iter().map(|(k, v)| (*k, v.clone())).collect(),
+        };
+        let bytes = bitcode::serialize(&data).map_err(|e| {
+            CodeforgeError::Serialization(format!("failed to serialize trigram index: {e}"))
+        })?;
+        std::fs::write(path, bytes)?;
+        Ok(())
+    }
+
+    /// Load the trigram index from a binary (bitcode) file.
+    pub fn load_binary(path: &Path) -> Result<Self> {
+        let bytes = std::fs::read(path)?;
+        let data: TrigramIndexData = bitcode::deserialize(&bytes).map_err(|e| {
+            CodeforgeError::Serialization(format!("failed to deserialize trigram index: {e}"))
+        })?;
+        Ok(Self {
+            index: data.index.into_iter().collect(),
+            chunks: data.chunks.into_iter().collect(),
+        })
+    }
 }
 
 impl Default for TrigramIndex {
@@ -141,6 +180,7 @@ impl Default for TrigramIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn finds_exact_function_name() {
@@ -226,5 +266,55 @@ mod tests {
         let matches = idx.search("HashMap");
         assert!(!matches.is_empty());
         assert!(matches.iter().all(|m| m.chunk_id == 1));
+    }
+
+    #[test]
+    fn binary_save_and_load_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trigram.bin");
+
+        let mut idx = TrigramIndex::new();
+        idx.add(1, "fn process_batch(items: &[Item]) { todo!() }");
+        idx.add(2, "fn main() { process_batch(&items); }");
+        idx.add(3, "fn unrelated_function() {}");
+
+        idx.save_binary(&path).unwrap();
+        let loaded = TrigramIndex::load_binary(&path).unwrap();
+
+        assert_eq!(loaded.len(), 3);
+
+        // Verify search results are identical after round-trip.
+        let original_matches = idx.search("process_batch");
+        let loaded_matches = loaded.search("process_batch");
+        assert_eq!(original_matches.len(), loaded_matches.len());
+
+        let mut orig_ids: Vec<u64> = original_matches.iter().map(|m| m.chunk_id).collect();
+        let mut load_ids: Vec<u64> = loaded_matches.iter().map(|m| m.chunk_id).collect();
+        orig_ids.sort();
+        load_ids.sort();
+        assert_eq!(orig_ids, load_ids);
+
+        // Verify that unrelated queries still work correctly.
+        let no_match = loaded.search("nonexistent_symbol");
+        assert!(no_match.is_empty());
+    }
+
+    #[test]
+    fn binary_empty_index_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trigram_empty.bin");
+
+        let idx = TrigramIndex::new();
+        idx.save_binary(&path).unwrap();
+        let loaded = TrigramIndex::load_binary(&path).unwrap();
+
+        assert_eq!(loaded.len(), 0);
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn load_nonexistent_file_returns_error() {
+        let result = TrigramIndex::load_binary(std::path::Path::new("/nonexistent/trigram.bin"));
+        assert!(result.is_err());
     }
 }
