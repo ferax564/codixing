@@ -6,7 +6,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use clap::Parser;
-use codeforge_core::{CodeforgeError, ContextBudget, Engine, IndexConfig, SearchQuery};
+use codeforge_core::{
+    AgenticSearchSession, CodeforgeError, ContextBudget, Engine, IndexConfig, SearchQuery,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::info;
@@ -96,6 +98,12 @@ fn build_app() -> Router {
         .route("/api/v1/search", post(search_handler))
         .route("/api/v1/hybrid-search", post(hybrid_search_handler))
         .route("/api/v1/context", post(context_handler))
+        .route("/api/v1/graph", post(graph_handler))
+        .route("/api/v1/symbols", post(symbols_handler))
+        .route("/api/v1/agentic/search", post(agentic_search_handler))
+        .route("/api/v1/agentic/read", post(agentic_read_handler))
+        .route("/api/v1/agentic/explore", post(agentic_explore_handler))
+        .route("/api/v1/agentic/repo-map", post(agentic_repo_map_handler))
 }
 
 async fn health_handler() -> Json<Value> {
@@ -302,6 +310,166 @@ async fn context_handler(Json(req): Json<AdapterRequest>) -> Result<Json<Value>,
         "token_budget": token_budget,
         "search_mode": "symbols",
         "snippets": snippets,
+    })))
+}
+
+async fn graph_handler(Json(req): Json<AdapterRequest>) -> Result<Json<Value>, ApiError> {
+    let root = resolve_source_root(&req.source)?;
+    let mut engine = Engine::open(&root).map_err(map_engine_error)?;
+    let graph = engine.build_graph().map_err(map_engine_error)?;
+
+    Ok(Json(json!({
+        "operation": "graph",
+        "status": "ok",
+        "nodes": graph.node_count(),
+        "edges": graph.edge_count(),
+    })))
+}
+
+async fn symbols_handler(Json(req): Json<AdapterRequest>) -> Result<Json<Value>, ApiError> {
+    let root = resolve_source_root(&req.source)?;
+    let engine = Engine::open(&root).map_err(map_engine_error)?;
+
+    let filter = req
+        .config
+        .get("filter")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let file = req.config.get("file").and_then(Value::as_str);
+
+    let symbols = engine.symbols(filter, file).map_err(map_engine_error)?;
+
+    let mapped: Vec<Value> = symbols
+        .into_iter()
+        .map(|sym| {
+            json!({
+                "name": sym.name,
+                "kind": format!("{:?}", sym.kind),
+                "file": sym.file_path,
+                "line_start": sym.line_start,
+                "line_end": sym.line_end,
+                "signature": sym.signature,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "operation": "symbols",
+        "status": "ok",
+        "symbols": mapped,
+    })))
+}
+
+// ---------------------------------------------------------------------------
+// Agentic API handlers
+// ---------------------------------------------------------------------------
+
+async fn agentic_search_handler(Json(req): Json<AdapterRequest>) -> Result<Json<Value>, ApiError> {
+    let root = resolve_source_root(&req.source)?;
+    let mut engine = Engine::open(&root).map_err(map_engine_error)?;
+
+    let query = req
+        .config
+        .get("query")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("config.query is required for agentic search"))?;
+    let limit = req
+        .config
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(10)
+        .clamp(1, 100) as usize;
+
+    let session = AgenticSearchSession::new(&mut engine);
+    let result = session.search(query, limit).map_err(map_engine_error)?;
+
+    Ok(Json(json!({
+        "operation": "agentic_search",
+        "status": "ok",
+        "content": result.content,
+        "token_count": result.token_count,
+        "suggestions": result.suggestions,
+    })))
+}
+
+async fn agentic_read_handler(Json(req): Json<AdapterRequest>) -> Result<Json<Value>, ApiError> {
+    let root = resolve_source_root(&req.source)?;
+    let mut engine = Engine::open(&root).map_err(map_engine_error)?;
+
+    let path = req
+        .config
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("config.path is required for agentic read"))?;
+    let start_line = req
+        .config
+        .get("start_line")
+        .and_then(Value::as_u64)
+        .map(|v| v as usize);
+    let end_line = req
+        .config
+        .get("end_line")
+        .and_then(Value::as_u64)
+        .map(|v| v as usize);
+
+    let session = AgenticSearchSession::new(&mut engine);
+    let result = session
+        .read_file(path, start_line, end_line)
+        .map_err(map_engine_error)?;
+
+    Ok(Json(json!({
+        "operation": "agentic_read",
+        "status": "ok",
+        "content": result.content,
+        "token_count": result.token_count,
+        "suggestions": result.suggestions,
+    })))
+}
+
+async fn agentic_explore_handler(Json(req): Json<AdapterRequest>) -> Result<Json<Value>, ApiError> {
+    let root = resolve_source_root(&req.source)?;
+    let mut engine = Engine::open(&root).map_err(map_engine_error)?;
+
+    let symbol = req
+        .config
+        .get("symbol")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad_request("config.symbol is required for agentic explore"))?;
+
+    let mut session = AgenticSearchSession::new(&mut engine);
+    let result = session.explore_symbol(symbol).map_err(map_engine_error)?;
+
+    Ok(Json(json!({
+        "operation": "agentic_explore",
+        "status": "ok",
+        "content": result.content,
+        "token_count": result.token_count,
+        "suggestions": result.suggestions,
+    })))
+}
+
+async fn agentic_repo_map_handler(
+    Json(req): Json<AdapterRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let root = resolve_source_root(&req.source)?;
+    let mut engine = Engine::open(&root).map_err(map_engine_error)?;
+
+    let token_budget = req
+        .config
+        .get("token_budget")
+        .and_then(Value::as_u64)
+        .unwrap_or(4096)
+        .clamp(64, 65_536) as usize;
+
+    let mut session = AgenticSearchSession::new(&mut engine);
+    let result = session.repo_map(token_budget).map_err(map_engine_error)?;
+
+    Ok(Json(json!({
+        "operation": "agentic_repo_map",
+        "status": "ok",
+        "content": result.content,
+        "token_count": result.token_count,
+        "suggestions": result.suggestions,
     })))
 }
 
@@ -660,5 +828,385 @@ pub struct RouterConfig {
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body["status"], "error");
         assert!(body["error"].as_str().unwrap().contains("index not found"));
+    }
+
+    #[tokio::test]
+    async fn graph_endpoint_builds_and_returns_stats() {
+        let project = tempdir().unwrap();
+        write_fixture_project(project.path());
+        let source = project.path().to_string_lossy().to_string();
+
+        // Index first
+        let (status, _) = request_json(
+            Method::POST,
+            "/api/v1/index",
+            Some(json!({"source": source, "config": {"op": "index"}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Build graph
+        let (status, body) = request_json(
+            Method::POST,
+            "/api/v1/graph",
+            Some(json!({"source": source, "config": {}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["operation"], "graph");
+        assert_eq!(body["status"], "ok");
+        assert!(body["nodes"].as_u64().unwrap() > 0);
+        assert!(body["edges"].is_number());
+    }
+
+    #[tokio::test]
+    async fn symbols_endpoint_returns_results() {
+        let project = tempdir().unwrap();
+        write_fixture_project(project.path());
+        let source = project.path().to_string_lossy().to_string();
+
+        // Index first
+        let (status, _) = request_json(
+            Method::POST,
+            "/api/v1/index",
+            Some(json!({"source": source, "config": {"op": "index"}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Query symbols with a filter
+        let (status, body) = request_json(
+            Method::POST,
+            "/api/v1/symbols",
+            Some(json!({"source": source, "config": {"filter": "router"}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["operation"], "symbols");
+        assert_eq!(body["status"], "ok");
+
+        let symbols = body["symbols"].as_array().unwrap();
+        assert!(!symbols.is_empty());
+        // The fixture defines router_handler and RouterConfig
+        let names: Vec<&str> = symbols
+            .iter()
+            .map(|s| s["name"].as_str().unwrap())
+            .collect();
+        assert!(names.iter().any(|n| n.contains("router")));
+    }
+
+    #[tokio::test]
+    async fn graph_without_index_returns_not_found() {
+        let project = tempdir().unwrap();
+        write_fixture_project(project.path());
+        let source = project.path().to_string_lossy().to_string();
+
+        let (status, body) = request_json(
+            Method::POST,
+            "/api/v1/graph",
+            Some(json!({"source": source, "config": {}})),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["status"], "error");
+    }
+
+    #[tokio::test]
+    async fn symbols_without_index_returns_not_found() {
+        let project = tempdir().unwrap();
+        write_fixture_project(project.path());
+        let source = project.path().to_string_lossy().to_string();
+
+        let (status, body) = request_json(
+            Method::POST,
+            "/api/v1/symbols",
+            Some(json!({"source": source, "config": {"filter": "router"}})),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["status"], "error");
+    }
+
+    // -----------------------------------------------------------------------
+    // Agentic endpoint tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn agentic_search_returns_results() {
+        let project = tempdir().unwrap();
+        write_fixture_project(project.path());
+        let source = project.path().to_string_lossy().to_string();
+
+        // Index first.
+        let (status, _) = request_json(
+            Method::POST,
+            "/api/v1/index",
+            Some(json!({"source": source, "config": {}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Agentic search.
+        let (status, body) = request_json(
+            Method::POST,
+            "/api/v1/agentic/search",
+            Some(json!({
+                "source": source,
+                "config": {"query": "router_handler", "limit": 5}
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["operation"], "agentic_search");
+        assert_eq!(body["status"], "ok");
+        assert!(body["content"].as_str().unwrap().contains("Search results"));
+        assert!(body["token_count"].as_u64().unwrap() > 0);
+        assert!(!body["suggestions"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn agentic_search_missing_query_returns_bad_request() {
+        let project = tempdir().unwrap();
+        write_fixture_project(project.path());
+        let source = project.path().to_string_lossy().to_string();
+
+        // Index first.
+        let (status, _) = request_json(
+            Method::POST,
+            "/api/v1/index",
+            Some(json!({"source": source, "config": {}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Missing query field.
+        let (status, body) = request_json(
+            Method::POST,
+            "/api/v1/agentic/search",
+            Some(json!({"source": source, "config": {}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], "error");
+    }
+
+    #[tokio::test]
+    async fn agentic_read_returns_file_content() {
+        let project = tempdir().unwrap();
+        write_fixture_project(project.path());
+        let source = project.path().to_string_lossy().to_string();
+
+        // Index first.
+        let (status, _) = request_json(
+            Method::POST,
+            "/api/v1/index",
+            Some(json!({"source": source, "config": {}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Read a file.
+        let (status, body) = request_json(
+            Method::POST,
+            "/api/v1/agentic/read",
+            Some(json!({
+                "source": source,
+                "config": {"path": "src/lib.rs"}
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["operation"], "agentic_read");
+        assert_eq!(body["status"], "ok");
+        assert!(body["content"].as_str().unwrap().contains("router_handler"));
+        assert!(body["token_count"].as_u64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn agentic_read_with_line_range() {
+        let project = tempdir().unwrap();
+        write_fixture_project(project.path());
+        let source = project.path().to_string_lossy().to_string();
+
+        // Index first.
+        let (status, _) = request_json(
+            Method::POST,
+            "/api/v1/index",
+            Some(json!({"source": source, "config": {}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Read lines 2-4.
+        let (status, body) = request_json(
+            Method::POST,
+            "/api/v1/agentic/read",
+            Some(json!({
+                "source": source,
+                "config": {"path": "src/lib.rs", "start_line": 2, "end_line": 4}
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["operation"], "agentic_read");
+        assert!(body["content"].as_str().unwrap().contains("2-4 of"));
+    }
+
+    #[tokio::test]
+    async fn agentic_read_missing_path_returns_bad_request() {
+        let project = tempdir().unwrap();
+        write_fixture_project(project.path());
+        let source = project.path().to_string_lossy().to_string();
+
+        // Index first.
+        let (status, _) = request_json(
+            Method::POST,
+            "/api/v1/index",
+            Some(json!({"source": source, "config": {}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = request_json(
+            Method::POST,
+            "/api/v1/agentic/read",
+            Some(json!({"source": source, "config": {}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], "error");
+    }
+
+    #[tokio::test]
+    async fn agentic_explore_returns_symbol_info() {
+        let project = tempdir().unwrap();
+        write_fixture_project(project.path());
+        let source = project.path().to_string_lossy().to_string();
+
+        // Index first.
+        let (status, _) = request_json(
+            Method::POST,
+            "/api/v1/index",
+            Some(json!({"source": source, "config": {}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Explore symbol.
+        let (status, body) = request_json(
+            Method::POST,
+            "/api/v1/agentic/explore",
+            Some(json!({
+                "source": source,
+                "config": {"symbol": "router_handler"}
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["operation"], "agentic_explore");
+        assert_eq!(body["status"], "ok");
+        assert!(
+            body["content"]
+                .as_str()
+                .unwrap()
+                .contains("Symbol exploration")
+        );
+        assert!(body["token_count"].as_u64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn agentic_explore_missing_symbol_returns_bad_request() {
+        let project = tempdir().unwrap();
+        write_fixture_project(project.path());
+        let source = project.path().to_string_lossy().to_string();
+
+        // Index first.
+        let (status, _) = request_json(
+            Method::POST,
+            "/api/v1/index",
+            Some(json!({"source": source, "config": {}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, body) = request_json(
+            Method::POST,
+            "/api/v1/agentic/explore",
+            Some(json!({"source": source, "config": {}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], "error");
+    }
+
+    #[tokio::test]
+    async fn agentic_repo_map_returns_map() {
+        let project = tempdir().unwrap();
+        write_fixture_project(project.path());
+        let source = project.path().to_string_lossy().to_string();
+
+        // Index first.
+        let (status, _) = request_json(
+            Method::POST,
+            "/api/v1/index",
+            Some(json!({"source": source, "config": {}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Get repo map.
+        let (status, body) = request_json(
+            Method::POST,
+            "/api/v1/agentic/repo-map",
+            Some(json!({
+                "source": source,
+                "config": {"token_budget": 4096}
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["operation"], "agentic_repo_map");
+        assert_eq!(body["status"], "ok");
+        assert!(body["content"].as_str().unwrap().contains("Repository Map"));
+        assert!(body["token_count"].as_u64().unwrap() > 0);
+        assert!(!body["suggestions"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn agentic_repo_map_respects_budget() {
+        let project = tempdir().unwrap();
+        write_fixture_project(project.path());
+        let source = project.path().to_string_lossy().to_string();
+
+        // Index first.
+        let (status, _) = request_json(
+            Method::POST,
+            "/api/v1/index",
+            Some(json!({"source": source, "config": {}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Get repo map with small budget.
+        let (status, body) = request_json(
+            Method::POST,
+            "/api/v1/agentic/repo-map",
+            Some(json!({
+                "source": source,
+                "config": {"token_budget": 64}
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["operation"], "agentic_repo_map");
+        // Token count should be within budget (allowing some slack for truncation message).
+        let token_count = body["token_count"].as_u64().unwrap();
+        assert!(
+            token_count <= 84,
+            "token_count {} exceeded budget 64 + slack",
+            token_count
+        );
     }
 }

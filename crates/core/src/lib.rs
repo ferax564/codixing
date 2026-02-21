@@ -1,5 +1,7 @@
+pub mod agentic;
 pub mod chunker;
 pub mod config;
+pub mod context_assembly;
 pub mod embeddings;
 pub mod engine;
 pub mod error;
@@ -14,7 +16,9 @@ pub mod tokenizer;
 pub mod watcher;
 
 // Re-export primary public API types.
+pub use agentic::{AgenticResult, AgenticSearchSession};
 pub use config::IndexConfig;
+pub use context_assembly::IntelligentContextAssembler;
 pub use engine::{Engine, IndexStats};
 pub use error::{CodeforgeError, Result};
 pub use graph::{CodeGraph, DefinitionInfo, ReferenceInfo, ReferenceKind, SymbolKind, SymbolNode};
