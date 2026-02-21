@@ -574,6 +574,23 @@ pub struct RouterConfig {
     }
 
     #[tokio::test]
+    async fn hybrid_search_without_index_returns_not_found() {
+        let project = tempdir().unwrap();
+        write_fixture_project(project.path());
+        let source = project.path().to_string_lossy().to_string();
+
+        let (status, body) = request_json(
+            Method::POST,
+            "/api/v1/hybrid-search",
+            Some(json!({"source": source, "config": {"query": "router_handler"}})),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["status"], "error");
+    }
+
+    #[tokio::test]
     async fn search_without_index_returns_not_found() {
         let project = tempdir().unwrap();
         write_fixture_project(project.path());
