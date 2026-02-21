@@ -1,5 +1,6 @@
 pub mod hnsw;
 pub mod schema;
+pub mod simd_distance;
 pub mod tantivy;
 pub mod vector;
 
