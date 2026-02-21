@@ -15,6 +15,7 @@ const SYMBOLS_FILE: &str = "symbols.bin";
 const TREE_HASHES_FILE: &str = "tree_hashes.bin";
 const GRAPH_FILE: &str = "graph.json";
 const VECTOR_INDEX_FILE: &str = "vectors.bin";
+const TRIGRAM_INDEX_FILE: &str = "trigram.bin";
 
 /// Index metadata persisted alongside the index.
 ///
@@ -122,6 +123,11 @@ impl IndexStore {
     /// Path to the `vectors.bin` file (binary-serialized vector index).
     pub fn vector_index_path(&self) -> PathBuf {
         self.codeforge_dir().join(VECTOR_INDEX_FILE)
+    }
+
+    /// Path to the `trigram.bin` file (binary-serialized trigram index).
+    pub fn trigram_index_path(&self) -> PathBuf {
+        self.codeforge_dir().join(TRIGRAM_INDEX_FILE)
     }
 
     /// Save the [`IndexConfig`] to `config.json`.
