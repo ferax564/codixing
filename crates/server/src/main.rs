@@ -208,7 +208,7 @@ async fn context_handler(Json(req): Json<AdapterRequest>) -> Result<Json<Value>,
 
     if let Some(query_text) = extract_query_text(&req.config) {
         let query = parse_search_query(&req.config, false)?;
-        let results = engine.search(query).map_err(map_engine_error)?;
+        let results = engine.hybrid_search(query).map_err(map_engine_error)?;
         for result in results {
             if budget.remaining() == 0 {
                 break;
@@ -244,6 +244,7 @@ async fn context_handler(Json(req): Json<AdapterRequest>) -> Result<Json<Value>,
             "status": "ok",
             "query": query_text,
             "token_budget": token_budget,
+            "search_mode": "hybrid",
             "snippets": snippets,
         })));
     }
@@ -299,6 +300,7 @@ async fn context_handler(Json(req): Json<AdapterRequest>) -> Result<Json<Value>,
         "status": "ok",
         "query": Value::Null,
         "token_budget": token_budget,
+        "search_mode": "symbols",
         "snippets": snippets,
     })))
 }
@@ -588,6 +590,58 @@ pub struct RouterConfig {
 
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body["status"], "error");
+    }
+
+    #[tokio::test]
+    async fn context_uses_hybrid_search() {
+        let project = tempdir().unwrap();
+        write_fixture_project(project.path());
+        let source = project.path().to_string_lossy().to_string();
+
+        // Index first
+        let (status, _) = request_json(
+            Method::POST,
+            "/api/v1/index",
+            Some(json!({"source": source, "config": {"op": "index"}})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Query context with a search query
+        let (status, body) = request_json(
+            Method::POST,
+            "/api/v1/context",
+            Some(json!({
+                "source": source,
+                "config": {
+                    "op": "context_retrieval",
+                    "query": "router_handler",
+                    "token_budget": 512
+                }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["operation"], "context_retrieval");
+        assert_eq!(body["search_mode"], "hybrid");
+        assert!(!body["snippets"].as_array().unwrap().is_empty());
+
+        // Also test symbol fallback path (no query)
+        let (status, sym_body) = request_json(
+            Method::POST,
+            "/api/v1/context",
+            Some(json!({
+                "source": source,
+                "config": {
+                    "op": "context_retrieval",
+                    "token_budget": 512
+                }
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(sym_body["operation"], "context_retrieval");
+        assert_eq!(sym_body["search_mode"], "symbols");
     }
 
     #[tokio::test]
