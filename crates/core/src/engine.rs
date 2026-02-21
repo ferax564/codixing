@@ -15,6 +15,7 @@ use crate::error::{CodeforgeError, Result};
 use crate::graph::CodeGraph;
 use crate::graph::extract::{extract_definitions, extract_references};
 use crate::graph::persistence::{load_graph, save_graph};
+use crate::index::trigram::TrigramIndex;
 use crate::index::vector::{BruteForceVectorIndex, VectorIndex};
 use crate::index::{HnswVectorIndex, TantivyIndex};
 use crate::language::{Language, SemanticEntity, detect_language};
@@ -121,6 +122,8 @@ pub struct Engine {
     vector_index: Option<DynVectorIndex>,
     /// Embedding model (None when vector features unavailable).
     embedder: Option<Box<dyn Embedder>>,
+    /// Trigram index for fast exact substring search (short queries).
+    trigram_index: TrigramIndex,
 }
 
 impl Engine {
@@ -217,11 +220,18 @@ impl Engine {
         // Persist vector index.
         vector_index.save_binary(&store.vector_index_path())?;
 
+        // Build trigram index from the same chunks.
+        let mut trigram_index = TrigramIndex::new();
+        for (chunk_id, content) in &all_chunks {
+            trigram_index.add(*chunk_id, content);
+        }
+
         info!(
             files = files.len(),
             chunks = total_chunks,
             symbols = total_symbols,
             vectors = vector_index.len(),
+            trigrams = trigram_index.len(),
             "index initialized"
         );
 
@@ -235,6 +245,7 @@ impl Engine {
             graph: None,
             vector_index: Some(vector_index),
             embedder: Some(embedder),
+            trigram_index,
         })
     }
 
@@ -318,10 +329,18 @@ impl Engine {
             None
         };
 
+        // Rebuild trigram index from existing chunks.
+        let mut trigram_index = TrigramIndex::new();
+        let all_chunks = tantivy.all_chunk_ids_and_content()?;
+        for (chunk_id, content) in &all_chunks {
+            trigram_index.add(*chunk_id, content);
+        }
+
         info!(
             files = meta.file_count,
             chunks = meta.chunk_count,
             symbols = meta.symbol_count,
+            trigrams = trigram_index.len(),
             "index opened"
         );
 
@@ -335,6 +354,7 @@ impl Engine {
             graph,
             vector_index,
             embedder: Some(embedder),
+            trigram_index,
         })
     }
 
@@ -347,29 +367,143 @@ impl Engine {
     /// Search using hybrid BM25 + vector retrieval with RRF fusion.
     ///
     /// Falls back to BM25-only search if no vector index or embedder is
-    /// available.
+    /// available. For short queries (< 10 characters), the trigram index
+    /// is consulted first to provide fast exact substring candidates that
+    /// are merged additively with the hybrid results.
     pub fn hybrid_search(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
         let (Some(vi), Some(embedder)) = (&self.vector_index, &self.embedder) else {
             return self.search(query);
         };
 
-        // Use the appropriate vector index type.
-        match vi {
+        // Run the normal hybrid retrieval.
+        let mut results = match vi {
             DynVectorIndex::BruteForce(bf) => {
                 let mut retriever = HybridRetriever::new(&self.tantivy, bf, embedder.as_ref());
                 if let Some(ref graph) = self.graph {
                     retriever = retriever.with_graph_boost(graph, 0.3);
                 }
-                retriever.search(&query)
+                retriever.search(&query)?
             }
             DynVectorIndex::Hnsw(hnsw) => {
                 let mut retriever = HybridRetriever::new(&self.tantivy, hnsw, embedder.as_ref());
                 if let Some(ref graph) = self.graph {
                     retriever = retriever.with_graph_boost(graph, 0.3);
                 }
-                retriever.search(&query)
+                retriever.search(&query)?
+            }
+        };
+
+        // For short queries (likely symbol/identifier lookups), use the
+        // trigram index to find exact substring matches that BM25 may miss
+        // due to tokenization differences.
+        const TRIGRAM_QUERY_THRESHOLD: usize = 10;
+        if query.query.len() < TRIGRAM_QUERY_THRESHOLD && query.query.len() >= 3 {
+            let trigram_matches = self.trigram_index.search(&query.query);
+            if !trigram_matches.is_empty() {
+                // Collect chunk IDs already in the hybrid results.
+                let existing_ids: std::collections::HashSet<String> =
+                    results.iter().map(|r| r.chunk_id.clone()).collect();
+
+                // Boost existing results that also have trigram matches.
+                let trigram_chunk_ids: std::collections::HashSet<String> = trigram_matches
+                    .iter()
+                    .map(|m| m.chunk_id.to_string())
+                    .collect();
+                for result in &mut results {
+                    if trigram_chunk_ids.contains(&result.chunk_id) {
+                        // Trigram-confirmed exact match gets a score boost.
+                        result.score *= 1.5;
+                    }
+                }
+
+                // Find trigram-only hits that BM25/vector missed.
+                let missing_ids: std::collections::HashSet<u64> = trigram_matches
+                    .iter()
+                    .filter(|m| !existing_ids.contains(&m.chunk_id.to_string()))
+                    .map(|m| m.chunk_id)
+                    .collect();
+
+                if !missing_ids.is_empty() {
+                    // Look up full document metadata from Tantivy.
+                    if let Ok(docs) = self.tantivy.lookup_chunks_by_ids(&missing_ids) {
+                        let fields = self.tantivy.fields();
+                        for doc in docs {
+                            let chunk_id = doc
+                                .get_first(fields.chunk_id)
+                                .and_then(|v| tantivy::schema::Value::as_str(&v))
+                                .unwrap_or("")
+                                .to_string();
+                            let file_path = doc
+                                .get_first(fields.file_path)
+                                .and_then(|v| tantivy::schema::Value::as_str(&v))
+                                .unwrap_or("")
+                                .to_string();
+                            let language = doc
+                                .get_first(fields.language)
+                                .and_then(|v| tantivy::schema::Value::as_str(&v))
+                                .unwrap_or("")
+                                .to_string();
+                            let content = doc
+                                .get_first(fields.content)
+                                .and_then(|v| tantivy::schema::Value::as_str(&v))
+                                .unwrap_or("")
+                                .to_string();
+                            let signature = doc
+                                .get_first(fields.signature)
+                                .and_then(|v| tantivy::schema::Value::as_str(&v))
+                                .unwrap_or("")
+                                .to_string();
+                            let line_start = doc
+                                .get_first(fields.line_start)
+                                .and_then(|v| tantivy::schema::Value::as_u64(&v))
+                                .unwrap_or(0);
+                            let line_end = doc
+                                .get_first(fields.line_end)
+                                .and_then(|v| tantivy::schema::Value::as_u64(&v))
+                                .unwrap_or(0);
+
+                            // Apply file filter if present.
+                            if let Some(ref filter) = query.file_filter {
+                                if !file_path.contains(filter) {
+                                    continue;
+                                }
+                            }
+
+                            // Assign a base score slightly below the lowest
+                            // hybrid result so trigram-only hits appear at the
+                            // tail unless they are the only results.
+                            let base_score = results
+                                .last()
+                                .map(|r| r.score * 0.9)
+                                .unwrap_or(0.001);
+
+                            results.push(SearchResult {
+                                chunk_id,
+                                file_path,
+                                language,
+                                score: base_score,
+                                line_start,
+                                line_end,
+                                signature,
+                                content,
+                            });
+                        }
+                    }
+                }
+
+                // Re-sort after boosting and adding trigram results.
+                results.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                // Truncate to the requested limit.
+                results.truncate(query.limit);
             }
         }
+
+        Ok(results)
     }
 
     /// Query the symbol table.
