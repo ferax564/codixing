@@ -339,12 +339,7 @@ mod tests {
 
     /// Generate clustered vectors: `num_clusters` cluster centers with
     /// `n / num_clusters` points each, Gaussian-like noise around each center.
-    fn clustered_vectors(
-        n: usize,
-        dim: usize,
-        num_clusters: usize,
-        seed: u64,
-    ) -> Vec<Vec<f32>> {
+    fn clustered_vectors(n: usize, dim: usize, num_clusters: usize, seed: u64) -> Vec<Vec<f32>> {
         let mut state = seed;
         let mut next_f32 = || -> f32 {
             state = state
@@ -371,10 +366,7 @@ mod tests {
         }
         // Fill remainder if n % num_clusters != 0
         while vectors.len() < n {
-            let v: Vec<f32> = centers[0]
-                .iter()
-                .map(|c| c + next_f32() * 0.3)
-                .collect();
+            let v: Vec<f32> = centers[0].iter().map(|c| c + next_f32() * 0.3).collect();
             vectors.push(v);
         }
         vectors
@@ -456,10 +448,7 @@ mod tests {
         // All codes should be valid (< 10 since only 10 centroids trained).
         for code in &pq.codes {
             for &c in code {
-                assert!(
-                    (c as usize) < 10,
-                    "code {c} exceeds centroid count of 10"
-                );
+                assert!((c as usize) < 10, "code {c} exceeds centroid count of 10");
             }
         }
     }

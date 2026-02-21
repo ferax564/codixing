@@ -9,8 +9,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use super::reranker::Reranker;
 use super::SearchResult;
+use super::reranker::Reranker;
 use crate::error::CodeforgeError;
 
 /// A reranker that calls an external cross-encoder API over HTTP.
@@ -161,7 +161,11 @@ impl Reranker for HttpReranker {
                 result.score = item.relevance_score as f32;
                 reranked.push(result);
             } else {
-                warn!(index = item.index, total = results.len(), "reranking API returned out-of-bounds index; skipping");
+                warn!(
+                    index = item.index,
+                    total = results.len(),
+                    "reranking API returned out-of-bounds index; skipping"
+                );
             }
         }
 
