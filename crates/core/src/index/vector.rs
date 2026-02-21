@@ -42,6 +42,18 @@ pub trait VectorIndex: Send + Sync {
     /// Search for `k` nearest neighbors to the query vector.
     fn search(&self, query: &[f32], k: usize) -> Result<Vec<VectorSearchResult>, CodeforgeError>;
 
+    /// Batch search: run multiple queries and return results for each.
+    ///
+    /// The default implementation runs queries sequentially. Implementations
+    /// may override this to use parallel execution (e.g. via rayon).
+    fn search_batch(
+        &self,
+        queries: &[Vec<f32>],
+        k: usize,
+    ) -> Result<Vec<Vec<VectorSearchResult>>, CodeforgeError> {
+        queries.iter().map(|q| self.search(q, k)).collect()
+    }
+
     /// Number of vectors stored.
     fn len(&self) -> usize;
 
@@ -178,6 +190,15 @@ impl VectorIndex for BruteForceVectorIndex {
         });
         scores.truncate(k);
         Ok(scores)
+    }
+
+    fn search_batch(
+        &self,
+        queries: &[Vec<f32>],
+        k: usize,
+    ) -> Result<Vec<Vec<VectorSearchResult>>, CodeforgeError> {
+        use rayon::prelude::*;
+        queries.par_iter().map(|q| self.search(q, k)).collect()
     }
 
     fn len(&self) -> usize {
@@ -392,6 +413,23 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         let results = loaded.search(&[1.0, 0.0, 0.0], 1).unwrap();
         assert_eq!(results[0].chunk_id, 1);
+    }
+
+    #[test]
+    fn batch_search_matches_sequential() {
+        let mut index = BruteForceVectorIndex::new(4);
+        for i in 0..100 {
+            index.add(i, vec![i as f32; 4]).unwrap();
+        }
+        let queries = vec![vec![5.0f32; 4], vec![50.0; 4], vec![95.0; 4]];
+        let batch_results = index.search_batch(&queries, 3).unwrap();
+        for (query, batch_result) in queries.iter().zip(&batch_results) {
+            let seq_result = index.search(query, 3).unwrap();
+            assert_eq!(batch_result.len(), seq_result.len());
+            for (br, sr) in batch_result.iter().zip(&seq_result) {
+                assert_eq!(br.chunk_id, sr.chunk_id);
+            }
+        }
     }
 
     #[test]

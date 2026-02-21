@@ -200,6 +200,22 @@ impl VectorIndex for HnswVectorIndex {
         Ok(results)
     }
 
+    fn search_batch(
+        &self,
+        queries: &[Vec<f32>],
+        k: usize,
+    ) -> Result<Vec<Vec<VectorSearchResult>>, CodeforgeError> {
+        use rayon::prelude::*;
+        // Ensure the HNSW graph is built before parallel queries.
+        {
+            let mut cache = self.hnsw_cache.lock().unwrap();
+            if cache.is_none() {
+                *cache = self.build_snapshot();
+            }
+        }
+        queries.par_iter().map(|q| self.search(q, k)).collect()
+    }
+
     fn len(&self) -> usize {
         self.entries.len()
     }
@@ -409,6 +425,22 @@ mod tests {
         assert_eq!(idx.len(), 1);
         let results = idx.search(&[0.0, 1.0, 0.0], 1).unwrap();
         assert_eq!(results[0].chunk_id, 2);
+    }
+
+    #[test]
+    fn hnsw_batch_search_matches_sequential() {
+        let mut index = HnswVectorIndex::new(4);
+        for i in 0..100 {
+            index.add(i, vec![i as f32; 4]).unwrap();
+        }
+        let queries = vec![vec![5.0f32; 4], vec![50.0; 4], vec![95.0; 4]];
+        let batch_results = index.search_batch(&queries, 3).unwrap();
+        for (query, batch_result) in queries.iter().zip(&batch_results) {
+            let seq_result = index.search(query, 3).unwrap();
+            assert_eq!(batch_result.len(), seq_result.len());
+            // HNSW is approximate, so just check the top-1 result matches.
+            assert_eq!(batch_result[0].chunk_id, seq_result[0].chunk_id);
+        }
     }
 
     #[test]
