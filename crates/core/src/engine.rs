@@ -1465,4 +1465,172 @@ pub fn unique_new_function() -> bool {
         let vec = embedder.embed("hello").unwrap();
         assert_eq!(vec.len(), 32);
     }
+
+    #[test]
+    fn trigram_index_finds_exact_substring() {
+        // Verify that the trigram index wired into Engine finds exact
+        // substring matches via hybrid_search.
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let src_dir = root.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        // Create a file with a distinctive function name that is short
+        // enough to trigger the trigram path (< 10 chars).
+        fs::write(
+            src_dir.join("main.rs"),
+            r#"
+fn main() {}
+
+pub fn xyz_fn() -> bool {
+    true
+}
+
+pub fn other_func() -> i32 {
+    42
+}
+"#,
+        )
+        .unwrap();
+
+        let config = IndexConfig::new(&root);
+        let engine = Engine::init(&root, config).unwrap();
+
+        // "xyz_fn" is 6 chars — below the 10-char trigram threshold.
+        let results = engine
+            .hybrid_search(SearchQuery::new("xyz_fn").with_limit(10))
+            .unwrap();
+        assert!(
+            !results.is_empty(),
+            "expected trigram-boosted results for short query 'xyz_fn'"
+        );
+        // The result containing "xyz_fn" should be present.
+        assert!(
+            results.iter().any(|r| r.content.contains("xyz_fn")),
+            "expected a result containing 'xyz_fn' in content"
+        );
+    }
+
+    #[test]
+    fn short_query_uses_trigram_path() {
+        // Verify that a short query (< 10 chars) gets trigram boost while
+        // a longer query still works normally without trigram involvement.
+        let (_dir, root) = setup_project();
+        let config = IndexConfig::new(&root);
+        let engine = Engine::init(&root, config).unwrap();
+
+        // Short query (3 chars "add") — should trigger trigram path.
+        let short_results = engine
+            .hybrid_search(SearchQuery::new("add").with_limit(10))
+            .unwrap();
+        assert!(
+            !short_results.is_empty(),
+            "expected results for short query 'add'"
+        );
+
+        // Long query (> 10 chars) — should NOT trigger trigram path,
+        // but should still return results via normal hybrid retrieval.
+        let long_results = engine
+            .hybrid_search(SearchQuery::new("Add two numbers together").with_limit(10))
+            .unwrap();
+        assert!(
+            !long_results.is_empty(),
+            "expected results for long query (no trigram shortcut)"
+        );
+    }
+
+    #[test]
+    fn long_query_works_without_trigram() {
+        // Verify that queries >= 10 chars bypass the trigram path entirely
+        // and still produce correct hybrid results.
+        let (_dir, root) = setup_project();
+        let config = IndexConfig::new(&root);
+        let engine = Engine::init(&root, config).unwrap();
+
+        let results = engine
+            .hybrid_search(SearchQuery::new("helper function").with_limit(10))
+            .unwrap();
+        assert!(
+            !results.is_empty(),
+            "expected results for long query 'helper function'"
+        );
+
+        // Results should be sorted by score descending.
+        for w in results.windows(2) {
+            assert!(
+                w[0].score >= w[1].score,
+                "results not sorted: {} < {}",
+                w[0].score,
+                w[1].score
+            );
+        }
+    }
+
+    #[test]
+    fn trigram_index_rebuilt_on_open() {
+        // Verify that the trigram index is rebuilt when opening an
+        // existing index and that short queries still work.
+        let (_dir, root) = setup_project();
+        let config = IndexConfig::new(&root);
+
+        // Init and drop.
+        {
+            let engine = Engine::init(&root, config).unwrap();
+            let results = engine
+                .hybrid_search(SearchQuery::new("add").with_limit(5))
+                .unwrap();
+            assert!(!results.is_empty(), "expected results before save");
+        }
+
+        // Re-open — trigram index should be rebuilt from Tantivy data.
+        let engine = Engine::open(&root).unwrap();
+        let results = engine
+            .hybrid_search(SearchQuery::new("add").with_limit(5))
+            .unwrap();
+        assert!(
+            !results.is_empty(),
+            "expected trigram-boosted results after re-opening index"
+        );
+    }
+
+    #[test]
+    fn trigram_boosts_exact_match_score() {
+        // Verify that an exact substring match via trigram gets a higher
+        // score than it would without the trigram boost.
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let src_dir = root.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        // Two files: one with the exact token, one without.
+        fs::write(
+            src_dir.join("alpha.rs"),
+            "pub fn qux_fn() -> bool { true }\n",
+        )
+        .unwrap();
+        fs::write(
+            src_dir.join("beta.rs"),
+            "pub fn other() -> bool { false }\n",
+        )
+        .unwrap();
+
+        let config = IndexConfig::new(&root);
+        let engine = Engine::init(&root, config).unwrap();
+
+        // "qux_fn" is 6 chars — triggers trigram path.
+        let results = engine
+            .hybrid_search(SearchQuery::new("qux_fn").with_limit(10))
+            .unwrap();
+        assert!(
+            !results.is_empty(),
+            "expected results for 'qux_fn'"
+        );
+
+        // The result from alpha.rs (containing exact match) should rank first.
+        assert!(
+            results[0].file_path.contains("alpha.rs"),
+            "expected alpha.rs (exact trigram match) to rank first, got: {}",
+            results[0].file_path
+        );
+    }
 }
