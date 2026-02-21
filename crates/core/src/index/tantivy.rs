@@ -492,6 +492,42 @@ impl TantivyIndex {
         &self.fields
     }
 
+    /// Look up documents by a set of chunk IDs.
+    ///
+    /// Scans all segments and returns full stored documents for any chunk whose
+    /// ID appears in `chunk_ids`. Used by the trigram search path to build
+    /// rich `SearchResult` objects from trigram-matched chunk IDs.
+    pub fn lookup_chunks_by_ids(
+        &self,
+        chunk_ids: &std::collections::HashSet<u64>,
+    ) -> Result<Vec<tantivy::TantivyDocument>> {
+        if chunk_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let searcher = self.reader.searcher();
+        let mut results = Vec::new();
+
+        for segment_reader in searcher.segment_readers() {
+            let store_reader = segment_reader.get_store_reader(1)?;
+            for doc_id in 0..segment_reader.max_doc() {
+                if segment_reader.is_deleted(doc_id) {
+                    continue;
+                }
+                let doc: tantivy::TantivyDocument = store_reader.get(doc_id)?;
+                let chunk_id = doc
+                    .get_first(self.fields.chunk_id)
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<u64>().ok())
+                    .unwrap_or(0);
+                if chunk_ids.contains(&chunk_id) {
+                    results.push(doc);
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Read all chunk IDs and their content from the index.
     ///
     /// Used during init to batch-embed chunks into a vector index.
