@@ -195,7 +195,8 @@ impl Engine {
 
         // Build vector index using the configured embedding backend.
         let embedder: Box<dyn Embedder> = create_embedder(&config.embedding_backend)?;
-        let chunk_threshold = 10_000;
+        // Switch to HNSW at 2,000 chunks (~400 files) for O(log N) search.
+        let chunk_threshold = 2_000;
         let use_hnsw = match &config.vector_backend {
             VectorBackend::Hnsw => true,
             VectorBackend::BruteForce => false,
@@ -306,7 +307,7 @@ impl Engine {
             let use_hnsw = match &config.vector_backend {
                 VectorBackend::Hnsw => true,
                 VectorBackend::BruteForce => false,
-                VectorBackend::Auto => meta.chunk_count >= 10_000,
+                VectorBackend::Auto => meta.chunk_count >= 2_000,
             };
             if use_hnsw {
                 match HnswVectorIndex::load_binary(&store.vector_index_path()) {
@@ -1354,11 +1355,11 @@ pub fn unique_new_function() -> bool {
     #[test]
     fn test_auto_backend_selection() {
         // VectorBackend::Auto should pick BruteForce for small chunk counts
-        // (< 10_000 threshold) and HNSW for large.
+        // (< 2_000 threshold) and HNSW for large.
         //
         // We verify the small case by checking that the default (Auto) config
         // on a small project uses brute-force (which it does because our test
-        // project has only a handful of chunks, well below 10_000).
+        // project has only a handful of chunks, well below 2_000).
 
         let (_dir, root) = setup_project();
         let config = IndexConfig::new(&root);
@@ -1368,11 +1369,11 @@ pub fn unique_new_function() -> bool {
         let mut engine = Engine::init(&root, config).unwrap();
         let stats = engine.stats();
 
-        // With only 2 files the chunk count is far below 10_000, so Auto
+        // With only 2 files the chunk count is far below 2_000, so Auto
         // should have selected BruteForce.
         assert!(
-            stats.chunk_count < 10_000,
-            "test project should have < 10_000 chunks, got {}",
+            stats.chunk_count < 2_000,
+            "test project should have < 2_000 chunks, got {}",
             stats.chunk_count
         );
 
