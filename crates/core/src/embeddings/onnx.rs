@@ -28,6 +28,14 @@ pub struct OnnxEmbedder {
     dimension: usize,
 }
 
+impl std::fmt::Debug for OnnxEmbedder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OnnxEmbedder")
+            .field("dimension", &self.dimension)
+            .finish_non_exhaustive()
+    }
+}
+
 impl OnnxEmbedder {
     /// Load model from a directory containing `model.onnx` and `tokenizer.json`.
     ///
