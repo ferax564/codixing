@@ -1,27 +1,24 @@
-pub mod agentic;
 pub mod chunker;
 pub mod config;
-pub mod context_assembly;
-pub mod embeddings;
+pub mod embedder;
 pub mod engine;
 pub mod error;
+pub mod formatter;
 pub mod graph;
 pub mod index;
 pub mod language;
 pub mod parser;
 pub mod persistence;
+pub mod reranker;
 pub mod retriever;
 pub mod symbols;
-pub mod tokenizer;
+pub mod vector;
 pub mod watcher;
 
 // Re-export primary public API types.
-pub use agentic::{AgenticResult, AgenticSearchSession};
-pub use config::IndexConfig;
-pub use context_assembly::IntelligentContextAssembler;
+pub use config::{EmbeddingConfig, EmbeddingModel, GraphConfig, IndexConfig};
 pub use engine::{Engine, IndexStats};
 pub use error::{CodeforgeError, Result};
-pub use graph::{CodeGraph, DefinitionInfo, ReferenceInfo, ReferenceKind, SymbolKind, SymbolNode};
-pub use retriever::{SearchQuery, SearchResult};
+pub use graph::{CodeEdge, CodeGraph, CodeNode, EdgeKind, GraphStats, RepoMapOptions};
+pub use retriever::{ChunkMeta, SearchQuery, SearchResult, Strategy};
 pub use symbols::Symbol;
-pub use tokenizer::{ApproxTokenCounter, ContextBudget, ContextSnippet, TokenCounter};

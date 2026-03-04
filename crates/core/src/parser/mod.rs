@@ -109,6 +109,11 @@ impl Parser {
         &self.cache
     }
 
+    /// Access the language registry.
+    pub fn registry(&self) -> &LanguageRegistry {
+        &self.registry
+    }
+
     /// Number of files currently held in the tree cache.
     pub fn cache_len(&self) -> usize {
         self.cache.len()

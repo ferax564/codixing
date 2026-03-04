@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/cli", "crates/server"]
+members = ["crates/core", "crates/cli", "crates/server", "crates/mcp"]
 resolver = "3"
 
 [workspace.package]
@@ -24,28 +24,30 @@ tree-sitter-c-sharp = "0.23"
 # Search
 tantivy = "0.22"
 
+# Embeddings + vector index
+fastembed = "5"
+usearch = "2"
+
+# Async runtime & HTTP server
+axum = { version = "0.8", features = ["json", "macros"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
 # Graph
-petgraph = "0.7"
+petgraph = { version = "0.8", features = ["serde-1"] }
+
+# Token budget
+tiktoken-rs = "0.9"
 
 # File watching
 notify = "8"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
-axum = "0.8"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
-tower = { version = "0.5", features = ["util"] }
-http = "1"
-
-# ANN search
-instant-distance = "0.6"
 
 # Concurrency
 dashmap = "6"
 rayon = "1"
-
-# HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

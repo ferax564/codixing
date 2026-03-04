@@ -60,7 +60,8 @@ pub fn build_schema() -> (Schema, SchemaFields) {
     let file_path_exact = builder.add_text_field("file_path_exact", STRING);
     let language = builder.add_text_field("language", STRING | STORED);
     let content = builder.add_text_field("content", code_text.clone());
-    let scope_chain = builder.add_text_field("scope_chain", code_text_unstored.clone());
+    // scope_chain is stored so BM25Retriever can populate SearchResult.scope_chain.
+    let scope_chain = builder.add_text_field("scope_chain", code_text.clone());
     let signature = builder.add_text_field("signature", code_text.clone());
     let entity_names = builder.add_text_field("entity_names", code_text_unstored);
     let line_start = builder.add_u64_field("line_start", STORED | FAST);

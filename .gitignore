@@ -6,6 +6,9 @@ Cargo.lock
 # CodeForge index
 .codeforge/
 
+# fastembed / ONNX model cache (downloaded at runtime, not committed)
+.fastembed_cache/
+
 # IDE
 .idea/
 .vscode/

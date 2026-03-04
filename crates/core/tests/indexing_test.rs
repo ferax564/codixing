@@ -4,8 +4,17 @@ mod common;
 
 use std::fs;
 
-use codeforge_core::{Engine, IndexConfig, SearchQuery};
+use codeforge_core::{Engine, IndexConfig, SearchQuery, Strategy};
 use tempfile::tempdir;
+
+/// Return an `IndexConfig` with embeddings disabled.
+/// Integration tests for indexing correctness don't need vector embeddings
+/// and should not trigger model downloads.
+fn no_embed_config(root: &std::path::Path) -> IndexConfig {
+    let mut cfg = IndexConfig::new(root);
+    cfg.embedding.enabled = false;
+    cfg
+}
 
 #[test]
 fn multi_language_indexing() {
@@ -13,8 +22,7 @@ fn multi_language_indexing() {
     let root = dir.path();
     common::setup_multi_language_project(root);
 
-    let config = IndexConfig::new(root);
-    let engine = Engine::init(root, config).unwrap();
+    let engine = Engine::init(root, no_embed_config(root)).unwrap();
     let stats = engine.stats();
 
     assert!(
@@ -40,7 +48,7 @@ fn respects_language_filter() {
     let root = dir.path();
     common::setup_multi_language_project(root);
 
-    let mut config = IndexConfig::new(root);
+    let mut config = no_embed_config(root);
     config.languages.insert("rust".to_string());
 
     let engine = Engine::init(root, config).unwrap();
@@ -76,8 +84,7 @@ fn exclude_patterns_work() {
     )
     .unwrap();
 
-    let config = IndexConfig::new(root);
-    let engine = Engine::init(root, config).unwrap();
+    let engine = Engine::init(root, no_embed_config(root)).unwrap();
 
     // The node_modules file should NOT be indexed.
     let syms = engine.symbols("libHelper", None).unwrap();
@@ -100,12 +107,15 @@ fn reindex_updates_existing() {
     let root = dir.path();
     common::setup_multi_language_project(root);
 
-    let config = IndexConfig::new(root);
-    let mut engine = Engine::init(root, config).unwrap();
+    let mut engine = Engine::init(root, no_embed_config(root)).unwrap();
 
     // Verify the initial content is searchable.
     let results = engine
-        .search(SearchQuery::new("add").with_limit(10))
+        .search(
+            SearchQuery::new("add")
+                .with_limit(10)
+                .with_strategy(Strategy::Instant),
+        )
         .unwrap();
     assert!(!results.is_empty(), "expected 'add' to be searchable");
 
@@ -131,7 +141,11 @@ pub fn reindex_sentinel_function() -> bool {
 
     // The new function should be searchable.
     let results = engine
-        .search(SearchQuery::new("reindex_sentinel_function").with_limit(5))
+        .search(
+            SearchQuery::new("reindex_sentinel_function")
+                .with_limit(5)
+                .with_strategy(Strategy::Instant),
+        )
         .unwrap();
     assert!(
         !results.is_empty(),

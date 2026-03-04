@@ -52,6 +52,11 @@ impl Retriever for BM25Retriever<'_> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            let scope_chain_str = doc
+                .get_first(fields.scope_chain)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let line_start = doc
                 .get_first(fields.line_start)
                 .and_then(|v| v.as_u64())
@@ -61,6 +66,12 @@ impl Retriever for BM25Retriever<'_> {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
 
+            // Reconstruct scope_chain Vec from the space-joined stored string.
+            let scope_chain: Vec<String> = scope_chain_str
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect();
+
             results.push(SearchResult {
                 chunk_id,
                 file_path,
@@ -69,6 +80,7 @@ impl Retriever for BM25Retriever<'_> {
                 line_start,
                 line_end,
                 signature,
+                scope_chain,
                 content,
             });
         }
@@ -153,5 +165,22 @@ mod tests {
             .unwrap();
         assert_eq!(filtered.len(), 1);
         assert!(filtered[0].file_path.contains("lib.rs"));
+    }
+
+    #[test]
+    fn bm25_search_populates_scope_chain() {
+        let idx = TantivyIndex::create_in_ram().unwrap();
+        let mut chunk = make_chunk(99, "src/lib.rs", "fn scoped() {}");
+        chunk.scope_chain = vec!["MyModule".to_string(), "MyClass".to_string()];
+        idx.add_chunk(&chunk).unwrap();
+        idx.commit().unwrap();
+
+        let retriever = BM25Retriever::new(&idx);
+        let results = retriever
+            .search(&SearchQuery::new("scoped").with_limit(5))
+            .unwrap();
+
+        assert!(!results.is_empty());
+        assert_eq!(results[0].scope_chain, vec!["MyModule", "MyClass"]);
     }
 }

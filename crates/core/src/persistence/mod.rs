@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::IndexConfig;
 use crate::error::{CodeforgeError, Result};
+use crate::graph::GraphData;
 
 /// Directory name for the CodeForge index store.
 const CODEFORGE_DIR: &str = ".codeforge";
@@ -13,9 +14,12 @@ const META_FILE: &str = "meta.json";
 const TANTIVY_DIR: &str = "tantivy";
 const SYMBOLS_FILE: &str = "symbols.bin";
 const TREE_HASHES_FILE: &str = "tree_hashes.bin";
-const GRAPH_FILE: &str = "graph.json";
-const VECTOR_INDEX_FILE: &str = "vectors.bin";
-const TRIGRAM_INDEX_FILE: &str = "trigram.bin";
+const VECTORS_DIR: &str = "vectors";
+const VECTOR_INDEX_FILE: &str = "index.usearch";
+const FILE_CHUNKS_FILE: &str = "file_chunks.bin";
+const CHUNK_META_FILE: &str = "chunk_meta.bin";
+const GRAPH_DIR: &str = "graph";
+const GRAPH_FILE: &str = "graph.bin";
 
 /// Index metadata persisted alongside the index.
 ///
@@ -64,6 +68,8 @@ impl IndexStore {
         let codeforge_dir = root.join(CODEFORGE_DIR);
         fs::create_dir_all(&codeforge_dir)?;
         fs::create_dir_all(codeforge_dir.join(TANTIVY_DIR))?;
+        fs::create_dir_all(codeforge_dir.join(VECTORS_DIR))?;
+        fs::create_dir_all(codeforge_dir.join(GRAPH_DIR))?;
 
         let store = Self {
             root: root.to_path_buf(),
@@ -115,19 +121,24 @@ impl IndexStore {
         self.codeforge_dir().join(TREE_HASHES_FILE)
     }
 
-    /// Path to the `graph.json` file.
-    pub fn graph_path(&self) -> PathBuf {
-        self.codeforge_dir().join(GRAPH_FILE)
+    /// Path to the `vectors/` sub-directory.
+    pub fn vectors_dir(&self) -> PathBuf {
+        self.codeforge_dir().join(VECTORS_DIR)
     }
 
-    /// Path to the `vectors.bin` file (binary-serialized vector index).
+    /// Path to the usearch HNSW index binary.
     pub fn vector_index_path(&self) -> PathBuf {
-        self.codeforge_dir().join(VECTOR_INDEX_FILE)
+        self.vectors_dir().join(VECTOR_INDEX_FILE)
     }
 
-    /// Path to the `trigram.bin` file (binary-serialized trigram index).
-    pub fn trigram_index_path(&self) -> PathBuf {
-        self.codeforge_dir().join(TRIGRAM_INDEX_FILE)
+    /// Path to the file-chunks map binary.
+    pub fn file_chunks_path(&self) -> PathBuf {
+        self.vectors_dir().join(FILE_CHUNKS_FILE)
+    }
+
+    /// Path to the chunk metadata binary.
+    pub fn chunk_meta_path(&self) -> PathBuf {
+        self.codeforge_dir().join(CHUNK_META_FILE)
     }
 
     /// Save the [`IndexConfig`] to `config.json`.
@@ -169,6 +180,40 @@ impl IndexStore {
         Ok(meta)
     }
 
+    /// Path to the `graph/` sub-directory.
+    pub fn graph_dir(&self) -> PathBuf {
+        self.codeforge_dir().join(GRAPH_DIR)
+    }
+
+    /// Path to the `graph/graph.bin` file.
+    pub fn graph_path(&self) -> PathBuf {
+        self.graph_dir().join(GRAPH_FILE)
+    }
+
+    /// Serialize and persist the dependency graph.
+    pub fn save_graph(&self, data: &GraphData) -> Result<()> {
+        // Ensure the directory exists (may not on older indexes opened before Phase 3).
+        fs::create_dir_all(self.graph_dir())?;
+        let bytes = bitcode::serialize(data).map_err(|e| {
+            CodeforgeError::Serialization(format!("failed to serialize graph: {e}"))
+        })?;
+        fs::write(self.graph_path(), bytes)?;
+        Ok(())
+    }
+
+    /// Load the dependency graph from disk.  Returns `None` if no graph has been saved yet.
+    pub fn load_graph(&self) -> Result<Option<GraphData>> {
+        let path = self.graph_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = fs::read(&path)?;
+        let data: GraphData = bitcode::deserialize(&bytes).map_err(|e| {
+            CodeforgeError::Serialization(format!("failed to deserialize graph: {e}"))
+        })?;
+        Ok(Some(data))
+    }
+
     /// Save raw bytes to the `symbols.bin` file.
     pub fn save_symbols_bytes(&self, bytes: &[u8]) -> Result<()> {
         fs::write(self.symbols_path(), bytes)?;
@@ -197,6 +242,21 @@ impl IndexStore {
             CodeforgeError::Serialization(format!("failed to deserialize tree hashes: {e}"))
         })?;
         Ok(hashes)
+    }
+
+    /// Save the chunk metadata map (bitcode-serialized `Vec<(u64, ChunkMeta)>`).
+    ///
+    /// Accepts a flat list of `(chunk_id, meta)` pairs rather than the DashMap
+    /// directly to avoid depending on DashMap in persistence.
+    pub fn save_chunk_meta_bytes(&self, bytes: &[u8]) -> Result<()> {
+        fs::write(self.chunk_meta_path(), bytes)?;
+        Ok(())
+    }
+
+    /// Load raw bytes from `chunk_meta.bin`.
+    pub fn load_chunk_meta_bytes(&self) -> Result<Vec<u8>> {
+        let bytes = fs::read(self.chunk_meta_path())?;
+        Ok(bytes)
     }
 }
 

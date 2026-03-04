@@ -1,9 +1,102 @@
 //! Shared test helpers for integration tests.
+#![allow(dead_code)]
 
 #![allow(dead_code)]
 
 use std::fs;
 use std::path::Path;
+
+/// Set up a project with explicit import statements for graph testing.
+///
+/// Structure:
+/// ```text
+/// src/
+///   main.rs     -- uses crate::engine and crate::parser
+///   engine.rs   -- uses crate::parser
+///   parser.rs   -- no imports
+///   index.ts    -- imports ./foo
+///   foo.ts      -- no imports
+///   utils.py    -- from . import helpers
+///   helpers.py  -- no imports
+/// ```
+pub fn setup_project_with_imports(root: &Path) {
+    let src = root.join("src");
+    fs::create_dir_all(&src).expect("failed to create src directory");
+
+    fs::write(
+        src.join("main.rs"),
+        r#"use crate::engine::Engine;
+use crate::parser::Parser;
+
+fn main() {
+    let _e = Engine::new();
+}
+"#,
+    )
+    .expect("failed to write main.rs");
+
+    fs::write(
+        src.join("engine.rs"),
+        r#"use crate::parser::Parser;
+
+pub struct Engine;
+
+impl Engine {
+    pub fn new() -> Self { Self }
+}
+"#,
+    )
+    .expect("failed to write engine.rs");
+
+    fs::write(
+        src.join("parser.rs"),
+        r#"pub struct Parser;
+
+impl Parser {
+    pub fn new() -> Self { Self }
+}
+"#,
+    )
+    .expect("failed to write parser.rs");
+
+    fs::write(
+        src.join("index.ts"),
+        r#"import { Foo } from "./foo";
+
+export class App {
+    run(): void {}
+}
+"#,
+    )
+    .expect("failed to write index.ts");
+
+    fs::write(
+        src.join("foo.ts"),
+        r#"export class Foo {
+    name: string = "foo";
+}
+"#,
+    )
+    .expect("failed to write foo.ts");
+
+    fs::write(
+        src.join("utils.py"),
+        r#"from . import helpers
+
+def run():
+    pass
+"#,
+    )
+    .expect("failed to write utils.py");
+
+    fs::write(
+        src.join("helpers.py"),
+        r#"def help():
+    return "help"
+"#,
+    )
+    .expect("failed to write helpers.py");
+}
 
 /// Set up a multi-language project with Rust, Python, TypeScript, and Go files.
 ///

@@ -1,9 +1,19 @@
 //! Integration tests for BM25 search.
+//!
+//! These tests focus on BM25 correctness and use `Strategy::Instant` to
+//! ensure they do not depend on the embedding model being downloaded.
 
 mod common;
 
-use codeforge_core::{Engine, IndexConfig, SearchQuery};
+use codeforge_core::{Engine, IndexConfig, SearchQuery, Strategy};
 use tempfile::tempdir;
+
+/// Create an `IndexConfig` with embeddings disabled (BM25-only mode).
+fn bm25_config(root: &std::path::Path) -> IndexConfig {
+    let mut cfg = IndexConfig::new(root);
+    cfg.embedding.enabled = false;
+    cfg
+}
 
 #[test]
 fn search_finds_rust_function() {
@@ -11,11 +21,14 @@ fn search_finds_rust_function() {
     let root = dir.path();
     common::setup_multi_language_project(root);
 
-    let config = IndexConfig::new(root);
-    let engine = Engine::init(root, config).unwrap();
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
 
     let results = engine
-        .search(SearchQuery::new("add").with_limit(10))
+        .search(
+            SearchQuery::new("add")
+                .with_limit(10)
+                .with_strategy(Strategy::Instant),
+        )
         .unwrap();
 
     assert!(!results.is_empty(), "expected search results for 'add'");
@@ -32,11 +45,14 @@ fn search_finds_python_class() {
     let root = dir.path();
     common::setup_multi_language_project(root);
 
-    let config = IndexConfig::new(root);
-    let engine = Engine::init(root, config).unwrap();
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
 
     let results = engine
-        .search(SearchQuery::new("Validator").with_limit(10))
+        .search(
+            SearchQuery::new("Validator")
+                .with_limit(10)
+                .with_strategy(Strategy::Instant),
+        )
         .unwrap();
 
     assert!(
@@ -56,11 +72,14 @@ fn search_finds_typescript_class() {
     let root = dir.path();
     common::setup_multi_language_project(root);
 
-    let config = IndexConfig::new(root);
-    let engine = Engine::init(root, config).unwrap();
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
 
     let results = engine
-        .search(SearchQuery::new("App").with_limit(10))
+        .search(
+            SearchQuery::new("App")
+                .with_limit(10)
+                .with_strategy(Strategy::Instant),
+        )
         .unwrap();
 
     assert!(!results.is_empty(), "expected search results for 'App'");
@@ -77,19 +96,18 @@ fn search_with_file_filter() {
     let root = dir.path();
     common::setup_multi_language_project(root);
 
-    let config = IndexConfig::new(root);
-    let engine = Engine::init(root, config).unwrap();
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
 
     // Search with a file filter that restricts to Python files.
     let results = engine
         .search(
             SearchQuery::new("Validator")
                 .with_limit(10)
+                .with_strategy(Strategy::Instant)
                 .with_file_filter(".py"),
         )
         .unwrap();
 
-    // All results should be from .py files.
     for result in &results {
         assert!(
             result.file_path.ends_with(".py"),
@@ -103,6 +121,7 @@ fn search_with_file_filter() {
         .search(
             SearchQuery::new("Validator")
                 .with_limit(10)
+                .with_strategy(Strategy::Instant)
                 .with_file_filter(".rs"),
         )
         .unwrap();
@@ -119,11 +138,14 @@ fn search_no_results() {
     let root = dir.path();
     common::setup_multi_language_project(root);
 
-    let config = IndexConfig::new(root);
-    let engine = Engine::init(root, config).unwrap();
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
 
     let results = engine
-        .search(SearchQuery::new("xyzzy_nonexistent_gibberish_42").with_limit(10))
+        .search(
+            SearchQuery::new("xyzzy_nonexistent_gibberish_42")
+                .with_limit(10)
+                .with_strategy(Strategy::Instant),
+        )
         .unwrap();
 
     assert!(

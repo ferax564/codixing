@@ -35,6 +35,20 @@ pub enum CodeforgeError {
 
     #[error("embedding error: {0}")]
     Embedding(String),
+
+    #[error("vector index error: {0}")]
+    VectorIndex(String),
+
+    #[error(
+        "embeddings not enabled — run `codeforge init` with embedding enabled, or use --strategy instant"
+    )]
+    EmbeddingNotEnabled,
+
+    #[error("graph error: {0}")]
+    Graph(String),
+
+    #[error("reranker error: {0}")]
+    Reranker(String),
 }
 
 /// Convenience alias used throughout the crate.

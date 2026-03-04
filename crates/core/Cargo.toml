@@ -6,17 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 description = "Core engine for CodeForge — AST parsing, indexing, and retrieval"
 
-[features]
-default = []
-vector = ["dep:ort", "dep:ndarray", "dep:tokenizers"]
-
 [dependencies]
-# Optional: ONNX Runtime embedding inference
-ort = { version = "2.0.0-rc.11", optional = true }
-ndarray = { version = "0.17", optional = true }
-tokenizers = { version = "0.22", optional = true, default-features = false, features = ["fancy-regex"] }
-# HTTP client for external embedding APIs
-reqwest.workspace = true
 tree-sitter.workspace = true
 tree-sitter-rust.workspace = true
 tree-sitter-python.workspace = true
@@ -28,9 +18,11 @@ tree-sitter-c.workspace = true
 tree-sitter-cpp.workspace = true
 tree-sitter-c-sharp.workspace = true
 
-instant-distance.workspace = true
-tantivy.workspace = true
 petgraph.workspace = true
+tantivy.workspace = true
+fastembed.workspace = true
+usearch.workspace = true
+tiktoken-rs.workspace = true
 notify.workspace = true
 dashmap.workspace = true
 rayon.workspace = true
