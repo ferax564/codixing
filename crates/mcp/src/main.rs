@@ -160,6 +160,44 @@ async fn run_daemon(engine: Arc<Mutex<Engine>>, socket_path: &Path) -> Result<()
 
     info!(socket = %socket_path.display(), "daemon listening");
 
+    // Spawn a background task that watches the project directory and keeps the
+    // in-memory engine up to date when source files change.
+    let engine_for_watch = Arc::clone(&engine);
+    tokio::task::spawn_blocking(move || {
+        let config = engine_for_watch
+            .lock()
+            .expect("engine lock poisoned")
+            .config()
+            .clone();
+
+        let watcher = match codeforge_core::watcher::FileWatcher::new(&config.root, &config) {
+            Ok(w) => w,
+            Err(e) => {
+                warn!(error = %e, "daemon: failed to start file watcher — index will not auto-update");
+                return;
+            }
+        };
+
+        info!(root = %config.root.display(), "daemon: file watcher started");
+
+        loop {
+            // Poll with a 2-second timeout so the thread isn't pinned at 100% CPU.
+            let changes = watcher.poll_changes(Duration::from_secs(2));
+            if changes.is_empty() {
+                continue;
+            }
+
+            info!(count = changes.len(), "daemon: file changes detected, updating index");
+            let mut eng = engine_for_watch.lock().expect("engine lock poisoned");
+            if let Err(e) = eng.apply_changes(&changes) {
+                warn!(error = %e, "daemon: apply_changes failed");
+            }
+            if let Err(e) = eng.save() {
+                warn!(error = %e, "daemon: save after watcher update failed");
+            }
+        }
+    });
+
     loop {
         let (stream, _addr) = listener
             .accept()

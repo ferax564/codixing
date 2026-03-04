@@ -19,6 +19,7 @@ use crate::graph::{
     CodeGraph, GraphStats, ImportExtractor, ImportResolver, RepoMapOptions, compute_pagerank,
     generate_repo_map,
 };
+use crate::graph::extractor::RawImport;
 use crate::index::TantivyIndex;
 use crate::language::{Language, SemanticEntity, detect_language};
 use crate::parser::Parser;
@@ -142,6 +143,9 @@ impl Engine {
         // We process files in parallel for parse/chunk/index, but embedding
         // batch is collected and inserted after the parallel phase.
         let pending_embeds: DashMap<u64, String> = DashMap::new(); // chunk_id → content
+        // Import lists extracted during parse — reused by build_graph to avoid
+        // a second file-read + parse pass (each file is parsed exactly once).
+        let pending_imports: DashMap<String, (Vec<RawImport>, Language)> = DashMap::new();
 
         let ctx = IndexContext {
             root: &root,
@@ -153,6 +157,7 @@ impl Engine {
             file_chunk_map: &file_chunk_map,
             chunk_meta_map: &chunk_meta_map,
             pending_embeds: &pending_embeds,
+            pending_imports: &pending_imports,
         };
 
         // Process files in parallel: parse → chunk → index → extract symbols.
@@ -184,9 +189,9 @@ impl Engine {
         // Convert DashMaps to owned types.
         let file_chunk_counts: HashMap<String, usize> = file_chunk_map.into_iter().collect();
 
-        // Build dependency graph.
+        // Build dependency graph using pre-extracted import lists (no re-parse).
         let graph = if config.graph.enabled {
-            let g = build_graph(&files, &root, &config, &parser);
+            let g = build_graph(&files, &root, &config, &parser, &pending_imports);
             let scores = compute_pagerank(&g, config.graph.damping, config.graph.iterations);
             let mut g = g;
             g.apply_pagerank(&scores);
@@ -603,7 +608,13 @@ impl Engine {
     /// Re-index a single file (after modification).
     ///
     /// Removes old data, re-parses, re-chunks, and re-indexes.
+    /// When called directly, also recomputes PageRank and persists the graph.
+    /// Use `apply_changes` to batch multiple files with a single PageRank pass.
     pub fn reindex_file(&mut self, path: &Path) -> Result<()> {
+        self.reindex_file_impl(path, true)
+    }
+
+    fn reindex_file_impl(&mut self, path: &Path, do_graph_finalize: bool) -> Result<()> {
         let abs_path = if path.is_absolute() {
             path.to_path_buf()
         } else {
@@ -687,8 +698,9 @@ impl Engine {
         self.tantivy.commit()?;
         self.file_chunk_counts.insert(rel_str.clone(), chunks.len());
 
-        // Update graph: remove stale edges, re-extract imports, recompute PageRank.
-        // Use the already-parsed tree and source — no need to re-read or re-parse.
+        // Update graph edges for this file using the already-parsed tree.
+        // PageRank is only recomputed when do_graph_finalize=true (single-file
+        // reindex). apply_changes() calls with false and does one pass at the end.
         let file_language = result.language;
         let raw_imports = ImportExtractor::extract(&result.tree, &source, file_language);
         if let Some(ref mut graph) = self.graph {
@@ -703,15 +715,17 @@ impl Engine {
                     graph.add_edge(&rel_str, &target, &raw.path, file_language, target_lang);
                 }
             }
-            let scores = compute_pagerank(
-                graph,
-                self.config.graph.damping,
-                self.config.graph.iterations,
-            );
-            graph.apply_pagerank(&scores);
-            let flat = graph.to_flat();
-            if let Err(e) = self.store.save_graph(&flat) {
-                warn!(error = %e, "failed to persist graph after reindex");
+            if do_graph_finalize {
+                let scores = compute_pagerank(
+                    graph,
+                    self.config.graph.damping,
+                    self.config.graph.iterations,
+                );
+                graph.apply_pagerank(&scores);
+                let flat = graph.to_flat();
+                if let Err(e) = self.store.save_graph(&flat) {
+                    warn!(error = %e, "failed to persist graph after reindex");
+                }
             }
         }
 
@@ -790,13 +804,24 @@ impl Engine {
     }
 
     /// Apply a batch of file changes to the index.
+    ///
+    /// Processes all files first (parse, chunk, embed, Tantivy commit per file),
+    /// then runs PageRank and persists the graph exactly once — regardless of
+    /// how many files changed. For N-file batches (e.g. after `git pull`) this
+    /// is N× faster than calling `reindex_file` repeatedly.
     pub fn apply_changes(&mut self, changes: &[crate::watcher::FileChange]) -> Result<()> {
         use crate::watcher::ChangeKind;
+
+        if changes.is_empty() {
+            return Ok(());
+        }
 
         for change in changes {
             match change.kind {
                 ChangeKind::Modified => {
-                    if let Err(e) = self.reindex_file(&change.path) {
+                    // skip_graph_finalize=false — accumulate edge updates but
+                    // defer PageRank until after all files are processed.
+                    if let Err(e) = self.reindex_file_impl(&change.path, false) {
                         warn!(path = %change.path.display(), error = %e, "failed to reindex");
                     }
                 }
@@ -805,6 +830,17 @@ impl Engine {
                         warn!(path = %change.path.display(), error = %e, "failed to remove");
                     }
                 }
+            }
+        }
+
+        // Single PageRank recompute for the entire batch.
+        if let Some(ref mut graph) = self.graph {
+            let scores =
+                compute_pagerank(graph, self.config.graph.damping, self.config.graph.iterations);
+            graph.apply_pagerank(&scores);
+            let flat = graph.to_flat();
+            if let Err(e) = self.store.save_graph(&flat) {
+                warn!(error = %e, "failed to persist graph after batch changes");
             }
         }
 
@@ -1167,6 +1203,9 @@ struct IndexContext<'a> {
     chunk_meta_map: &'a DashMap<u64, ChunkMeta>,
     /// Pending chunks to embed: chunk_id → content.
     pending_embeds: &'a DashMap<u64, String>,
+    /// Imports extracted during parsing, keyed by relative path.
+    /// Reused by `build_graph` to avoid re-reading/re-parsing files.
+    pending_imports: &'a DashMap<String, (Vec<RawImport>, Language)>,
 }
 
 /// Process a single file: parse → chunk → index → extract symbols.
@@ -1214,6 +1253,12 @@ fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
         ctx.symbols
             .insert(symbol_from_entity(entity, &rel_str, result.language));
     }
+
+    // Extract imports now — we already have the tree in memory, so this
+    // avoids a second read+parse pass during build_graph.
+    let raw_imports = ImportExtractor::extract(&result.tree, &source, result.language);
+    ctx.pending_imports
+        .insert(rel_str.clone(), (raw_imports, result.language));
 
     debug!(
         path = %rel_str,
@@ -1329,69 +1374,87 @@ fn walk_dir_recursive(dir: &Path, config: &IndexConfig, files: &mut Vec<PathBuf>
     Ok(())
 }
 
-/// Build a dependency graph by walking all indexed files, extracting imports,
-/// and resolving them against the known file set.
+/// Build a dependency graph from pre-extracted import lists (populated during
+/// the parallel parse phase) plus a rayon-parallel resolution pass.
+///
+/// Phase 1 (parallel): resolve each file's raw imports against the indexed
+///   file set — pure string operations, no graph mutation.
+/// Phase 2 (sequential): insert all resolved edges into the graph.
+///
+/// When `import_cache` is empty (e.g. called standalone), falls back to
+/// re-reading and re-parsing each file (old behaviour).
 fn build_graph(
     files: &[PathBuf],
     root: &Path,
     _config: &IndexConfig,
     parser: &Parser,
+    import_cache: &DashMap<String, (Vec<RawImport>, Language)>,
 ) -> CodeGraph {
-    // Collect all indexed relative paths for the resolver.
     let indexed: std::collections::HashSet<String> = files
         .iter()
-        .map(|p| {
-            let rel = p.strip_prefix(root).unwrap_or(p);
-            normalize_path(rel)
-        })
+        .map(|p| normalize_path(p.strip_prefix(root).unwrap_or(p)))
         .collect();
 
     let resolver = ImportResolver::new(indexed, root.to_path_buf());
+
+    // Phase 1: resolve imports in parallel.
+    // Each entry is (rel_str, language, Vec<(target, raw_path, target_lang)>).
+    type ResolvedFile = (String, Language, Vec<(String, String, Language)>);
+    let resolved: Vec<ResolvedFile> = files
+        .par_iter()
+        .filter_map(|abs_path| {
+            let rel_str = normalize_path(abs_path.strip_prefix(root).unwrap_or(abs_path));
+
+            let (raw_imports, language) = if let Some(entry) = import_cache.get(&rel_str) {
+                // Fast path: use imports extracted during process_file (no I/O).
+                (entry.0.clone(), entry.1)
+            } else {
+                // Fallback: re-read + re-parse (only reached when cache is empty).
+                let language = detect_language(abs_path)?;
+                let source = fs::read(abs_path)
+                    .map_err(|e| {
+                        warn!(path = %abs_path.display(), error = %e, "skipping in graph build");
+                    })
+                    .ok()?;
+                let lang_support = parser.registry().get(language)?;
+                let mut ts_parser = tree_sitter::Parser::new();
+                ts_parser.set_language(&lang_support.tree_sitter_language()).ok()?;
+                let tree = ts_parser.parse(&source, None)?;
+                (ImportExtractor::extract(&tree, &source, language), language)
+            };
+
+            let edges: Vec<(String, String, Language)> = raw_imports
+                .iter()
+                .filter_map(|raw| {
+                    resolver.resolve(raw, &rel_str).map(|target| {
+                        let tl = detect_language(std::path::Path::new(&target))
+                            .unwrap_or(language);
+                        (target, raw.path.clone(), tl)
+                    })
+                })
+                .collect();
+
+            Some((rel_str, language, edges))
+        })
+        .collect();
+
+    // Phase 2: insert into graph (sequential — petgraph::DiGraph is not Sync).
     let mut graph = CodeGraph::new();
-
-    for abs_path in files {
-        let rel_str = normalize_path(abs_path.strip_prefix(root).unwrap_or(abs_path));
-        let language = match detect_language(abs_path) {
-            Some(l) => l,
-            None => continue,
-        };
-
-        let source = match fs::read(abs_path) {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(path = %abs_path.display(), error = %e, "skipping file in graph build");
-                continue;
-            }
-        };
-
-        // Create a fresh tree_sitter::Parser (it is !Send).
-        let lang_support = match parser.registry().get(language) {
-            Some(ls) => ls,
-            None => continue,
-        };
-        let mut ts_parser = tree_sitter::Parser::new();
-        if ts_parser
-            .set_language(&lang_support.tree_sitter_language())
-            .is_err()
-        {
-            continue;
-        }
-        let tree = match ts_parser.parse(&source, None) {
-            Some(t) => t,
-            None => continue,
-        };
-
-        // Ensure the source node exists in the graph.
+    for (rel_str, language, edges) in resolved {
         graph.get_or_insert_node(&rel_str, language);
+        for (target, raw_path, target_lang) in edges {
+            graph.add_edge(&rel_str, &target, &raw_path, language, target_lang);
+        }
+    }
 
-        let raw_imports = ImportExtractor::extract(&tree, &source, language);
-        for raw in &raw_imports {
-            if let Some(target) = resolver.resolve(raw, &rel_str) {
-                let target_lang =
-                    detect_language(std::path::Path::new(&target)).unwrap_or(language);
-                graph.add_edge(&rel_str, &target, &raw.path, language, target_lang);
-            } else if !raw.is_relative {
-                graph.add_external_edge(&rel_str, &raw.path, language);
+    // Insert external edges (no resolver hit) — iterate cache for external imports.
+    // These don't affect PageRank but are tracked for completeness.
+    for entry in import_cache.iter() {
+        let rel_str = entry.key();
+        let (raw_imports, language) = entry.value();
+        for raw in raw_imports {
+            if !raw.is_relative && resolver.resolve(raw, rel_str).is_none() {
+                graph.add_external_edge(rel_str, &raw.path, *language);
             }
         }
     }
