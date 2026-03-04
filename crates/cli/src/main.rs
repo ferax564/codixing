@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use codeforge_core::{Engine, IndexConfig, RepoMapOptions, SearchQuery, Strategy};
+use codeforge_core::{Engine, IndexConfig, RepoMapOptions, SearchQuery, Strategy, SyncStats};
 
 #[derive(Parser)]
 #[command(name = "codeforge", about = "Code retrieval engine for AI agents")]
@@ -143,6 +143,15 @@ enum Command {
         dry_run: bool,
     },
 
+    /// Sync the index with current filesystem state using stored content hashes.
+    /// Re-indexes only files whose content changed since the last init/sync.
+    /// Works without git; handles any form of file drift.
+    Sync {
+        /// Project root to sync (defaults to current directory).
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+
     /// Start the REST API server.
     Serve {
         /// Host to bind to.
@@ -232,6 +241,7 @@ async fn main() -> Result<()> {
             file,
         } => cmd_usages(symbol, limit, file),
         Command::Update { path, dry_run } => cmd_update(path, dry_run),
+        Command::Sync { path } => cmd_sync(path),
         Command::Serve { host, port, path } => cmd_serve(host, port, path).await,
     }
 }
@@ -648,6 +658,26 @@ fn cmd_update(path: PathBuf, dry_run: bool) -> Result<()> {
     eprintln!(
         "\nUpdated {updated} file(s), removed {removed} file(s) in {:.2}s",
         start.elapsed().as_secs_f64()
+    );
+
+    Ok(())
+}
+
+fn cmd_sync(path: PathBuf) -> Result<()> {
+    let root = path
+        .canonicalize()
+        .with_context(|| format!("path not found: {}", path.display()))?;
+
+    let mut engine = Engine::open(&root)
+        .with_context(|| "no index found — run `codeforge init` first")?;
+
+    let start = Instant::now();
+    let SyncStats { added, modified, removed, unchanged } = engine.sync()?;
+
+    eprintln!(
+        "sync complete: {} added, {} modified, {} removed, {} unchanged ({:.2}s)",
+        added, modified, removed, unchanged,
+        start.elapsed().as_secs_f64(),
     );
 
     Ok(())

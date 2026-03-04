@@ -156,9 +156,9 @@ Core indexing and BM25 retrieval end-to-end.
 - [ ] **Persistent content-hash skip during open** — already have xxh3 hashes; `Engine::open()` should skip embedding unchanged files (currently re-embeds nothing, but re-chunks BM25 on all files if index version mismatches)
 
 **P1 — Retrieval quality**
-- [ ] **Cross-encoder reranking** — optional ONNX second-pass reranker (e.g., BGE-Reranker-v2-m3) on `thorough` strategy; measurably improves MRR at <50ms extra latency for top-20 candidates
-- [ ] **Contextual embeddings** — prepend file path + scope chain + function signature to each chunk before embedding (+35% recall on code-specific queries, per BGE paper)
-- [ ] **int8 quantization for HNSW** — `usearch` supports int8; 8× memory reduction, critical for 3M+ LoC indexes without quality loss
+- [x] **Cross-encoder reranking** — BGE-Reranker-Base ONNX reranker (`Strategy::Deep`); opt-in via `--reranker` at init time; graceful fallback to `thorough` if not loaded (Phase 4A)
+- [x] **Contextual embeddings** — file path + scope chain + signature prepended before embedding; `EmbeddingConfig.contextual_embeddings = true` by default (+35% recall) (Phase 4A)
+- [x] **int8 quantization for HNSW** — `usearch` int8 (`ScalarKind::I8`); `EmbeddingConfig.quantize = true` by default; 8× memory reduction (Phase 4A)
 
 **P2 — Scope expansion**
 - [ ] **Tier 2 language support** — Ruby, Swift, Kotlin, Scala, Zig (tree-sitter grammars exist; need language trait + import resolver implementations)

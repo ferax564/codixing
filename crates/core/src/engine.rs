@@ -50,6 +50,19 @@ pub struct IndexStats {
     pub graph_edge_count: usize,
 }
 
+/// Statistics returned by [`Engine::sync`].
+#[derive(Debug, Clone)]
+pub struct SyncStats {
+    /// Files present on disk but not yet in the index (new files).
+    pub added: usize,
+    /// Files whose content changed since the last index save.
+    pub modified: usize,
+    /// Files that were in the index but no longer exist on disk.
+    pub removed: usize,
+    /// Files that are unchanged and were skipped.
+    pub unchanged: usize,
+}
+
 /// A single regex/literal match produced by [`Engine::grep_code`].
 #[derive(Debug, Clone)]
 pub struct GrepMatch {
@@ -611,7 +624,9 @@ impl Engine {
     /// When called directly, also recomputes PageRank and persists the graph.
     /// Use `apply_changes` to batch multiple files with a single PageRank pass.
     pub fn reindex_file(&mut self, path: &Path) -> Result<()> {
-        self.reindex_file_impl(path, true)
+        self.reindex_file_impl(path, true)?;
+        self.tantivy.commit()?;
+        Ok(())
     }
 
     fn reindex_file_impl(&mut self, path: &Path, do_graph_finalize: bool) -> Result<()> {
@@ -695,7 +710,6 @@ impl Engine {
             }
         }
 
-        self.tantivy.commit()?;
         self.file_chunk_counts.insert(rel_str.clone(), chunks.len());
 
         // Update graph edges for this file using the already-parsed tree.
@@ -733,25 +747,37 @@ impl Engine {
         Ok(())
     }
 
+    /// Inner removal: all index ops except `tantivy.commit()` and graph PageRank finalization.
+    /// Called by both `remove_file()` (single-file public API) and `apply_changes()` (batch).
+    fn remove_file_inner(&mut self, abs_path: &Path, rel_str: &str) -> Result<()> {
+        self.tantivy.remove_file(rel_str)?;
+        self.symbols.remove_file(rel_str);
+        self.parser.invalidate(abs_path);
+        self.file_chunk_counts.remove(rel_str);
+
+        if let Some(ref mut vec_idx) = self.vector {
+            vec_idx.remove_file(rel_str)?;
+        }
+        self.chunk_meta.retain(|_, v| v.file_path != rel_str);
+
+        // Remove graph node + incident edges (PageRank deferred to caller).
+        if let Some(ref mut graph) = self.graph {
+            graph.remove_file(rel_str);
+        }
+
+        Ok(())
+    }
+
     /// Remove a file from the index entirely.
     pub fn remove_file(&mut self, path: &Path) -> Result<()> {
         let rel_path = path.strip_prefix(&self.config.root).unwrap_or(path);
         let rel_str = normalize_path(rel_path);
 
-        self.tantivy.remove_file(&rel_str)?;
+        self.remove_file_inner(path, &rel_str)?;
         self.tantivy.commit()?;
-        self.symbols.remove_file(&rel_str);
-        self.parser.invalidate(path);
-        self.file_chunk_counts.remove(&rel_str);
 
-        if let Some(ref mut vec_idx) = self.vector {
-            vec_idx.remove_file(&rel_str)?;
-        }
-        self.chunk_meta.retain(|_, v| v.file_path != rel_str);
-
-        // Update graph: remove node + all incident edges, recompute PageRank.
+        // Recompute PageRank + persist graph for single-file removal.
         if let Some(ref mut graph) = self.graph {
-            graph.remove_file(&rel_str);
             let scores = compute_pagerank(
                 graph,
                 self.config.graph.damping,
@@ -805,10 +831,9 @@ impl Engine {
 
     /// Apply a batch of file changes to the index.
     ///
-    /// Processes all files first (parse, chunk, embed, Tantivy commit per file),
-    /// then runs PageRank and persists the graph exactly once — regardless of
-    /// how many files changed. For N-file batches (e.g. after `git pull`) this
-    /// is N× faster than calling `reindex_file` repeatedly.
+    /// Processes all files first (parse, chunk, embed), then issues a single
+    /// Tantivy commit for the entire batch, then runs PageRank exactly once.
+    /// For N-file batches (e.g. after `git pull`) this reduces N fsyncs to 1.
     pub fn apply_changes(&mut self, changes: &[crate::watcher::FileChange]) -> Result<()> {
         use crate::watcher::ChangeKind;
 
@@ -819,19 +844,24 @@ impl Engine {
         for change in changes {
             match change.kind {
                 ChangeKind::Modified => {
-                    // skip_graph_finalize=false — accumulate edge updates but
+                    // do_graph_finalize=false — accumulate edge updates but
                     // defer PageRank until after all files are processed.
                     if let Err(e) = self.reindex_file_impl(&change.path, false) {
                         warn!(path = %change.path.display(), error = %e, "failed to reindex");
                     }
                 }
                 ChangeKind::Removed => {
-                    if let Err(e) = self.remove_file(&change.path) {
+                    let rel = change.path.strip_prefix(&self.config.root).unwrap_or(&change.path);
+                    let rel_str = normalize_path(rel);
+                    if let Err(e) = self.remove_file_inner(&change.path, &rel_str) {
                         warn!(path = %change.path.display(), error = %e, "failed to remove");
                     }
                 }
             }
         }
+
+        // Single Tantivy commit for all pending adds + deletes.
+        self.tantivy.commit()?;
 
         // Single PageRank recompute for the entire batch.
         if let Some(ref mut graph) = self.graph {
@@ -845,6 +875,81 @@ impl Engine {
         }
 
         Ok(())
+    }
+
+    /// Sync the index with the current filesystem state using stored content hashes.
+    ///
+    /// Computes xxh3 hashes for all current source files, diffs against the hashes
+    /// saved during the last `init()` or `sync()`, and calls `apply_changes()` with
+    /// only the delta — skipping unchanged files entirely.
+    ///
+    /// This works without `git` and handles any form of file drift (editor saves,
+    /// `git pull`, manual copies, etc.). For an already-current index the method
+    /// returns in milliseconds (hash scan only, no Tantivy commit).
+    pub fn sync(&mut self) -> Result<SyncStats> {
+        use std::collections::{HashMap, HashSet};
+        use crate::watcher::{ChangeKind, FileChange};
+
+        // Load stored hashes (absolute path → xxh3). Missing file → treat as empty (full re-index).
+        let old_hashes: HashMap<PathBuf, u64> = self
+            .store
+            .load_tree_hashes()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+        let current_files = walk_source_files(&self.config.root, &self.config)?;
+
+        let mut changes: Vec<FileChange> = Vec::new();
+        let mut seen: HashSet<PathBuf> = HashSet::new();
+        let mut unchanged = 0usize;
+
+        for abs_path in &current_files {
+            seen.insert(abs_path.clone());
+            let content = fs::read(abs_path)?;
+            let hash = xxhash_rust::xxh3::xxh3_64(&content);
+            match old_hashes.get(abs_path) {
+                Some(&old) if old == hash => unchanged += 1,
+                _ => changes.push(FileChange {
+                    path: abs_path.clone(),
+                    kind: ChangeKind::Modified,
+                }),
+            }
+        }
+
+        // Files that were indexed before but are gone now.
+        for old_path in old_hashes.keys() {
+            if !seen.contains(old_path) {
+                changes.push(FileChange {
+                    path: old_path.clone(),
+                    kind: ChangeKind::Removed,
+                });
+            }
+        }
+
+        let added = changes
+            .iter()
+            .filter(|c| matches!(c.kind, ChangeKind::Modified) && !old_hashes.contains_key(&c.path))
+            .count();
+        let modified = changes
+            .iter()
+            .filter(|c| matches!(c.kind, ChangeKind::Modified) && old_hashes.contains_key(&c.path))
+            .count();
+        let removed = changes
+            .iter()
+            .filter(|c| matches!(c.kind, ChangeKind::Removed))
+            .count();
+
+        info!(added, modified, removed, unchanged, "syncing index");
+
+        if !changes.is_empty() {
+            self.apply_changes(&changes)?;
+            self.save()?;
+        } else {
+            info!("index already up-to-date");
+        }
+
+        Ok(SyncStats { added, modified, removed, unchanged })
     }
 
     /// Persist current state to disk.
