@@ -17,7 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use codeforge_core::Engine;
+use codeforge_core::{EmbeddingConfig, Engine, IndexConfig};
 
 use protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
@@ -48,14 +48,35 @@ async fn main() -> Result<()> {
         .canonicalize()
         .with_context(|| format!("root path not found: {}", args.root.display()))?;
 
-    info!(root = %root.display(), "opening CodeForge index");
-
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "failed to open index at {} — run `codeforge init .` first",
-            root.display()
-        )
-    })?;
+    // Auto-init: if no .codeforge/ index exists, build a BM25-only index on the
+    // spot so `codeforge-mcp --root .` works out-of-the-box without a manual
+    // `codeforge init` step.
+    let engine = if Engine::index_exists(&root) {
+        info!(root = %root.display(), "opening existing CodeForge index");
+        Engine::open(&root).with_context(|| {
+            format!(
+                "failed to open index at {} — index directory exists but may be corrupt; \
+                 delete .codeforge/ and restart to rebuild",
+                root.display()
+            )
+        })?
+    } else {
+        info!(
+            root = %root.display(),
+            "no .codeforge/ index found — running automatic BM25-only init (no embeddings)"
+        );
+        let mut config = IndexConfig::new(&root);
+        config.embedding = EmbeddingConfig {
+            enabled: false,
+            ..EmbeddingConfig::default()
+        };
+        Engine::init(&root, config).with_context(|| {
+            format!(
+                "auto-init failed at {} — ensure the directory exists and contains source files",
+                root.display()
+            )
+        })?
+    };
 
     let engine = Arc::new(Mutex::new(engine));
 

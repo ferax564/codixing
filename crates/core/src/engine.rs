@@ -49,6 +49,25 @@ pub struct IndexStats {
     pub graph_edge_count: usize,
 }
 
+/// A single regex/literal match produced by [`Engine::grep_code`].
+#[derive(Debug, Clone)]
+pub struct GrepMatch {
+    /// Relative file path from the project root.
+    pub file_path: String,
+    /// 0-indexed line number of the matching line.
+    pub line_number: u64,
+    /// The full text of the matching line.
+    pub line: String,
+    /// Byte offset of the match start within `line`.
+    pub match_start: usize,
+    /// Byte offset of the match end within `line`.
+    pub match_end: usize,
+    /// Context lines immediately before the match (oldest first).
+    pub before: Vec<String>,
+    /// Context lines immediately after the match.
+    pub after: Vec<String>,
+}
+
 /// Top-level facade that wires together parsing, chunking, indexing,
 /// and retrieval into a single coherent API.
 pub struct Engine {
@@ -1014,6 +1033,121 @@ impl Engine {
             Some(sym.line_start as u64),
             Some(sym.line_end as u64),
         )
+    }
+
+    /// Return `true` if a `.codeforge/` index directory exists at `root`.
+    ///
+    /// Used by the MCP server to decide whether auto-init is needed.
+    pub fn index_exists(root: impl AsRef<Path>) -> bool {
+        IndexStore::exists(root.as_ref())
+    }
+
+    /// Perform a regex or literal search across all source files in the project.
+    ///
+    /// Unlike [`Engine::search`] which queries the pre-built BM25/vector index,
+    /// `grep_code` scans the raw file content — ideal for exact identifiers,
+    /// string literals, TODO comments, or any pattern requiring verbatim matching.
+    ///
+    /// - `literal`: when `true`, the pattern is treated as a plain string (all
+    ///   regex metacharacters are escaped before compilation).
+    /// - `file_glob`: optional glob pattern (e.g. `"*.rs"`, `"src/**/*.py"`) to
+    ///   restrict which files are searched.  `None` searches all indexed files.
+    /// - `context_lines`: number of surrounding lines to include (clamped to 5).
+    /// - `limit`: maximum total matches to return (default 50).
+    ///
+    /// Returns [`CodeforgeError::Index`] if the pattern fails to compile.
+    pub fn grep_code(
+        &self,
+        pattern: &str,
+        literal: bool,
+        file_glob: Option<&str>,
+        context_lines: usize,
+        limit: usize,
+    ) -> Result<Vec<GrepMatch>> {
+        use regex::Regex;
+
+        let context_lines = context_lines.min(5);
+        let limit = if limit == 0 { 50 } else { limit };
+
+        let compiled_pattern = if literal {
+            regex::escape(pattern)
+        } else {
+            pattern.to_string()
+        };
+        let re = Regex::new(&compiled_pattern)
+            .map_err(|e| CodeforgeError::Index(format!("grep pattern error: {e}")))?;
+
+        // Build a glob matcher if file_glob is provided.
+        let glob_pat: Option<glob::Pattern> = match file_glob {
+            Some(g) => Some(
+                glob::Pattern::new(g)
+                    .map_err(|e| CodeforgeError::Index(format!("invalid file glob: {e}")))?,
+            ),
+            None => None,
+        };
+
+        let mut matches: Vec<GrepMatch> = Vec::new();
+
+        // Iterate over the already-indexed file set (relative paths).
+        let mut rel_paths: Vec<String> = self.file_chunk_counts.keys().cloned().collect();
+        rel_paths.sort_unstable(); // deterministic ordering
+
+        'files: for rel_path in &rel_paths {
+            // Apply glob filter if present.
+            if let Some(ref pat) = glob_pat {
+                // Match against both the full rel_path and just the filename.
+                let filename = std::path::Path::new(rel_path)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("");
+                if !pat.matches(rel_path) && !pat.matches(filename) {
+                    continue;
+                }
+            }
+
+            let abs = self.config.root.join(rel_path);
+            let content = match fs::read_to_string(&abs) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(file = %rel_path, error = %e, "grep_code: skipping unreadable file");
+                    continue;
+                }
+            };
+
+            let lines: Vec<&str> = content.lines().collect();
+            let n = lines.len();
+
+            for (i, line) in lines.iter().enumerate() {
+                if let Some(m) = re.find(line) {
+                    let before: Vec<String> = lines[i.saturating_sub(context_lines)..i]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
+                    let after_start = (i + 1).min(n);
+                    let after_end = (i + 1 + context_lines).min(n);
+                    let after: Vec<String> = lines[after_start..after_end]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
+
+                    matches.push(GrepMatch {
+                        file_path: rel_path.clone(),
+                        line_number: i as u64,
+                        line: line.to_string(),
+                        match_start: m.start(),
+                        match_end: m.end(),
+                        before,
+                        after,
+                    });
+
+                    if matches.len() >= limit {
+                        break 'files;
+                    }
+                }
+            }
+        }
+
+        Ok(matches)
     }
 }
 
