@@ -3,19 +3,51 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::embeddings::EmbeddingBackend;
+/// Configuration for the dependency graph module.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GraphConfig {
+    /// Whether to build and maintain a dependency graph.
+    #[serde(default = "default_graph_enabled")]
+    pub enabled: bool,
 
-/// Which vector index backend to use for semantic search.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum VectorBackend {
-    /// Choose automatically: HNSW for >= 10 000 chunks, brute-force otherwise.
-    #[default]
-    Auto,
-    /// Exact cosine-similarity scan. Simple, correct; suitable up to ~100K chunks.
-    BruteForce,
-    /// Approximate nearest-neighbor via HNSW. Sub-linear query time for large corpora.
-    Hnsw,
+    /// Multiplicative PageRank boost weight applied to search results.
+    #[serde(default = "default_graph_boost_weight")]
+    pub boost_weight: f32,
+
+    /// PageRank damping factor (standard value: 0.85).
+    #[serde(default = "default_graph_damping")]
+    pub damping: f32,
+
+    /// Maximum PageRank power-iteration steps.
+    #[serde(default = "default_graph_iterations")]
+    pub iterations: usize,
+}
+
+impl Default for GraphConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_graph_enabled(),
+            boost_weight: default_graph_boost_weight(),
+            damping: default_graph_damping(),
+            iterations: default_graph_iterations(),
+        }
+    }
+}
+
+fn default_graph_enabled() -> bool {
+    true
+}
+
+fn default_graph_boost_weight() -> f32 {
+    0.3
+}
+
+fn default_graph_damping() -> f32 {
+    0.85
+}
+
+fn default_graph_iterations() -> usize {
+    20
 }
 
 /// Configuration for the CodeForge index.
@@ -36,13 +68,95 @@ pub struct IndexConfig {
     #[serde(default)]
     pub chunk: ChunkConfig,
 
-    /// Vector index backend for semantic search.
+    /// Embedding and vector index configuration.
     #[serde(default)]
-    pub vector_backend: VectorBackend,
+    pub embedding: EmbeddingConfig,
 
-    /// Embedding backend to use for vector search.
+    /// Dependency graph configuration.
     #[serde(default)]
-    pub embedding_backend: EmbeddingBackend,
+    pub graph: GraphConfig,
+}
+
+/// Which embedding model to use for vector search.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum EmbeddingModel {
+    /// BGE Small English v1.5 — 384 dimensions, kept for backwards compat / fast machines.
+    BgeSmallEn,
+    /// BGE Base English v1.5 — 768 dimensions, higher quality (new default).
+    #[default]
+    BgeBaseEn,
+}
+
+/// Configuration for the vector embedding pipeline.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EmbeddingConfig {
+    /// Whether to generate vector embeddings during indexing.
+    #[serde(default = "default_embedding_enabled")]
+    pub enabled: bool,
+
+    /// Which embedding model to use.
+    #[serde(default)]
+    pub model: EmbeddingModel,
+
+    /// Reciprocal Rank Fusion constant (higher = more weight on lower ranks).
+    #[serde(default = "default_rrf_k")]
+    pub rrf_k: f32,
+
+    /// MMR lambda: 1.0 = pure relevance, 0.0 = pure diversity.
+    #[serde(default = "default_mmr_lambda")]
+    pub mmr_lambda: f32,
+
+    /// Prepend file path, language, and scope chain to each chunk before
+    /// embedding.  Mirrors Sourcegraph Cody's "contextual embeddings" technique
+    /// which reduces retrieval failure rate by ~35%.  Enabled by default.
+    #[serde(default = "default_contextual_embeddings")]
+    pub contextual_embeddings: bool,
+
+    /// Store HNSW vectors as int8 instead of float32.  Reduces memory by 8×
+    /// (critical for 3 M+ LoC repos) with negligible recall loss.
+    #[serde(default = "default_quantize")]
+    pub quantize: bool,
+
+    /// Load the BGE-Reranker-Base cross-encoder model to enable the `deep`
+    /// retrieval strategy.  Disabled by default because the model is ~270 MB
+    /// and takes ~2 s to load.  Enable with `--reranker` on `codeforge init`
+    /// or by setting this field in config.
+    #[serde(default)]
+    pub reranker_enabled: bool,
+}
+
+impl Default for EmbeddingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_embedding_enabled(),
+            model: EmbeddingModel::default(),
+            rrf_k: default_rrf_k(),
+            mmr_lambda: default_mmr_lambda(),
+            contextual_embeddings: default_contextual_embeddings(),
+            quantize: default_quantize(),
+            reranker_enabled: false,
+        }
+    }
+}
+
+fn default_embedding_enabled() -> bool {
+    true
+}
+
+fn default_rrf_k() -> f32 {
+    60.0
+}
+
+fn default_mmr_lambda() -> f32 {
+    0.7
+}
+
+fn default_contextual_embeddings() -> bool {
+    true
+}
+
+fn default_quantize() -> bool {
+    true
 }
 
 /// Controls the cAST chunking algorithm parameters.
@@ -96,8 +210,8 @@ impl IndexConfig {
             languages: HashSet::new(),
             exclude_patterns: default_exclude_patterns(),
             chunk: ChunkConfig::default(),
-            vector_backend: VectorBackend::default(),
-            embedding_backend: EmbeddingBackend::default(),
+            embedding: EmbeddingConfig::default(),
+            graph: GraphConfig::default(),
         }
     }
 }
@@ -116,22 +230,10 @@ mod tests {
 
     #[test]
     fn bitcode_round_trip() {
-        // EmbeddingBackend uses serde internally-tagged representation
-        // (`#[serde(tag = "type")]`) which requires `deserialize_any`.
-        // bitcode does not support `deserialize_any`, so IndexConfig
-        // cannot round-trip through bitcode.  IndexConfig is always
-        // persisted as JSON (see persistence::save_config / load_config),
-        // so this is not a production concern.
-        //
-        // Verify that bitcode rejects the round-trip (the error occurs
-        // during deserialization).
         let config = IndexConfig::new("/tmp/project");
         let bytes = bitcode::serialize(&config).unwrap();
-        let result: std::result::Result<IndexConfig, _> = bitcode::deserialize(&bytes);
-        assert!(
-            result.is_err(),
-            "bitcode should reject internally-tagged enums during deserialization"
-        );
+        let decoded: IndexConfig = bitcode::deserialize(&bytes).unwrap();
+        assert_eq!(config, decoded);
     }
 
     #[test]

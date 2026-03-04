@@ -100,7 +100,7 @@ impl SymbolTable {
             if entry.key().to_lowercase().contains(&pattern_lower) {
                 for sym in entry.value() {
                     if let Some(f) = file {
-                        if sym.file_path == f {
+                        if sym.file_path.contains(f) {
                             results.push(sym.clone());
                         }
                     } else {

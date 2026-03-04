@@ -1,31 +1,36 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 
+use dashmap::DashMap;
 use rayon::prelude::*;
 use tracing::{debug, info, warn};
 
 use crate::chunker::Chunker;
 use crate::chunker::cast::CastChunker;
-use crate::config::{IndexConfig, VectorBackend};
-use crate::embeddings::{Embedder, EmbeddingBackend, MockEmbedder, http::HttpEmbedder};
+use crate::config::IndexConfig;
+use crate::embedder::Embedder;
 use crate::error::{CodeforgeError, Result};
-use crate::graph::CodeGraph;
-use crate::graph::extract::{extract_definitions, extract_references};
-use crate::graph::persistence::{load_graph, save_graph};
-use crate::index::trigram::TrigramIndex;
-use crate::index::vector::{BruteForceVectorIndex, VectorIndex};
-use crate::index::{HnswVectorIndex, TantivyIndex};
+use crate::formatter;
+use crate::graph::{
+    CodeGraph, GraphStats, ImportExtractor, ImportResolver, RepoMapOptions, compute_pagerank,
+    generate_repo_map,
+};
+use crate::index::TantivyIndex;
 use crate::language::{Language, SemanticEntity, detect_language};
 use crate::parser::Parser;
 use crate::persistence::{IndexMeta, IndexStore};
+use crate::reranker::Reranker;
 use crate::retriever::bm25::BM25Retriever;
 use crate::retriever::hybrid::HybridRetriever;
-use crate::retriever::{Retriever, SearchQuery, SearchResult};
+use crate::retriever::mmr::mmr_select;
+use crate::retriever::{ChunkMeta, Retriever, SearchQuery, SearchResult, Strategy};
 use crate::symbols::persistence::{deserialize_symbols, serialize_symbols};
 use crate::symbols::{Symbol, SymbolTable};
+use crate::vector::VectorIndex;
 
 /// Summary statistics about the index.
 #[derive(Debug, Clone)]
@@ -36,74 +41,12 @@ pub struct IndexStats {
     pub chunk_count: usize,
     /// Number of unique symbol names.
     pub symbol_count: usize,
-}
-
-/// Holds a type-erased vector index that can be either brute-force or HNSW.
-enum DynVectorIndex {
-    BruteForce(BruteForceVectorIndex),
-    Hnsw(HnswVectorIndex),
-}
-
-impl DynVectorIndex {
-    fn add(&mut self, chunk_id: u64, vector: Vec<f32>) -> Result<()> {
-        match self {
-            Self::BruteForce(idx) => idx.add(chunk_id, vector),
-            Self::Hnsw(idx) => idx.add(chunk_id, vector),
-        }
-    }
-
-    fn len(&self) -> usize {
-        match self {
-            Self::BruteForce(idx) => idx.len(),
-            Self::Hnsw(idx) => idx.len(),
-        }
-    }
-
-    fn save_binary(&self, path: &std::path::Path) -> Result<()> {
-        match self {
-            Self::BruteForce(idx) => idx.save_binary(path),
-            Self::Hnsw(idx) => idx.save_binary(path),
-        }
-    }
-}
-
-/// Create an embedder from the configured backend.
-fn create_embedder(backend: &EmbeddingBackend) -> Result<Box<dyn Embedder>> {
-    match backend {
-        EmbeddingBackend::Mock => Ok(Box::new(MockEmbedder::new(backend.dimension()))),
-        EmbeddingBackend::Onnx => {
-            #[cfg(feature = "vector")]
-            {
-                use crate::embeddings::OnnxEmbedder;
-                // OnnxEmbedder requires a model directory — use CODEFORGE_MODEL_DIR
-                // env var or fall back to a standard location.
-                let model_dir = std::env::var("CODEFORGE_MODEL_DIR")
-                    .unwrap_or_else(|_| "models/minilm".to_string());
-                let embedder = OnnxEmbedder::load(std::path::Path::new(&model_dir))?;
-                Ok(Box::new(embedder))
-            }
-            #[cfg(not(feature = "vector"))]
-            {
-                Err(CodeforgeError::Config(
-                    "ONNX embedding backend requires the 'vector' feature to be enabled"
-                        .to_string(),
-                ))
-            }
-        }
-        EmbeddingBackend::External {
-            url,
-            model,
-            dimension,
-            api_key,
-            batch_size,
-        } => Ok(Box::new(HttpEmbedder::new(
-            url,
-            model,
-            *dimension,
-            api_key.clone(),
-            batch_size.unwrap_or(32),
-        ))),
-    }
+    /// Number of vectors in the HNSW index.
+    pub vector_count: usize,
+    /// Number of nodes in the dependency graph (0 if graph not built).
+    pub graph_node_count: usize,
+    /// Number of edges in the dependency graph (0 if graph not built).
+    pub graph_edge_count: usize,
 }
 
 /// Top-level facade that wires together parsing, chunking, indexing,
@@ -116,16 +59,16 @@ pub struct Engine {
     symbols: SymbolTable,
     /// Per-file chunk counts, used for stats.
     file_chunk_counts: HashMap<String, usize>,
-    /// Lazily-built code graph.
+    /// Optional fastembed model for vector embeddings.
+    embedder: Option<Arc<Embedder>>,
+    /// Optional usearch HNSW vector index.
+    vector: Option<VectorIndex>,
+    /// Chunk metadata hydration table for vector results.
+    chunk_meta: DashMap<u64, ChunkMeta>,
+    /// Optional code dependency graph with PageRank scores.
     graph: Option<CodeGraph>,
-    /// Vector index for semantic search (populated during init or open).
-    vector_index: Option<DynVectorIndex>,
-    /// Embedding model (None when vector features unavailable).
-    embedder: Option<Box<dyn Embedder>>,
-    /// Trigram index for fast exact substring search (short queries).
-    trigram_index: TrigramIndex,
-    /// Cached PageRank file scores to avoid recomputing per query.
-    cached_pagerank: Option<HashMap<String, f32>>,
+    /// Optional cross-encoder reranker (BGE-Reranker-Base) for the `deep` strategy.
+    reranker: Option<Arc<Reranker>>,
 }
 
 impl Engine {
@@ -133,8 +76,8 @@ impl Engine {
     ///
     /// Walks the directory tree, parses all supported source files in parallel
     /// using rayon, chunks them with the cAST algorithm, indexes chunks in
-    /// Tantivy, and populates the symbol table. All state is persisted to the
-    /// `.codeforge/` directory.
+    /// Tantivy, optionally embeds them into the HNSW index, and populates the
+    /// symbol table. All state is persisted to the `.codeforge/` directory.
     pub fn init(root: impl AsRef<Path>, config: IndexConfig) -> Result<Self> {
         let root = root
             .as_ref()
@@ -146,11 +89,40 @@ impl Engine {
         let parser = Parser::new();
         let symbols = SymbolTable::new();
 
+        // Initialise the embedder (if enabled).
+        let embedder: Option<Arc<Embedder>> = if config.embedding.enabled {
+            match Embedder::new(&config.embedding.model) {
+                Ok(e) => {
+                    info!(dims = e.dims, "embedding model loaded");
+                    Some(Arc::new(e))
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to load embedding model; running BM25-only");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let dims = embedder.as_ref().map(|e| e.dims).unwrap_or(0);
+        let mut vector: Option<VectorIndex> = if embedder.is_some() {
+            Some(VectorIndex::new(dims, config.embedding.quantize)?)
+        } else {
+            None
+        };
+
         let files = walk_source_files(&root, &config)?;
         info!(file_count = files.len(), "discovered source files");
 
         let chunk_count = AtomicUsize::new(0);
-        let file_chunk_map = dashmap::DashMap::<String, usize>::new();
+        let file_chunk_map = DashMap::<String, usize>::new();
+        let chunk_meta_map = DashMap::<u64, ChunkMeta>::new();
+
+        // Collect embeddings per file for later batch insertion.
+        // We process files in parallel for parse/chunk/index, but embedding
+        // batch is collected and inserted after the parallel phase.
+        let pending_embeds: DashMap<u64, String> = DashMap::new(); // chunk_id → content
 
         let ctx = IndexContext {
             root: &root,
@@ -160,9 +132,11 @@ impl Engine {
             symbols: &symbols,
             chunk_count: &chunk_count,
             file_chunk_map: &file_chunk_map,
+            chunk_meta_map: &chunk_meta_map,
+            pending_embeds: &pending_embeds,
         };
 
-        // Process files in parallel: parse → chunk → index.
+        // Process files in parallel: parse → chunk → index → extract symbols.
         files.par_iter().for_each(|path| {
             if let Err(e) = process_file(path, &ctx) {
                 warn!(path = %path.display(), error = %e, "skipping file");
@@ -171,11 +145,48 @@ impl Engine {
 
         tantivy.commit()?;
 
+        // Batch-embed all chunks if the embedder is available.
+        if let Some(emb) = &embedder {
+            if let Some(vec_idx) = &mut vector {
+                embed_and_index_chunks(
+                    &pending_embeds,
+                    &chunk_meta_map,
+                    emb,
+                    vec_idx,
+                    config.embedding.contextual_embeddings,
+                )?;
+            }
+        }
+
         let total_chunks = chunk_count.load(Ordering::Relaxed);
         let total_symbols = symbols.len();
+        let vector_count = vector.as_ref().map(|v| v.len()).unwrap_or(0);
 
-        // Convert DashMap to HashMap.
+        // Convert DashMaps to owned types.
         let file_chunk_counts: HashMap<String, usize> = file_chunk_map.into_iter().collect();
+
+        // Build dependency graph.
+        let graph = if config.graph.enabled {
+            let g = build_graph(&files, &root, &config, &parser);
+            let scores = compute_pagerank(&g, config.graph.damping, config.graph.iterations);
+            let mut g = g;
+            g.apply_pagerank(&scores);
+            let flat = g.to_flat();
+            if let Err(e) = store.save_graph(&flat) {
+                warn!(error = %e, "failed to persist graph");
+            }
+            Some(g)
+        } else {
+            None
+        };
+
+        let (graph_nodes, graph_edges) = graph
+            .as_ref()
+            .map(|g| {
+                let s = g.stats();
+                (s.node_count, s.edge_count)
+            })
+            .unwrap_or((0, 0));
 
         // Persist everything.
         let sym_bytes = serialize_symbols(&symbols)?;
@@ -184,62 +195,52 @@ impl Engine {
         let hashes: Vec<(PathBuf, u64)> = parser.cache().content_hashes().into_iter().collect();
         store.save_tree_hashes(&hashes)?;
 
-        let meta = IndexMeta {
-            version: "0.1.0".to_string(),
+        // Persist chunk_meta.
+        let meta_pairs: Vec<(u64, ChunkMeta)> = chunk_meta_map
+            .iter()
+            .map(|e| (*e.key(), e.value().clone()))
+            .collect();
+        let meta_bytes = bitcode::serialize(&meta_pairs).map_err(|e| {
+            CodeforgeError::Serialization(format!("failed to serialize chunk_meta: {e}"))
+        })?;
+        store.save_chunk_meta_bytes(&meta_bytes)?;
+
+        // Persist vector index.
+        if let Some(ref vec_idx) = vector {
+            vec_idx.save(&store.vector_index_path(), &store.file_chunks_path())?;
+        }
+
+        let idx_meta = IndexMeta {
+            version: "0.3.0".to_string(),
             file_count: files.len(),
             chunk_count: total_chunks,
             symbol_count: total_symbols,
             last_indexed: unix_timestamp_string(),
         };
-        store.save_meta(&meta)?;
-
-        // Build vector index using the configured embedding backend.
-        let embedder: Box<dyn Embedder> = create_embedder(&config.embedding_backend)?;
-        // Switch to HNSW at 2,000 chunks (~400 files) for O(log N) search.
-        let chunk_threshold = 2_000;
-        let use_hnsw = match &config.vector_backend {
-            VectorBackend::Hnsw => true,
-            VectorBackend::BruteForce => false,
-            VectorBackend::Auto => total_chunks >= chunk_threshold,
-        };
-
-        let mut vector_index: DynVectorIndex = if use_hnsw {
-            DynVectorIndex::Hnsw(HnswVectorIndex::new(embedder.dimension()))
-        } else {
-            DynVectorIndex::BruteForce(BruteForceVectorIndex::new(embedder.dimension()))
-        };
-
-        // Batch-embed all indexed chunks into the vector index.
-        // We read the tantivy index to get chunk IDs and content.
-        let all_chunks = tantivy.all_chunk_ids_and_content()?;
-        if !all_chunks.is_empty() {
-            let texts: Vec<&str> = all_chunks.iter().map(|(_, c)| c.as_str()).collect();
-            let embeddings = embedder.embed_batch(&texts)?;
-            for ((chunk_id, _), embedding) in all_chunks.iter().zip(embeddings) {
-                vector_index.add(*chunk_id, embedding)?;
-            }
-        }
-
-        // Persist vector index.
-        vector_index.save_binary(&store.vector_index_path())?;
-
-        // Build trigram index from the same chunks.
-        let mut trigram_index = TrigramIndex::new();
-        for (chunk_id, content) in &all_chunks {
-            trigram_index.add(*chunk_id, content);
-        }
-
-        // Persist trigram index.
-        trigram_index.save_binary(&store.trigram_index_path())?;
+        store.save_meta(&idx_meta)?;
 
         info!(
             files = files.len(),
             chunks = total_chunks,
             symbols = total_symbols,
-            vectors = vector_index.len(),
-            trigrams = trigram_index.len(),
+            vectors = vector_count,
+            graph_nodes,
+            graph_edges,
             "index initialized"
         );
+
+        // Load reranker if requested (opt-in: model is ~270 MB).
+        let reranker = if config.embedding.reranker_enabled {
+            match Reranker::new() {
+                Ok(r) => Some(Arc::new(r)),
+                Err(e) => {
+                    warn!(error = %e, "failed to load reranker; deep strategy will fall back to thorough");
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         Ok(Self {
             config,
@@ -248,17 +249,18 @@ impl Engine {
             tantivy,
             symbols,
             file_chunk_counts,
-            graph: None,
-            vector_index: Some(vector_index),
-            embedder: Some(embedder),
-            trigram_index,
-            cached_pagerank: None,
+            embedder,
+            vector,
+            chunk_meta: chunk_meta_map,
+            graph,
+            reranker,
         })
     }
 
     /// Open an existing index from the `.codeforge/` directory.
     ///
-    /// Restores the Tantivy index, symbol table, and tree hashes from disk.
+    /// Restores the Tantivy index, symbol table, chunk metadata, and optional
+    /// vector index from disk.
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = root
             .as_ref()
@@ -279,96 +281,95 @@ impl Engine {
 
         let parser = Parser::new();
         let meta = store.load_meta()?;
-        let file_chunk_counts = HashMap::new(); // Not persisted; rebuilt on reindex.
 
-        // Load persisted graph if available.
-        let graph = if store.graph_path().exists() {
-            match load_graph(&store.graph_path()) {
-                Ok(g) => {
-                    info!(
-                        nodes = g.node_count(),
-                        edges = g.edge_count(),
-                        "loaded code graph"
-                    );
-                    Some(g)
+        // Restore chunk_meta.
+        let chunk_meta: DashMap<u64, ChunkMeta> = if store.chunk_meta_path().exists() {
+            let bytes = store.load_chunk_meta_bytes()?;
+            let pairs: Vec<(u64, ChunkMeta)> = bitcode::deserialize(&bytes).map_err(|e| {
+                CodeforgeError::Serialization(format!("failed to deserialize chunk_meta: {e}"))
+            })?;
+            let map = DashMap::new();
+            for (k, v) in pairs {
+                map.insert(k, v);
+            }
+            map
+        } else {
+            DashMap::new()
+        };
+
+        // Rebuild file_chunk_counts from chunk_meta (derived view, not separately persisted).
+        let mut file_chunk_counts: HashMap<String, usize> = HashMap::new();
+        for entry in chunk_meta.iter() {
+            *file_chunk_counts
+                .entry(entry.value().file_path.clone())
+                .or_insert(0) += 1;
+        }
+
+        // Restore vector index if it exists.
+        let (embedder, vector) = if config.embedding.enabled
+            && store.vector_index_path().exists()
+            && store.file_chunks_path().exists()
+        {
+            match Embedder::new(&config.embedding.model) {
+                Ok(e) => {
+                    let dims = e.dims;
+                    let vec_idx = VectorIndex::load(
+                        &store.vector_index_path(),
+                        &store.file_chunks_path(),
+                        dims,
+                        config.embedding.quantize,
+                    )?;
+                    (Some(Arc::new(e)), Some(vec_idx))
                 }
                 Err(e) => {
-                    warn!(error = %e, "failed to load code graph, skipping");
+                    warn!(error = %e, "failed to load embedding model; running BM25-only");
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        };
+
+        // Restore graph.
+        let graph = match store.load_graph() {
+            Ok(Some(data)) => Some(CodeGraph::from_flat(data)),
+            Ok(None) => None,
+            Err(e) => {
+                warn!(error = %e, "failed to load graph; running without graph intelligence");
+                None
+            }
+        };
+
+        let (graph_nodes, graph_edges) = graph
+            .as_ref()
+            .map(|g| {
+                let s = g.stats();
+                (s.node_count, s.edge_count)
+            })
+            .unwrap_or((0, 0));
+
+        info!(
+            files = meta.file_count,
+            chunks = meta.chunk_count,
+            symbols = meta.symbol_count,
+            vectors = vector.as_ref().map(|v| v.len()).unwrap_or(0),
+            graph_nodes,
+            graph_edges,
+            "index opened"
+        );
+
+        // Load reranker if requested.
+        let reranker = if config.embedding.reranker_enabled {
+            match Reranker::new() {
+                Ok(r) => Some(Arc::new(r)),
+                Err(e) => {
+                    warn!(error = %e, "failed to load reranker; deep strategy will fall back to thorough");
                     None
                 }
             }
         } else {
             None
         };
-
-        // Load vector index if persisted.
-        let embedder: Box<dyn Embedder> = create_embedder(&config.embedding_backend)?;
-        let vector_index = if store.vector_index_path().exists() {
-            let use_hnsw = match &config.vector_backend {
-                VectorBackend::Hnsw => true,
-                VectorBackend::BruteForce => false,
-                VectorBackend::Auto => meta.chunk_count >= 2_000,
-            };
-            if use_hnsw {
-                match HnswVectorIndex::load_binary(&store.vector_index_path()) {
-                    Ok(idx) => {
-                        info!(vectors = idx.len(), "loaded HNSW vector index");
-                        Some(DynVectorIndex::Hnsw(idx))
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "failed to load HNSW vector index, skipping");
-                        None
-                    }
-                }
-            } else {
-                match BruteForceVectorIndex::load_binary(&store.vector_index_path()) {
-                    Ok(idx) => {
-                        info!(vectors = idx.len(), "loaded brute-force vector index");
-                        Some(DynVectorIndex::BruteForce(idx))
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "failed to load brute-force vector index, skipping");
-                        None
-                    }
-                }
-            }
-        } else {
-            None
-        };
-
-        // Load persisted trigram index, falling back to rebuild from Tantivy.
-        let trigram_index = if store.trigram_index_path().exists() {
-            match TrigramIndex::load_binary(&store.trigram_index_path()) {
-                Ok(idx) => {
-                    info!(chunks = idx.len(), "loaded trigram index");
-                    idx
-                }
-                Err(e) => {
-                    warn!(error = %e, "failed to load trigram index, rebuilding");
-                    let all_chunks = tantivy.all_chunk_ids_and_content()?;
-                    let mut idx = TrigramIndex::new();
-                    for (chunk_id, content) in &all_chunks {
-                        idx.add(*chunk_id, content);
-                    }
-                    idx
-                }
-            }
-        } else {
-            let all_chunks = tantivy.all_chunk_ids_and_content()?;
-            let mut idx = TrigramIndex::new();
-            for (chunk_id, content) in &all_chunks {
-                idx.add(*chunk_id, content);
-            }
-            idx
-        };
-
-        info!(
-            files = meta.file_count,
-            chunks = meta.chunk_count,
-            symbols = meta.symbol_count,
-            trigrams = trigram_index.len(),
-            "index opened"
-        );
 
         Ok(Self {
             config,
@@ -377,178 +378,199 @@ impl Engine {
             tantivy,
             symbols,
             file_chunk_counts,
+            embedder,
+            vector,
+            chunk_meta,
             graph,
-            vector_index,
-            embedder: Some(embedder),
-            trigram_index,
-            cached_pagerank: None,
+            reranker,
         })
     }
 
-    /// Search the index using BM25 ranking.
+    /// Search the index using the strategy specified in `query`.
+    ///
+    /// - `Instant` → BM25 only
+    /// - `Fast`    → BM25 + vector + RRF fusion (falls back to BM25 if no embedder)
+    /// - `Thorough` → hybrid + MMR deduplication
     pub fn search(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
-        let retriever = BM25Retriever::new(&self.tantivy);
-        retriever.search(&query)
+        match query.strategy {
+            Strategy::Instant => {
+                let retriever = BM25Retriever::new(&self.tantivy);
+                retriever.search(&query)
+                // NOTE: Instant is NOT graph-boosted (speed-first path).
+            }
+            Strategy::Fast => {
+                let mut results = if let (Some(emb), Some(vec_idx)) = (&self.embedder, &self.vector)
+                {
+                    let retriever = HybridRetriever::new(
+                        &self.tantivy,
+                        Arc::clone(emb),
+                        vec_idx,
+                        &self.chunk_meta,
+                        self.config.embedding.rrf_k,
+                    );
+                    retriever.search(&query)?
+                } else {
+                    debug!("no embedder available; falling back to BM25 for Fast strategy");
+                    BM25Retriever::new(&self.tantivy).search(&query)?
+                };
+                self.apply_graph_boost(&mut results, self.config.graph.boost_weight);
+                Ok(results)
+            }
+            Strategy::Explore => self.search_explore(query),
+            Strategy::Thorough => {
+                let mut results = if let (Some(emb), Some(vec_idx)) = (&self.embedder, &self.vector)
+                {
+                    let hybrid = HybridRetriever::new(
+                        &self.tantivy,
+                        Arc::clone(emb),
+                        vec_idx,
+                        &self.chunk_meta,
+                        self.config.embedding.rrf_k,
+                    );
+                    let fetch_query = SearchQuery {
+                        limit: query.limit * 3,
+                        ..query.clone()
+                    };
+                    let candidates = hybrid.search(&fetch_query)?;
+
+                    if candidates.is_empty() {
+                        return Ok(Vec::new());
+                    }
+
+                    let (results_with_meta, embeddings): (Vec<SearchResult>, Vec<Vec<f32>>) =
+                        candidates
+                            .into_iter()
+                            .filter_map(|r| {
+                                let emb_vec = emb.embed_one(&r.content).ok()?;
+                                Some((r, emb_vec))
+                            })
+                            .unzip();
+
+                    let query_vec = emb.embed_one(&query.query)?;
+                    mmr_select(
+                        results_with_meta,
+                        &query_vec,
+                        &embeddings,
+                        self.config.embedding.mmr_lambda,
+                        query.limit,
+                    )
+                } else {
+                    debug!("no embedder available; falling back to BM25 for Thorough strategy");
+                    BM25Retriever::new(&self.tantivy).search(&query)?
+                };
+                self.apply_graph_boost(&mut results, self.config.graph.boost_weight);
+                Ok(results)
+            }
+            Strategy::Deep => self.search_deep(query),
+        }
     }
 
-    /// Search using hybrid BM25 + vector retrieval with RRF fusion.
+    /// Graph-expanded search (RepoHyper "Search-then-Expand" pattern).
     ///
-    /// Falls back to BM25-only search if no vector index or embedder is
-    /// available. For short queries (< 10 characters), the trigram index
-    /// is consulted first to provide fast exact substring candidates that
-    /// are merged additively with the hybrid results.
-    pub fn hybrid_search(&mut self, query: SearchQuery) -> Result<Vec<SearchResult>> {
-        let (Some(vi), Some(embedder)) = (&self.vector_index, &self.embedder) else {
-            return self.search(query);
+    /// Phase 1: broad BM25 retrieval identifies anchor files.
+    /// Phase 2: import graph expands anchor set to direct callers/callees.
+    /// Phase 3: each newly-discovered neighbour file contributes its best
+    ///          BM25 chunk, scored by PageRank to penalise low-importance files.
+    ///
+    /// This surfaces transitively-relevant code that a single BM25 pass misses
+    /// — especially useful on 3 M+ LoC codebases where related logic is spread
+    /// across many files connected only via import chains.
+    fn search_explore(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
+        use std::collections::HashSet;
+
+        let bm25 = BM25Retriever::new(&self.tantivy);
+
+        // Phase 1 — broad BM25 over-fetch.
+        let wide_q = SearchQuery {
+            limit: query.limit * 3,
+            strategy: Strategy::Instant,
+            ..query.clone()
         };
+        let mut results = bm25.search(&wide_q)?;
+        self.apply_graph_boost(&mut results, self.config.graph.boost_weight);
 
-        // For short queries (likely symbol/identifier lookups), try the
-        // trigram index FIRST as a fast pre-filter. If trigram produces
-        // enough exact substring matches, return those directly without
-        // running the full hybrid pipeline.
-        const TRIGRAM_QUERY_THRESHOLD: usize = 10;
-        if query.query.len() < TRIGRAM_QUERY_THRESHOLD && query.query.len() >= 3 {
-            let trigram_matches = self.trigram_index.search(&query.query);
-            let exact_count = trigram_matches.len();
-            if exact_count >= query.limit {
-                // Trigram has enough results -- convert to SearchResults
-                // directly by looking up metadata from Tantivy.
-                let chunk_ids: std::collections::HashSet<u64> =
-                    trigram_matches.iter().take(query.limit * 2).map(|m| m.chunk_id).collect();
-                if let Ok(docs) = self.tantivy.lookup_chunks_by_ids(&chunk_ids) {
-                    let fields = self.tantivy.fields();
-                    let mut results: Vec<SearchResult> = Vec::new();
-                    for doc in docs {
-                        let chunk_id = doc
-                            .get_first(fields.chunk_id)
-                            .and_then(|v| tantivy::schema::Value::as_str(&v))
-                            .unwrap_or("")
-                            .to_string();
-                        let file_path = doc
-                            .get_first(fields.file_path)
-                            .and_then(|v| tantivy::schema::Value::as_str(&v))
-                            .unwrap_or("")
-                            .to_string();
-                        let language = doc
-                            .get_first(fields.language)
-                            .and_then(|v| tantivy::schema::Value::as_str(&v))
-                            .unwrap_or("")
-                            .to_string();
-                        let content = doc
-                            .get_first(fields.content)
-                            .and_then(|v| tantivy::schema::Value::as_str(&v))
-                            .unwrap_or("")
-                            .to_string();
-                        let signature = doc
-                            .get_first(fields.signature)
-                            .and_then(|v| tantivy::schema::Value::as_str(&v))
-                            .unwrap_or("")
-                            .to_string();
-                        let line_start = doc
-                            .get_first(fields.line_start)
-                            .and_then(|v| tantivy::schema::Value::as_u64(&v))
-                            .unwrap_or(0);
-                        let line_end = doc
-                            .get_first(fields.line_end)
-                            .and_then(|v| tantivy::schema::Value::as_u64(&v))
-                            .unwrap_or(0);
+        // Phase 2 — expand via import graph.
+        if let Some(ref graph) = self.graph {
+            // Anchor = files in the top-limit initial results.
+            let anchor_files: HashSet<String> = results
+                .iter()
+                .take(query.limit)
+                .map(|r| r.file_path.clone())
+                .collect();
 
-                        if let Some(ref filter) = query.file_filter {
-                            if !file_path.contains(filter) {
-                                continue;
-                            }
-                        }
+            // Already-covered = all files in the full result set.
+            let covered_files: HashSet<String> =
+                results.iter().map(|r| r.file_path.clone()).collect();
 
-                        // Score by trigram match position (earlier = higher).
-                        let score = trigram_matches
-                            .iter()
-                            .position(|m| m.chunk_id.to_string() == chunk_id)
-                            .map(|pos| 1.0 / (1.0 + pos as f32))
-                            .unwrap_or(0.01);
-
-                        results.push(SearchResult {
-                            chunk_id,
-                            file_path,
-                            language,
-                            score,
-                            line_start,
-                            line_end,
-                            signature,
-                            content,
-                        });
-                    }
-                    results.sort_by(|a, b| {
-                        b.score
-                            .partial_cmp(&a.score)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    });
-                    results.truncate(query.limit);
-                    if !results.is_empty() {
-                        return Ok(results);
+            // Collect graph neighbours not already in the anchor set.
+            let mut neighbour_files: HashSet<String> = HashSet::new();
+            for file in &anchor_files {
+                for n in graph.callers(file) {
+                    if !anchor_files.contains(&n) {
+                        neighbour_files.insert(n);
                     }
                 }
-                // Fall through to full hybrid search if lookup failed.
-            }
-        }
-
-        // Lazily compute and cache PageRank file scores on first hybrid_search.
-        if self.graph.is_some() && self.cached_pagerank.is_none() {
-            let graph = self.graph.as_ref().unwrap();
-            let scores = graph.pagerank(0.85, 20);
-            let mut file_scores: HashMap<String, f32> = HashMap::new();
-            for node_idx in graph.inner.node_indices() {
-                if let Some(node) = graph.get_node(node_idx) {
-                    let pr = scores.get(&node_idx).copied().unwrap_or(0.0) as f32;
-                    let entry = file_scores.entry(node.file.clone()).or_insert(0.0);
-                    *entry = entry.max(pr);
-                }
-            }
-            self.cached_pagerank = Some(file_scores);
-        }
-
-        // Run the normal hybrid retrieval.
-        let mut results = match vi {
-            DynVectorIndex::BruteForce(bf) => {
-                let mut retriever = HybridRetriever::new(&self.tantivy, bf, embedder.as_ref());
-                if let Some(ref scores) = self.cached_pagerank {
-                    retriever = retriever.with_precomputed_graph_boost(scores, 0.3);
-                }
-                retriever.search(&query)?
-            }
-            DynVectorIndex::Hnsw(hnsw) => {
-                let mut retriever = HybridRetriever::new(&self.tantivy, hnsw, embedder.as_ref());
-                if let Some(ref scores) = self.cached_pagerank {
-                    retriever = retriever.with_precomputed_graph_boost(scores, 0.3);
-                }
-                retriever.search(&query)?
-            }
-        };
-
-        // For short queries that didn't have enough trigram results to
-        // short-circuit above, still boost hybrid results that have
-        // trigram matches.
-        if query.query.len() < TRIGRAM_QUERY_THRESHOLD && query.query.len() >= 3 {
-            let trigram_matches = self.trigram_index.search(&query.query);
-            if !trigram_matches.is_empty() {
-                let trigram_chunk_ids: std::collections::HashSet<String> = trigram_matches
-                    .iter()
-                    .map(|m| m.chunk_id.to_string())
-                    .collect();
-                for result in &mut results {
-                    if trigram_chunk_ids.contains(&result.chunk_id) {
-                        result.score *= 1.5;
+                for n in graph.callees(file) {
+                    if !anchor_files.contains(&n) {
+                        neighbour_files.insert(n);
                     }
                 }
-                results.sort_by(|a, b| {
-                    b.score
-                        .partial_cmp(&a.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                results.truncate(query.limit);
             }
+
+            // Phase 3 — for each uncovered neighbour, fetch its best BM25 chunk.
+            // Cap at 8 neighbours to keep latency predictable.
+            let mut expansion: Vec<SearchResult> = Vec::new();
+            for neighbour in neighbour_files.iter().take(8) {
+                if covered_files.contains(neighbour) {
+                    continue;
+                }
+                let nq = SearchQuery {
+                    query: query.query.clone(),
+                    limit: 1,
+                    file_filter: Some(neighbour.clone()),
+                    strategy: Strategy::Instant,
+                    token_budget: None,
+                };
+                if let Ok(mut exp) = bm25.search(&nq) {
+                    for r in exp.iter_mut() {
+                        // Scale by PageRank: neighbour files must be architecturally
+                        // important to surface above the direct BM25 hits.
+                        let pr = graph.node(&r.file_path).map(|n| n.pagerank).unwrap_or(0.0);
+                        r.score *= 0.6 + 0.6 * pr;
+                    }
+                    expansion.extend(exp);
+                }
+            }
+            results.extend(expansion);
+            results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
         }
 
+        results.truncate(query.limit);
         Ok(results)
+    }
+
+    /// Multiply each result's score by `1 + weight * pagerank` then re-sort descending.
+    fn apply_graph_boost(&self, results: &mut [SearchResult], weight: f32) {
+        if let Some(ref graph) = self.graph {
+            for r in results.iter_mut() {
+                let pr = graph.node(&r.file_path).map(|n| n.pagerank).unwrap_or(0.0);
+                r.score *= 1.0 + weight * pr;
+            }
+            results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+    }
+
+    /// Format search results as an LLM-friendly context block.
+    pub fn format_results(&self, results: &[SearchResult], token_budget: Option<usize>) -> String {
+        formatter::format_context(results, token_budget)
     }
 
     /// Query the symbol table.
@@ -557,98 +579,6 @@ impl Engine {
     /// If `file` is provided, also filters by file path.
     pub fn symbols(&self, filter: &str, file: Option<&str>) -> Result<Vec<Symbol>> {
         Ok(self.symbols.filter(filter, file))
-    }
-
-    /// Access the code graph, if it has been built.
-    pub fn graph(&self) -> Option<&CodeGraph> {
-        self.graph.as_ref()
-    }
-
-    /// Build a code graph from all indexed files.
-    ///
-    /// Walks the project source files, extracts definitions and references
-    /// using tree-sitter, creates graph nodes for each definition, and
-    /// resolves references to definition nodes by name matching.
-    pub fn build_graph(&mut self) -> Result<&CodeGraph> {
-        let root = &self.config.root.clone();
-        let files = walk_source_files(root, &self.config)?;
-
-        let mut graph = CodeGraph::new();
-
-        // First pass: extract all definitions and add them as nodes.
-        // We collect (name -> NodeIndex) for reference resolution.
-        let mut name_to_nodes: HashMap<String, Vec<petgraph::graph::NodeIndex>> = HashMap::new();
-
-        for path in &files {
-            let source = match fs::read_to_string(path) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-
-            let lang = match detect_language(path) {
-                Some(l) => l,
-                None => continue,
-            };
-
-            let rel_path = path.strip_prefix(root).unwrap_or(path);
-            let rel_str = normalize_path(rel_path);
-
-            let defs = extract_definitions(&source, &rel_str, &lang);
-            for def in &defs {
-                let idx =
-                    graph.add_symbol_with_line(&def.name, &def.file, def.kind.clone(), def.line);
-                name_to_nodes.entry(def.name.clone()).or_default().push(idx);
-            }
-        }
-
-        // Second pass: extract references and resolve to definition nodes.
-        for path in &files {
-            let source = match fs::read_to_string(path) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-
-            let lang = match detect_language(path) {
-                Some(l) => l,
-                None => continue,
-            };
-
-            let rel_path = path.strip_prefix(root).unwrap_or(path);
-            let rel_str = normalize_path(rel_path);
-
-            let defs = extract_definitions(&source, &rel_str, &lang);
-            let refs = extract_references(&source, &rel_str, &lang);
-
-            // For each reference, find the definition node that contains this
-            // reference (by line range) and the target definition node (by name).
-            for reference in &refs {
-                // Find the source node: the definition in this file whose range
-                // contains the reference line.
-                let source_node = find_enclosing_definition(&defs, reference.line, &name_to_nodes);
-
-                // Find target nodes by name.
-                let target_name = &reference.target_name;
-                let target_nodes = name_to_nodes.get(target_name);
-
-                if let (Some(src_idx), Some(targets)) = (source_node, target_nodes) {
-                    for &tgt_idx in targets {
-                        // Avoid self-edges.
-                        if src_idx != tgt_idx {
-                            graph.add_reference(src_idx, tgt_idx, reference.kind.clone());
-                        }
-                    }
-                }
-            }
-        }
-
-        info!(
-            nodes = graph.node_count(),
-            edges = graph.edge_count(),
-            "built code graph"
-        );
-
-        self.graph = Some(graph);
-        Ok(self.graph.as_ref().unwrap())
     }
 
     /// Re-index a single file (after modification).
@@ -667,6 +597,11 @@ impl Engine {
         // Remove old data.
         self.tantivy.remove_file(&rel_str)?;
         self.symbols.remove_file(&rel_str);
+        if let Some(ref mut vec_idx) = self.vector {
+            vec_idx.remove_file(&rel_str)?;
+        }
+        // Remove old chunk_meta entries for this file.
+        self.chunk_meta.retain(|_, v| v.file_path != rel_str);
 
         // Read and re-process.
         let source = fs::read(&abs_path)?;
@@ -682,6 +617,21 @@ impl Engine {
 
         for chunk in &chunks {
             self.tantivy.add_chunk(chunk)?;
+
+            // Store chunk_meta for vector hydration.
+            self.chunk_meta.insert(
+                chunk.id,
+                ChunkMeta {
+                    chunk_id: chunk.id,
+                    file_path: rel_str.clone(),
+                    language: chunk.language.name().to_string(),
+                    line_start: chunk.line_start as u64,
+                    line_end: chunk.line_end as u64,
+                    signature: chunk.signatures.join("\n"),
+                    scope_chain: chunk.scope_chain.clone(),
+                    content: chunk.content.clone(),
+                },
+            );
         }
 
         for entity in &result.entities {
@@ -689,10 +639,62 @@ impl Engine {
                 .insert(symbol_from_entity(entity, &rel_str, result.language));
         }
 
+        // Embed new chunks and add to vector index.
+        if let (Some(emb), Some(vec_idx)) = (self.embedder.as_ref(), self.vector.as_mut()) {
+            let contextual = self.config.embedding.contextual_embeddings;
+            let texts: Vec<String> = chunks
+                .iter()
+                .map(|c| {
+                    if contextual {
+                        if let Some(meta) = self.chunk_meta.get(&c.id) {
+                            return make_embed_text(&meta, true);
+                        }
+                    }
+                    c.content.clone()
+                })
+                .collect();
+            match emb.embed(texts) {
+                Ok(embeddings) => {
+                    for (chunk, embedding) in chunks.iter().zip(embeddings.iter()) {
+                        if let Err(e) = vec_idx.add_mut(chunk.id, embedding, &rel_str) {
+                            warn!(error = %e, chunk_id = chunk.id, "failed to add vector");
+                        }
+                    }
+                }
+                Err(e) => warn!(error = %e, "embedding failed during reindex"),
+            }
+        }
+
         self.tantivy.commit()?;
-        self.file_chunk_counts.insert(rel_str, chunks.len());
-        // Invalidate cached PageRank (graph structure may have changed).
-        self.cached_pagerank = None;
+        self.file_chunk_counts.insert(rel_str.clone(), chunks.len());
+
+        // Update graph: remove stale edges, re-extract imports, recompute PageRank.
+        // Use the already-parsed tree and source — no need to re-read or re-parse.
+        let file_language = result.language;
+        let raw_imports = ImportExtractor::extract(&result.tree, &source, file_language);
+        if let Some(ref mut graph) = self.graph {
+            graph.remove_file_edges(&rel_str);
+            let indexed: std::collections::HashSet<String> =
+                self.file_chunk_counts.keys().cloned().collect();
+            let resolver = ImportResolver::new(indexed, self.config.root.clone());
+            for raw in &raw_imports {
+                if let Some(target) = resolver.resolve(raw, &rel_str) {
+                    let target_lang =
+                        detect_language(std::path::Path::new(&target)).unwrap_or(file_language);
+                    graph.add_edge(&rel_str, &target, &raw.path, file_language, target_lang);
+                }
+            }
+            let scores = compute_pagerank(
+                graph,
+                self.config.graph.damping,
+                self.config.graph.iterations,
+            );
+            graph.apply_pagerank(&scores);
+            let flat = graph.to_flat();
+            if let Err(e) = self.store.save_graph(&flat) {
+                warn!(error = %e, "failed to persist graph after reindex");
+            }
+        }
 
         debug!(path = %abs_path.display(), chunks = chunks.len(), "reindexed file");
         Ok(())
@@ -708,8 +710,26 @@ impl Engine {
         self.symbols.remove_file(&rel_str);
         self.parser.invalidate(path);
         self.file_chunk_counts.remove(&rel_str);
-        // Invalidate cached PageRank (graph structure may have changed).
-        self.cached_pagerank = None;
+
+        if let Some(ref mut vec_idx) = self.vector {
+            vec_idx.remove_file(&rel_str)?;
+        }
+        self.chunk_meta.retain(|_, v| v.file_path != rel_str);
+
+        // Update graph: remove node + all incident edges, recompute PageRank.
+        if let Some(ref mut graph) = self.graph {
+            graph.remove_file(&rel_str);
+            let scores = compute_pagerank(
+                graph,
+                self.config.graph.damping,
+                self.config.graph.iterations,
+            );
+            graph.apply_pagerank(&scores);
+            let flat = graph.to_flat();
+            if let Err(e) = self.store.save_graph(&flat) {
+                warn!(error = %e, "failed to persist graph after remove");
+            }
+        }
 
         debug!(path = %path.display(), "removed file from index");
         Ok(())
@@ -717,10 +737,21 @@ impl Engine {
 
     /// Return summary statistics about the current index.
     pub fn stats(&self) -> IndexStats {
+        let (graph_node_count, graph_edge_count) = self
+            .graph
+            .as_ref()
+            .map(|g| {
+                let s = g.stats();
+                (s.node_count, s.edge_count)
+            })
+            .unwrap_or((0, 0));
         IndexStats {
             file_count: self.file_chunk_counts.len(),
             chunk_count: self.file_chunk_counts.values().sum(),
             symbol_count: self.symbols.len(),
+            vector_count: self.vector.as_ref().map(|v| v.len()).unwrap_or(0),
+            graph_node_count,
+            graph_edge_count,
         }
     }
 
@@ -735,17 +766,11 @@ impl Engine {
     }
 
     /// Start watching the project directory for file changes.
-    ///
-    /// Returns a [`FileWatcher`] that can be polled for batches of changes.
-    /// Call [`Self::apply_changes`] with the resulting batch to update the index.
     pub fn watch(&self) -> Result<crate::watcher::FileWatcher> {
         crate::watcher::FileWatcher::new(&self.config.root, &self.config)
     }
 
     /// Apply a batch of file changes to the index.
-    ///
-    /// For each modified file, re-parses and re-indexes it. For each removed
-    /// file, removes it from the index.
     pub fn apply_changes(&mut self, changes: &[crate::watcher::FileChange]) -> Result<()> {
         use crate::watcher::ChangeKind;
 
@@ -776,9 +801,36 @@ impl Engine {
             self.parser.cache().content_hashes().into_iter().collect();
         self.store.save_tree_hashes(&hashes)?;
 
+        // Persist chunk_meta.
+        let meta_pairs: Vec<(u64, ChunkMeta)> = self
+            .chunk_meta
+            .iter()
+            .map(|e| (*e.key(), e.value().clone()))
+            .collect();
+        let meta_bytes = bitcode::serialize(&meta_pairs).map_err(|e| {
+            CodeforgeError::Serialization(format!("failed to serialize chunk_meta: {e}"))
+        })?;
+        self.store.save_chunk_meta_bytes(&meta_bytes)?;
+
+        // Persist vector index.
+        if let Some(ref vec_idx) = self.vector {
+            vec_idx.save(
+                &self.store.vector_index_path(),
+                &self.store.file_chunks_path(),
+            )?;
+        }
+
+        // Persist graph.
+        if let Some(ref g) = self.graph {
+            let flat = g.to_flat();
+            if let Err(e) = self.store.save_graph(&flat) {
+                warn!(error = %e, "failed to persist graph in save()");
+            }
+        }
+
         let stats = self.stats();
         let meta = IndexMeta {
-            version: "0.1.0".to_string(),
+            version: "0.3.0".to_string(),
             file_count: stats.file_count,
             chunk_count: stats.chunk_count,
             symbol_count: stats.symbol_count,
@@ -786,55 +838,188 @@ impl Engine {
         };
         self.store.save_meta(&meta)?;
 
-        // Persist code graph if built.
-        if let Some(ref graph) = self.graph {
-            save_graph(graph, &self.store.graph_path())?;
-        }
-
-        // Persist vector index if available.
-        if let Some(ref vi) = self.vector_index {
-            vi.save_binary(&self.store.vector_index_path())?;
-        }
-
-        // Persist trigram index.
-        self.trigram_index
-            .save_binary(&self.store.trigram_index_path())?;
-
         Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // Graph public API
+    // -------------------------------------------------------------------------
+
+    /// Generate a token-budgeted repo map.  Returns `None` if the graph is not available.
+    pub fn repo_map(&self, options: RepoMapOptions) -> Option<String> {
+        self.graph
+            .as_ref()
+            .map(|g| generate_repo_map(g, &self.symbols, &options))
+    }
+
+    /// Return the files that directly import `file_path`.
+    pub fn callers(&self, file_path: &str) -> Vec<String> {
+        self.graph
+            .as_ref()
+            .map(|g| g.callers(file_path))
+            .unwrap_or_default()
+    }
+
+    /// Return the files that `file_path` directly imports.
+    pub fn callees(&self, file_path: &str) -> Vec<String> {
+        self.graph
+            .as_ref()
+            .map(|g| g.callees(file_path))
+            .unwrap_or_default()
+    }
+
+    /// Return transitive dependencies of `file_path` up to `depth` hops.
+    pub fn dependencies(&self, file_path: &str, depth: usize) -> Vec<String> {
+        self.graph
+            .as_ref()
+            .map(|g| g.transitive_callees(file_path, depth))
+            .unwrap_or_default()
+    }
+
+    /// Return graph statistics, or `None` if the graph has not been built.
+    pub fn graph_stats(&self) -> Option<GraphStats> {
+        self.graph.as_ref().map(|g| g.stats())
+    }
+
+    /// Two-stage reranked search: hybrid first-pass then cross-encoder scoring.
+    ///
+    /// Phase 1: collect up to `max(limit × 3, 30)` candidates via the `Fast`
+    ///          hybrid pipeline (BM25 + vector + graph boost).
+    /// Phase 2: BGE-Reranker-Base scores each `(query, chunk)` pair jointly.
+    ///          Results are re-sorted by reranker score and truncated.
+    ///
+    /// Falls back to `Thorough` if the reranker is not loaded.
+    fn search_deep(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
+        let reranker = match self.reranker.as_ref() {
+            Some(r) => Arc::clone(r),
+            None => {
+                warn!(
+                    "deep strategy requested but reranker not loaded \
+                     (set reranker_enabled = true in config and re-open the engine)"
+                );
+                // Graceful degradation: run Thorough instead.
+                return self.search(SearchQuery {
+                    strategy: Strategy::Thorough,
+                    ..query
+                });
+            }
+        };
+
+        // Phase 1: over-fetch candidates.
+        let candidate_limit = (query.limit * 3).max(30);
+        let candidate_query = SearchQuery {
+            limit: candidate_limit,
+            strategy: Strategy::Fast,
+            ..query.clone()
+        };
+
+        let mut candidates = if let (Some(emb), Some(vec_idx)) =
+            (&self.embedder, &self.vector)
+        {
+            let retriever = HybridRetriever::new(
+                &self.tantivy,
+                Arc::clone(emb),
+                vec_idx,
+                &self.chunk_meta,
+                self.config.embedding.rrf_k,
+            );
+            retriever.search(&candidate_query)?
+        } else {
+            BM25Retriever::new(&self.tantivy).search(&candidate_query)?
+        };
+        self.apply_graph_boost(&mut candidates, self.config.graph.boost_weight);
+
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Phase 2: rerank with cross-encoder.
+        let docs: Vec<String> = candidates.iter().map(|r| r.content.clone()).collect();
+        let ranked = reranker.rerank(&query.query, &docs)?;
+
+        // Apply reranker scores — map (original_index, score) back onto candidates.
+        for (orig_idx, score) in &ranked {
+            candidates[*orig_idx].score = *score;
+        }
+
+        // Re-sort descending by the new scores.
+        candidates
+            .sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Apply file filter and truncate to requested limit.
+        if let Some(ref filter) = query.file_filter {
+            candidates.retain(|r| r.file_path.contains(filter.as_str()));
+        }
+        candidates.truncate(query.limit);
+
+        Ok(candidates)
+    }
+
+    /// Find all code chunks that reference `symbol` (BM25 full-text search).
+    ///
+    /// This is the "find usages" operation: given an identifier name, it returns
+    /// ranked chunks where that identifier appears — including call sites,
+    /// imports, and variable usages, not just the definition.
+    pub fn search_usages(&self, symbol: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let query = SearchQuery::new(symbol).with_limit(limit);
+        let mut results = BM25Retriever::new(&self.tantivy).search(&query)?;
+        // Apply PageRank boost so architecturally central files rank first.
+        self.apply_graph_boost(&mut results, self.config.graph.boost_weight);
+        Ok(results)
+    }
+
+    // -------------------------------------------------------------------------
+    // File and symbol reading
+    // -------------------------------------------------------------------------
+
+    /// Read raw source lines from a file in the indexed project.
+    ///
+    /// `path` must be relative to the project root (e.g. `"src/engine.rs"`).
+    /// `line_start` and `line_end` are both **0-indexed inclusive** bounds.
+    /// Omitting either means "from the beginning" / "to the end of file".
+    ///
+    /// Returns `None` if the file does not exist on disk.
+    pub fn read_file_range(
+        &self,
+        path: &str,
+        line_start: Option<u64>,
+        line_end: Option<u64>,
+    ) -> Result<Option<String>> {
+        let abs = self.config.root.join(path);
+        if !abs.exists() {
+            return Ok(None);
+        }
+        let content = fs::read_to_string(&abs)?;
+        let lines: Vec<&str> = content.lines().collect();
+        let total = lines.len() as u64;
+        let start = line_start.unwrap_or(0).min(total) as usize;
+        let end = line_end.map(|e| (e + 1).min(total)).unwrap_or(total) as usize;
+        Ok(Some(lines[start..end].join("\n")))
+    }
+
+    /// Read the complete source of the first symbol whose name matches `name`.
+    ///
+    /// Performs the same case-insensitive substring lookup as [`Engine::symbols`],
+    /// then reads the exact source lines from disk.
+    ///
+    /// Returns `None` if no matching symbol is found or the file is not on disk.
+    pub fn read_symbol_source(&self, name: &str, file: Option<&str>) -> Result<Option<String>> {
+        let matches = self.symbols.filter(name, file);
+        let sym = match matches.into_iter().next() {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        self.read_file_range(
+            &sym.file_path,
+            Some(sym.line_start as u64),
+            Some(sym.line_end as u64),
+        )
     }
 }
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-/// Find the definition that encloses a given line number.
-///
-/// Returns the `NodeIndex` of the closest definition whose line is at or before
-/// the reference line. This is a heuristic: we pick the last definition that
-/// starts before or at the reference line.
-fn find_enclosing_definition(
-    defs: &[crate::graph::extract::DefinitionInfo],
-    ref_line: usize,
-    name_to_nodes: &HashMap<String, Vec<petgraph::graph::NodeIndex>>,
-) -> Option<petgraph::graph::NodeIndex> {
-    // Find the last definition whose line <= ref_line.
-    let mut best: Option<&crate::graph::extract::DefinitionInfo> = None;
-    for def in defs {
-        if def.line <= ref_line {
-            match best {
-                None => best = Some(def),
-                Some(b) if def.line >= b.line => best = Some(def),
-                _ => {}
-            }
-        }
-    }
-
-    let def = best?;
-    let nodes = name_to_nodes.get(&def.name)?;
-    // Return the first node that matches (from this file).
-    nodes.first().copied()
-}
 
 /// Shared context passed to `process_file` to avoid too-many-arguments.
 struct IndexContext<'a> {
@@ -844,7 +1029,10 @@ struct IndexContext<'a> {
     tantivy: &'a TantivyIndex,
     symbols: &'a SymbolTable,
     chunk_count: &'a AtomicUsize,
-    file_chunk_map: &'a dashmap::DashMap<String, usize>,
+    file_chunk_map: &'a DashMap<String, usize>,
+    chunk_meta_map: &'a DashMap<u64, ChunkMeta>,
+    /// Pending chunks to embed: chunk_id → content.
+    pending_embeds: &'a DashMap<u64, String>,
 }
 
 /// Process a single file: parse → chunk → index → extract symbols.
@@ -869,6 +1057,23 @@ fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
 
     for chunk in &chunks {
         ctx.tantivy.add_chunk(chunk)?;
+
+        ctx.chunk_meta_map.insert(
+            chunk.id,
+            ChunkMeta {
+                chunk_id: chunk.id,
+                file_path: rel_str.clone(),
+                language: chunk.language.name().to_string(),
+                line_start: chunk.line_start as u64,
+                line_end: chunk.line_end as u64,
+                signature: chunk.signatures.join("\n"),
+                scope_chain: chunk.scope_chain.clone(),
+                content: chunk.content.clone(),
+            },
+        );
+
+        // Queue for batch embedding.
+        ctx.pending_embeds.insert(chunk.id, chunk.content.clone());
     }
 
     for entity in &result.entities {
@@ -883,6 +1088,70 @@ fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
         entities = result.entities.len(),
         "indexed file"
     );
+
+    Ok(())
+}
+
+/// Build the text string to embed for a chunk.
+///
+/// When `contextual` is `true`, prepends the file path, language, and AST
+/// scope chain — the "contextual embeddings" technique from Sourcegraph Cody
+/// that reduces retrieval failure rate by ~35 %.
+fn make_embed_text(meta: &ChunkMeta, contextual: bool) -> String {
+    if !contextual {
+        return meta.content.clone();
+    }
+    let mut header = format!("File: {}\nLanguage: {}", meta.file_path, meta.language);
+    if !meta.scope_chain.is_empty() {
+        header.push_str(&format!("\nScope: {}", meta.scope_chain.join(" > ")));
+    }
+    if !meta.signature.is_empty() {
+        header.push_str(&format!("\nSignature: {}", meta.signature));
+    }
+    format!("{header}\n\n{}", meta.content)
+}
+
+/// Batch-embed all pending chunks and add them to the vector index.
+fn embed_and_index_chunks(
+    pending: &DashMap<u64, String>,
+    chunk_meta: &DashMap<u64, ChunkMeta>,
+    embedder: &Embedder,
+    vec_idx: &mut VectorIndex,
+    contextual: bool,
+) -> Result<()> {
+    let entries: Vec<u64> = pending.iter().map(|e| *e.key()).collect();
+
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    info!(count = entries.len(), contextual, "embedding chunks");
+
+    // Embed in batches of 256 (fastembed default).
+    const BATCH: usize = 256;
+    for batch in entries.chunks(BATCH) {
+        let texts: Vec<String> = batch
+            .iter()
+            .map(|id| {
+                chunk_meta
+                    .get(id)
+                    .map(|m| make_embed_text(&m, contextual))
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        let embeddings = embedder.embed(texts)?;
+
+        for (chunk_id, embedding) in batch.iter().zip(embeddings.into_iter()) {
+            let file_path = chunk_meta
+                .get(chunk_id)
+                .map(|m| m.file_path.clone())
+                .unwrap_or_default();
+            if let Err(e) = vec_idx.add_mut(*chunk_id, &embedding, &file_path) {
+                warn!(error = %e, chunk_id, "failed to add vector");
+            }
+        }
+    }
 
     Ok(())
 }
@@ -904,7 +1173,6 @@ fn walk_dir_recursive(dir: &Path, config: &IndexConfig, files: &mut Vec<PathBuf>
         let file_name = entry.file_name();
         let name = file_name.to_string_lossy();
 
-        // Skip excluded directories/files.
         if config.exclude_patterns.iter().any(|p| p == name.as_ref()) {
             continue;
         }
@@ -912,16 +1180,12 @@ fn walk_dir_recursive(dir: &Path, config: &IndexConfig, files: &mut Vec<PathBuf>
         if path.is_dir() {
             walk_dir_recursive(&path, config, files)?;
         } else if path.is_file() {
-            // Only include files with supported language extensions.
-            if detect_language(&path).is_some() {
-                // If specific languages are configured, filter by them.
-                if !config.languages.is_empty() {
-                    if let Some(lang) = detect_language(&path) {
-                        if config.languages.contains(&lang.name().to_lowercase()) {
-                            files.push(path);
-                        }
-                    }
-                } else {
+            if config.languages.is_empty() {
+                if detect_language(&path).is_some() {
+                    files.push(path);
+                }
+            } else if let Some(lang) = detect_language(&path) {
+                if config.languages.contains(&lang.name().to_lowercase()) {
                     files.push(path);
                 }
             }
@@ -929,6 +1193,76 @@ fn walk_dir_recursive(dir: &Path, config: &IndexConfig, files: &mut Vec<PathBuf>
     }
 
     Ok(())
+}
+
+/// Build a dependency graph by walking all indexed files, extracting imports,
+/// and resolving them against the known file set.
+fn build_graph(
+    files: &[PathBuf],
+    root: &Path,
+    _config: &IndexConfig,
+    parser: &Parser,
+) -> CodeGraph {
+    // Collect all indexed relative paths for the resolver.
+    let indexed: std::collections::HashSet<String> = files
+        .iter()
+        .map(|p| {
+            let rel = p.strip_prefix(root).unwrap_or(p);
+            normalize_path(rel)
+        })
+        .collect();
+
+    let resolver = ImportResolver::new(indexed, root.to_path_buf());
+    let mut graph = CodeGraph::new();
+
+    for abs_path in files {
+        let rel_str = normalize_path(abs_path.strip_prefix(root).unwrap_or(abs_path));
+        let language = match detect_language(abs_path) {
+            Some(l) => l,
+            None => continue,
+        };
+
+        let source = match fs::read(abs_path) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(path = %abs_path.display(), error = %e, "skipping file in graph build");
+                continue;
+            }
+        };
+
+        // Create a fresh tree_sitter::Parser (it is !Send).
+        let lang_support = match parser.registry().get(language) {
+            Some(ls) => ls,
+            None => continue,
+        };
+        let mut ts_parser = tree_sitter::Parser::new();
+        if ts_parser
+            .set_language(&lang_support.tree_sitter_language())
+            .is_err()
+        {
+            continue;
+        }
+        let tree = match ts_parser.parse(&source, None) {
+            Some(t) => t,
+            None => continue,
+        };
+
+        // Ensure the source node exists in the graph.
+        graph.get_or_insert_node(&rel_str, language);
+
+        let raw_imports = ImportExtractor::extract(&tree, &source, language);
+        for raw in &raw_imports {
+            if let Some(target) = resolver.resolve(raw, &rel_str) {
+                let target_lang =
+                    detect_language(std::path::Path::new(&target)).unwrap_or(language);
+                graph.add_edge(&rel_str, &target, &raw.path, language, target_lang);
+            } else if !raw.is_relative {
+                graph.add_external_edge(&rel_str, &raw.path, language);
+            }
+        }
+    }
+
+    graph
 }
 
 /// Convert a `SemanticEntity` to a `Symbol`.
@@ -971,7 +1305,6 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path().to_path_buf();
 
-        // Create a simple Rust file.
         let src_dir = root.join("src");
         fs::create_dir_all(&src_dir).unwrap();
 
@@ -1014,12 +1347,17 @@ pub trait Processor {
         (dir, root)
     }
 
+    fn setup_engine_bm25_only() -> (tempfile::TempDir, Engine) {
+        let (dir, root) = setup_project();
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false; // disable embeddings for fast tests
+        let engine = Engine::init(&root, config).unwrap();
+        (dir, engine)
+    }
+
     #[test]
     fn init_indexes_project() {
-        let (_dir, root) = setup_project();
-        let config = IndexConfig::new(&root);
-
-        let mut engine = Engine::init(&root, config).unwrap();
+        let (_dir, engine) = setup_engine_bm25_only();
         let stats = engine.stats();
 
         assert_eq!(stats.file_count, 2, "expected 2 source files");
@@ -1028,18 +1366,17 @@ pub trait Processor {
     }
 
     #[test]
-    fn search_finds_function() {
-        let (_dir, root) = setup_project();
-        let config = IndexConfig::new(&root);
-
-        let mut engine = Engine::init(&root, config).unwrap();
+    fn search_instant_finds_function() {
+        let (_dir, engine) = setup_engine_bm25_only();
 
         let results = engine
-            .search(SearchQuery::new("add").with_limit(5))
+            .search(
+                SearchQuery::new("add")
+                    .with_limit(5)
+                    .with_strategy(Strategy::Instant),
+            )
             .unwrap();
         assert!(!results.is_empty(), "expected search results for 'add'");
-
-        // At least one result should be from main.rs.
         assert!(
             results.iter().any(|r| r.file_path.contains("main.rs")),
             "expected result from main.rs"
@@ -1047,11 +1384,23 @@ pub trait Processor {
     }
 
     #[test]
-    fn symbols_returns_matching() {
-        let (_dir, root) = setup_project();
-        let config = IndexConfig::new(&root);
+    fn search_fast_falls_back_without_embedder() {
+        let (_dir, engine) = setup_engine_bm25_only();
 
-        let mut engine = Engine::init(&root, config).unwrap();
+        // Fast strategy without embedder should fall back to BM25 gracefully.
+        let results = engine
+            .search(
+                SearchQuery::new("helper")
+                    .with_limit(5)
+                    .with_strategy(Strategy::Fast),
+            )
+            .unwrap();
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn symbols_returns_matching() {
+        let (_dir, engine) = setup_engine_bm25_only();
 
         let syms = engine.symbols("Config", None).unwrap();
         assert!(
@@ -1063,35 +1412,39 @@ pub trait Processor {
 
     #[test]
     fn open_restores_index() {
-        let (_dir, root) = setup_project();
-        let config = IndexConfig::new(&root);
+        let (dir, root) = setup_project();
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
 
-        // Init and drop.
         {
-            let mut engine = Engine::init(&root, config).unwrap();
-            let stats = engine.stats();
-            assert!(stats.chunk_count > 0);
+            let engine = Engine::init(&root, config).unwrap();
+            assert!(engine.stats().chunk_count > 0);
         }
 
-        // Re-open.
-        let mut engine = Engine::open(&root).unwrap();
+        let engine = Engine::open(&root).unwrap();
         let results = engine
-            .search(SearchQuery::new("helper").with_limit(5))
+            .search(
+                SearchQuery::new("helper")
+                    .with_limit(5)
+                    .with_strategy(Strategy::Instant),
+            )
             .unwrap();
         assert!(
             !results.is_empty(),
-            "expected search results after re-opening index"
+            "expected results after re-opening index"
         );
+
+        drop(dir);
     }
 
     #[test]
     fn reindex_file_updates_index() {
-        let (_dir, root) = setup_project();
-        let config = IndexConfig::new(&root);
+        let (dir, root) = setup_project();
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
 
         let mut engine = Engine::init(&root, config).unwrap();
 
-        // Modify main.rs.
         fs::write(
             root.join("src/main.rs"),
             r#"
@@ -1110,696 +1463,25 @@ pub fn unique_new_function() -> bool {
         engine.reindex_file(Path::new("src/main.rs")).unwrap();
 
         let results = engine
-            .search(SearchQuery::new("unique_new_function").with_limit(5))
+            .search(
+                SearchQuery::new("unique_new_function")
+                    .with_limit(5)
+                    .with_strategy(Strategy::Instant),
+            )
             .unwrap();
         assert!(
             !results.is_empty(),
             "expected to find newly added function after reindex"
         );
+
+        drop(dir);
     }
 
     #[test]
-    fn engine_builds_graph_from_indexed_files() {
-        let dir = tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let src_dir = root.join("src");
-        fs::create_dir_all(&src_dir).unwrap();
-
-        fs::write(
-            src_dir.join("main.rs"),
-            "fn main() { greet(); }\nfn greet() {}\n",
-        )
-        .unwrap();
-
-        let config = IndexConfig::new(&root);
-        let mut engine = Engine::init(&root, config).unwrap();
-
-        // Graph should be None before build.
-        assert!(engine.graph().is_none());
-
-        engine.build_graph().unwrap();
-        let graph = engine.graph().unwrap();
-        // Should find at least main and greet as definitions.
-        assert!(
-            graph.node_count() >= 2,
-            "expected at least 2 nodes, got {}",
-            graph.node_count()
-        );
-    }
-
-    #[test]
-    fn engine_build_graph_creates_edges() {
-        let dir = tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let src_dir = root.join("src");
-        fs::create_dir_all(&src_dir).unwrap();
-
-        fs::write(
-            src_dir.join("main.rs"),
-            "fn main() { greet(); }\nfn greet() {}\n",
-        )
-        .unwrap();
-
-        let config = IndexConfig::new(&root);
-        let mut engine = Engine::init(&root, config).unwrap();
-        engine.build_graph().unwrap();
-        let graph = engine.graph().unwrap();
-
-        // main calls greet, so there should be at least 1 edge.
-        assert!(
-            graph.edge_count() >= 1,
-            "expected at least 1 edge (main->greet), got {}",
-            graph.edge_count()
-        );
-    }
-
-    #[test]
-    fn graph_persistence_round_trip() {
-        use crate::graph::persistence::{load_graph, save_graph};
-
-        let dir = tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let src_dir = root.join("src");
-        fs::create_dir_all(&src_dir).unwrap();
-
-        fs::write(
-            src_dir.join("main.rs"),
-            "fn main() { greet(); }\nfn greet() {}\n",
-        )
-        .unwrap();
-
-        let config = IndexConfig::new(&root);
-        let mut engine = Engine::init(&root, config).unwrap();
-        engine.build_graph().unwrap();
-
-        let graph = engine.graph().unwrap();
-        let original_nodes = graph.node_count();
-        let original_edges = graph.edge_count();
-
-        // Save and load.
-        let graph_path = dir.path().join("graph.json");
-        save_graph(graph, &graph_path).unwrap();
-        let loaded = load_graph(&graph_path).unwrap();
-
-        assert_eq!(loaded.node_count(), original_nodes);
-        assert_eq!(loaded.edge_count(), original_edges);
-    }
-
-    #[test]
-    fn test_engine_hybrid_search() {
-        // Verify that Engine::hybrid_search() returns results using the vector
-        // index that is built during Engine::init().
-        let (_dir, root) = setup_project();
-        let config = IndexConfig::new(&root);
-
-        let mut engine = Engine::init(&root, config).unwrap();
-
-        // hybrid_search should return results for a known function name.
-        let results = engine
-            .hybrid_search(SearchQuery::new("add").with_limit(5))
-            .unwrap();
-        assert!(
-            !results.is_empty(),
-            "expected hybrid_search to return results for 'add'"
-        );
-
-        // At least one result should be from main.rs (where `add` is defined).
-        assert!(
-            results.iter().any(|r| r.file_path.contains("main.rs")),
-            "expected a result from main.rs, got: {:?}",
-            results.iter().map(|r| &r.file_path).collect::<Vec<_>>()
-        );
-
-        // All scores should be positive.
-        for r in &results {
-            assert!(r.score > 0.0, "expected positive score, got {}", r.score);
-        }
-
-        // Results should be in descending score order.
-        for w in results.windows(2) {
-            assert!(
-                w[0].score >= w[1].score,
-                "hybrid_search results not sorted: {} < {}",
-                w[0].score,
-                w[1].score
-            );
-        }
-    }
-
-    #[test]
-    fn test_engine_hybrid_search_with_hnsw_backend() {
-        // Force HNSW backend and verify hybrid_search still works.
-        let (_dir, root) = setup_project();
-        let mut config = IndexConfig::new(&root);
-        config.vector_backend = VectorBackend::Hnsw;
-
-        let mut engine = Engine::init(&root, config).unwrap();
-
-        let results = engine
-            .hybrid_search(SearchQuery::new("helper").with_limit(5))
-            .unwrap();
-        assert!(
-            !results.is_empty(),
-            "expected HNSW-backed hybrid_search to return results for 'helper'"
-        );
-
-        // Should find result from lib.rs (where `helper` is defined).
-        assert!(
-            results.iter().any(|r| r.file_path.contains("lib.rs")),
-            "expected a result from lib.rs with HNSW backend"
-        );
-    }
-
-    #[test]
-    fn test_vector_index_persistence() {
-        // Verify that the vector index survives a save/open round-trip and
-        // hybrid_search works after reopening.
-        let (_dir, root) = setup_project();
-        let config = IndexConfig::new(&root);
-
-        // Phase 1: Init, verify hybrid_search works, then drop.
-        let original_result_count;
-        {
-            let mut engine = Engine::init(&root, config).unwrap();
-            let results = engine
-                .hybrid_search(SearchQuery::new("add").with_limit(5))
-                .unwrap();
-            assert!(
-                !results.is_empty(),
-                "expected hybrid_search results before save"
-            );
-            original_result_count = results.len();
-
-            // Engine::init already persists the vector index; no explicit save needed.
-        }
-
-        // Phase 2: Re-open from disk and verify hybrid_search still works.
-        let mut engine = Engine::open(&root).unwrap();
-        let results = engine
-            .hybrid_search(SearchQuery::new("add").with_limit(5))
-            .unwrap();
-
-        assert!(
-            !results.is_empty(),
-            "expected hybrid_search results after re-opening index"
-        );
-        // Should get the same number of results (same data, same index).
-        assert_eq!(
-            results.len(),
-            original_result_count,
-            "expected same result count after round-trip: got {} vs original {}",
-            results.len(),
-            original_result_count
-        );
-
-        // Verify the vector index file exists on disk.
-        let vi_path = root.join(".codeforge/vectors.bin");
-        assert!(
-            vi_path.exists(),
-            "expected vectors.bin to exist at {:?}",
-            vi_path
-        );
-    }
-
-    #[test]
-    fn test_vector_index_persistence_hnsw() {
-        // Verify that HNSW vector index specifically survives a round-trip.
-        let (_dir, root) = setup_project();
-        let mut config = IndexConfig::new(&root);
-        config.vector_backend = VectorBackend::Hnsw;
-
-        // Init with HNSW, verify hybrid_search, drop.
-        {
-            let mut engine = Engine::init(&root, config).unwrap();
-            let results = engine
-                .hybrid_search(SearchQuery::new("Config").with_limit(5))
-                .unwrap();
-            assert!(
-                !results.is_empty(),
-                "expected HNSW hybrid_search results before save"
-            );
-        }
-
-        // Re-open. The config on disk has vector_backend: Hnsw, so open()
-        // should load the HNSW index.
-        let mut engine = Engine::open(&root).unwrap();
-        let results = engine
-            .hybrid_search(SearchQuery::new("Config").with_limit(5))
-            .unwrap();
-        assert!(
-            !results.is_empty(),
-            "expected HNSW hybrid_search results after re-open"
-        );
-    }
-
-    #[test]
-    fn test_auto_backend_selection() {
-        // VectorBackend::Auto should pick BruteForce for small chunk counts
-        // (< 2_000 threshold) and HNSW for large.
-        //
-        // We verify the small case by checking that the default (Auto) config
-        // on a small project uses brute-force (which it does because our test
-        // project has only a handful of chunks, well below 2_000).
-
-        let (_dir, root) = setup_project();
-        let config = IndexConfig::new(&root);
-        // Default is VectorBackend::Auto.
-        assert_eq!(config.vector_backend, VectorBackend::Auto);
-
-        let mut engine = Engine::init(&root, config).unwrap();
+    fn stats_includes_vector_count() {
+        let (_dir, engine) = setup_engine_bm25_only();
         let stats = engine.stats();
-
-        // With only 2 files the chunk count is far below 2_000, so Auto
-        // should have selected BruteForce.
-        assert!(
-            stats.chunk_count < 2_000,
-            "test project should have < 2_000 chunks, got {}",
-            stats.chunk_count
-        );
-
-        // hybrid_search should still work (proving a vector index was created).
-        let results = engine
-            .hybrid_search(SearchQuery::new("add").with_limit(5))
-            .unwrap();
-        assert!(
-            !results.is_empty(),
-            "expected hybrid_search results with Auto backend"
-        );
-
-        // Now test the HNSW threshold logic directly: VectorBackend::Hnsw
-        // forces HNSW regardless of chunk count.
-        let mut hnsw_config = IndexConfig::new(&root);
-        hnsw_config.vector_backend = VectorBackend::Hnsw;
-
-        // Re-init with a clean root to avoid the existing .codeforge dir.
-        let dir2 = tempdir().unwrap();
-        let root2 = dir2.path().to_path_buf();
-        let src2 = root2.join("src");
-        fs::create_dir_all(&src2).unwrap();
-        fs::write(
-            src2.join("main.rs"),
-            "fn main() {}\npub fn tiny() -> bool { true }\n",
-        )
-        .unwrap();
-
-        let mut hnsw_config2 = IndexConfig::new(&root2);
-        hnsw_config2.vector_backend = VectorBackend::Hnsw;
-        let mut engine2 = Engine::init(&root2, hnsw_config2).unwrap();
-
-        // Even with very few chunks, HNSW is selected when explicitly configured.
-        let results2 = engine2
-            .hybrid_search(SearchQuery::new("tiny").with_limit(5))
-            .unwrap();
-        assert!(
-            !results2.is_empty(),
-            "expected HNSW hybrid_search results even for small project"
-        );
-    }
-
-    #[test]
-    fn test_auto_selects_brute_force_for_small_project() {
-        // Complementary test: verify that VectorBackend::BruteForce explicitly
-        // forces brute-force even if chunk count were hypothetically large.
-        let (_dir, root) = setup_project();
-        let mut config = IndexConfig::new(&root);
-        config.vector_backend = VectorBackend::BruteForce;
-
-        let mut engine = Engine::init(&root, config).unwrap();
-
-        let results = engine
-            .hybrid_search(SearchQuery::new("Processor").with_limit(5))
-            .unwrap();
-        assert!(
-            !results.is_empty(),
-            "expected BruteForce hybrid_search results for 'Processor'"
-        );
-    }
-
-    #[test]
-    fn open_loads_persisted_graph() {
-        let dir = tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let src_dir = root.join("src");
-        fs::create_dir_all(&src_dir).unwrap();
-
-        fs::write(
-            src_dir.join("main.rs"),
-            "fn main() { greet(); }\nfn greet() {}\n",
-        )
-        .unwrap();
-
-        // Init, build graph, save.
-        {
-            let config = IndexConfig::new(&root);
-            let mut engine = Engine::init(&root, config).unwrap();
-            engine.build_graph().unwrap();
-            engine.save().unwrap();
-        }
-
-        // Re-open — should load graph.
-        let mut engine = Engine::open(&root).unwrap();
-        let graph = engine.graph();
-        assert!(graph.is_some(), "expected graph to be loaded on open");
-        assert!(
-            graph.unwrap().node_count() >= 2,
-            "expected at least 2 nodes after loading"
-        );
-    }
-
-    #[test]
-    fn engine_config_with_external_backend() {
-        use crate::embeddings::EmbeddingBackend;
-
-        // Verify that IndexConfig with an External embedding backend
-        // serializes and deserializes correctly.
-        let mut config = IndexConfig::new("/tmp/test");
-        config.embedding_backend = EmbeddingBackend::External {
-            url: "https://api.voyageai.com/v1/embeddings".into(),
-            model: "voyage-code-3".into(),
-            dimension: 1024,
-            api_key: Some("$VOYAGE_API_KEY".into()),
-            batch_size: Some(64),
-        };
-
-        let json = serde_json::to_string_pretty(&config).unwrap();
-        let parsed: IndexConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(config, parsed);
-        assert_eq!(parsed.embedding_backend.dimension(), 1024);
-    }
-
-    #[test]
-    fn engine_uses_mock_backend_by_default() {
-        // Verify that Engine::init() works with default config (Mock backend).
-        let (_dir, root) = setup_project();
-        let config = IndexConfig::new(&root);
-        assert_eq!(
-            config.embedding_backend,
-            crate::embeddings::EmbeddingBackend::Mock
-        );
-
-        let mut engine = Engine::init(&root, config).unwrap();
-        let results = engine
-            .hybrid_search(SearchQuery::new("add").with_limit(5))
-            .unwrap();
-        assert!(
-            !results.is_empty(),
-            "expected hybrid_search results with default Mock backend"
-        );
-    }
-
-    #[test]
-    fn create_embedder_mock() {
-        use crate::embeddings::EmbeddingBackend;
-
-        let embedder = super::create_embedder(&EmbeddingBackend::Mock).unwrap();
-        assert_eq!(embedder.dimension(), 32);
-
-        // Should produce valid embeddings.
-        let vec = embedder.embed("hello").unwrap();
-        assert_eq!(vec.len(), 32);
-    }
-
-    #[test]
-    fn trigram_index_finds_exact_substring() {
-        // Verify that the trigram index wired into Engine finds exact
-        // substring matches via hybrid_search.
-        let dir = tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let src_dir = root.join("src");
-        fs::create_dir_all(&src_dir).unwrap();
-
-        // Create a file with a distinctive function name that is short
-        // enough to trigger the trigram path (< 10 chars).
-        fs::write(
-            src_dir.join("main.rs"),
-            r#"
-fn main() {}
-
-pub fn xyz_fn() -> bool {
-    true
-}
-
-pub fn other_func() -> i32 {
-    42
-}
-"#,
-        )
-        .unwrap();
-
-        let config = IndexConfig::new(&root);
-        let mut engine = Engine::init(&root, config).unwrap();
-
-        // "xyz_fn" is 6 chars — below the 10-char trigram threshold.
-        let results = engine
-            .hybrid_search(SearchQuery::new("xyz_fn").with_limit(10))
-            .unwrap();
-        assert!(
-            !results.is_empty(),
-            "expected trigram-boosted results for short query 'xyz_fn'"
-        );
-        // The result containing "xyz_fn" should be present.
-        assert!(
-            results.iter().any(|r| r.content.contains("xyz_fn")),
-            "expected a result containing 'xyz_fn' in content"
-        );
-    }
-
-    #[test]
-    fn short_query_uses_trigram_path() {
-        // Verify that a short query (< 10 chars) gets trigram boost while
-        // a longer query still works normally without trigram involvement.
-        let (_dir, root) = setup_project();
-        let config = IndexConfig::new(&root);
-        let mut engine = Engine::init(&root, config).unwrap();
-
-        // Short query (3 chars "add") — should trigger trigram path.
-        let short_results = engine
-            .hybrid_search(SearchQuery::new("add").with_limit(10))
-            .unwrap();
-        assert!(
-            !short_results.is_empty(),
-            "expected results for short query 'add'"
-        );
-
-        // Long query (> 10 chars) — should NOT trigger trigram path,
-        // but should still return results via normal hybrid retrieval.
-        let long_results = engine
-            .hybrid_search(SearchQuery::new("Add two numbers together").with_limit(10))
-            .unwrap();
-        assert!(
-            !long_results.is_empty(),
-            "expected results for long query (no trigram shortcut)"
-        );
-    }
-
-    #[test]
-    fn long_query_works_without_trigram() {
-        // Verify that queries >= 10 chars bypass the trigram path entirely
-        // and still produce correct hybrid results.
-        let (_dir, root) = setup_project();
-        let config = IndexConfig::new(&root);
-        let mut engine = Engine::init(&root, config).unwrap();
-
-        let results = engine
-            .hybrid_search(SearchQuery::new("helper function").with_limit(10))
-            .unwrap();
-        assert!(
-            !results.is_empty(),
-            "expected results for long query 'helper function'"
-        );
-
-        // Results should be sorted by score descending.
-        for w in results.windows(2) {
-            assert!(
-                w[0].score >= w[1].score,
-                "results not sorted: {} < {}",
-                w[0].score,
-                w[1].score
-            );
-        }
-    }
-
-    #[test]
-    fn trigram_index_persisted_on_init_and_loaded_on_open() {
-        // Verify that the trigram index is persisted during init and
-        // loaded from disk during open, and that short queries still work.
-        let (_dir, root) = setup_project();
-        let config = IndexConfig::new(&root);
-
-        // Init and drop.
-        {
-            let mut engine = Engine::init(&root, config).unwrap();
-            let results = engine
-                .hybrid_search(SearchQuery::new("add").with_limit(5))
-                .unwrap();
-            assert!(!results.is_empty(), "expected results before save");
-        }
-
-        // Verify the trigram index file exists on disk.
-        let trigram_path = root.join(".codeforge/trigram.bin");
-        assert!(
-            trigram_path.exists(),
-            "expected trigram.bin to exist at {:?}",
-            trigram_path
-        );
-
-        // Re-open — trigram index should be loaded from persisted file.
-        let mut engine = Engine::open(&root).unwrap();
-        let results = engine
-            .hybrid_search(SearchQuery::new("add").with_limit(5))
-            .unwrap();
-        assert!(
-            !results.is_empty(),
-            "expected trigram-boosted results after re-opening index"
-        );
-    }
-
-    #[test]
-    fn trigram_boosts_exact_match_score() {
-        // Verify that an exact substring match via trigram gets a higher
-        // score than it would without the trigram boost.
-        let dir = tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let src_dir = root.join("src");
-        fs::create_dir_all(&src_dir).unwrap();
-
-        // Two files: one with the exact token, one without.
-        fs::write(
-            src_dir.join("alpha.rs"),
-            "pub fn qux_fn() -> bool { true }\n",
-        )
-        .unwrap();
-        fs::write(
-            src_dir.join("beta.rs"),
-            "pub fn other() -> bool { false }\n",
-        )
-        .unwrap();
-
-        let config = IndexConfig::new(&root);
-        let mut engine = Engine::init(&root, config).unwrap();
-
-        // "qux_fn" is 6 chars — triggers trigram path.
-        let results = engine
-            .hybrid_search(SearchQuery::new("qux_fn").with_limit(10))
-            .unwrap();
-        assert!(!results.is_empty(), "expected results for 'qux_fn'");
-
-        // The result from alpha.rs (containing exact match) should rank first.
-        assert!(
-            results[0].file_path.contains("alpha.rs"),
-            "expected alpha.rs (exact trigram match) to rank first, got: {}",
-            results[0].file_path
-        );
-    }
-
-    #[test]
-    fn cached_pagerank_produces_identical_results() {
-        // Build a project with cross-file references so PageRank has
-        // meaningful scores, then verify that the first hybrid_search
-        // (which computes and caches PageRank) and the second call
-        // (which uses the cache) produce identical results.
-        let dir = tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let src_dir = root.join("src");
-        fs::create_dir_all(&src_dir).unwrap();
-
-        fs::write(
-            src_dir.join("main.rs"),
-            "fn main() { helper(); }\nfn greet() {}\n",
-        )
-        .unwrap();
-        fs::write(
-            src_dir.join("lib.rs"),
-            "pub fn helper() -> bool { true }\n",
-        )
-        .unwrap();
-
-        let config = IndexConfig::new(&root);
-        let mut engine = Engine::init(&root, config).unwrap();
-        engine.build_graph().unwrap();
-
-        // First call computes and caches PageRank.
-        assert!(engine.cached_pagerank.is_none());
-        let results1 = engine
-            .hybrid_search(SearchQuery::new("helper").with_limit(10))
-            .unwrap();
-        assert!(engine.cached_pagerank.is_some());
-
-        // Second call uses the cached scores.
-        let results2 = engine
-            .hybrid_search(SearchQuery::new("helper").with_limit(10))
-            .unwrap();
-
-        // Results should be identical (same scores, same ordering).
-        assert_eq!(results1.len(), results2.len());
-        for (r1, r2) in results1.iter().zip(results2.iter()) {
-            assert_eq!(r1.chunk_id, r2.chunk_id);
-            assert!(
-                (r1.score - r2.score).abs() < 1e-6,
-                "scores differ: {} vs {}",
-                r1.score,
-                r2.score
-            );
-        }
-    }
-
-    #[test]
-    fn reindex_invalidates_pagerank_cache() {
-        let dir = tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let src_dir = root.join("src");
-        fs::create_dir_all(&src_dir).unwrap();
-
-        fs::write(src_dir.join("main.rs"), "fn main() {}\nfn add() {}\n").unwrap();
-
-        let config = IndexConfig::new(&root);
-        let mut engine = Engine::init(&root, config).unwrap();
-        engine.build_graph().unwrap();
-
-        // Populate the cache.
-        let _ = engine
-            .hybrid_search(SearchQuery::new("main").with_limit(5))
-            .unwrap();
-        assert!(engine.cached_pagerank.is_some());
-
-        // Reindex a file -- cache should be invalidated.
-        fs::write(
-            src_dir.join("main.rs"),
-            "fn main() {}\nfn new_func() {}\n",
-        )
-        .unwrap();
-        engine.reindex_file(Path::new("src/main.rs")).unwrap();
-        assert!(
-            engine.cached_pagerank.is_none(),
-            "expected PageRank cache to be invalidated after reindex"
-        );
-    }
-
-    #[test]
-    fn remove_file_invalidates_pagerank_cache() {
-        let dir = tempdir().unwrap();
-        let root = dir.path().to_path_buf();
-        let src_dir = root.join("src");
-        fs::create_dir_all(&src_dir).unwrap();
-
-        fs::write(src_dir.join("main.rs"), "fn main() {}\n").unwrap();
-        fs::write(src_dir.join("lib.rs"), "pub fn helper() {}\n").unwrap();
-
-        let config = IndexConfig::new(&root);
-        let mut engine = Engine::init(&root, config).unwrap();
-        engine.build_graph().unwrap();
-
-        // Populate the cache.
-        let _ = engine
-            .hybrid_search(SearchQuery::new("main").with_limit(5))
-            .unwrap();
-        assert!(engine.cached_pagerank.is_some());
-
-        // Remove a file -- cache should be invalidated.
-        engine.remove_file(Path::new("src/lib.rs")).unwrap();
-        assert!(
-            engine.cached_pagerank.is_none(),
-            "expected PageRank cache to be invalidated after remove_file"
-        );
+        // embeddings disabled → vector_count = 0.
+        assert_eq!(stats.vector_count, 0);
     }
 }

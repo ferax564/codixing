@@ -6,23 +6,27 @@ use std::fs;
 use std::time::Duration;
 
 use codeforge_core::watcher::{ChangeKind, FileWatcher};
-use codeforge_core::{Engine, IndexConfig, SearchQuery};
+use codeforge_core::{Engine, IndexConfig, SearchQuery, Strategy};
 use tempfile::tempdir;
+
+fn no_embed_config(root: &std::path::Path) -> IndexConfig {
+    let mut cfg = IndexConfig::new(root);
+    cfg.embedding.enabled = false;
+    cfg
+}
 
 #[test]
 fn watcher_create_and_poll() {
     let dir = tempdir().unwrap();
     let root = dir.path();
 
-    // Create an initial Rust file so the watcher has something to watch.
     let src = root.join("src");
     fs::create_dir_all(&src).unwrap();
     fs::write(src.join("existing.rs"), "fn existing() {}").unwrap();
 
-    let config = IndexConfig::new(root);
+    let config = no_embed_config(root);
     let watcher = FileWatcher::new(root, &config).unwrap();
 
-    // Create a new file while the watcher is active.
     fs::write(src.join("new_file.rs"), "fn new_func() {}").unwrap();
 
     let changes = watcher.poll_changes(Duration::from_secs(2));
@@ -52,22 +56,23 @@ fn watcher_integrates_with_engine() {
     let root = dir.path();
     common::setup_multi_language_project(root);
 
-    let config = IndexConfig::new(root);
-    let mut engine = Engine::init(root, config).unwrap();
+    let mut engine = Engine::init(root, no_embed_config(root)).unwrap();
 
     // Verify the sentinel does not exist yet.
     let results = engine
-        .search(SearchQuery::new("watcher_sentinel_function").with_limit(5))
+        .search(
+            SearchQuery::new("watcher_sentinel_function")
+                .with_limit(5)
+                .with_strategy(Strategy::Instant),
+        )
         .unwrap();
     assert!(
         results.is_empty(),
         "sentinel should not exist before file creation"
     );
 
-    // Start watching.
     let watcher = engine.watch().unwrap();
 
-    // Create a new file with a unique function.
     fs::write(
         root.join("src/watcher_new.rs"),
         r#"/// A sentinel function for the watcher integration test.
@@ -78,19 +83,20 @@ pub fn watcher_sentinel_function() -> bool {
     )
     .unwrap();
 
-    // Poll for changes.
     let changes = watcher.poll_changes(Duration::from_secs(2));
     assert!(
         !changes.is_empty(),
         "expected at least one change from the watcher"
     );
 
-    // Apply changes to the engine.
     engine.apply_changes(&changes).unwrap();
 
-    // The new function should now be searchable.
     let results = engine
-        .search(SearchQuery::new("watcher_sentinel_function").with_limit(5))
+        .search(
+            SearchQuery::new("watcher_sentinel_function")
+                .with_limit(5)
+                .with_strategy(Strategy::Instant),
+        )
         .unwrap();
     assert!(
         !results.is_empty(),
