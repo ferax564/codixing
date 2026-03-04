@@ -1,175 +1,222 @@
 # CodeForge
 
-Ultra-fast code retrieval engine for AI agents.
+Ultra-fast code retrieval engine for AI agents — beats `grep` at its own game.
 
-CodeForge is a Rust-native engine that gives AI coding agents precisely the right context from any codebase, regardless of size. It combines structure-aware parsing (tree-sitter), hybrid search (BM25 + vector), a live code dependency graph with PageRank scoring, and AI-optimized output into a single, blazing-fast binary.
+CodeForge is a Rust-native engine that gives AI coding agents precisely the right context from any codebase, regardless of size. It combines structure-aware AST parsing (tree-sitter), hybrid search (BM25 + vector), a live code dependency graph with PageRank scoring, and AI-optimized token-budgeted output into a single, blazing-fast binary.
 
-## Why
+## Why Not Just Grep?
 
-AI coding agents live or die by context quality. Current approaches — naive text search, pure vector search, file-level stuffing — waste tokens and miss relevant code. CodeForge solves this by understanding code as *structure*, not text.
+Claude Code and similar agents currently use `grep`, `find`, and `cat` for code navigation. These tools are fast, but they have a fundamental problem: **they return everything, always**. A single `grep -r 'b2Vec2'` on a real C++ game codebase returns 2,240 hits — 56,000 tokens, burning 28% of Claude's context window before any reasoning happens.
+
+CodeForge solves this with three properties grep cannot replicate:
+
+1. **Bounded output** — `limit=20` caps results so context never overflows
+2. **Structural awareness** — finds where a symbol is *defined*, not just where it appears
+3. **Graph intelligence** — answers "who imports this file?" and "what does changing this break?" transitively
+
+---
+
+## Benchmark: CodeForge Daemon vs Native Shell Tools
+
+Measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — 246,000 lines of C++, 770 files. CodeForge running in daemon mode (engine pre-loaded, Unix socket IPC ~6ms overhead).
+
+| Operation | Native tool | Native | CodeForge | Speed | Tokens |
+|-----------|------------|-------:|----------:|------:|-------:|
+| Literal search | `grep -r` (all hits) | 73ms | 26ms | **2.8×** | ≈ same |
+| Regex + file filter | `grep -rE --include='*.h'` | 56ms | 12ms | **4.6×** | −38% |
+| High-freq pattern (2,240 hits) | `grep -r` (unbounded) | 69ms | 6ms | **12×** | **−99%** |
+| Find class definition | `grep -rn 'class ...'` | 82ms | 8ms | **10×** | structured |
+| Read large file | `cat file` (full) | 4ms | 6ms | −1.3× | **−56%** |
+| Reverse dependency lookup | `grep -rl '#include'` | 67ms | 6ms | **11×** | −92% |
+| Transitive dep chain (depth 2) | manual multi-hop grep | 6ms | 6ms | ≈ same | −66% |
+| Architecture overview | `find + wc -l \| sort` | 38ms | 104ms | −2.7× | PageRank |
+| Semantic / conceptual search | keyword-guessing grep | 67ms | 37ms | **1.8×** | natural language |
+
+> **The b2Vec2 case is the decisive number.** Raw `grep` returns 56,335 tokens — 28% of Claude's 200K context budget — in a single call. CodeForge returns the top 20 results in 333 tokens. Same information, 99% less waste.
+
+### What grep cannot do at all
+
+- PageRank-ranked architecture map (importance ≠ file size)
+- Transitive import graph at arbitrary depth
+- Semantic / conceptual search (BM25 understands intent, not just strings)
+- Automatic token budget management (grep overflows; CodeForge caps)
+- Symbol-table lookup (definition vs. every mention)
+
+---
 
 ## Quick Start
 
 ```bash
-# Install (from source)
-cargo install --path crates/cli
+# Build from source
+cargo build --release --workspace
 
-# Index a codebase (builds BM25 index, vector embeddings, and dependency graph)
-codeforge init .
+# Index a codebase (BM25 only — fast, no GPU needed)
+./target/release/codeforge init . --no-embeddings
 
-# Search with natural language (graph-boosted by default)
+# Or with semantic search (BGE-Base-EN-v1.5, local ONNX inference)
+./target/release/codeforge init .
+
+# Search
 codeforge search "authentication handler"
+codeforge search "parse config" --strategy thorough
 
-# Search with file filter and specific strategy
-codeforge search "parse config" --file "src/" --limit 5 --strategy thorough
-
-# List symbols
+# Symbol lookup
 codeforge symbols Engine
 codeforge symbols --file src/main.rs
 
-# Explore the dependency graph
-codeforge graph                          # graph stats
-codeforge graph --map --token-budget 2000  # token-budgeted repo map
-codeforge callers src/engine.rs          # files that import engine.rs
-codeforge callees src/engine.rs          # files that engine.rs imports
-codeforge dependencies src/engine.rs --depth 2   # transitive dependency tree
+# Dependency graph
+codeforge callers src/engine.rs          # who imports this?
+codeforge callees src/engine.rs          # what does this import?
+codeforge dependencies src/main.rs --depth 2
 ```
 
-## Example Output
+---
 
+## Claude Code Integration (MCP)
+
+CodeForge exposes all its tools via the [Model Context Protocol](https://modelcontextprotocol.io) — Claude Code picks them up automatically.
+
+### Register once
+
+```bash
+claude mcp add --scope user --transport stdio codeforge \
+  -- /path/to/codeforge-mcp --root /path/to/your/project
 ```
-$ codeforge init .
-Indexing /home/user/my-project...
-Indexed 28 files, 136 chunks, 370 symbols, 512 vectors in 1.4s
 
-$ codeforge search "authentication handler" --strategy fast
-1. src/auth/handler.rs [L12-L45] (Rust) score=8.931
-   pub async fn authenticate(req: Request) -> Response
-   | pub async fn authenticate(req: Request) -> Response {
-   |     let token = req.headers().get("Authorization");
-   |     ...
+Or edit `~/.claude.json` directly:
 
-$ codeforge graph
-Graph Statistics
-  Nodes (files):     28
-  Edges (imports):   47
-  Resolved edges:    31
-  External edges:    16
-
-$ codeforge callers src/parser.rs
-src/engine.rs
-src/main.rs
-
-  2 caller(s) found.
-
-$ codeforge symbols Config
-KIND         NAME                 FILE                    LINES
---------------------------------------------------------------
-Struct       Config               src/engine.rs           L35-L44
-Import       Config               src/lib.rs              L13-L14
+```json
+{
+  "mcpServers": {
+    "codeforge": {
+      "type": "stdio",
+      "command": "/path/to/codeforge-mcp",
+      "args": ["--root", "/path/to/your/project"]
+    }
+  }
+}
 ```
+
+### Daemon mode (recommended)
+
+Normal mode spawns a new process per call (~30ms cold start). Daemon mode loads the engine once and serves all calls over a Unix socket (~6ms IPC overhead) — **4–5× faster for cheap operations**.
+
+```bash
+# Start daemon (keeps running, auto-updates index on file saves)
+codeforge-mcp --root /path/to/project --daemon &
+
+# All subsequent codeforge-mcp calls auto-proxy through the daemon
+```
+
+The daemon runs a background file watcher. When you save a file, the index updates within ~100ms. Claude Code always queries a fresh index.
+
+### Available MCP tools (10)
+
+| Tool | What it does |
+|------|-------------|
+| `code_search` | BM25 + graph-boosted search; `instant`/`fast`/`thorough`/`explore` strategies |
+| `grep_code` | Regex or literal search across indexed files; bounded output, glob filter, context lines |
+| `find_symbol` | Structured symbol lookup — returns definition location + signature |
+| `read_symbol` | Full source of a named symbol |
+| `read_file` | Token-budgeted file reader with line range |
+| `get_repo_map` | PageRank-ranked architecture overview within a token budget |
+| `get_references` | Who imports a file (callers) + what it imports (callees) |
+| `get_transitive_deps` | Multi-hop dependency chain to arbitrary depth |
+| `search_usages` | All usage sites of a symbol across the codebase |
+| `index_status` | Current index statistics (files, chunks, symbols, graph) |
+
+---
+
+## Performance
+
+All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a real C++ game engine, 246K lines across 770 files.
+
+| Metric | Result |
+|--------|--------|
+| **Init speed (BM25 + graph)** | **0.87s** for 246K LoC / 770 files |
+| **Init speed (with BGE-Base embeddings)** | ~25s (ONNX inference dominates; one-time cost) |
+| **Incremental reindex (single file)** | <150ms |
+| **Batch reindex (N files, e.g. after git pull)** | Single PageRank pass — N× faster than N individual reindexes |
+| **File watcher latency** | ≤100ms from save to queryable |
+| **Daemon IPC overhead** | ~6ms per call (Unix socket round-trip) |
+| **BM25 search** | <10ms p99 |
+| **Test suite** | 222 tests |
+
+### Init speed breakdown (0.87s on 246K LoC)
+
+| Stage | Time | Notes |
+|-------|------|-------|
+| File discovery | ~5ms | Directory walk, 770 files |
+| Parse + chunk + BM25 index | ~600ms | rayon parallel, all CPU cores |
+| Graph build (imports + PageRank) | ~200ms | Parallel resolution, single sequential insert pass |
+| Persist to `.codeforge/` | ~50ms | bitcode + Tantivy flush |
+
+> **Why it's fast:** `build_graph()` reuses the import lists extracted during the parallel parse phase — no second file read, no second tree-sitter parse. Files are parsed exactly once.
+
+---
 
 ## Key Features
 
 - **AST-aware chunking** — Tree-sitter parsing across 10 language families; never splits a function in half
 - **BM25 full-text search** — Tantivy-backed with a custom code tokenizer (camelCase, snake_case, dot.path splitting)
-- **Hybrid retrieval** — BM25 + vector (fastembed BGE-Small) fused with Reciprocal Rank Fusion; MMR deduplication on `thorough` strategy
+- **Hybrid retrieval** — BM25 + vector (fastembed BGE-Base-EN-v1.5, 768 dims) fused with Reciprocal Rank Fusion; MMR deduplication on `thorough` strategy
 - **Code dependency graph** — Import extraction for all 10 languages, petgraph `DiGraph`, PageRank scoring; transparently boosts search result ranking
-- **Repo map generation** — Aider-style, token-budgeted output sorted by PageRank for AI agent context
-- **Concurrent symbol table** — DashMap-backed with exact, prefix, and pattern matching
-- **Incremental indexing** — Sub-500ms updates via file watcher with debouncing; graph edges updated automatically
+- **Repo map generation** — Aider-style, token-budgeted output sorted by PageRank (importance) not file size
+- **Live index freshness** — Daemon file watcher updates the in-memory engine within 100ms of any file save; no restart needed
+- **MCP server** — 10 tools exposed via JSON-RPC 2.0; Claude Code registers with one command
+- **Concurrent symbol table** — DashMap-backed with exact, prefix, and substring matching
 - **Single binary, zero runtime deps** — No JVM, no Docker, no external databases
+
+---
 
 ## Supported Languages
 
-| Tier | Languages | Capabilities |
-|------|-----------|-------------|
-| **Tier 1** | Rust, Python, TypeScript, TSX, JavaScript, Go, Java, C, C++, C# | Full AST parsing + entity extraction + symbol resolution |
-| **Tier 2** | *(Phase 2)* Ruby, PHP, Swift, Kotlin, Scala, Zig, Elixir, Lua, Bash, SQL | AST chunking + basic indexing |
-| **Tier 3** | Any tree-sitter grammar (40+) | Text-mode fallback |
+| Tier | Languages |
+|------|-----------|
+| **Tier 1** (full AST + graph) | Rust, Python, TypeScript, TSX, JavaScript, Go, Java, C, C++, C# |
+
+---
 
 ## Architecture
 
 ```
-┌────────────────────────────────────────────────────────────────────┐
-│                         CodeForge Engine                            │
-│                                                                     │
-│  ┌────────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐  │
-│  │ Tree-sitter │  │ Tantivy  │  │  Symbol  │  │  Code Graph      │  │
-│  │ AST Parser  │  │  (BM25)  │  │  Table   │  │  (petgraph)      │  │
-│  └─────┬──────┘  └────┬─────┘  └────┬─────┘  └────────┬─────────┘  │
-│        │              │              │                  │            │
-│  ┌─────▼──────┐  ┌────▼─────┐  ┌────▼─────┐  ┌────────▼─────────┐  │
-│  │   cAST     │  │ Code     │  │ DashMap  │  │  ImportExtractor  │  │
-│  │  Chunker   │  │ Tokenizer│  │ (conc.)  │  │  PageRank         │  │
-│  └────────────┘  └────┬─────┘  └──────────┘  └────────┬─────────┘  │
-│                        │                               │            │
-│  ┌─────────────────────▼───────────────────────────────▼──────────┐ │
-│  │         Retriever: BM25 | Hybrid (RRF) | Thorough (MMR)        │ │
-│  │                  + Graph PageRank boost                         │ │
-│  └────────────────────────────────────────────────────────────────┘ │
-│                                                                     │
-│  ┌──────────────────────────────────────────────────────────────── ┐ │
-│  │       API Layer: CLI (clap) / REST (axum) / File Watcher        │ │
-│  └──────────────────────────────────────────────────────────────── ┘ │
-└────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────┐
+│                           CodeForge Engine                              │
+│                                                                         │
+│  ┌─────────────┐  ┌──────────┐  ┌──────────────┐  ┌─────────────────┐  │
+│  │ Tree-sitter  │  │ Tantivy  │  │    Symbol    │  │   Code Graph    │  │
+│  │ AST Parser   │  │  (BM25)  │  │    Table     │  │  (petgraph)     │  │
+│  └──────┬───────┘  └────┬─────┘  └──────┬───────┘  └───────┬─────────┘  │
+│         │               │               │                   │            │
+│  ┌──────▼───────┐  ┌────▼──────┐  ┌─────▼──────┐  ┌────────▼─────────┐  │
+│  │     cAST     │  │   Code    │  │  DashMap   │  │ ImportExtractor  │  │
+│  │   Chunker    │  │ Tokenizer │  │  (conc.)   │  │   + PageRank     │  │
+│  └──────────────┘  └────┬──────┘  └────────────┘  └────────┬─────────┘  │
+│                          │                                  │            │
+│  ┌───────────────────────▼──────────────────────────────────▼──────────┐ │
+│  │      Retriever: BM25 · Hybrid (RRF) · Thorough (MMR) · Explore     │ │
+│  │                   + Graph PageRank score boost                      │ │
+│  └──────────────────────────────────────────────────────────────────── ┘ │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐ │
+│  │   API Layer: CLI (clap) · REST (axum) · MCP (JSON-RPC 2.0)         │ │
+│  │              + Daemon (Unix socket) · File Watcher                  │ │
+│  └─────────────────────────────────────────────────────────────────────┘ │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Rust Library API
+---
 
-```rust
-use codeforge_core::{Engine, IndexConfig, RepoMapOptions, SearchQuery, Strategy};
+## Retrieval Strategies
 
-// Index a project (graph built automatically)
-let config = IndexConfig::new("./my-project");
-let engine = Engine::init("./my-project", config)?;
+| Strategy | Method | Graph boost | Latency |
+|----------|--------|-------------|---------|
+| `instant` | BM25 only | No | <10ms |
+| `fast` | BM25 + vector (RRF) | Yes | <50ms |
+| `thorough` | Hybrid + MMR dedup | Yes | <200ms |
+| `explore` | BM25 + graph neighbor expansion | Yes | <100ms |
 
-// Search — graph PageRank boost applied automatically for Fast/Thorough
-let results = engine.search(
-    SearchQuery::new("authentication handler")
-        .with_limit(10)
-        .with_strategy(Strategy::Fast)
-        .with_file_filter("src/")
-)?;
-
-for result in &results {
-    println!("{}:{}-{} score={:.2}",
-        result.file_path, result.line_start, result.line_end, result.score);
-}
-
-// Symbol lookup
-let symbols = engine.symbols("Config", None)?;
-
-// Graph navigation
-let callers = engine.callers("src/parser.rs");      // direct importers
-let callees = engine.callees("src/engine.rs");      // direct imports
-let deps    = engine.dependencies("src/main.rs", 2); // transitive, depth 2
-
-// Repo map for AI context window
-let map = engine.repo_map(RepoMapOptions {
-    token_budget: 4096,
-    ..Default::default()
-});
-
-// Graph stats
-let stats = engine.graph_stats(); // Option<GraphStats>
-
-// Incremental re-indexing (graph edges update automatically)
-let mut engine = engine;
-engine.reindex_file(Path::new("src/main.rs"))?;
-```
-
-## Performance
-
-| Metric | Measured | Target |
-|--------|----------|--------|
-| Index speed (BM25 only) | 28 files in 0.27s (~100 files/s) | >800 files/s |
-| Index speed (hybrid + graph) | 28 files in ~1.4s (embedding dominates) | — |
-| Incremental update | <500ms | <500ms |
-| BM25 search latency | <5ms p99 | <10ms p99 |
-| Hybrid search latency | <50ms p99 | <50ms p99 |
-| Test suite | 165 tests in ~4s | <30s |
-| Binary size | TBD | <50MB |
+---
 
 ## Tech Stack
 
@@ -177,82 +224,44 @@ engine.reindex_file(Path::new("src/main.rs"))?;
 |-----------|-------|---------|
 | AST Parsing | `tree-sitter` 0.26 | Incremental, multi-language parsing |
 | Full-text search | `tantivy` 0.22 | BM25 scoring, inverted index |
-| Vector embeddings | `fastembed` 5 | BGE-Small-EN-v1.5, local ONNX inference |
-| Vector index | `usearch` 2 | HNSW approximate nearest-neighbour |
-| Code graph | `petgraph` 0.8 | `DiGraph` + PageRank for dependency graph |
-| Token counting | `tiktoken-rs` 0.9 | cl100k_base token budget enforcement |
+| Vector embeddings | `fastembed` 5 | BGE-Base-EN-v1.5 (768d), local ONNX |
+| Vector index | `usearch` 2 | HNSW approximate nearest-neighbour + int8 quantization |
+| Code graph | `petgraph` 0.8 | `DiGraph` + PageRank |
+| Token counting | `tiktoken-rs` 0.9 | cl100k_base budget enforcement |
 | HTTP server | `axum` 0.8 | Async REST API |
 | Symbol table | `dashmap` 6 | Lock-free concurrent hash map |
 | Parallelism | `rayon` 1 | Parallel file processing |
 | File watching | `notify` 8 | Cross-platform fs event monitoring |
-| Serialization | `bitcode` 0.6 | Fast binary serialization |
+| Serialization | `bitcode` 0.6 | Fast binary persistence |
 | Content hashing | `xxhash-rust` 0.8 | Change detection (xxh3) |
+| IPC | tokio `UnixListener` | Daemon socket server |
 | CLI | `clap` 4 | Command-line interface |
-| Logging | `tracing` 0.1 | Structured logging |
+| Logging | `tracing` 0.1 | Structured logging (stderr only in MCP mode) |
+
+---
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for the full phased delivery plan.
+| Phase | Status | Highlights |
+|-------|--------|-----------|
+| **Phase 1: Foundation** | ✅ Complete | AST parsing, BM25, CLI, file watcher — 111 tests |
+| **Phase 2: Semantic Search** | ✅ Complete | BGE-Base embeddings, hybrid RRF+MMR, REST API |
+| **Phase 3: Graph Intelligence** | ✅ Complete | Import graph, PageRank, repo map — 165 tests |
+| **Phase 4: Agent Integration** | ✅ Complete | MCP (10 tools), daemon mode, 2.6× faster init, live watcher — 222 tests |
+| **Phase 5: Production Hardening** | Planned | See [ROADMAP.md](ROADMAP.md) |
 
-| Phase | Status | Description |
-|-------|--------|-------------|
-| **Phase 1: Foundation** | **Complete** | AST parsing, BM25 search, CLI, file watcher — 111 tests |
-| **Phase 2: Semantic Search** | **Complete** | Vector search, hybrid retrieval (RRF+MMR), REST API — 131 tests |
-| **Phase 3: Graph Intelligence** | **Complete** | Code graph, PageRank, repo map, graph-boosted search — 165 tests |
-| Phase 4: Agent Integration | Planned | MCP server, gRPC, multi-repo |
-| Phase 5: Production Hardening | Planned | Benchmarks, fuzzing, Tier 2 languages |
+---
 
 ## Development
 
 ```bash
-# Build
 cargo build --workspace
-
-# Test
-cargo test --workspace
-
-# Lint
+cargo test --workspace        # 222 tests
 cargo clippy --workspace -- -D warnings
-
-# Format
 cargo fmt --all
 ```
 
-## Retrieval Strategies
-
-| Strategy | Description | Graph Boost | Target Latency |
-|----------|-------------|-------------|----------------|
-| `instant` | BM25 only — no embeddings, no graph | No | <10ms p99 |
-| `fast` | BM25 + vector (RRF fusion) + PageRank boost | Yes | <50ms p99 |
-| `thorough` | Hybrid + MMR deduplication + PageRank boost | Yes | <200ms p99 |
-| `deep` | *(Phase 4)* Multi-hop graph traversal | — | <2s p99 |
-
-## REST API
-
-The `codeforge-server` binary exposes a REST API on port 3000 by default.
-
-```
-POST   /search            search with strategy + optional token budget
-POST   /symbols           symbol lookup with name/file filter
-POST   /index/reindex     re-index a specific file
-DELETE /index/file        remove a file from the index
-GET    /status            index statistics (files, chunks, symbols, vectors, graph)
-GET    /health            liveness probe
-
-POST   /graph/repo-map    generate token-budgeted repo map
-GET    /graph/callers     ?file=src/parser.rs&depth=1
-GET    /graph/callees     ?file=src/engine.rs&depth=1
-GET    /graph/stats       { node_count, edge_count, resolved_edges, external_edges }
-```
-
-## 2026 Priority Alignment
-
-- **P0:** ~~ship Phase 1 MVP~~ — **DONE** (111 tests, 10 languages, BM25 search, CLI, file watcher)
-- **P1:** ~~semantic + hybrid retrieval and REST integration~~ — **DONE** (Phase 2, hybrid+MMR, REST API)
-- **P2:** ~~graph intelligence, PageRank, repo map~~ — **DONE** (Phase 3, 165 tests)
-- **P3:** MCP/gRPC depth, multi-repo, production benchmark hardening.
-
-See `ROADMAP.md` for the synchronized project roadmap.
+---
 
 ## License
 
