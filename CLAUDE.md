@@ -9,7 +9,7 @@ CodeForge is a Rust-native code retrieval engine for AI agents. It combines tree
 
 ## Current Status
 
-**Phase 4A (Agent Integration): IN PROGRESS** — 167 tests, version 0.4.0
+**Phase 4A (Agent Integration): COMPLETE** — 222 tests, version 0.4.0
 
 ### What's been delivered across all phases
 
@@ -45,9 +45,13 @@ CodeForge is a Rust-native code retrieval engine for AI agents. It combines tree
 - CLI: `codeforge graph`, `codeforge callers`, `codeforge callees`, `codeforge dependencies`
 - REST: `POST /graph/repo-map`, `GET /graph/callers`, `GET /graph/callees`, `GET /graph/stats`
 
-**Phase 4A — Agent Integration (partial, in progress)**
+**Phase 4A — Agent Integration: COMPLETE**
 - MCP server binary (`codeforge-mcp`): JSON-RPC 2.0 over stdin/stdout for Claude Code integration
-- 7 MCP tools: `code_search`, `find_symbol`, `get_references`, `get_repo_map`, `search_usages`, `get_transitive_deps`, `index_status`
+- 10 MCP tools: `code_search`, `find_symbol`, `get_references`, `get_repo_map`, `search_usages`, `get_transitive_deps`, `index_status`, `read_file`, `grep_code`, `read_symbol`
+- `grep_code`: regex/literal file search with context lines, glob filter, match highlighting (beats raw grep for LLM token budget)
+- Auto-init: `codeforge-mcp --root .` auto-initializes a BM25-only index if none exists
+- Daemon mode: `codeforge-mcp --root . --daemon` loads engine once, serves over Unix socket `.codeforge/daemon.sock`; subsequent invocations auto-proxy (4–5× faster for cheap operations, ~1.8× overall)
+- Stale socket detection: `socket_alive()` uses `Ok(Ok(_))` matching to distinguish live daemon from stale socket file (connection refused ≠ alive)
 - `explore` strategy: BM25 first-pass + graph neighbor expansion (RepoHyper Search-then-Expand pattern)
 - `Engine::search_usages()`: BM25 + graph boost for symbol reference lookup
 - CLI: `codeforge usages` subcommand; `--strategy explore` added to `search`
