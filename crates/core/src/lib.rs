@@ -17,7 +17,7 @@ pub mod watcher;
 
 // Re-export primary public API types.
 pub use config::{EmbeddingConfig, EmbeddingModel, GraphConfig, IndexConfig};
-pub use engine::{Engine, IndexStats};
+pub use engine::{Engine, GrepMatch, IndexStats};
 pub use error::{CodeforgeError, Result};
 pub use graph::{CodeEdge, CodeGraph, CodeNode, EdgeKind, GraphStats, RepoMapOptions};
 pub use retriever::{ChunkMeta, SearchQuery, SearchResult, Strategy};

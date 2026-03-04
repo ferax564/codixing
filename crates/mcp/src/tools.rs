@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use codeforge_core::{Engine, RepoMapOptions, SearchQuery, Strategy};
+use codeforge_core::{Engine, GrepMatch, RepoMapOptions, SearchQuery, Strategy};
 
 /// Return the JSON-Schema definitions for all MCP tools.
 pub fn tool_definitions() -> Value {
@@ -152,6 +152,36 @@ pub fn tool_definitions() -> Value {
             }
         },
         {
+            "name": "grep_code",
+            "description": "Fast regex or literal text search across all source files in the indexed project. Unlike code_search (which uses BM25/vector retrieval on pre-indexed chunks), grep_code scans file content directly — ideal for finding exact identifiers, string literals, TODO/FIXME comments, error codes, or any pattern requiring verbatim matching. Returns file path, line number, the matching line, and optional surrounding context.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Search pattern. Interpreted as a regular expression (RE2 syntax, e.g. 'fn\\\\s+search', 'TODO|FIXME'). Set literal=true for exact string matching."
+                    },
+                    "literal": {
+                        "type": "boolean",
+                        "description": "When true, treat pattern as a plain string (regex metacharacters are escaped). Default: false."
+                    },
+                    "file_glob": {
+                        "type": "string",
+                        "description": "Glob pattern to restrict which files are searched (e.g. '*.rs', 'src/**/*.py', 'crates/core/**'). Omit to search all indexed files."
+                    },
+                    "context_lines": {
+                        "type": "integer",
+                        "description": "Lines of surrounding context to include before and after each match (default: 0, max: 5)."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum matches to return (default: 50)."
+                    }
+                },
+                "required": ["pattern"]
+            }
+        },
+        {
             "name": "read_symbol",
             "description": "Read the complete source definition of a named symbol (function, struct, class, method, etc.) resolved from the symbol table. More precise than code_search for fetching a known definition — returns exact source lines with language-tagged fenced code.",
             "inputSchema": {
@@ -186,6 +216,7 @@ pub fn dispatch_tool(engine: &Engine, name: &str, args: &Value) -> (String, bool
         "index_status" => call_index_status(engine),
         "read_file" => call_read_file(engine, args),
         "read_symbol" => call_read_symbol(engine, args),
+        "grep_code" => call_grep_code(engine, args),
         _ => (format!("Unknown tool: {name}"), true),
     }
 }
@@ -473,6 +504,60 @@ fn call_read_file(engine: &Engine, args: &Value) -> (String, bool) {
         }
         Err(e) => (format!("Read error: {e}"), true),
     }
+}
+
+fn call_grep_code(engine: &Engine, args: &Value) -> (String, bool) {
+    let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
+        Some(p) => p,
+        None => return ("Missing required argument: pattern".to_string(), true),
+    };
+
+    let literal = args.get("literal").and_then(|v| v.as_bool()).unwrap_or(false);
+    let file_glob = args.get("file_glob").and_then(|v| v.as_str());
+    let context_lines = args
+        .get("context_lines")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0)
+        .min(5) as usize;
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(50) as usize;
+
+    match engine.grep_code(pattern, literal, file_glob, context_lines, limit) {
+        Err(e) => (format!("grep_code error: {e}"), true),
+        Ok(matches) if matches.is_empty() => {
+            (format!("No matches found for `{pattern}`."), false)
+        }
+        Ok(matches) => (format_grep_matches(pattern, &matches), false),
+    }
+}
+
+fn format_grep_matches(pattern: &str, matches: &[GrepMatch]) -> String {
+    let mut out = format!("Found {} match(es) for `{}`:\n\n", matches.len(), pattern);
+    let mut current_file = String::new();
+    for m in matches {
+        if m.file_path != current_file {
+            current_file = m.file_path.clone();
+            out.push_str(&format!("## {}\n", current_file));
+        }
+        // Context lines before.
+        for (offset, line) in m.before.iter().enumerate() {
+            let ln = m.line_number as usize - m.before.len() + offset;
+            out.push_str(&format!("  {:>5}  {}\n", ln, line));
+        }
+        // The matching line with a visual arrow.
+        out.push_str(&format!("→ {:>5}  {}\n", m.line_number, m.line));
+        // Context lines after.
+        for (offset, line) in m.after.iter().enumerate() {
+            let ln = m.line_number as usize + 1 + offset;
+            out.push_str(&format!("  {:>5}  {}\n", ln, line));
+        }
+        if !m.before.is_empty() || !m.after.is_empty() {
+            out.push('\n');
+        }
+    }
+    out
 }
 
 fn call_read_symbol(engine: &Engine, args: &Value) -> (String, bool) {

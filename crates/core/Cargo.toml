@@ -32,6 +32,8 @@ bitcode.workspace = true
 xxhash-rust.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+regex.workspace = true
+glob.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
