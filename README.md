@@ -1,5 +1,7 @@
 # Codixing
 
+**Website: [codixing.com](https://codixing.com)**
+
 Ultra-fast code retrieval engine for AI agents — beats `grep` at its own game.
 
 Codixing is a Rust-native engine that gives AI coding agents precisely the right context from any codebase, regardless of size. It combines structure-aware AST parsing (tree-sitter), hybrid search (BM25 + vector), a live code dependency graph with PageRank scoring, and AI-optimized token-budgeted output into a single, blazing-fast binary.
