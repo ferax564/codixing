@@ -11,7 +11,7 @@ use tracing::{debug, warn};
 
 use super::SearchResult;
 use super::reranker::Reranker;
-use crate::error::CodeforgeError;
+use crate::error::CodixingError;
 
 /// A reranker that calls an external cross-encoder API over HTTP.
 ///
@@ -109,7 +109,7 @@ impl Reranker for HttpReranker {
         query: &str,
         results: &[SearchResult],
         top_k: usize,
-    ) -> Result<Vec<SearchResult>, CodeforgeError> {
+    ) -> Result<Vec<SearchResult>, CodixingError> {
         if results.is_empty() {
             return Ok(Vec::new());
         }
@@ -138,19 +138,19 @@ impl Reranker for HttpReranker {
         );
 
         let response = request.send().map_err(|e| {
-            CodeforgeError::Embedding(format!("HTTP request to {} failed: {e}", self.url))
+            CodixingError::Embedding(format!("HTTP request to {} failed: {e}", self.url))
         })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body_text = response.text().unwrap_or_default();
-            return Err(CodeforgeError::Embedding(format!(
+            return Err(CodixingError::Embedding(format!(
                 "reranking API returned {status}: {body_text}"
             )));
         }
 
         let rerank_response: RerankResponse = response.json().map_err(|e| {
-            CodeforgeError::Embedding(format!("failed to parse reranking response: {e}"))
+            CodixingError::Embedding(format!("failed to parse reranking response: {e}"))
         })?;
 
         // Map API results back to SearchResult objects.

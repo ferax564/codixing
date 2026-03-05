@@ -5,8 +5,8 @@ mod common;
 use std::fs;
 use std::time::Duration;
 
-use codeforge_core::watcher::{ChangeKind, FileWatcher};
-use codeforge_core::{Engine, IndexConfig, SearchQuery, Strategy};
+use codixing_core::watcher::{ChangeKind, FileWatcher};
+use codixing_core::{Engine, IndexConfig, SearchQuery, Strategy};
 use tempfile::tempdir;
 
 fn no_embed_config(root: &std::path::Path) -> IndexConfig {

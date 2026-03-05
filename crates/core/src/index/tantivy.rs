@@ -9,7 +9,7 @@ use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, Term, doc};
 
 use crate::chunker::Chunk;
-use crate::error::{CodeforgeError, Result};
+use crate::error::{CodixingError, Result};
 use crate::index::schema::{SchemaFields, build_schema};
 
 // ---------------------------------------------------------------------------
@@ -297,7 +297,7 @@ impl TantivyIndex {
         std::fs::create_dir_all(path)?;
         let (schema, fields) = build_schema();
         let dir = tantivy::directory::MmapDirectory::open(path)
-            .map_err(|e| CodeforgeError::Index(e.to_string()))?;
+            .map_err(|e| CodixingError::Index(e.to_string()))?;
         let index = Index::open_or_create(dir, schema)?;
         register_code_tokenizer(&index);
         let writer = index.writer(50_000_000)?;
@@ -316,7 +316,7 @@ impl TantivyIndex {
     /// Open an existing persistent index (fails if no index exists).
     pub fn open_in_dir(path: &Path) -> Result<Self> {
         if !path.exists() {
-            return Err(CodeforgeError::IndexNotFound {
+            return Err(CodixingError::IndexNotFound {
                 path: path.to_path_buf(),
             });
         }
@@ -328,7 +328,7 @@ impl TantivyIndex {
         let field = |name: &str| -> Result<Field> {
             schema
                 .get_field(name)
-                .map_err(|e| CodeforgeError::Index(e.to_string()))
+                .map_err(|e| CodixingError::Index(e.to_string()))
         };
         let fields = SchemaFields {
             chunk_id: field("chunk_id")?,
@@ -371,7 +371,7 @@ impl TantivyIndex {
         let writer = self
             .writer
             .lock()
-            .map_err(|e| CodeforgeError::Index(format!("writer lock poisoned: {e}")))?;
+            .map_err(|e| CodixingError::Index(format!("writer lock poisoned: {e}")))?;
 
         writer.add_document(doc!(
             self.fields.chunk_id => chunk_id_str,
@@ -398,7 +398,7 @@ impl TantivyIndex {
         let writer = self
             .writer
             .lock()
-            .map_err(|e| CodeforgeError::Index(format!("writer lock poisoned: {e}")))?;
+            .map_err(|e| CodixingError::Index(format!("writer lock poisoned: {e}")))?;
         writer.delete_term(Term::from_field_text(
             self.fields.file_path_exact,
             file_path,
@@ -411,7 +411,7 @@ impl TantivyIndex {
         let mut writer = self
             .writer
             .lock()
-            .map_err(|e| CodeforgeError::Index(format!("writer lock poisoned: {e}")))?;
+            .map_err(|e| CodixingError::Index(format!("writer lock poisoned: {e}")))?;
         writer.commit()?;
         self.reader.reload()?;
         Ok(())

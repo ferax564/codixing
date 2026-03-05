@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
 use tracing::info;
 
-use crate::error::{CodeforgeError, Result};
+use crate::error::{CodixingError, Result};
 
 /// Wrapper around a fastembed [`TextRerank`] cross-encoder model.
 ///
@@ -29,7 +29,7 @@ impl Reranker {
             RerankInitOptions::new(RerankerModel::BGERerankerBase)
                 .with_show_download_progress(false),
         )
-        .map_err(|e| CodeforgeError::Reranker(format!("failed to load model: {e}")))?;
+        .map_err(|e| CodixingError::Reranker(format!("failed to load model: {e}")))?;
 
         Ok(Self {
             model: Mutex::new(model),
@@ -51,11 +51,11 @@ impl Reranker {
         let mut model = self
             .model
             .lock()
-            .map_err(|_| CodeforgeError::Reranker("model lock poisoned".to_string()))?;
+            .map_err(|_| CodixingError::Reranker("model lock poisoned".to_string()))?;
 
         let results = model
             .rerank(query, doc_refs.as_slice(), false, None)
-            .map_err(|e| CodeforgeError::Reranker(format!("rerank failed: {e}")))?;
+            .map_err(|e| CodixingError::Reranker(format!("rerank failed: {e}")))?;
 
         let mut scored: Vec<(usize, f32)> =
             results.into_iter().map(|r| (r.index, r.score)).collect();

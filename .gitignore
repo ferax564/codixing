@@ -1,17 +1,31 @@
-# Rust
+# Rust build output
 /target/
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock is intentionally committed — this workspace produces binaries,
+# so lock files ensure reproducible builds for end users.
 
-# CodeForge index
+# CodeForge index (generated at runtime)
 .codeforge/
 
-# fastembed / ONNX model cache (downloaded at runtime, not committed)
+# Embedding model cache (downloaded at runtime, not committed)
 .fastembed_cache/
+
+# Test / benchmark data
+data/*.redb
+
+# Internal tooling and working files
+.playwright-mcp/
+GTM_Strategy.md
+
+# Screenshot / marketing assets (not part of the source tree)
+*.png
+*.jpg
+*.jpeg
+*.gif
+!docs/assets/**
 
 # IDE
 .idea/
-.vscode/
 *.swp
 *.swo
 *~

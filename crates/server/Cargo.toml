@@ -1,17 +1,17 @@
 [package]
-name = "codeforge-server"
+name = "codixing-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "API server for CodeForge — HTTP + gRPC endpoints"
+description = "API server for Codixing — HTTP + gRPC endpoints"
 
 [[bin]]
-name = "codeforge-server"
+name = "codixing-server"
 path = "src/main.rs"
 
 [dependencies]
-codeforge-core = { path = "../core" }
+codixing-core = { path = "../core" }
 axum.workspace = true
 tokio.workspace = true
 tower-http.workspace = true

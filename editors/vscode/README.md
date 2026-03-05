@@ -1,27 +1,27 @@
-# CodeForge — VS Code / Cursor Extension
+# Codixing — VS Code / Cursor Extension
 
-Ultra-fast code retrieval for AI agents. Brings CodeForge's structural search,
+Ultra-fast code retrieval for AI agents. Brings Codixing's structural search,
 dependency graph, and MCP integration directly into VS Code and Cursor.
 
 ## Features
 
-- **Status bar indicator** — shows `CodeForge: ✓ indexed` or `CodeForge: ○ not indexed`
-  based on the presence of a `.codeforge/` directory in the workspace.
+- **Status bar indicator** — shows `Codixing: ✓ indexed` or `Codixing: ○ not indexed`
+  based on the presence of a `.codixing/` directory in the workspace.
 - **Command Palette commands**:
-  - `CodeForge: Index Workspace` — runs `codeforge init .` in an integrated terminal
-  - `CodeForge: Sync Index` — runs `codeforge sync .` (hash-based incremental update)
-  - `CodeForge: Search...` — opens a query prompt; results appear in the Output panel
-  - `CodeForge: Show Repo Map` — generates a PageRank-sorted file overview
-  - `CodeForge: Start Daemon` — starts `codeforge-mcp --daemon` for faster subsequent calls
-  - `CodeForge: Register MCP Server` — writes the `codeforge-mcp` entry to
+  - `Codixing: Index Workspace` — runs `codixing init .` in an integrated terminal
+  - `Codixing: Sync Index` — runs `codixing sync .` (hash-based incremental update)
+  - `Codixing: Search...` — opens a query prompt; results appear in the Output panel
+  - `Codixing: Show Repo Map` — generates a PageRank-sorted file overview
+  - `Codixing: Start Daemon` — starts `codixing-mcp --daemon` for faster subsequent calls
+  - `Codixing: Register MCP Server` — writes the `codixing-mcp` entry to
     `~/.claude.json` and `~/.cursor/mcp.json`
 
 ## Requirements
 
-Install the CodeForge binaries:
+Install the Codixing binaries:
 
 ```bash
-cargo install codeforge codeforge-mcp codeforge-server
+cargo install codixing codixing-mcp codixing-server
 ```
 
 Or build from source:
@@ -34,10 +34,10 @@ cargo build --release --workspace
 
 | Setting | Default | Description |
 |---|---|---|
-| `codeforge.binaryPath` | `""` | Path to `codeforge` binary (auto-detected if empty) |
-| `codeforge.mcpBinaryPath` | `""` | Path to `codeforge-mcp` binary (auto-detected if empty) |
-| `codeforge.autoStartDaemon` | `false` | Start the MCP daemon automatically on activation |
-| `codeforge.embeddings` | `false` | Enable vector embeddings when indexing (slower init, better search quality) |
+| `codixing.binaryPath` | `""` | Path to `codixing` binary (auto-detected if empty) |
+| `codixing.mcpBinaryPath` | `""` | Path to `codixing-mcp` binary (auto-detected if empty) |
+| `codixing.autoStartDaemon` | `false` | Start the MCP daemon automatically on activation |
+| `codixing.embeddings` | `false` | Enable vector embeddings when indexing (slower init, better search quality) |
 
 ## Building the Extension
 

@@ -8,7 +8,7 @@ use clap::Parser;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use codeforge_core::Engine;
+use codixing_core::Engine;
 
 use config::ServerConfig;
 use state::new_state;
@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
 
     let engine = Engine::open(&root).with_context(|| {
         format!(
-            "failed to open index at {} — run `codeforge init` first",
+            "failed to open index at {} — run `codixing init` first",
             root.display()
         )
     })?;
@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("failed to bind to {addr}"))?;
 
-    info!("CodeForge server listening on http://{addr}");
+    info!("Codixing server listening on http://{addr}");
 
     axum::serve(listener, router)
         .await

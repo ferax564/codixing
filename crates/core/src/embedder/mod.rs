@@ -4,7 +4,7 @@ use fastembed::{EmbeddingModel as FastEmbedModel, InitOptions, TextEmbedding};
 use tracing::info;
 
 use crate::config::EmbeddingModel;
-use crate::error::{CodeforgeError, Result};
+use crate::error::{CodixingError, Result};
 
 /// Number of dimensions for BGE Small EN v1.5.
 pub const BGE_SMALL_EN_DIMS: usize = 384;
@@ -95,7 +95,7 @@ impl Embedder {
         let model = TextEmbedding::try_new(
             InitOptions::new(fastembed_model).with_show_download_progress(false),
         )
-        .map_err(|e| CodeforgeError::Embedding(format!("failed to load model: {e}")))?;
+        .map_err(|e| CodixingError::Embedding(format!("failed to load model: {e}")))?;
 
         Ok(Self {
             backend: EmbedBackend::Onnx(Mutex::new(model)),
@@ -120,7 +120,7 @@ impl Embedder {
         let device = Device::Cpu;
         let model =
             fastembed::Qwen3TextEmbedding::from_hf(QWEN3_SMALL_REPO, &device, DType::F32, QWEN3_MAX_LENGTH)
-                .map_err(|e| CodeforgeError::Embedding(format!("failed to load Qwen3 model: {e}")))?;
+                .map_err(|e| CodixingError::Embedding(format!("failed to load Qwen3 model: {e}")))?;
 
         Ok(Self {
             backend: EmbedBackend::Qwen3(Mutex::new(model)),
@@ -137,23 +137,23 @@ impl Embedder {
                 let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
                 let mut model = m
                     .lock()
-                    .map_err(|e| CodeforgeError::Embedding(format!("model lock poisoned: {e}")))?;
+                    .map_err(|e| CodixingError::Embedding(format!("model lock poisoned: {e}")))?;
                 model
                     .embed(refs, None)
-                    .map_err(|e| CodeforgeError::Embedding(format!("embed failed: {e}")))
+                    .map_err(|e| CodixingError::Embedding(format!("embed failed: {e}")))
             }
 
             #[cfg(feature = "qwen3")]
             EmbedBackend::Qwen3(m) => {
                 let model = m
                     .lock()
-                    .map_err(|e| CodeforgeError::Embedding(format!("model lock poisoned: {e}")))?;
+                    .map_err(|e| CodixingError::Embedding(format!("model lock poisoned: {e}")))?;
                 // Qwen3TextEmbedding::embed takes &[S] where S: AsRef<str>.
                 // It does NOT require &mut self (the candle tensors are built
                 // fresh on each call).
                 model
                     .embed(&texts)
-                    .map_err(|e| CodeforgeError::Embedding(format!("embed failed: {e}")))
+                    .map_err(|e| CodixingError::Embedding(format!("embed failed: {e}")))
             }
         }
     }
@@ -164,26 +164,26 @@ impl Embedder {
             EmbedBackend::Onnx(m) => {
                 let mut model = m
                     .lock()
-                    .map_err(|e| CodeforgeError::Embedding(format!("model lock poisoned: {e}")))?;
+                    .map_err(|e| CodixingError::Embedding(format!("model lock poisoned: {e}")))?;
                 let mut results = model
                     .embed(vec![text], None)
-                    .map_err(|e| CodeforgeError::Embedding(format!("embed failed: {e}")))?;
+                    .map_err(|e| CodixingError::Embedding(format!("embed failed: {e}")))?;
                 results
                     .pop()
-                    .ok_or_else(|| CodeforgeError::Embedding("empty embedding result".to_string()))
+                    .ok_or_else(|| CodixingError::Embedding("empty embedding result".to_string()))
             }
 
             #[cfg(feature = "qwen3")]
             EmbedBackend::Qwen3(m) => {
                 let model = m
                     .lock()
-                    .map_err(|e| CodeforgeError::Embedding(format!("model lock poisoned: {e}")))?;
+                    .map_err(|e| CodixingError::Embedding(format!("model lock poisoned: {e}")))?;
                 let mut results = model
                     .embed(&[text])
-                    .map_err(|e| CodeforgeError::Embedding(format!("embed failed: {e}")))?;
+                    .map_err(|e| CodixingError::Embedding(format!("embed failed: {e}")))?;
                 results
                     .pop()
-                    .ok_or_else(|| CodeforgeError::Embedding("empty embedding result".to_string()))
+                    .ok_or_else(|| CodixingError::Embedding("empty embedding result".to_string()))
             }
         }
     }

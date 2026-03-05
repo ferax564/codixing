@@ -50,18 +50,18 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: |
           mkdir -p staging
-          cp target/release/codeforge staging/codeforge-${{ matrix.artifact_suffix }}
-          cp target/release/codeforge-mcp staging/codeforge-mcp-${{ matrix.artifact_suffix }}
-          cp target/release/codeforge-server staging/codeforge-server-${{ matrix.artifact_suffix }}
+          cp target/release/codixing staging/codixing-${{ matrix.artifact_suffix }}
+          cp target/release/codixing-mcp staging/codixing-mcp-${{ matrix.artifact_suffix }}
+          cp target/release/codixing-server staging/codixing-server-${{ matrix.artifact_suffix }}
 
       - name: Stage binaries (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path staging
-          Copy-Item target\release\codeforge.exe staging\codeforge-${{ matrix.artifact_suffix }}.exe
-          Copy-Item target\release\codeforge-mcp.exe staging\codeforge-mcp-${{ matrix.artifact_suffix }}.exe
-          Copy-Item target\release\codeforge-server.exe staging\codeforge-server-${{ matrix.artifact_suffix }}.exe
+          Copy-Item target\release\codixing.exe staging\codixing-${{ matrix.artifact_suffix }}.exe
+          Copy-Item target\release\codixing-mcp.exe staging\codixing-mcp-${{ matrix.artifact_suffix }}.exe
+          Copy-Item target\release\codixing-server.exe staging\codixing-server-${{ matrix.artifact_suffix }}.exe
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

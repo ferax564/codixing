@@ -5,7 +5,7 @@
 
 mod common;
 
-use codeforge_core::{Engine, IndexConfig, SearchQuery, Strategy};
+use codixing_core::{Engine, IndexConfig, SearchQuery, Strategy};
 use tempfile::tempdir;
 
 /// Create an `IndexConfig` with embeddings disabled (BM25-only mode).

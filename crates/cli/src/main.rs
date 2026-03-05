@@ -5,10 +5,10 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use codeforge_core::{Engine, GitSyncStats, IndexConfig, RepoMapOptions, SearchQuery, Strategy, SyncStats};
+use codixing_core::{Engine, GitSyncStats, IndexConfig, RepoMapOptions, SearchQuery, Strategy, SyncStats};
 
 #[derive(Parser)]
-#[command(name = "codeforge", about = "Code retrieval engine for AI agents")]
+#[command(name = "codixing", about = "Code retrieval engine for AI agents")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -355,7 +355,7 @@ fn cmd_search(
     let root = std::env::current_dir().context("cannot determine current directory")?;
     let engine = Engine::open(&root).with_context(|| {
         format!(
-            "no index found at {} — run `codeforge init` first",
+            "no index found at {} — run `codixing init` first",
             root.display()
         )
     })?;
@@ -417,7 +417,7 @@ fn cmd_symbols(filter: String, file: Option<String>) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
     let engine = Engine::open(&root).with_context(|| {
         format!(
-            "no index found at {} — run `codeforge init` first",
+            "no index found at {} — run `codixing init` first",
             root.display()
         )
     })?;
@@ -458,7 +458,7 @@ fn cmd_graph(path: PathBuf, token_budget: usize, map: bool) -> Result<()> {
         .with_context(|| format!("path not found: {}", path.display()))?;
     let engine = Engine::open(&root).with_context(|| {
         format!(
-            "no index found at {} — run `codeforge init` first",
+            "no index found at {} — run `codixing init` first",
             root.display()
         )
     })?;
@@ -470,7 +470,7 @@ fn cmd_graph(path: PathBuf, token_budget: usize, map: bool) -> Result<()> {
         };
         match engine.repo_map(opts) {
             Some(text) => print!("{text}"),
-            None => eprintln!("Graph not available — re-run `codeforge init`"),
+            None => eprintln!("Graph not available — re-run `codixing init`"),
         }
         return Ok(());
     }
@@ -483,7 +483,7 @@ fn cmd_graph(path: PathBuf, token_budget: usize, map: bool) -> Result<()> {
             println!("  Resolved edges:    {}", stats.resolved_edges);
             println!("  External edges:    {}", stats.external_edges);
         }
-        None => eprintln!("Graph not available — re-run `codeforge init`"),
+        None => eprintln!("Graph not available — re-run `codixing init`"),
     }
     Ok(())
 }
@@ -492,7 +492,7 @@ fn cmd_callers(file: String, depth: usize) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
     let engine = Engine::open(&root).with_context(|| {
         format!(
-            "no index found at {} — run `codeforge init` first",
+            "no index found at {} — run `codixing init` first",
             root.display()
         )
     })?;
@@ -519,7 +519,7 @@ fn cmd_callees(file: String, depth: usize) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
     let engine = Engine::open(&root).with_context(|| {
         format!(
-            "no index found at {} — run `codeforge init` first",
+            "no index found at {} — run `codixing init` first",
             root.display()
         )
     })?;
@@ -545,7 +545,7 @@ fn cmd_dependencies(file: String, depth: usize) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
     let engine = Engine::open(&root).with_context(|| {
         format!(
-            "no index found at {} — run `codeforge init` first",
+            "no index found at {} — run `codixing init` first",
             root.display()
         )
     })?;
@@ -567,7 +567,7 @@ fn cmd_usages(symbol: String, limit: usize, file: Option<String>) -> Result<()> 
     let root = std::env::current_dir().context("cannot determine current directory")?;
     let engine = Engine::open(&root).with_context(|| {
         format!(
-            "no index found at {} — run `codeforge init` first",
+            "no index found at {} — run `codixing init` first",
             root.display()
         )
     })?;
@@ -694,7 +694,7 @@ fn cmd_update(path: PathBuf, dry_run: bool) -> Result<()> {
 
     let mut engine = Engine::open(&root).with_context(|| {
         format!(
-            "no index found at {} — run `codeforge init` first",
+            "no index found at {} — run `codixing init` first",
             root.display()
         )
     })?;
@@ -734,7 +734,7 @@ fn cmd_sync(path: PathBuf) -> Result<()> {
         .with_context(|| format!("path not found: {}", path.display()))?;
 
     let mut engine =
-        Engine::open(&root).with_context(|| "no index found — run `codeforge init` first")?;
+        Engine::open(&root).with_context(|| "no index found — run `codixing init` first")?;
 
     let start = Instant::now();
     let SyncStats {
@@ -762,7 +762,7 @@ fn cmd_git_sync(path: PathBuf) -> Result<()> {
         .with_context(|| format!("path not found: {}", path.display()))?;
 
     let mut engine =
-        Engine::open(&root).with_context(|| "no index found — run `codeforge init` first")?;
+        Engine::open(&root).with_context(|| "no index found — run `codixing init` first")?;
 
     let start = Instant::now();
     let GitSyncStats {
@@ -794,7 +794,7 @@ fn cmd_embed(path: PathBuf) -> Result<()> {
         .with_context(|| format!("path not found: {}", path.display()))?;
 
     let mut engine =
-        Engine::open(&root).with_context(|| "no index found — run `codeforge init` first")?;
+        Engine::open(&root).with_context(|| "no index found — run `codixing init` first")?;
 
     let start = Instant::now();
     let embedded = engine.embed_remaining()?;
@@ -817,12 +817,12 @@ async fn cmd_serve(host: String, port: u16, path: PathBuf) -> Result<()> {
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
 
-    eprintln!("Starting CodeForge server at http://{}:{}", host, port);
+    eprintln!("Starting Codixing server at http://{}:{}", host, port);
     eprintln!("Serving index at: {}", root.display());
 
-    // Try to start the standalone codeforge-server binary first.
+    // Try to start the standalone codixing-server binary first.
     // If it's not in PATH, fall back to a helpful error message.
-    let server_result = tokio::process::Command::new("codeforge-server")
+    let server_result = tokio::process::Command::new("codixing-server")
         .args(["--host", &host, "--port", &port.to_string()])
         .arg(&root)
         .status()
@@ -830,12 +830,12 @@ async fn cmd_serve(host: String, port: u16, path: PathBuf) -> Result<()> {
 
     match server_result {
         Ok(status) if !status.success() => {
-            anyhow::bail!("codeforge-server exited with status: {status}");
+            anyhow::bail!("codixing-server exited with status: {status}");
         }
         Err(_) => {
             anyhow::bail!(
-                "codeforge-server binary not found in PATH.\n\
-                 Run it directly: codeforge-server --host {} --port {} {}",
+                "codixing-server binary not found in PATH.\n\
+                 Run it directly: codixing-server --host {} --port {} {}",
                 host,
                 port,
                 root.display()

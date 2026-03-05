@@ -1,17 +1,17 @@
 [package]
-name = "codeforge"
+name = "codixing"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "CLI for CodeForge — code retrieval engine for AI agents"
+description = "CLI for Codixing — code retrieval engine for AI agents"
 
 [[bin]]
-name = "codeforge"
+name = "codixing"
 path = "src/main.rs"
 
 [dependencies]
-codeforge-core = { path = "../core" }
+codixing-core = { path = "../core" }
 clap.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

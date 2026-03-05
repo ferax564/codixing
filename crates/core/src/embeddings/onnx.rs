@@ -10,7 +10,7 @@ use ort::session::Session;
 use tokenizers::Tokenizer;
 
 use super::Embedder;
-use crate::error::CodeforgeError;
+use crate::error::CodixingError;
 
 /// Default embedding dimension for `all-MiniLM-L6-v2`.
 const DEFAULT_DIMENSION: usize = 384;
@@ -40,18 +40,18 @@ impl OnnxEmbedder {
     /// Load model from a directory containing `model.onnx` and `tokenizer.json`.
     ///
     /// Returns an error if the required files are missing or cannot be loaded.
-    pub fn load(model_dir: &Path) -> Result<Self, CodeforgeError> {
+    pub fn load(model_dir: &Path) -> Result<Self, CodixingError> {
         let model_path = model_dir.join("model.onnx");
         let tokenizer_path = model_dir.join("tokenizer.json");
 
         if !model_path.exists() {
-            return Err(CodeforgeError::Embedding(format!(
+            return Err(CodixingError::Embedding(format!(
                 "model file not found: {}",
                 model_path.display()
             )));
         }
         if !tokenizer_path.exists() {
-            return Err(CodeforgeError::Embedding(format!(
+            return Err(CodixingError::Embedding(format!(
                 "tokenizer file not found: {}",
                 tokenizer_path.display()
             )));
@@ -61,21 +61,21 @@ impl OnnxEmbedder {
     }
 
     /// Create with explicit model and tokenizer file paths.
-    pub fn from_paths(model_path: &Path, tokenizer_path: &Path) -> Result<Self, CodeforgeError> {
+    pub fn from_paths(model_path: &Path, tokenizer_path: &Path) -> Result<Self, CodixingError> {
         let session = Session::builder()
             .map_err(|e| {
-                CodeforgeError::Embedding(format!("failed to create session builder: {e}"))
+                CodixingError::Embedding(format!("failed to create session builder: {e}"))
             })?
             .commit_from_file(model_path)
             .map_err(|e| {
-                CodeforgeError::Embedding(format!(
+                CodixingError::Embedding(format!(
                     "failed to load ONNX model from {}: {e}",
                     model_path.display()
                 ))
             })?;
 
         let tokenizer = Tokenizer::from_file(tokenizer_path).map_err(|e| {
-            CodeforgeError::Embedding(format!(
+            CodixingError::Embedding(format!(
                 "failed to load tokenizer from {}: {e}",
                 tokenizer_path.display()
             ))
@@ -144,23 +144,23 @@ impl OnnxEmbedder {
         input_ids: Array2<i64>,
         attention_mask: Array2<i64>,
         token_type_ids: Array2<i64>,
-    ) -> Result<Array2<f32>, CodeforgeError> {
+    ) -> Result<Array2<f32>, CodixingError> {
         use ort::value::Tensor;
 
         let ids_tensor = Tensor::from_array(input_ids).map_err(|e| {
-            CodeforgeError::Embedding(format!("failed to create input_ids tensor: {e}"))
+            CodixingError::Embedding(format!("failed to create input_ids tensor: {e}"))
         })?;
         let mask_tensor = Tensor::from_array(attention_mask.clone()).map_err(|e| {
-            CodeforgeError::Embedding(format!("failed to create attention_mask tensor: {e}"))
+            CodixingError::Embedding(format!("failed to create attention_mask tensor: {e}"))
         })?;
         let type_tensor = Tensor::from_array(token_type_ids).map_err(|e| {
-            CodeforgeError::Embedding(format!("failed to create token_type_ids tensor: {e}"))
+            CodixingError::Embedding(format!("failed to create token_type_ids tensor: {e}"))
         })?;
 
         let mut session = self
             .session
             .lock()
-            .map_err(|e| CodeforgeError::Embedding(format!("session lock poisoned: {e}")))?;
+            .map_err(|e| CodixingError::Embedding(format!("session lock poisoned: {e}")))?;
 
         let outputs = session
             .run(ort::inputs![
@@ -168,20 +168,20 @@ impl OnnxEmbedder {
                 "attention_mask" => mask_tensor,
                 "token_type_ids" => type_tensor,
             ])
-            .map_err(|e| CodeforgeError::Embedding(format!("ONNX inference failed: {e}")))?;
+            .map_err(|e| CodixingError::Embedding(format!("ONNX inference failed: {e}")))?;
 
         // The model outputs last_hidden_state as the first output.
         let hidden_state = outputs[0].try_extract_array::<f32>().map_err(|e| {
-            CodeforgeError::Embedding(format!("failed to extract output tensor: {e}"))
+            CodixingError::Embedding(format!("failed to extract output tensor: {e}"))
         })?;
 
         // Reshape into 3D (batch, seq_len, hidden_dim).
         let view_3d = if hidden_state.ndim() == 3 {
             hidden_state
                 .into_dimensionality::<ndarray::Ix3>()
-                .map_err(|e| CodeforgeError::Embedding(format!("unexpected output shape: {e}")))?
+                .map_err(|e| CodixingError::Embedding(format!("unexpected output shape: {e}")))?
         } else {
-            return Err(CodeforgeError::Embedding(format!(
+            return Err(CodixingError::Embedding(format!(
                 "expected 3D output tensor, got {}D",
                 hidden_state.ndim()
             )));
@@ -195,11 +195,11 @@ impl OnnxEmbedder {
 }
 
 impl Embedder for OnnxEmbedder {
-    fn embed(&self, text: &str) -> Result<Vec<f32>, CodeforgeError> {
+    fn embed(&self, text: &str) -> Result<Vec<f32>, CodixingError> {
         let encoding = self
             .tokenizer
             .encode(text, true)
-            .map_err(|e| CodeforgeError::Embedding(format!("tokenization failed: {e}")))?;
+            .map_err(|e| CodixingError::Embedding(format!("tokenization failed: {e}")))?;
 
         let ids: Vec<i64> = encoding.get_ids().iter().map(|&id| id as i64).collect();
         let mask: Vec<i64> = encoding
@@ -211,17 +211,17 @@ impl Embedder for OnnxEmbedder {
 
         let seq_len = ids.len();
         let input_ids = Array2::from_shape_vec((1, seq_len), ids)
-            .map_err(|e| CodeforgeError::Embedding(format!("shape error: {e}")))?;
+            .map_err(|e| CodixingError::Embedding(format!("shape error: {e}")))?;
         let attention_mask = Array2::from_shape_vec((1, seq_len), mask)
-            .map_err(|e| CodeforgeError::Embedding(format!("shape error: {e}")))?;
+            .map_err(|e| CodixingError::Embedding(format!("shape error: {e}")))?;
         let token_type_ids = Array2::from_shape_vec((1, seq_len), type_ids)
-            .map_err(|e| CodeforgeError::Embedding(format!("shape error: {e}")))?;
+            .map_err(|e| CodixingError::Embedding(format!("shape error: {e}")))?;
 
         let result = self.infer(input_ids, attention_mask, token_type_ids)?;
         Ok(result.row(0).to_vec())
     }
 
-    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, CodeforgeError> {
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, CodixingError> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
@@ -229,7 +229,7 @@ impl Embedder for OnnxEmbedder {
         let encodings = self
             .tokenizer
             .encode_batch(texts.to_vec(), true)
-            .map_err(|e| CodeforgeError::Embedding(format!("batch tokenization failed: {e}")))?;
+            .map_err(|e| CodixingError::Embedding(format!("batch tokenization failed: {e}")))?;
 
         let batch_size = encodings.len();
         let max_len = encodings.iter().map(|e| e.len()).max().unwrap_or(0);

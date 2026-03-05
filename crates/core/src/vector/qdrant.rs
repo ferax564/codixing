@@ -4,7 +4,7 @@
 //! instance reachable at the URL stored in the `QDRANT_URL` environment
 //! variable (default: `http://localhost:6334`).
 //!
-//! The collection name defaults to `codeforge`; override with
+//! The collection name defaults to `codixing`; override with
 //! `QDRANT_COLLECTION`.
 //!
 //! # Example
@@ -28,7 +28,7 @@ mod inner {
     };
     use qdrant_client::{Payload, Qdrant};
 
-    use crate::error::{CodeforgeError, Result};
+    use crate::error::{CodixingError, Result};
     use crate::vector::VectorBackend;
 
     /// Qdrant-backed vector index.
@@ -59,13 +59,13 @@ mod inner {
         ///
         /// Reads connection parameters from environment variables:
         /// - `QDRANT_URL` — default `http://localhost:6334`
-        /// - `QDRANT_COLLECTION` — default `codeforge`
+        /// - `QDRANT_COLLECTION` — default `codixing`
         /// - `QDRANT_API_KEY` — optional API key
         pub fn new(dims: usize) -> Result<Self> {
             let url =
                 std::env::var("QDRANT_URL").unwrap_or_else(|_| "http://localhost:6334".to_string());
             let collection =
-                std::env::var("QDRANT_COLLECTION").unwrap_or_else(|_| "codeforge".to_string());
+                std::env::var("QDRANT_COLLECTION").unwrap_or_else(|_| "codixing".to_string());
 
             let rt = build_rt()?;
 
@@ -75,12 +75,12 @@ mod inner {
             }
             let client = builder
                 .build()
-                .map_err(|e| CodeforgeError::VectorIndex(format!("qdrant connect: {e}")))?;
+                .map_err(|e| CodixingError::VectorIndex(format!("qdrant connect: {e}")))?;
 
             // Create the collection if it does not already exist.
             rt.block_on(async {
                 let exists = client.collection_exists(&collection).await.map_err(|e| {
-                    CodeforgeError::VectorIndex(format!("qdrant collection_exists: {e}"))
+                    CodixingError::VectorIndex(format!("qdrant collection_exists: {e}"))
                 })?;
 
                 if !exists {
@@ -92,10 +92,10 @@ mod inner {
                         )
                         .await
                         .map_err(|e| {
-                            CodeforgeError::VectorIndex(format!("qdrant create_collection: {e}"))
+                            CodixingError::VectorIndex(format!("qdrant create_collection: {e}"))
                         })?;
                 }
-                Ok::<_, CodeforgeError>(())
+                Ok::<_, CodixingError>(())
             })?;
 
             Ok(Self {
@@ -135,8 +135,8 @@ mod inner {
                 self.client
                     .upsert_points(UpsertPointsBuilder::new(&self.collection, vec![point]))
                     .await
-                    .map_err(|e| CodeforgeError::VectorIndex(format!("qdrant upsert: {e}")))?;
-                Ok::<_, CodeforgeError>(())
+                    .map_err(|e| CodixingError::VectorIndex(format!("qdrant upsert: {e}")))?;
+                Ok::<_, CodixingError>(())
             })?;
 
             self.file_chunks
@@ -161,7 +161,7 @@ mod inner {
                         k as u64,
                     ))
                     .await
-                    .map_err(|e| CodeforgeError::VectorIndex(format!("qdrant search: {e}")))
+                    .map_err(|e| CodixingError::VectorIndex(format!("qdrant search: {e}")))
             })?;
 
             let results = response
@@ -204,8 +204,8 @@ mod inner {
                         DeletePointsBuilder::new(&self.collection).points(points_selector),
                     )
                     .await
-                    .map_err(|e| CodeforgeError::VectorIndex(format!("qdrant delete: {e}")))?;
-                Ok::<_, CodeforgeError>(())
+                    .map_err(|e| CodixingError::VectorIndex(format!("qdrant delete: {e}")))?;
+                Ok::<_, CodixingError>(())
             })
         }
 
@@ -237,7 +237,7 @@ mod inner {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map_err(|e| CodeforgeError::VectorIndex(format!("tokio runtime: {e}")))
+            .map_err(|e| CodixingError::VectorIndex(format!("tokio runtime: {e}")))
     }
 
     #[cfg(test)]

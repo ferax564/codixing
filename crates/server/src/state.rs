@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use codeforge_core::Engine;
+use codixing_core::Engine;
 
 /// Shared application state — an `Engine` behind an async `RwLock`.
 ///

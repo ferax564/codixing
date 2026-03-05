@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use codeforge_core::{Engine, GrepMatch, RepoMapOptions, SearchQuery, Strategy};
+use codixing_core::{Engine, GrepMatch, RepoMapOptions, SearchQuery, Strategy};
 
 /// Return the JSON-Schema definitions for all MCP tools.
 pub fn tool_definitions() -> Value {
@@ -118,7 +118,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "index_status",
-            "description": "Return diagnostic information about the CodeForge index: file count, chunk count, symbol count, vector count, graph statistics, available search strategies, and whether semantic search is active. Call this first when starting work on an unfamiliar codebase.",
+            "description": "Return diagnostic information about the Codixing index: file count, chunk count, symbol count, vector count, graph statistics, available search strategies, and whether semantic search is active. Call this first when starting work on an unfamiliar codebase.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -294,7 +294,7 @@ fn call_index_status(engine: &Engine) -> (String, bool) {
             stats.vector_count, config.embedding.model, config.embedding.contextual_embeddings
         )
     } else if config.embedding.enabled {
-        "0 vectors — index was built without embeddings; re-run `codeforge init .` to enable semantic search".to_string()
+        "0 vectors — index was built without embeddings; re-run `codixing init .` to enable semantic search".to_string()
     } else {
         "disabled (BM25-only mode)".to_string()
     };
@@ -319,7 +319,7 @@ fn call_index_status(engine: &Engine) -> (String, bool) {
     };
 
     let out = format!(
-        "# CodeForge Index Status\n\n\
+        "# Codixing Index Status\n\n\
          Files indexed:    {}\n\
          Code chunks:      {}\n\
          Symbols:          {}\n\
@@ -450,7 +450,7 @@ fn call_get_repo_map(engine: &Engine, args: &Value) -> (String, bool) {
         ),
         Some(map) => (map, false),
         None => (
-            "Repository map unavailable — graph intelligence is disabled or not yet built. Run `codeforge init .` to enable it.".to_string(),
+            "Repository map unavailable — graph intelligence is disabled or not yet built. Run `codixing init .` to enable it.".to_string(),
             false,
         ),
     }

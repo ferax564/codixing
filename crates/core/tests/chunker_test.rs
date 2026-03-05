@@ -5,10 +5,10 @@ mod common;
 use std::collections::HashSet;
 use std::fs;
 
-use codeforge_core::chunker::cast::CastChunker;
-use codeforge_core::chunker::{Chunker, non_ws_chars};
-use codeforge_core::config::ChunkConfig;
-use codeforge_core::language::detect_language;
+use codixing_core::chunker::cast::CastChunker;
+use codixing_core::chunker::{Chunker, non_ws_chars};
+use codixing_core::config::ChunkConfig;
+use codixing_core::language::detect_language;
 use tempfile::tempdir;
 
 /// Parse a file with tree-sitter and return chunks.
@@ -16,19 +16,19 @@ fn chunks_for_file(
     file_path: &str,
     source: &[u8],
     config: &ChunkConfig,
-) -> Vec<codeforge_core::chunker::Chunk> {
+) -> Vec<codixing_core::chunker::Chunk> {
     let path = std::path::Path::new(file_path);
     let language = detect_language(path).expect("unsupported language in test");
 
     // Set up a tree-sitter parser for the detected language.
     let mut parser = tree_sitter::Parser::new();
     let ts_lang: tree_sitter::Language = match language {
-        codeforge_core::language::Language::Rust => tree_sitter_rust::LANGUAGE.into(),
-        codeforge_core::language::Language::Python => tree_sitter_python::LANGUAGE.into(),
-        codeforge_core::language::Language::TypeScript => {
+        codixing_core::language::Language::Rust => tree_sitter_rust::LANGUAGE.into(),
+        codixing_core::language::Language::Python => tree_sitter_python::LANGUAGE.into(),
+        codixing_core::language::Language::TypeScript => {
             tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
         }
-        codeforge_core::language::Language::Go => tree_sitter_go::LANGUAGE.into(),
+        codixing_core::language::Language::Go => tree_sitter_go::LANGUAGE.into(),
         _ => panic!("language not set up in test helper: {:?}", language),
     };
 

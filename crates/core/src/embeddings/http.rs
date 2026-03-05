@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use super::Embedder;
-use crate::error::CodeforgeError;
+use crate::error::CodixingError;
 
 /// An embedding backend that calls an external HTTP API.
 ///
@@ -106,7 +106,7 @@ impl HttpEmbedder {
     }
 
     /// Call the embedding API with a batch of texts.
-    fn call_api(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, CodeforgeError> {
+    fn call_api(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, CodixingError> {
         let body = EmbedRequest {
             model: &self.model,
             input: texts,
@@ -126,19 +126,19 @@ impl HttpEmbedder {
         );
 
         let response = request.send().map_err(|e| {
-            CodeforgeError::Embedding(format!("HTTP request to {} failed: {e}", self.url))
+            CodixingError::Embedding(format!("HTTP request to {} failed: {e}", self.url))
         })?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body_text = response.text().unwrap_or_default();
-            return Err(CodeforgeError::Embedding(format!(
+            return Err(CodixingError::Embedding(format!(
                 "embedding API returned {status}: {body_text}"
             )));
         }
 
         let embed_response: EmbedResponse = response.json().map_err(|e| {
-            CodeforgeError::Embedding(format!("failed to parse embedding response: {e}"))
+            CodixingError::Embedding(format!("failed to parse embedding response: {e}"))
         })?;
 
         let embeddings: Vec<Vec<f32>> = embed_response
@@ -149,7 +149,7 @@ impl HttpEmbedder {
 
         // Validate count: API must return exactly one embedding per input text.
         if embeddings.len() != texts.len() {
-            return Err(CodeforgeError::Embedding(format!(
+            return Err(CodixingError::Embedding(format!(
                 "expected {} embeddings but got {}",
                 texts.len(),
                 embeddings.len()
@@ -159,7 +159,7 @@ impl HttpEmbedder {
         // Validate dimensions.
         for (i, emb) in embeddings.iter().enumerate() {
             if emb.len() != self.dim {
-                return Err(CodeforgeError::Embedding(format!(
+                return Err(CodixingError::Embedding(format!(
                     "embedding[{i}] has dimension {} but expected {}",
                     emb.len(),
                     self.dim
@@ -172,15 +172,15 @@ impl HttpEmbedder {
 }
 
 impl Embedder for HttpEmbedder {
-    fn embed(&self, text: &str) -> Result<Vec<f32>, CodeforgeError> {
+    fn embed(&self, text: &str) -> Result<Vec<f32>, CodixingError> {
         let results = self.call_api(&[text])?;
         results
             .into_iter()
             .next()
-            .ok_or_else(|| CodeforgeError::Embedding("empty response from embedding API".into()))
+            .ok_or_else(|| CodixingError::Embedding("empty response from embedding API".into()))
     }
 
-    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, CodeforgeError> {
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, CodixingError> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }

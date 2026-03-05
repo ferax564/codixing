@@ -1,4 +1,4 @@
-# Product Requirements Document: **CodeForge** — Ultra-Fast Code Retrieval Engine for AI Agents
+# Product Requirements Document: **Codixing** — Ultra-Fast Code Retrieval Engine for AI Agents
 
 **Version:** 0.1.0
 **Date:** February 7, 2026
@@ -8,7 +8,7 @@
 
 ## 1. Executive Summary
 
-CodeForge is a Rust-native code retrieval engine purpose-built for feeding AI coding agents with precisely the right context from massive codebases. It combines structure-aware parsing, hybrid search (lexical + semantic + graph-based), and an AI-optimized output layer into a single, blazing-fast binary. The goal is to solve the fundamental bottleneck in AI-assisted coding: context quality. The best LLM in the world produces garbage if fed the wrong code snippets.
+Codixing is a Rust-native code retrieval engine purpose-built for feeding AI coding agents with precisely the right context from massive codebases. It combines structure-aware parsing, hybrid search (lexical + semantic + graph-based), and an AI-optimized output layer into a single, blazing-fast binary. The goal is to solve the fundamental bottleneck in AI-assisted coding: context quality. The best LLM in the world produces garbage if fed the wrong code snippets.
 
 The project draws on cutting-edge research (cAST chunking, graph-based retrieval à la Aider, hybrid BM25+vector fusion with reranking) and proven Rust infrastructure (tree-sitter, tantivy, qdrant) to build something that doesn't exist today: an open-source, single-binary code retrieval engine that understands code as *structure*, not text.
 
@@ -52,14 +52,14 @@ Research from 2024–2025 shows that the retrieval layer — not the LLM itself 
 2. **Hybrid by default.** No single retrieval method wins. Lexical, semantic, and structural signals are fused and reranked.
 3. **Incremental everything.** Full re-indexing is a failure mode. Every mutation (file save, branch switch, git pull) triggers minimal, targeted updates.
 4. **AI-native output.** Results are formatted to maximize LLM comprehension: contextualized chunks with scope chains, signatures, dependency annotations, and token budgets.
-5. **Zero-config start, infinite tunability.** Works out of the box on `codeforge init .` but exposes every knob for power users.
+5. **Zero-config start, infinite tunability.** Works out of the box on `codixing init .` but exposes every knob for power users.
 6. **Single binary, no runtime dependencies.** No JVM, no Docker, no external databases required for core functionality.
 
 ---
 
 ## 4. Target Users
 
-| User Persona | Need | How CodeForge Helps |
+| User Persona | Need | How Codixing Helps |
 |---|---|---|
 | **AI Agent Builders** | Feed LLMs with precise, token-efficient context from large repos | Hybrid retrieval + AI-optimized output with token budgets |
 | **IDE Plugin Developers** | Provide code intelligence at interactive speeds | Sub-20ms retrieval, incremental indexing on keystroke |
@@ -74,7 +74,7 @@ Research from 2024–2025 shows that the retrieval layer — not the LLM itself 
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        CodeForge Engine                         │
+│                        Codixing Engine                         │
 │                                                                 │
 │  ┌──────────────┐  ┌──────────────┐  ┌────────────────────────┐ │
 │  │   Ingestion   │  │   Indexing    │  │      Retrieval         │ │
@@ -281,7 +281,7 @@ Any language with a tree-sitter grammar (40+ total), with graceful degradation
 ### 6.5 Storage
 
 - **Index persistence:** All indices (tantivy, vector, graph, symbol table) serialized to disk using `bincode` / tantivy's native format
-- **Index location:** `.codeforge/` directory in project root (gitignored by default)
+- **Index location:** `.codixing/` directory in project root (gitignored by default)
 - **Estimated disk usage:** ~500MB per 1M lines of code (all indices combined)
 - **Cache invalidation:** File content hash (xxHash) compared on load; stale entries re-indexed
 
@@ -293,22 +293,22 @@ Any language with a tree-sitter grammar (40+ total), with graceful degradation
 
 ```bash
 # Initialize and index a codebase
-codeforge init .
-codeforge init ./my-project --languages rust,python,typescript
+codixing init .
+codixing init ./my-project --languages rust,python,typescript
 
 # Search
-codeforge search "how does authentication work?"
-codeforge search "fn verify_token" --strategy instant
-codeforge search "payment processing flow" --strategy deep --budget 4096
+codixing search "how does authentication work?"
+codixing search "fn verify_token" --strategy instant
+codixing search "payment processing flow" --strategy deep --budget 4096
 
 # Inspect
-codeforge symbols --filter "pub fn" --file src/main.rs
-codeforge graph --node "AuthService" --depth 2
-codeforge stats
+codixing symbols --filter "pub fn" --file src/main.rs
+codixing graph --node "AuthService" --depth 2
+codixing stats
 
 # Serve
-codeforge serve --port 8080
-codeforge serve --mcp  # MCP server mode for AI agents
+codixing serve --port 8080
+codixing serve --mcp  # MCP server mode for AI agents
 ```
 
 ### 7.2 MCP (Model Context Protocol) Server
@@ -344,7 +344,7 @@ WS   /v1/stream          WebSocket for real-time index updates
 ### 7.4 Rust Library (crate)
 
 ```rust
-use codeforge::{Engine, SearchQuery, Strategy};
+use codixing::{Engine, SearchQuery, Strategy};
 
 let engine = Engine::open("./my-project").await?;
 
@@ -370,7 +370,7 @@ for chunk in results.chunks {
 
 ### 8.1 Local-First Approach
 
-CodeForge runs embedding inference locally by default using ONNX Runtime:
+Codixing runs embedding inference locally by default using ONNX Runtime:
 
 - **Default model:** `nomic-embed-code` or `jina-embeddings-v2-base-code` (open weights, 8192 token context)
 - **Quantized:** INT8 quantization for ~4x speedup with <1% quality loss
@@ -438,7 +438,7 @@ Inspired by Aider's approach — the most token-efficient retrieval method in th
 - [x] Symbol table (DashMap-based, with bitcode persistence)
 - [x] CLI: `init`, `search` (BM25 only), `symbols`
 - [x] File watcher with incremental re-parse (notify, 100ms debounce)
-- [x] Index persistence to `.codeforge/` directory (JSON config/meta, bitcode symbols/hashes, tantivy native)
+- [x] Index persistence to `.codixing/` directory (JSON config/meta, bitcode symbols/hashes, tantivy native)
 - [x] Integration test suite: multi-language indexing, BM25 search accuracy, chunker boundary verification, watcher lifecycle
 
 ### Phase 2: Semantic Search (Months 3–5)
@@ -498,22 +498,22 @@ Inspired by Aider's approach — the most token-efficient retrieval method in th
 
 ## 11. Competitive Landscape
 
-| Tool | Approach | Strengths | CodeForge Advantage |
+| Tool | Approach | Strengths | Codixing Advantage |
 |---|---|---|---|
-| **Aider repo-map** | Graph-based (tree-sitter + PageRank) | Most token-efficient (4.3–6.5% utilization), no GPU needed | CodeForge adds semantic search + hybrid fusion on top of the same graph approach |
-| **Sourcegraph Cody** | Multi-repo semantic search | Enterprise-grade, cross-repo context | CodeForge is open-source, local-first, single binary |
-| **Cursor** | Hybrid semantic-lexical indexing | IDE-integrated, good UX | CodeForge is standalone, embeddable, not locked to an IDE |
-| **Cline** | ripgrep + fzf + tree-sitter AST | Transparent, lightweight | CodeForge adds vector search, graph intelligence, reranking |
-| **Augment Code** | Deep context engine | Strong cross-repo reasoning | CodeForge is open-source and self-hosted |
-| **Qodo** | RAG pipeline with NL-enriched chunks | Enterprise scale with continuous indexing | CodeForge offers more retrieval strategies and graph-based understanding |
-| **Narsil-MCP** | Rust MCP server, 90 tools, tree-sitter | Comprehensive code intelligence | CodeForge focuses deeper on retrieval quality with hybrid search + embeddings |
-| **code-splitter** | Rust crate, tree-sitter chunking | Simple, reusable | CodeForge is a full engine, not just a chunker |
+| **Aider repo-map** | Graph-based (tree-sitter + PageRank) | Most token-efficient (4.3–6.5% utilization), no GPU needed | Codixing adds semantic search + hybrid fusion on top of the same graph approach |
+| **Sourcegraph Cody** | Multi-repo semantic search | Enterprise-grade, cross-repo context | Codixing is open-source, local-first, single binary |
+| **Cursor** | Hybrid semantic-lexical indexing | IDE-integrated, good UX | Codixing is standalone, embeddable, not locked to an IDE |
+| **Cline** | ripgrep + fzf + tree-sitter AST | Transparent, lightweight | Codixing adds vector search, graph intelligence, reranking |
+| **Augment Code** | Deep context engine | Strong cross-repo reasoning | Codixing is open-source and self-hosted |
+| **Qodo** | RAG pipeline with NL-enriched chunks | Enterprise scale with continuous indexing | Codixing offers more retrieval strategies and graph-based understanding |
+| **Narsil-MCP** | Rust MCP server, 90 tools, tree-sitter | Comprehensive code intelligence | Codixing focuses deeper on retrieval quality with hybrid search + embeddings |
+| **code-splitter** | Rust crate, tree-sitter chunking | Simple, reusable | Codixing is a full engine, not just a chunker |
 
 ---
 
 ## 12. Key Research References
 
-These papers and projects directly inform CodeForge's design:
+These papers and projects directly inform Codixing's design:
 
 1. **cAST (2025)** — AST-based chunking for code RAG. Shows 4.3pt gain on RepoEval, 2.7pt on SWE-bench over line-based chunking. Directly informs our chunking algorithm.
 
@@ -539,7 +539,7 @@ These papers and projects directly inform CodeForge's design:
 |---|---|---|
 | **Retrieval Recall@10** | % of relevant chunks in top 10 results | >85% on RepoEval benchmark |
 | **Context Utilization** | Useful tokens / total tokens sent to LLM | <10% (lower is better) |
-| **SWE-bench Impact** | Improvement in SWE-bench resolve rate when CodeForge feeds the agent vs. baseline | >3pt improvement |
+| **SWE-bench Impact** | Improvement in SWE-bench resolve rate when Codixing feeds the agent vs. baseline | >3pt improvement |
 | **Indexing Throughput** | Files indexed per second (cold start) | >800 files/s |
 | **Query Latency p99** | 99th percentile retrieval time | <50ms (fast strategy) |
 | **Incremental Update** | Time from file save to index consistency | <500ms |
@@ -556,7 +556,7 @@ These papers and projects directly inform CodeForge's design:
 | HNSW in-process scalability limit (~10M vectors) | Medium | Medium | Offer Qdrant backend for large deployments; shard by repo |
 | Import resolution complexity (dynamic imports, monkeypatching) | High | Medium | Best-effort resolution; flag unresolved references; support LSP fallback |
 | Cross-encoder reranking adds latency | Low | Low | Optional; only in `thorough`/`deep` strategies; quantized models |
-| Context window sizes keep growing (10M+ tokens) | Medium | Medium | CodeForge still valuable for quality over quantity; even with 10M tokens, 1M LoC doesn't fit; precision always matters |
+| Context window sizes keep growing (10M+ tokens) | Medium | Medium | Codixing still valuable for quality over quantity; even with 10M tokens, 1M LoC doesn't fit; precision always matters |
 
 ---
 
@@ -568,7 +568,7 @@ These papers and projects directly inform CodeForge's design:
 
 3. **Multi-repo federation:** Single unified index vs. per-repo indices with federated search? The former is simpler; the latter scales better.
 
-4. **LSP integration:** Should CodeForge optionally spin up LSP servers for Tier 1 languages to get compiler-accurate symbol resolution? Research shows mixed results (Claude Code's LSP experiment showed 8.5% higher token consumption without quality improvement), but it could benefit complex dependency analysis.
+4. **LSP integration:** Should Codixing optionally spin up LSP servers for Tier 1 languages to get compiler-accurate symbol resolution? Research shows mixed results (Claude Code's LSP experiment showed 8.5% higher token consumption without quality improvement), but it could benefit complex dependency analysis.
 
 5. **Chunk summarization:** Should each chunk have an LLM-generated natural language summary stored alongside it (like Qodo's approach)? Improves NL search quality but adds indexing cost and API dependency.
 

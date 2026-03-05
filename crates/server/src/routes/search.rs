@@ -3,7 +3,7 @@ use axum::extract::State;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
-use codeforge_core::{SearchQuery, Strategy};
+use codixing_core::{SearchQuery, Strategy};
 
 use crate::error::ApiError;
 use crate::state::AppState;
