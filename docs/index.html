@@ -883,6 +883,106 @@
       margin: 0 auto 36px;
     }
 
+    /* ── Waitlist ── */
+    .waitlist-section {
+      background: var(--bg-1);
+      border-top: 1px solid var(--border);
+      padding: 96px 24px;
+      text-align: center;
+    }
+
+    .waitlist-inner {
+      max-width: 560px;
+      margin: 0 auto;
+    }
+
+    .waitlist-section h2 {
+      font-size: clamp(1.5rem, 3vw, 2rem);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      margin-bottom: 12px;
+    }
+
+    .waitlist-section p {
+      color: var(--text-muted);
+      font-size: 1rem;
+      margin-bottom: 32px;
+    }
+
+    .waitlist-form {
+      display: flex;
+      gap: 10px;
+      max-width: 440px;
+      margin: 0 auto 14px;
+    }
+
+    .waitlist-form input[type="email"] {
+      flex: 1;
+      background: var(--bg-3);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 16px;
+      color: var(--text);
+      font-size: 0.95rem;
+      font-family: inherit;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .waitlist-form input[type="email"]::placeholder { color: var(--text-dim); }
+
+    .waitlist-form input[type="email"]:focus {
+      border-color: var(--cyan);
+      box-shadow: 0 0 0 3px rgba(0,212,170,0.1);
+    }
+
+    .waitlist-form button {
+      background: var(--cyan);
+      color: #000;
+      border: none;
+      border-radius: var(--radius);
+      padding: 12px 22px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: opacity 0.2s, transform 0.2s;
+    }
+
+    .waitlist-form button:hover { opacity: 0.88; transform: translateY(-1px); }
+    .waitlist-form button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+    .waitlist-fine {
+      font-size: 0.8rem;
+      color: var(--text-dim);
+      margin-bottom: 0 !important;
+    }
+
+    .waitlist-success {
+      display: none;
+      background: rgba(63, 185, 80, 0.08);
+      border: 1px solid rgba(63, 185, 80, 0.3);
+      border-radius: var(--radius);
+      padding: 14px 20px;
+      color: var(--green);
+      font-size: 0.95rem;
+      max-width: 440px;
+      margin: 0 auto;
+    }
+
+    .waitlist-error {
+      color: var(--red);
+      font-size: 0.82rem;
+      margin-top: 8px;
+      display: none;
+    }
+
+    @media (max-width: 480px) {
+      .waitlist-form { flex-direction: column; }
+      .waitlist-form button { width: 100%; }
+    }
+
     /* ── Footer ── */
     footer {
       background: var(--bg);
@@ -1444,6 +1544,25 @@
     </div>
   </div>
 
+  <!-- Email capture -->
+  <section id="waitlist" class="waitlist-section">
+    <div class="wrapper">
+      <div class="reveal waitlist-inner">
+        <h2>Get notified when the <span class="grad">hosted version</span> ships</h2>
+        <p>One shared index for your whole team, always fresh — no daemon to run.<br>Leave your email and we'll let you know when it's ready.</p>
+        <form class="waitlist-form" id="waitlist-form" action="https://formspree.io/f/YOUR_FORM_ID" method="POST">
+          <input type="email" name="email" placeholder="you@company.com" required autocomplete="email" />
+          <button type="submit" id="waitlist-btn">Notify me</button>
+        </form>
+        <div class="waitlist-success" id="waitlist-success">
+          You're on the list. We'll reach out when the hosted tier launches.
+        </div>
+        <div class="waitlist-error" id="waitlist-error">Something went wrong — try again or email us directly.</div>
+        <p class="waitlist-fine">No spam. Unsubscribe any time.</p>
+      </div>
+    </div>
+  </section>
+
   <!-- Footer -->
   <footer>
     <div class="footer-inner">
@@ -1454,6 +1573,7 @@
         <a href="https://github.com/ferax564/codixing">GitHub</a>
         <a href="https://github.com/ferax564/codixing/blob/main/README.md">Docs</a>
         <a href="https://github.com/ferax564/codixing/blob/main/ROADMAP.md">Roadmap</a>
+        <a href="#waitlist">Early access</a>
       </div>
       <span>Open source &bull; MIT License</span>
     </div>
@@ -1565,6 +1685,36 @@
         a.style.color = a.getAttribute('href') === '#' + current ? 'var(--cyan)' : '';
       });
     }, { passive: true });
+    // ── Waitlist form — AJAX submit via Formspree ──
+    const form = document.getElementById('waitlist-form');
+    if (form) {
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const btn = document.getElementById('waitlist-btn');
+        const success = document.getElementById('waitlist-success');
+        const error = document.getElementById('waitlist-error');
+        btn.disabled = true;
+        btn.textContent = 'Sending…';
+        error.style.display = 'none';
+        try {
+          const res = await fetch(form.action, {
+            method: 'POST',
+            body: new FormData(form),
+            headers: { 'Accept': 'application/json' },
+          });
+          if (res.ok) {
+            form.style.display = 'none';
+            success.style.display = 'block';
+          } else {
+            throw new Error('non-ok');
+          }
+        } catch {
+          btn.disabled = false;
+          btn.textContent = 'Notify me';
+          error.style.display = 'block';
+        }
+      });
+    }
   </script>
 </body>
 </html>
