@@ -1550,7 +1550,8 @@
       <div class="reveal waitlist-inner">
         <h2>Get notified when the <span class="grad">hosted version</span> ships</h2>
         <p>One shared index for your whole team, always fresh — no daemon to run.<br>Leave your email and we'll let you know when it's ready.</p>
-        <form class="waitlist-form" id="waitlist-form" action="https://formspree.io/f/YOUR_FORM_ID" method="POST">
+        <form class="waitlist-form" id="waitlist-form" action="https://api.web3forms.com/submit" method="POST">
+          <input type="hidden" name="access_key" value="f01f7163-477d-4edb-b535-eb51817f5772" />
           <input type="email" name="email" placeholder="you@company.com" required autocomplete="email" />
           <button type="submit" id="waitlist-btn">Notify me</button>
         </form>
@@ -1702,7 +1703,8 @@
             body: new FormData(form),
             headers: { 'Accept': 'application/json' },
           });
-          if (res.ok) {
+          const data = await res.json();
+          if (data.success) {
             form.style.display = 'none';
             success.style.display = 'block';
           } else {

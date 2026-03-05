@@ -1,0 +1,10 @@
+target/
+crates/
+editors/
+.github/
+*.toml
+*.lock
+*.md
+PRD.md
+ROADMAP.md
+CLAUDE.md
