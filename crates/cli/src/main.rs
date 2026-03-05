@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use codeforge_core::{Engine, IndexConfig, RepoMapOptions, SearchQuery, Strategy, SyncStats};
+use codeforge_core::{Engine, GitSyncStats, IndexConfig, RepoMapOptions, SearchQuery, Strategy, SyncStats};
 
 #[derive(Parser)]
 #[command(name = "codeforge", about = "Code retrieval engine for AI agents")]
@@ -159,6 +159,21 @@ enum Command {
         path: PathBuf,
     },
 
+    /// Fast git-aware sync: re-indexes only files changed since the last indexed git commit.
+    ///
+    /// Reads the git commit hash stored during the last `init` / `sync` / `git-sync`,
+    /// runs `git diff --name-status <stored_commit>` to compute the exact file delta,
+    /// and passes only those files to the incremental re-indexer.
+    /// Runs `apply_changes` with a single Tantivy commit and a single PageRank pass.
+    ///
+    /// Much faster than `sync` after `git pull` on large repos because it skips
+    /// hash-scanning every file.  Falls back gracefully if git is unavailable.
+    GitSync {
+        /// Project root to git-sync (defaults to current directory).
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+
     /// Embed all un-embedded chunks in an existing BM25-only index.
     ///
     /// Run this after initialising with `--no-embeddings` to add vector search
@@ -261,6 +276,7 @@ async fn main() -> Result<()> {
         } => cmd_usages(symbol, limit, file),
         Command::Update { path, dry_run } => cmd_update(path, dry_run),
         Command::Sync { path } => cmd_sync(path),
+        Command::GitSync { path } => cmd_git_sync(path),
         Command::Embed { path } => cmd_embed(path),
         Command::Serve { host, port, path } => cmd_serve(host, port, path).await,
     }
@@ -484,7 +500,7 @@ fn cmd_callers(file: String, depth: usize) -> Result<()> {
     let callers = if depth <= 1 {
         engine.callers(&file)
     } else {
-        engine.dependencies(&file, depth)
+        engine.transitive_callers(&file, depth)
     };
 
     if callers.is_empty() {
@@ -511,7 +527,7 @@ fn cmd_callees(file: String, depth: usize) -> Result<()> {
     let callees = if depth <= 1 {
         engine.callees(&file)
     } else {
-        engine.dependencies(&file, depth)
+        engine.transitive_callees(&file, depth)
     };
     if callees.is_empty() {
         eprintln!("No dependencies found for \"{}\"", file);
@@ -736,6 +752,38 @@ fn cmd_sync(path: PathBuf) -> Result<()> {
         unchanged,
         start.elapsed().as_secs_f64(),
     );
+
+    Ok(())
+}
+
+fn cmd_git_sync(path: PathBuf) -> Result<()> {
+    let root = path
+        .canonicalize()
+        .with_context(|| format!("path not found: {}", path.display()))?;
+
+    let mut engine =
+        Engine::open(&root).with_context(|| "no index found — run `codeforge init` first")?;
+
+    let start = Instant::now();
+    let GitSyncStats {
+        modified,
+        removed,
+        unchanged,
+    } = engine.git_sync()?;
+
+    if unchanged {
+        eprintln!(
+            "index already up-to-date (no git changes since last index, {:.2}s)",
+            start.elapsed().as_secs_f64()
+        );
+    } else {
+        eprintln!(
+            "git-sync complete: {} modified, {} removed ({:.2}s)",
+            modified,
+            removed,
+            start.elapsed().as_secs_f64()
+        );
+    }
 
     Ok(())
 }
