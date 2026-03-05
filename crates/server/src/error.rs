@@ -2,22 +2,22 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
-use codeforge_core::CodeforgeError;
+use codixing_core::CodixingError;
 
 /// API error type that converts to an HTTP response.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum ApiError {
-    /// A codeforge engine error.
-    Engine(CodeforgeError),
+    /// A codixing engine error.
+    Engine(CodixingError),
     /// A bad request (client error).
     BadRequest(String),
     /// Internal server error.
     Internal(String),
 }
 
-impl From<CodeforgeError> for ApiError {
-    fn from(e: CodeforgeError) -> Self {
+impl From<CodixingError> for ApiError {
+    fn from(e: CodixingError) -> Self {
         ApiError::Engine(e)
     }
 }
@@ -31,10 +31,10 @@ impl From<anyhow::Error> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
-            ApiError::Engine(CodeforgeError::IndexNotFound { .. }) => {
+            ApiError::Engine(CodixingError::IndexNotFound { .. }) => {
                 (StatusCode::NOT_FOUND, self.to_string())
             }
-            ApiError::Engine(CodeforgeError::EmbeddingNotEnabled) => {
+            ApiError::Engine(CodixingError::EmbeddingNotEnabled) => {
                 (StatusCode::BAD_REQUEST, self.to_string())
             }
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),

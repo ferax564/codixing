@@ -5,7 +5,7 @@ use std::path::Path;
 
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, new_index};
 
-use crate::error::{CodeforgeError, Result};
+use crate::error::{CodixingError, Result};
 
 /// Pluggable vector search backend.
 ///
@@ -67,7 +67,7 @@ impl VectorIndex {
             multi: false,
         };
         let inner = new_index(&options)
-            .map_err(|e| CodeforgeError::VectorIndex(format!("failed to create index: {e}")))?;
+            .map_err(|e| CodixingError::VectorIndex(format!("failed to create index: {e}")))?;
         Ok(Self {
             inner,
             file_chunks: HashMap::new(),
@@ -85,10 +85,10 @@ impl VectorIndex {
         let needed = self.inner.size() + 1;
         self.inner
             .reserve(needed)
-            .map_err(|e| CodeforgeError::VectorIndex(format!("reserve failed: {e}")))?;
+            .map_err(|e| CodixingError::VectorIndex(format!("reserve failed: {e}")))?;
         self.inner
             .add(chunk_id, vector)
-            .map_err(|e| CodeforgeError::VectorIndex(format!("add failed: {e}")))?;
+            .map_err(|e| CodixingError::VectorIndex(format!("add failed: {e}")))?;
         // Caller is responsible for updating file_chunks (needs &mut self).
         let _ = file_path; // acknowledged here; see add_mut below
         Ok(())
@@ -99,10 +99,10 @@ impl VectorIndex {
         let needed = self.inner.size() + 1;
         self.inner
             .reserve(needed)
-            .map_err(|e| CodeforgeError::VectorIndex(format!("reserve failed: {e}")))?;
+            .map_err(|e| CodixingError::VectorIndex(format!("reserve failed: {e}")))?;
         self.inner
             .add(chunk_id, vector)
-            .map_err(|e| CodeforgeError::VectorIndex(format!("add failed: {e}")))?;
+            .map_err(|e| CodixingError::VectorIndex(format!("add failed: {e}")))?;
         self.file_chunks
             .entry(file_path.to_string())
             .or_default()
@@ -120,7 +120,7 @@ impl VectorIndex {
         let matches = self
             .inner
             .search(query, k)
-            .map_err(|e| CodeforgeError::VectorIndex(format!("search failed: {e}")))?;
+            .map_err(|e| CodixingError::VectorIndex(format!("search failed: {e}")))?;
         Ok(matches.keys.into_iter().zip(matches.distances).collect())
     }
 
@@ -150,10 +150,10 @@ impl VectorIndex {
     pub fn save(&self, index_path: &Path, file_chunks_path: &Path) -> Result<()> {
         self.inner
             .save(index_path.to_string_lossy().as_ref())
-            .map_err(|e| CodeforgeError::VectorIndex(format!("save index failed: {e}")))?;
+            .map_err(|e| CodixingError::VectorIndex(format!("save index failed: {e}")))?;
 
         let bytes = bitcode::serialize(&self.file_chunks).map_err(|e| {
-            CodeforgeError::Serialization(format!("failed to serialize file_chunks: {e}"))
+            CodixingError::Serialization(format!("failed to serialize file_chunks: {e}"))
         })?;
         std::fs::write(file_chunks_path, bytes)?;
         Ok(())
@@ -173,11 +173,11 @@ impl VectorIndex {
         let idx = Self::new(dims, quantize)?;
         idx.inner
             .load(index_path.to_string_lossy().as_ref())
-            .map_err(|e| CodeforgeError::VectorIndex(format!("load index failed: {e}")))?;
+            .map_err(|e| CodixingError::VectorIndex(format!("load index failed: {e}")))?;
 
         let bytes = std::fs::read(file_chunks_path)?;
         let file_chunks: HashMap<String, Vec<u64>> = bitcode::deserialize(&bytes).map_err(|e| {
-            CodeforgeError::Serialization(format!("failed to deserialize file_chunks: {e}"))
+            CodixingError::Serialization(format!("failed to deserialize file_chunks: {e}"))
         })?;
 
         Ok(Self {
@@ -199,10 +199,10 @@ impl VectorBackend for VectorIndex {
         let needed = self.inner.size() + 1;
         self.inner
             .reserve(needed)
-            .map_err(|e| CodeforgeError::VectorIndex(format!("reserve failed: {e}")))?;
+            .map_err(|e| CodixingError::VectorIndex(format!("reserve failed: {e}")))?;
         self.inner
             .add(chunk_id, vector)
-            .map_err(|e| CodeforgeError::VectorIndex(format!("add failed: {e}")))?;
+            .map_err(|e| CodixingError::VectorIndex(format!("add failed: {e}")))?;
         Ok(())
     }
 

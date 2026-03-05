@@ -5,7 +5,7 @@ mod common;
 use std::collections::HashSet;
 use std::fs;
 
-use codeforge_core::{Engine, IndexConfig, SearchQuery, Strategy};
+use codixing_core::{Engine, IndexConfig, SearchQuery, Strategy};
 use tempfile::tempdir;
 
 /// Return an `IndexConfig` with embeddings disabled.

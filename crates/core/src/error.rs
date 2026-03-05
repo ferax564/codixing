@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
-/// All errors produced by the CodeForge engine.
+/// All errors produced by the Codixing engine.
 #[derive(Debug, thiserror::Error)]
-pub enum CodeforgeError {
+pub enum CodixingError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -27,7 +27,7 @@ pub enum CodeforgeError {
     #[error("config error: {0}")]
     Config(String),
 
-    #[error("index not found at {path} — run `codeforge init` first")]
+    #[error("index not found at {path} — run `codixing init` first")]
     IndexNotFound { path: PathBuf },
 
     #[error("watcher error: {0}")]
@@ -40,7 +40,7 @@ pub enum CodeforgeError {
     VectorIndex(String),
 
     #[error(
-        "embeddings not enabled — run `codeforge init` with embedding enabled, or use --strategy instant"
+        "embeddings not enabled — run `codixing init` with embedding enabled, or use --strategy instant"
     )]
     EmbeddingNotEnabled,
 
@@ -52,7 +52,7 @@ pub enum CodeforgeError {
 }
 
 /// Convenience alias used throughout the crate.
-pub type Result<T> = std::result::Result<T, CodeforgeError>;
+pub type Result<T> = std::result::Result<T, CodixingError>;
 
 #[cfg(test)]
 mod tests {
@@ -60,13 +60,13 @@ mod tests {
 
     #[test]
     fn io_error_display() {
-        let err: CodeforgeError = std::io::Error::new(std::io::ErrorKind::NotFound, "gone").into();
+        let err: CodixingError = std::io::Error::new(std::io::ErrorKind::NotFound, "gone").into();
         assert!(err.to_string().contains("I/O error"));
     }
 
     #[test]
     fn unsupported_language_display() {
-        let err = CodeforgeError::UnsupportedLanguage {
+        let err = CodixingError::UnsupportedLanguage {
             path: PathBuf::from("foo.xyz"),
         };
         assert!(err.to_string().contains("foo.xyz"));
@@ -74,9 +74,9 @@ mod tests {
 
     #[test]
     fn index_not_found_display() {
-        let err = CodeforgeError::IndexNotFound {
+        let err = CodixingError::IndexNotFound {
             path: PathBuf::from("/project"),
         };
-        assert!(err.to_string().contains("codeforge init"));
+        assert!(err.to_string().contains("codixing init"));
     }
 }

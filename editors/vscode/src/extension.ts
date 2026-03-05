@@ -1,10 +1,10 @@
-// CodeForge VS Code / Cursor extension
+// Codixing VS Code / Cursor extension
 //
 // NOTE: Run `npm install` in editors/vscode/ before building.
 // Build:   npm run compile
 // Package: npm run package
 //
-// This extension integrates CodeForge into VS Code and Cursor, providing:
+// This extension integrates Codixing into VS Code and Cursor, providing:
 //   - Status bar indicator showing index state
 //   - Commands for indexing, syncing, searching, and daemon management
 //   - MCP server registration for Claude Code / Cursor
@@ -28,14 +28,14 @@ let daemonProcess: cp.ChildProcess | null = null;
 // ---------------------------------------------------------------------------
 
 export function activate(context: vscode.ExtensionContext): void {
-    outputChannel = vscode.window.createOutputChannel('CodeForge');
+    outputChannel = vscode.window.createOutputChannel('Codixing');
 
     // Status bar item (right side, priority 100 keeps it near the right edge)
     statusBarItem = vscode.window.createStatusBarItem(
         vscode.StatusBarAlignment.Right,
         100,
     );
-    statusBarItem.command = 'codeforge.search';
+    statusBarItem.command = 'codixing.search';
     context.subscriptions.push(statusBarItem);
 
     updateStatusBar();
@@ -48,28 +48,28 @@ export function activate(context: vscode.ExtensionContext): void {
 
     // Register commands
     context.subscriptions.push(
-        vscode.commands.registerCommand('codeforge.indexWorkspace', () =>
+        vscode.commands.registerCommand('codixing.indexWorkspace', () =>
             cmdIndexWorkspace(),
         ),
-        vscode.commands.registerCommand('codeforge.syncIndex', () =>
+        vscode.commands.registerCommand('codixing.syncIndex', () =>
             cmdSyncIndex(),
         ),
-        vscode.commands.registerCommand('codeforge.search', () =>
+        vscode.commands.registerCommand('codixing.search', () =>
             cmdSearch(),
         ),
-        vscode.commands.registerCommand('codeforge.showRepoMap', () =>
+        vscode.commands.registerCommand('codixing.showRepoMap', () =>
             cmdShowRepoMap(),
         ),
-        vscode.commands.registerCommand('codeforge.startDaemon', () =>
+        vscode.commands.registerCommand('codixing.startDaemon', () =>
             cmdStartDaemon(),
         ),
-        vscode.commands.registerCommand('codeforge.registerMcpServer', () =>
+        vscode.commands.registerCommand('codixing.registerMcpServer', () =>
             cmdRegisterMcpServer(),
         ),
     );
 
     // Auto-start daemon if configured
-    const cfg = vscode.workspace.getConfiguration('codeforge');
+    const cfg = vscode.workspace.getConfiguration('codixing');
     if (cfg.get<boolean>('autoStartDaemon', false)) {
         cmdStartDaemon();
     }
@@ -92,13 +92,13 @@ function updateStatusBar(): void {
         return;
     }
 
-    const indexed = fs.existsSync(path.join(root, '.codeforge'));
+    const indexed = fs.existsSync(path.join(root, '.codixing'));
     statusBarItem.text = indexed
-        ? 'CodeForge: $(check) indexed'
-        : 'CodeForge: $(circle-slash) not indexed';
+        ? 'Codixing: $(check) indexed'
+        : 'Codixing: $(circle-slash) not indexed';
     statusBarItem.tooltip = indexed
-        ? 'CodeForge index is present. Click to search.'
-        : 'No CodeForge index found. Click to search (or run "CodeForge: Index Workspace").';
+        ? 'Codixing index is present. Click to search.'
+        : 'No Codixing index found. Click to search (or run "Codixing: Index Workspace").';
     statusBarItem.show();
 }
 
@@ -109,16 +109,16 @@ function updateStatusBar(): void {
 async function cmdIndexWorkspace(): Promise<void> {
     const root = getWorkspaceRoot();
     if (!root) {
-        vscode.window.showErrorMessage('CodeForge: No workspace folder open.');
+        vscode.window.showErrorMessage('Codixing: No workspace folder open.');
         return;
     }
 
-    const bin = await findBinary('codeforge');
+    const bin = await findBinary('codixing');
     if (!bin) {
         return;
     }
 
-    const cfg = vscode.workspace.getConfiguration('codeforge');
+    const cfg = vscode.workspace.getConfiguration('codixing');
     const embeddings = cfg.get<boolean>('embeddings', false);
 
     const args = ['init', root];
@@ -127,11 +127,11 @@ async function cmdIndexWorkspace(): Promise<void> {
     }
 
     outputChannel.show(true);
-    outputChannel.appendLine(`[CodeForge] Indexing workspace: ${root}`);
-    outputChannel.appendLine(`[CodeForge] Running: ${bin} ${args.join(' ')}`);
+    outputChannel.appendLine(`[Codixing] Indexing workspace: ${root}`);
+    outputChannel.appendLine(`[Codixing] Running: ${bin} ${args.join(' ')}`);
 
     const terminal = vscode.window.createTerminal({
-        name: 'CodeForge: Index',
+        name: 'Codixing: Index',
         cwd: root,
     });
     terminal.sendText(`${shellQuote(bin)} ${args.map(shellQuote).join(' ')}`);
@@ -145,20 +145,20 @@ async function cmdIndexWorkspace(): Promise<void> {
 async function cmdSyncIndex(): Promise<void> {
     const root = getWorkspaceRoot();
     if (!root) {
-        vscode.window.showErrorMessage('CodeForge: No workspace folder open.');
+        vscode.window.showErrorMessage('Codixing: No workspace folder open.');
         return;
     }
 
-    const bin = await findBinary('codeforge');
+    const bin = await findBinary('codixing');
     if (!bin) {
         return;
     }
 
     outputChannel.show(true);
-    outputChannel.appendLine(`[CodeForge] Syncing index at: ${root}`);
+    outputChannel.appendLine(`[Codixing] Syncing index at: ${root}`);
 
     const terminal = vscode.window.createTerminal({
-        name: 'CodeForge: Sync',
+        name: 'Codixing: Sync',
         cwd: root,
     });
     terminal.sendText(`${shellQuote(bin)} sync ${shellQuote(root)}`);
@@ -172,13 +172,13 @@ async function cmdSyncIndex(): Promise<void> {
 async function cmdSearch(): Promise<void> {
     const root = getWorkspaceRoot();
     if (!root) {
-        vscode.window.showErrorMessage('CodeForge: No workspace folder open.');
+        vscode.window.showErrorMessage('Codixing: No workspace folder open.');
         return;
     }
 
-    if (!fs.existsSync(path.join(root, '.codeforge'))) {
+    if (!fs.existsSync(path.join(root, '.codixing'))) {
         const action = await vscode.window.showWarningMessage(
-            'CodeForge: No index found. Index the workspace first.',
+            'Codixing: No index found. Index the workspace first.',
             'Index Now',
         );
         if (action === 'Index Now') {
@@ -188,7 +188,7 @@ async function cmdSearch(): Promise<void> {
     }
 
     const query = await vscode.window.showInputBox({
-        prompt: 'CodeForge: Enter search query',
+        prompt: 'Codixing: Enter search query',
         placeHolder: 'e.g. "parse function arguments"',
     });
 
@@ -196,13 +196,13 @@ async function cmdSearch(): Promise<void> {
         return;
     }
 
-    const bin = await findBinary('codeforge');
+    const bin = await findBinary('codixing');
     if (!bin) {
         return;
     }
 
     outputChannel.show(true);
-    outputChannel.appendLine(`\n[CodeForge] Searching: "${query}"`);
+    outputChannel.appendLine(`\n[Codixing] Searching: "${query}"`);
     outputChannel.appendLine('\u2500'.repeat(60));
 
     // Use execFile (not exec) to avoid shell injection — query goes directly as arg
@@ -219,22 +219,22 @@ async function cmdSearch(): Promise<void> {
 async function cmdShowRepoMap(): Promise<void> {
     const root = getWorkspaceRoot();
     if (!root) {
-        vscode.window.showErrorMessage('CodeForge: No workspace folder open.');
+        vscode.window.showErrorMessage('Codixing: No workspace folder open.');
         return;
     }
 
-    if (!fs.existsSync(path.join(root, '.codeforge'))) {
+    if (!fs.existsSync(path.join(root, '.codixing'))) {
         vscode.window.showWarningMessage(
-            'CodeForge: No index found. Run "CodeForge: Index Workspace" first.',
+            'Codixing: No index found. Run "Codixing: Index Workspace" first.',
         );
         return;
     }
 
     outputChannel.show(true);
-    outputChannel.appendLine('\n[CodeForge] Generating repo map...');
+    outputChannel.appendLine('\n[Codixing] Generating repo map...');
 
-    // Prefer codeforge-mcp for repo map (richer output via JSON-RPC)
-    const mcpBin = await findBinary('codeforge-mcp', false);
+    // Prefer codixing-mcp for repo map (richer output via JSON-RPC)
+    const mcpBin = await findBinary('codixing-mcp', false);
 
     if (mcpBin) {
         const initRequest = JSON.stringify({
@@ -279,14 +279,14 @@ async function cmdShowRepoMap(): Promise<void> {
                     // not valid JSON, skip
                 }
             }
-            await showTextDocument('CodeForge Repo Map', text);
+            await showTextDocument('Codixing Repo Map', text);
         });
         proc.stdin.write(initRequest + '\n');
         proc.stdin.write(toolRequest + '\n');
         proc.stdin.end();
     } else {
         // Fallback: CLI graph --map
-        const bin = await findBinary('codeforge');
+        const bin = await findBinary('codixing');
         if (!bin) {
             return;
         }
@@ -299,7 +299,7 @@ async function cmdShowRepoMap(): Promise<void> {
                 repoMap += chunk;
             },
             async () => {
-                await showTextDocument('CodeForge Repo Map', repoMap);
+                await showTextDocument('Codixing Repo Map', repoMap);
             },
         );
     }
@@ -312,25 +312,25 @@ async function cmdShowRepoMap(): Promise<void> {
 async function cmdStartDaemon(): Promise<void> {
     const root = getWorkspaceRoot();
     if (!root) {
-        vscode.window.showErrorMessage('CodeForge: No workspace folder open.');
+        vscode.window.showErrorMessage('Codixing: No workspace folder open.');
         return;
     }
 
-    const mcpBin = await findBinary('codeforge-mcp');
+    const mcpBin = await findBinary('codixing-mcp');
     if (!mcpBin) {
         return;
     }
 
     if (daemonProcess && !daemonProcess.killed) {
         vscode.window.showInformationMessage(
-            'CodeForge: Daemon is already running.',
+            'Codixing: Daemon is already running.',
         );
         return;
     }
 
     outputChannel.show(true);
     outputChannel.appendLine(
-        `[CodeForge] Starting daemon: ${mcpBin} --root ${root} --daemon`,
+        `[Codixing] Starting daemon: ${mcpBin} --root ${root} --daemon`,
     );
 
     // Use spawn with arg array — no shell expansion
@@ -347,13 +347,13 @@ async function cmdStartDaemon(): Promise<void> {
         outputChannel.append(`[daemon] ${chunk.toString()}`);
     });
     daemonProcess.on('exit', (code) => {
-        outputChannel.appendLine(`[CodeForge] Daemon exited with code ${String(code)}`);
+        outputChannel.appendLine(`[Codixing] Daemon exited with code ${String(code)}`);
         daemonProcess = null;
         updateStatusBar();
     });
 
     vscode.window.showInformationMessage(
-        'CodeForge: Daemon started. Subsequent MCP calls will be faster.',
+        'Codixing: Daemon started. Subsequent MCP calls will be faster.',
     );
 }
 
@@ -364,11 +364,11 @@ async function cmdStartDaemon(): Promise<void> {
 async function cmdRegisterMcpServer(): Promise<void> {
     const root = getWorkspaceRoot();
     if (!root) {
-        vscode.window.showErrorMessage('CodeForge: No workspace folder open.');
+        vscode.window.showErrorMessage('Codixing: No workspace folder open.');
         return;
     }
 
-    const mcpBin = await findBinary('codeforge-mcp');
+    const mcpBin = await findBinary('codixing-mcp');
     if (!mcpBin) {
         return;
     }
@@ -376,11 +376,11 @@ async function cmdRegisterMcpServer(): Promise<void> {
     try {
         await registerMcpServer(mcpBin, root);
         vscode.window.showInformationMessage(
-            'CodeForge: MCP server registered in ~/.claude.json and ~/.cursor/mcp.json',
+            'Codixing: MCP server registered in ~/.claude.json and ~/.cursor/mcp.json',
         );
     } catch (err) {
         vscode.window.showErrorMessage(
-            `CodeForge: Failed to register MCP server — ${String(err)}`,
+            `Codixing: Failed to register MCP server — ${String(err)}`,
         );
     }
 }
@@ -427,14 +427,14 @@ async function registerMcpServer(mcpBin: string, root: string): Promise<void> {
         ) {
             config.mcpServers = {};
         }
-        (config.mcpServers as Record<string, unknown>)['codeforge'] = entry;
+        (config.mcpServers as Record<string, unknown>)['codixing'] = entry;
 
         fs.writeFileSync(
             configPath,
             JSON.stringify(config, null, 2) + '\n',
             'utf8',
         );
-        outputChannel.appendLine(`[CodeForge] Wrote MCP config: ${configPath}`);
+        outputChannel.appendLine(`[Codixing] Wrote MCP config: ${configPath}`);
     }
 }
 
@@ -443,7 +443,7 @@ async function registerMcpServer(mcpBin: string, root: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 /**
- * Find a CodeForge binary by checking, in order:
+ * Find a Codixing binary by checking, in order:
  *   1. The relevant VS Code setting (binaryPath / mcpBinaryPath)
  *   2. PATH via `which` (Unix) or `where` (Windows) — using execFile to avoid injection
  *   3. Common install locations (~/.cargo/bin, ./target/release)
@@ -452,11 +452,11 @@ async function registerMcpServer(mcpBin: string, root: string): Promise<void> {
  * When `showError` is true (default) a user-facing error message is shown.
  */
 async function findBinary(
-    name: 'codeforge' | 'codeforge-mcp' | 'codeforge-server',
+    name: 'codixing' | 'codixing-mcp' | 'codixing-server',
     showError = true,
 ): Promise<string | null> {
-    const cfg = vscode.workspace.getConfiguration('codeforge');
-    const settingKey = name === 'codeforge' ? 'binaryPath' : 'mcpBinaryPath';
+    const cfg = vscode.workspace.getConfiguration('codixing');
+    const settingKey = name === 'codixing' ? 'binaryPath' : 'mcpBinaryPath';
     const configured = cfg.get<string>(settingKey, '').trim();
 
     if (configured && fs.existsSync(configured)) {
@@ -494,13 +494,13 @@ async function findBinary(
 
     if (showError) {
         const action = await vscode.window.showErrorMessage(
-            `CodeForge: Cannot find "${name}" binary. Install it with \`cargo install codeforge\` or set the path in settings.`,
+            `Codixing: Cannot find "${name}" binary. Install it with \`cargo install codixing\` or set the path in settings.`,
             'Open Settings',
         );
         if (action === 'Open Settings') {
             await vscode.commands.executeCommand(
                 'workbench.action.openSettings',
-                'codeforge.binaryPath',
+                'codixing.binaryPath',
             );
         }
     }
@@ -555,7 +555,7 @@ function runCommandSpawn(
         outputChannel.append(`[stderr] ${chunk.toString()}`),
     );
     proc.on('error', (err) =>
-        outputChannel.appendLine(`[CodeForge] Error: ${err.message}`),
+        outputChannel.appendLine(`[Codixing] Error: ${err.message}`),
     );
     proc.on('close', () => {
         if (onDone) {

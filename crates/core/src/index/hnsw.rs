@@ -15,7 +15,7 @@ use std::sync::RwLock;
 use instant_distance::{Builder, HnswMap, Point, Search};
 
 use super::vector::{VectorEntry, VectorIndex, VectorSearchResult};
-use crate::error::CodeforgeError;
+use crate::error::CodixingError;
 
 // ---------------------------------------------------------------------------
 // Point adapter
@@ -85,23 +85,23 @@ impl HnswVectorIndex {
     }
 
     /// Save the index using bitcode binary serialization (faster + smaller than JSON).
-    pub fn save_binary(&self, path: &std::path::Path) -> Result<(), CodeforgeError> {
+    pub fn save_binary(&self, path: &std::path::Path) -> Result<(), CodixingError> {
         let data = super::vector::VectorIndexData {
             dimension: self.dimension,
             entries: self.entries.clone(),
         };
         let bytes = bitcode::serialize(&data).map_err(|e| {
-            CodeforgeError::Embedding(format!("failed to serialize HNSW index: {e}"))
+            CodixingError::Embedding(format!("failed to serialize HNSW index: {e}"))
         })?;
         std::fs::write(path, bytes)?;
         Ok(())
     }
 
     /// Load the index from a bitcode binary file.
-    pub fn load_binary(path: &std::path::Path) -> Result<Self, CodeforgeError> {
+    pub fn load_binary(path: &std::path::Path) -> Result<Self, CodixingError> {
         let bytes = std::fs::read(path)?;
         let data: super::vector::VectorIndexData = bitcode::deserialize(&bytes).map_err(|e| {
-            CodeforgeError::Embedding(format!("failed to deserialize HNSW index: {e}"))
+            CodixingError::Embedding(format!("failed to deserialize HNSW index: {e}"))
         })?;
         let mut index = Self::new(data.dimension);
         for entry in data.entries {
@@ -116,7 +116,7 @@ impl HnswVectorIndex {
         snapshot: &HnswSnapshot,
         query: &[f32],
         k: usize,
-    ) -> Result<Vec<VectorSearchResult>, CodeforgeError> {
+    ) -> Result<Vec<VectorSearchResult>, CodixingError> {
         let query_point = EmbeddingPoint {
             vector: query.to_vec(),
         };
@@ -158,9 +158,9 @@ impl HnswVectorIndex {
 }
 
 impl VectorIndex for HnswVectorIndex {
-    fn add(&mut self, chunk_id: u64, vector: Vec<f32>) -> Result<(), CodeforgeError> {
+    fn add(&mut self, chunk_id: u64, vector: Vec<f32>) -> Result<(), CodixingError> {
         if vector.len() != self.dimension {
-            return Err(CodeforgeError::Embedding(format!(
+            return Err(CodixingError::Embedding(format!(
                 "vector dimension mismatch: expected {}, got {}",
                 self.dimension,
                 vector.len()
@@ -178,7 +178,7 @@ impl VectorIndex for HnswVectorIndex {
         Ok(())
     }
 
-    fn remove_chunks(&mut self, chunk_ids: &[u64]) -> Result<(), CodeforgeError> {
+    fn remove_chunks(&mut self, chunk_ids: &[u64]) -> Result<(), CodixingError> {
         let to_remove: std::collections::HashSet<u64> = chunk_ids.iter().copied().collect();
         self.entries.retain(|e| !to_remove.contains(&e.chunk_id));
         self.id_to_idx.clear();
@@ -189,7 +189,7 @@ impl VectorIndex for HnswVectorIndex {
         Ok(())
     }
 
-    fn search(&self, query: &[f32], k: usize) -> Result<Vec<VectorSearchResult>, CodeforgeError> {
+    fn search(&self, query: &[f32], k: usize) -> Result<Vec<VectorSearchResult>, CodixingError> {
         if self.entries.is_empty() || k == 0 {
             return Ok(Vec::new());
         }
@@ -220,7 +220,7 @@ impl VectorIndex for HnswVectorIndex {
         &self,
         queries: &[Vec<f32>],
         k: usize,
-    ) -> Result<Vec<Vec<VectorSearchResult>>, CodeforgeError> {
+    ) -> Result<Vec<Vec<VectorSearchResult>>, CodixingError> {
         use rayon::prelude::*;
         // Ensure the HNSW graph is built before parallel queries use read locks.
         {
@@ -239,7 +239,7 @@ impl VectorIndex for HnswVectorIndex {
         self.entries.len()
     }
 
-    fn save(&self, path: &Path) -> Result<(), CodeforgeError> {
+    fn save(&self, path: &Path) -> Result<(), CodixingError> {
         let data = serde_json::json!({
             "type": "hnsw",
             "dimension": self.dimension,
@@ -251,16 +251,16 @@ impl VectorIndex for HnswVectorIndex {
             }).collect::<Vec<_>>(),
         });
         let bytes = serde_json::to_vec(&data).map_err(|e| {
-            CodeforgeError::Embedding(format!("failed to serialize HNSW index: {e}"))
+            CodixingError::Embedding(format!("failed to serialize HNSW index: {e}"))
         })?;
         std::fs::write(path, bytes)?;
         Ok(())
     }
 
-    fn load(path: &Path) -> Result<Self, CodeforgeError> {
+    fn load(path: &Path) -> Result<Self, CodixingError> {
         let bytes = std::fs::read(path)?;
         let data: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
-            CodeforgeError::Embedding(format!("failed to deserialize HNSW index: {e}"))
+            CodixingError::Embedding(format!("failed to deserialize HNSW index: {e}"))
         })?;
         let dimension = data["dimension"].as_u64().unwrap_or(384) as usize;
         let mut index = Self::new(dimension);

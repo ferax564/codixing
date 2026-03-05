@@ -1,9 +1,9 @@
-//! CodeForge MCP server — exposes code search and graph tools via the
+//! Codixing MCP server — exposes code search and graph tools via the
 //! Model Context Protocol (JSON-RPC 2.0 over stdin/stdout or Unix socket).
 //!
 //! **Daemon mode** (`--daemon`):
 //!   Loads the engine once and serves it over a Unix domain socket at
-//!   `.codeforge/daemon.sock`. Subsequent `codeforge-mcp` invocations
+//!   `.codixing/daemon.sock`. Subsequent `codixing-mcp` invocations
 //!   detect the live socket and proxy their stdin/stdout through it,
 //!   making per-call latency ~1 ms instead of ~30 ms.
 //!
@@ -29,7 +29,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use codeforge_core::{EmbeddingConfig, Engine, IndexConfig};
+use codixing_core::{EmbeddingConfig, Engine, IndexConfig};
 
 use protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
@@ -37,22 +37,22 @@ use protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 // CLI
 // ---------------------------------------------------------------------------
 
-/// CodeForge MCP server — JSON-RPC 2.0 over stdin/stdout (or Unix socket in daemon mode).
+/// Codixing MCP server — JSON-RPC 2.0 over stdin/stdout (or Unix socket in daemon mode).
 #[derive(Parser)]
-#[command(name = "codeforge-mcp", version, about)]
+#[command(name = "codixing-mcp", version, about)]
 struct Args {
-    /// Root directory containing the `.codeforge` index (created by `codeforge init`).
+    /// Root directory containing the `.codixing` index (created by `codixing init`).
     #[arg(long, default_value = ".")]
     root: PathBuf,
 
     /// Start in daemon mode: load the engine once, listen on
-    /// `.codeforge/daemon.sock`, and serve multiple clients concurrently.
-    /// Subsequent `codeforge-mcp` invocations will auto-proxy through this socket.
+    /// `.codixing/daemon.sock`, and serve multiple clients concurrently.
+    /// Subsequent `codixing-mcp` invocations will auto-proxy through this socket.
     #[arg(long)]
     daemon: bool,
 
     /// Path to the Unix socket used by daemon mode.
-    /// Defaults to `<root>/.codeforge/daemon.sock`.
+    /// Defaults to `<root>/.codixing/daemon.sock`.
     #[arg(long)]
     socket: Option<PathBuf>,
 }
@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
 
     let socket_path = args
         .socket
-        .unwrap_or_else(|| root.join(".codeforge/daemon.sock"));
+        .unwrap_or_else(|| root.join(".codixing/daemon.sock"));
 
     if args.daemon {
         // ── Daemon mode ────────────────────────────────────────────────────
@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
         } else {
             let engine = load_engine(&root).await?;
             let engine = Arc::new(Mutex::new(engine));
-            info!("CodeForge MCP server ready — listening on stdin");
+            info!("Codixing MCP server ready — listening on stdin");
             let stdin = tokio::io::stdin();
             let stdout = tokio::io::stdout();
             run_jsonrpc_loop(
@@ -114,18 +114,18 @@ async fn main() -> Result<()> {
 
 async fn load_engine(root: &Path) -> Result<Engine> {
     if Engine::index_exists(root) {
-        info!(root = %root.display(), "opening existing CodeForge index");
+        info!(root = %root.display(), "opening existing Codixing index");
         Engine::open(root).with_context(|| {
             format!(
                 "failed to open index at {} — index may be corrupt; \
-                 delete .codeforge/ and restart to rebuild",
+                 delete .codixing/ and restart to rebuild",
                 root.display()
             )
         })
     } else {
         info!(
             root = %root.display(),
-            "no .codeforge/ index found — running automatic BM25-only init"
+            "no .codixing/ index found — running automatic BM25-only init"
         );
         let mut config = IndexConfig::new(root);
         config.embedding = EmbeddingConfig {
@@ -170,7 +170,7 @@ async fn run_daemon(engine: Arc<Mutex<Engine>>, socket_path: &Path) -> Result<()
             .config()
             .clone();
 
-        let watcher = match codeforge_core::watcher::FileWatcher::new(&config.root, &config) {
+        let watcher = match codixing_core::watcher::FileWatcher::new(&config.root, &config) {
             Ok(w) => w,
             Err(e) => {
                 warn!(error = %e, "daemon: failed to start file watcher — index will not auto-update");
@@ -360,7 +360,7 @@ fn handle_initialize(id: Value, _params: Option<Value>) -> Value {
     let result = json!({
         "protocolVersion": "2024-11-05",
         "capabilities": { "tools": {} },
-        "serverInfo": { "name": "codeforge", "version": "0.4.0" }
+        "serverInfo": { "name": "codixing", "version": "0.4.0" }
     });
     serde_json::to_value(JsonRpcResponse::new(id, result)).unwrap_or(Value::Null)
 }

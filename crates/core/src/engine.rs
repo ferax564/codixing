@@ -13,7 +13,7 @@ use crate::chunker::Chunker;
 use crate::chunker::cast::CastChunker;
 use crate::config::IndexConfig;
 use crate::embedder::Embedder;
-use crate::error::{CodeforgeError, Result};
+use crate::error::{CodixingError, Result};
 use crate::formatter;
 use crate::graph::extractor::RawImport;
 use crate::graph::{
@@ -182,12 +182,12 @@ impl Engine {
     /// Walks the directory tree, parses all supported source files in parallel
     /// using rayon, chunks them with the cAST algorithm, indexes chunks in
     /// Tantivy, optionally embeds them into the HNSW index, and populates the
-    /// symbol table. All state is persisted to the `.codeforge/` directory.
+    /// symbol table. All state is persisted to the `.codixing/` directory.
     pub fn init(root: impl AsRef<Path>, config: IndexConfig) -> Result<Self> {
         let root = root
             .as_ref()
             .canonicalize()
-            .map_err(|e| CodeforgeError::Config(format!("cannot resolve root path: {e}")))?;
+            .map_err(|e| CodixingError::Config(format!("cannot resolve root path: {e}")))?;
 
         let store = IndexStore::init(&root, &config)?;
         let tantivy = TantivyIndex::create_in_dir(&store.tantivy_dir())?;
@@ -315,7 +315,7 @@ impl Engine {
             .map(|e| (*e.key(), e.value().clone()))
             .collect();
         let meta_bytes = bitcode::serialize(&meta_pairs).map_err(|e| {
-            CodeforgeError::Serialization(format!("failed to serialize chunk_meta: {e}"))
+            CodixingError::Serialization(format!("failed to serialize chunk_meta: {e}"))
         })?;
         store.save_chunk_meta_bytes(&meta_bytes)?;
 
@@ -374,7 +374,7 @@ impl Engine {
         })
     }
 
-    /// Open an existing index from the `.codeforge/` directory.
+    /// Open an existing index from the `.codixing/` directory.
     ///
     /// Restores the Tantivy index, symbol table, chunk metadata, and optional
     /// vector index from disk.
@@ -382,7 +382,7 @@ impl Engine {
         let root = root
             .as_ref()
             .canonicalize()
-            .map_err(|e| CodeforgeError::Config(format!("cannot resolve root path: {e}")))?;
+            .map_err(|e| CodixingError::Config(format!("cannot resolve root path: {e}")))?;
 
         let store = IndexStore::open(&root)?;
         let config = store.load_config()?;
@@ -403,7 +403,7 @@ impl Engine {
         let chunk_meta: DashMap<u64, ChunkMeta> = if store.chunk_meta_path().exists() {
             let bytes = store.load_chunk_meta_bytes()?;
             let pairs: Vec<(u64, ChunkMeta)> = bitcode::deserialize(&bytes).map_err(|e| {
-                CodeforgeError::Serialization(format!("failed to deserialize chunk_meta: {e}"))
+                CodixingError::Serialization(format!("failed to deserialize chunk_meta: {e}"))
             })?;
             let map = DashMap::new();
             for (k, v) in pairs {
@@ -512,8 +512,11 @@ impl Engine {
         match query.strategy {
             Strategy::Instant => {
                 let retriever = BM25Retriever::new(&self.tantivy);
-                retriever.search(&query)
-                // NOTE: Instant is NOT graph-boosted (speed-first path).
+                let mut results = retriever.search(&query)?;
+                // Apply definition boost even on the BM25-only path: it's pure
+                // HashMap lookups and fixes the definition-vs-usage ranking issue.
+                self.apply_definition_boost(&mut results, &query.query);
+                Ok(results)
             }
             Strategy::Fast => {
                 let mut results = if let (Some(emb), Some(vec_idx)) = (&self.embedder, &self.vector)
@@ -531,6 +534,7 @@ impl Engine {
                     BM25Retriever::new(&self.tantivy).search(&query)?
                 };
                 self.apply_graph_boost(&mut results, self.config.graph.boost_weight);
+                self.apply_definition_boost(&mut results, &query.query);
                 Ok(results)
             }
             Strategy::Explore => self.search_explore(query),
@@ -576,6 +580,7 @@ impl Engine {
                     BM25Retriever::new(&self.tantivy).search(&query)?
                 };
                 self.apply_graph_boost(&mut results, self.config.graph.boost_weight);
+                self.apply_definition_boost(&mut results, &query.query);
                 Ok(results)
             }
             Strategy::Deep => self.search_deep(query),
@@ -677,6 +682,61 @@ impl Engine {
                 let pr = graph.node(&r.file_path).map(|n| n.pagerank).unwrap_or(0.0);
                 r.score *= 1.0 + weight * pr;
             }
+            results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+    }
+
+    /// Boost results that *define* a symbol matching any identifier token in `query`.
+    ///
+    /// BM25 TF-IDF over-ranks files that *heavily use* a symbol (e.g. `engine.rs`
+    /// mentions `IndexConfig` 40+ times) above the file that *defines* it
+    /// (e.g. `config.rs`).  This method corrects that by applying a 1.5× score
+    /// multiplier to any result whose `file_path` appears in the symbol table as
+    /// a defining location for a query term.
+    ///
+    /// Works for all strategies — even `Instant` — since it is pure in-memory
+    /// DashMap lookups with no I/O.
+    fn apply_definition_boost(&self, results: &mut [SearchResult], query: &str) {
+        use std::collections::HashSet;
+
+        // Collect files that define any identifier-like token in the query.
+        let mut defining_files: HashSet<String> = HashSet::new();
+        for term in query.split_whitespace() {
+            // Skip short or punctuation-heavy tokens.
+            if term.len() < 3 || !term.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                continue;
+            }
+            // Exact-name lookup (covers CamelCase identifiers like `IndexConfig`).
+            let exact = self.symbols.lookup(term);
+            if !exact.is_empty() {
+                for sym in exact {
+                    defining_files.insert(sym.file_path);
+                }
+            } else {
+                // Case-insensitive substring fallback (e.g. "indexconfig" → IndexConfig).
+                for sym in self.symbols.filter(term, None) {
+                    defining_files.insert(sym.file_path);
+                }
+            }
+        }
+
+        if defining_files.is_empty() {
+            return;
+        }
+
+        const DEFINITION_BOOST: f32 = 1.5;
+        let mut boosted = false;
+        for r in results.iter_mut() {
+            if defining_files.contains(&r.file_path) {
+                r.score *= DEFINITION_BOOST;
+                boosted = true;
+            }
+        }
+        if boosted {
             results.sort_by(|a, b| {
                 b.score
                     .partial_cmp(&a.score)
@@ -1022,7 +1082,7 @@ impl Engine {
             .embedder
             .as_ref()
             .ok_or_else(|| {
-                CodeforgeError::Config(
+                CodixingError::Config(
                     "embeddings not enabled — re-init with embedding support".into(),
                 )
             })?
@@ -1031,7 +1091,7 @@ impl Engine {
         let vec_idx = self
             .vector
             .as_mut()
-            .ok_or_else(|| CodeforgeError::Config("vector index not available".into()))?;
+            .ok_or_else(|| CodixingError::Config("vector index not available".into()))?;
 
         // Determine which chunk IDs already have vector representations.
         let embedded: std::collections::HashSet<u64> =
@@ -1266,7 +1326,7 @@ impl Engine {
             .map(|e| (*e.key(), e.value().clone()))
             .collect();
         let meta_bytes = bitcode::serialize(&meta_pairs).map_err(|e| {
-            CodeforgeError::Serialization(format!("failed to serialize chunk_meta: {e}"))
+            CodixingError::Serialization(format!("failed to serialize chunk_meta: {e}"))
         })?;
         self.store.save_chunk_meta_bytes(&meta_bytes)?;
 
@@ -1494,7 +1554,7 @@ impl Engine {
         )
     }
 
-    /// Return `true` if a `.codeforge/` index directory exists at `root`.
+    /// Return `true` if a `.codixing/` index directory exists at `root`.
     ///
     /// Used by the MCP server to decide whether auto-init is needed.
     pub fn index_exists(root: impl AsRef<Path>) -> bool {
@@ -1514,7 +1574,7 @@ impl Engine {
     /// - `context_lines`: number of surrounding lines to include (clamped to 5).
     /// - `limit`: maximum total matches to return (default 50).
     ///
-    /// Returns [`CodeforgeError::Index`] if the pattern fails to compile.
+    /// Returns [`CodixingError::Index`] if the pattern fails to compile.
     pub fn grep_code(
         &self,
         pattern: &str,
@@ -1534,13 +1594,13 @@ impl Engine {
             pattern.to_string()
         };
         let re = Regex::new(&compiled_pattern)
-            .map_err(|e| CodeforgeError::Index(format!("grep pattern error: {e}")))?;
+            .map_err(|e| CodixingError::Index(format!("grep pattern error: {e}")))?;
 
         // Build a glob matcher if file_glob is provided.
         let glob_pat: Option<glob::Pattern> = match file_glob {
             Some(g) => Some(
                 glob::Pattern::new(g)
-                    .map_err(|e| CodeforgeError::Index(format!("invalid file glob: {e}")))?,
+                    .map_err(|e| CodixingError::Index(format!("invalid file glob: {e}")))?,
             ),
             None => None,
         };

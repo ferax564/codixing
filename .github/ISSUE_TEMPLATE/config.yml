@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/your-org/codixing/security/advisories/new
+    about: Report a security issue privately via GitHub's security advisory system
+  - name: Question / discussion
+    url: https://github.com/your-org/codixing/discussions
+    about: Ask a question or start a discussion

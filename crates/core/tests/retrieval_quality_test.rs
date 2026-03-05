@@ -14,8 +14,8 @@ use std::collections::HashSet;
 
 use tempfile::TempDir;
 
-use codeforge_core::config::EmbeddingConfig;
-use codeforge_core::{Engine, IndexConfig, SearchQuery, Strategy};
+use codixing_core::config::EmbeddingConfig;
+use codixing_core::{Engine, IndexConfig, SearchQuery, Strategy};
 
 // ---------------------------------------------------------------------------
 // Helpers

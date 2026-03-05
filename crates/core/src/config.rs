@@ -50,7 +50,7 @@ fn default_graph_iterations() -> usize {
     20
 }
 
-/// Configuration for the CodeForge index.
+/// Configuration for the Codixing index.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IndexConfig {
     /// Root directory of the project being indexed.
@@ -99,7 +99,7 @@ pub enum EmbeddingModel {
     /// Uses the `Qwen/Qwen3-Embedding-0.6B` checkpoint from Hugging Face.
     /// Weights (~1.2 GB) are downloaded on first use and cached by hf-hub.
     ///
-    /// **Requires the `qwen3` Cargo feature** (`--features codeforge-core/qwen3`).
+    /// **Requires the `qwen3` Cargo feature** (`--features codixing-core/qwen3`).
     /// Unlike the ONNX-backed models above this variant runs the full Transformer
     /// in Rust via the candle ML framework rather than ONNX Runtime.
     #[cfg(feature = "qwen3")]
@@ -138,7 +138,7 @@ pub struct EmbeddingConfig {
 
     /// Load the BGE-Reranker-Base cross-encoder model to enable the `deep`
     /// retrieval strategy.  Disabled by default because the model is ~270 MB
-    /// and takes ~2 s to load.  Enable with `--reranker` on `codeforge init`
+    /// and takes ~2 s to load.  Enable with `--reranker` on `codixing init`
     /// or by setting this field in config.
     #[serde(default)]
     pub reranker_enabled: bool,
@@ -219,7 +219,7 @@ fn default_min_chars() -> usize {
 fn default_exclude_patterns() -> Vec<String> {
     vec![
         ".git".into(),
-        ".codeforge".into(),
+        ".codixing".into(),
         "target".into(),
         "node_modules".into(),
         ".venv".into(),

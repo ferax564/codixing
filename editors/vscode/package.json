@@ -1,9 +1,9 @@
 {
-  "name": "codeforge",
-  "displayName": "CodeForge",
+  "name": "codixing",
+  "displayName": "Codixing",
   "description": "Ultra-fast code retrieval for AI agents — structural search, dependency graph, MCP integration",
   "version": "0.1.0",
-  "publisher": "codeforge",
+  "publisher": "codixing",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -19,56 +19,56 @@
     "Claude"
   ],
   "activationEvents": [
-    "workspaceContains:.codeforge",
+    "workspaceContains:.codixing",
     "onStartupFinished"
   ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "codeforge.indexWorkspace",
-        "title": "CodeForge: Index Workspace"
+        "command": "codixing.indexWorkspace",
+        "title": "Codixing: Index Workspace"
       },
       {
-        "command": "codeforge.syncIndex",
-        "title": "CodeForge: Sync Index"
+        "command": "codixing.syncIndex",
+        "title": "Codixing: Sync Index"
       },
       {
-        "command": "codeforge.search",
-        "title": "CodeForge: Search..."
+        "command": "codixing.search",
+        "title": "Codixing: Search..."
       },
       {
-        "command": "codeforge.showRepoMap",
-        "title": "CodeForge: Show Repo Map"
+        "command": "codixing.showRepoMap",
+        "title": "Codixing: Show Repo Map"
       },
       {
-        "command": "codeforge.startDaemon",
-        "title": "CodeForge: Start Daemon"
+        "command": "codixing.startDaemon",
+        "title": "Codixing: Start Daemon"
       },
       {
-        "command": "codeforge.registerMcpServer",
-        "title": "CodeForge: Register MCP Server"
+        "command": "codixing.registerMcpServer",
+        "title": "Codixing: Register MCP Server"
       }
     ],
     "configuration": {
-      "title": "CodeForge",
+      "title": "Codixing",
       "properties": {
-        "codeforge.binaryPath": {
+        "codixing.binaryPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the codeforge binary. Leave empty to auto-detect from PATH or common locations."
+          "description": "Path to the codixing binary. Leave empty to auto-detect from PATH or common locations."
         },
-        "codeforge.mcpBinaryPath": {
+        "codixing.mcpBinaryPath": {
           "type": "string",
           "default": "",
-          "description": "Path to the codeforge-mcp binary. Leave empty to auto-detect."
+          "description": "Path to the codixing-mcp binary. Leave empty to auto-detect."
         },
-        "codeforge.autoStartDaemon": {
+        "codixing.autoStartDaemon": {
           "type": "boolean",
           "default": false,
-          "description": "Automatically start the codeforge-mcp daemon when the extension activates."
+          "description": "Automatically start the codixing-mcp daemon when the extension activates."
         },
-        "codeforge.embeddings": {
+        "codixing.embeddings": {
           "type": "boolean",
           "default": false,
           "description": "Enable vector embeddings when initializing a new index (slower init, better search quality)."

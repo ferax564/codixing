@@ -1,8 +1,8 @@
-# CodeForge — Claude Code Instructions
+# Codixing — Claude Code Instructions
 
 ## Project Overview
 
-CodeForge is a Rust-native code retrieval engine for AI agents. It combines tree-sitter AST parsing, hybrid search (BM25 + vector), a live code dependency graph with PageRank scoring, and AI-optimized output into a single binary.
+Codixing is a Rust-native code retrieval engine for AI agents. It combines tree-sitter AST parsing, hybrid search (BM25 + vector), a live code dependency graph with PageRank scoring, and AI-optimized output into a single binary.
 
 **PRD**: `PRD.md` at repo root — the authoritative specification.
 **Roadmap**: `ROADMAP.md` — phased delivery plan with status.
@@ -19,9 +19,9 @@ CodeForge is a Rust-native code retrieval engine for AI agents. It combines tree
 - Tantivy BM25 full-text index with custom CodeTokenizer
 - DashMap-based symbol table with bitcode persistence
 - Engine facade: `init`, `open`, `search`, `symbols`, `reindex_file`, `remove_file`, `watch`, `save`
-- CLI: `codeforge init`, `codeforge search`, `codeforge symbols`
+- CLI: `codixing init`, `codixing search`, `codixing symbols`
 - File watcher with debounced incremental re-indexing
-- Index persistence to `.codeforge/` directory
+- Index persistence to `.codixing/` directory
 
 **Phase 2 — Semantic Search**
 - fastembed BGE-Small-EN-v1.5 local embedding inference (ONNX) → upgraded to BGE-Base-EN-v1.5 (768 dims) as default
@@ -41,21 +41,21 @@ CodeForge is a Rust-native code retrieval engine for AI agents. It combines tree
 - PageRank: custom iterative power method, dangling-node redistribution, normalized max=1.0
 - Graph boost: `score *= 1 + 0.3 * pagerank` on `fast`/`thorough` strategies
 - Repo map: Aider-style, token-budgeted, sorted by PageRank
-- Graph persistence: `.codeforge/graph/graph.bin`; incremental updates on reindex/remove
-- CLI: `codeforge graph`, `codeforge callers`, `codeforge callees`, `codeforge dependencies`
+- Graph persistence: `.codixing/graph/graph.bin`; incremental updates on reindex/remove
+- CLI: `codixing graph`, `codixing callers`, `codixing callees`, `codixing dependencies`
 - REST: `POST /graph/repo-map`, `GET /graph/callers`, `GET /graph/callees`, `GET /graph/stats`
 
 **Phase 4A–4E — Agent Integration + Performance: COMPLETE**
-- MCP server binary (`codeforge-mcp`): JSON-RPC 2.0 over stdin/stdout for Claude Code integration
+- MCP server binary (`codixing-mcp`): JSON-RPC 2.0 over stdin/stdout for Claude Code integration
 - 10 MCP tools: `code_search`, `find_symbol`, `get_references`, `get_repo_map`, `search_usages`, `get_transitive_deps`, `index_status`, `read_file`, `grep_code`, `read_symbol`
 - `grep_code`: regex/literal file search with context lines, glob filter, match highlighting (beats raw grep for LLM token budget)
-- Auto-init: `codeforge-mcp --root .` auto-initializes a BM25-only index if none exists
-- Daemon mode: `codeforge-mcp --root . --daemon` loads engine once, serves over Unix socket `.codeforge/daemon.sock`; subsequent invocations auto-proxy (4–5× faster for cheap operations, ~1.8× overall)
+- Auto-init: `codixing-mcp --root .` auto-initializes a BM25-only index if none exists
+- Daemon mode: `codixing-mcp --root . --daemon` loads engine once, serves over Unix socket `.codixing/daemon.sock`; subsequent invocations auto-proxy (4–5× faster for cheap operations, ~1.8× overall)
 - Stale socket detection: `socket_alive()` uses `Ok(Ok(_))` matching to distinguish live daemon from stale socket file (connection refused ≠ alive)
 - `explore` strategy: BM25 first-pass + graph neighbor expansion (RepoHyper Search-then-Expand pattern)
 - `Engine::search_usages()`: BM25 + graph boost for symbol reference lookup
-- CLI: `codeforge usages` subcommand; `--strategy explore` added to `search`
-- Daemon mode + live file watcher; `Engine::sync()` + `codeforge sync` (hash-based incremental)
+- CLI: `codixing usages` subcommand; `--strategy explore` added to `search`
+- Daemon mode + live file watcher; `Engine::sync()` + `codixing sync` (hash-based incremental)
 - Batched Tantivy commits in `apply_changes()` (N fsyncs → 1)
 
 **Phase 5 — Production Hardening: COMPLETE**
@@ -73,14 +73,14 @@ CodeForge is a Rust-native code retrieval engine for AI agents. It combines tree
   - Note: `tree-sitter-kotlin` (0.3.x) requires ts < 0.23; use `tree-sitter-kotlin-ng` instead
   - Swift: `struct`/`extension` both parse as `class_declaration` — differentiated by first keyword child
   - Kotlin: `interface` parses as `class_declaration` with `interface` keyword child
-- Multi-repo: `IndexConfig.extra_roots: Vec<PathBuf>`; `normalize_path()` / `resolve_path()` / `all_roots()`; CLI `codeforge init --also <DIR>`
+- Multi-repo: `IndexConfig.extra_roots: Vec<PathBuf>`; `normalize_path()` / `resolve_path()` / `all_roots()`; CLI `codixing init --also <DIR>`
 - VS Code / Cursor extension: `editors/vscode/`; 6 commands; auto-registers MCP in `~/.claude.json` + `~/.cursor/mcp.json`
 - GitHub Actions CI: `.github/workflows/ci.yml` (3-platform matrix) + `release.yml` (4-arch cross-compile on `v*`)
 - Optional Qdrant backend: `VectorBackend` trait + `QdrantVectorIndex` behind `--features qdrant`; configured via `QDRANT_URL` / `QDRANT_COLLECTION`
 
 
 **Phase 7 — Git Sync + Qwen3 + Eval Harness: COMPLETE (249 tests)**
-- Git-aware incremental sync: `IndexMeta.git_commit`, `git_head_commit()` / `git_diff_since()` (no extra crate, pure std::process::Command); `Engine::git_sync()` → `GitSyncStats`; CLI: `codeforge git-sync`; 5 integration tests (changed/deleted/renamed/no-op/non-git-dir)
+- Git-aware incremental sync: `IndexMeta.git_commit`, `git_head_commit()` / `git_diff_since()` (no extra crate, pure std::process::Command); `Engine::git_sync()` → `GitSyncStats`; CLI: `codixing git-sync`; 5 integration tests (changed/deleted/renamed/no-op/non-git-dir)
 - Qwen3 candle backend: `EmbedBackend` enum (Onnx | Qwen3); `EmbeddingModel::Qwen3SmallEmbedding` (1024d); fastembed 5.12 + candle-core 0.9.1; feature flag: `--features qwen3`
 - Embedding eval harness: `tests/embedding_eval_test.rs` — 12-query suite (4 identifier + 8 NL); `compare_bm25_vs_hybrid_recall` + `compare_embedding_models`; auto-verdict on whether fine-tuning is warranted; all `#[ignore]` (require model download)
 - Server depth fix: REST graph routes now route `depth > 1` through `transitive_callers/callees`
@@ -96,14 +96,14 @@ CodeForge is a Rust-native code retrieval engine for AI agents. It combines tree
 ## Architecture
 
 ```
-codeforge/
+codixing/
 ├── Cargo.toml             # Workspace root (virtual manifest)
 ├── crates/
 │   ├── core/              # Engine library
 │   │   ├── src/
 │   │   │   ├── lib.rs          # Re-exports: Engine, IndexStats, SearchQuery, GraphStats, etc.
 │   │   │   ├── engine.rs       # Engine facade — all public API
-│   │   │   ├── error.rs        # CodeforgeError (thiserror)
+│   │   │   ├── error.rs        # CodixingError (thiserror)
 │   │   │   ├── config.rs       # IndexConfig, ChunkConfig, EmbeddingConfig, GraphConfig
 │   │   │   ├── language/       # 10 languages, LanguageSupport trait, registry
 │   │   │   ├── parser/         # tree-sitter parser + DashMap tree cache
@@ -114,7 +114,7 @@ codeforge/
 │   │   │   ├── vector/         # usearch HNSW index
 │   │   │   ├── graph/          # NEW: CodeGraph, extractor, resolver, pagerank, repomap
 │   │   │   ├── symbols/        # DashMap symbol table + bitcode persistence
-│   │   │   ├── persistence/    # .codeforge/ directory management (now includes graph/)
+│   │   │   ├── persistence/    # .codixing/ directory management (now includes graph/)
 │   │   │   ├── formatter/      # AI-optimized context output
 │   │   │   └── watcher/        # notify-based debounced file watcher
 │   │   └── tests/              # Integration tests (indexing, search, graph, watcher, chunker)
@@ -182,7 +182,7 @@ codeforge/
 2. **Hybrid by default** — no single retrieval method wins
 3. **Incremental everything** — full re-indexing is a failure mode
 4. **AI-native output** — results formatted for LLM comprehension
-5. **Zero-config start** — `codeforge init .` just works
+5. **Zero-config start** — `codixing init .` just works
 6. **Single binary** — no runtime dependencies
 
 ## Workflow

@@ -22,8 +22,8 @@ use std::time::Instant;
 
 use tempfile::TempDir;
 
-use codeforge_core::config::{EmbeddingConfig, EmbeddingModel};
-use codeforge_core::{Engine, IndexConfig, SearchQuery, Strategy};
+use codixing_core::config::{EmbeddingConfig, EmbeddingModel};
+use codixing_core::{Engine, IndexConfig, SearchQuery, Strategy};
 
 // ---------------------------------------------------------------------------
 // Eval case definition
@@ -764,4 +764,574 @@ fn compare_embedding_models() {
             recall * 100.0,
         );
     }
+}
+// ---------------------------------------------------------------------------
+// Test 3: Real-codebase eval — Codixing own source (83 files)
+// ---------------------------------------------------------------------------
+
+/// Eval cases designed with a deliberate lexical gap between query and answer.
+///
+/// For each case the query deliberately avoids the exact identifier/filename
+/// so BM25 must rely on co-occurring tokens while the vector model can bridge
+/// the semantic gap through learned associations.
+const REAL_CODEBASE_CASES: &[EvalCase] = &[
+    // --- Architecture / concept queries (no exact file name in query) ---
+    EvalCase {
+        query: "component that scores documents by graph centrality",
+        expected_file: "pagerank",
+        k: 5,
+        query_type: "nl",
+    },
+    EvalCase {
+        query: "data structure mapping file paths to dependency edges",
+        expected_file: "graph",
+        k: 5,
+        query_type: "nl",
+    },
+    EvalCase {
+        query: "reciprocal rank fusion of two ranked lists",
+        expected_file: "retriever",
+        k: 5,
+        query_type: "nl",
+    },
+    EvalCase {
+        query: "merge adjacent context windows from the same file",
+        expected_file: "formatter",
+        k: 5,
+        query_type: "nl",
+    },
+    EvalCase {
+        query: "convert raw import path to resolved file location",
+        expected_file: "resolver",
+        k: 5,
+        query_type: "nl",
+    },
+    EvalCase {
+        query: "serialize index metadata to disk between sessions",
+        expected_file: "persistence",
+        k: 5,
+        query_type: "nl",
+    },
+    EvalCase {
+        query: "split camelCase and snake_case identifiers into tokens",
+        expected_file: "tantivy",   // CodeTokenizer is in index/tantivy.rs
+        k: 5,
+        query_type: "nl",
+    },
+    EvalCase {
+        query: "watch filesystem for changes and trigger incremental reindex",
+        expected_file: "watcher",
+        k: 5,
+        query_type: "nl",
+    },
+    EvalCase {
+        query: "approximate nearest neighbour search with memory quantization",
+        expected_file: "vector",
+        k: 5,
+        query_type: "nl",
+    },
+    EvalCase {
+        query: "extract function and class names from source AST",
+        expected_file: "language",
+        k: 5,
+        query_type: "nl",
+    },
+    // --- Identifier queries: BM25 should dominate ---
+    EvalCase {
+        query: "Engine",
+        expected_file: "engine",
+        k: 3,
+        query_type: "identifier",
+    },
+    EvalCase {
+        query: "IndexConfig",
+        expected_file: "config",
+        k: 3,
+        query_type: "identifier",
+    },
+    EvalCase {
+        query: "CodeGraph pagerank",
+        expected_file: "pagerank",
+        k: 3,
+        query_type: "identifier",
+    },
+    EvalCase {
+        query: "BM25Retriever",
+        expected_file: "bm25",   // retriever/bm25.rs
+        k: 3,
+        query_type: "identifier",
+    },
+];
+
+/// Index Codixing's own source tree and compare BM25 vs hybrid on hard NL queries.
+///
+/// This test uses 83 real Rust files where the lexical gap between query tokens
+/// and document tokens is intentionally maximised — the expected file is never
+/// named in the query.
+///
+/// Run with:
+/// ```bash
+/// FASTEMBED_CACHE_DIR=~/.cache/fastembed \
+///   cargo test --test embedding_eval_test real_codebase_bm25_vs_hybrid \
+///   -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore]
+fn real_codebase_bm25_vs_hybrid() {
+    // Path to the actual codixing source tree — skip if not available.
+    let codixing_src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()   // crates/core → crates
+        .unwrap()
+        .parent()   // crates → repo root
+        .unwrap()
+        .to_path_buf();
+
+    if !codixing_src.join("Cargo.toml").exists() {
+        eprintln!("real_codebase_bm25_vs_hybrid: skipped (repo root not found)");
+        return;
+    }
+
+    // Build a temporary index with BGE-Base embeddings over the real source.
+    let tmp = tempfile::tempdir().expect("tempdir");
+
+    // Copy only the crates/core/src tree so we test on Rust code, not docs/editors.
+    let src_root = codixing_src.join("crates/core/src");
+    let dest_root = tmp.path().join("src");
+    copy_dir_recursive(&src_root, &dest_root);
+
+    let mut config = IndexConfig::new(tmp.path());
+    config.embedding = EmbeddingConfig {
+        enabled: true,
+        model: EmbeddingModel::BgeBaseEn,
+        contextual_embeddings: true,
+        quantize: true,
+        reranker_enabled: false,
+        ..Default::default()
+    };
+
+    println!("\nBuilding index over real codixing source ({} files)...",
+        count_rs_files(tmp.path()));
+    let t_build = Instant::now();
+    let engine = Engine::init(tmp.path(), config).expect("init failed");
+    println!("Index built in {}ms  ({} files, {} chunks)",
+        t_build.elapsed().as_millis(),
+        engine.stats().file_count,
+        engine.stats().chunk_count,
+    );
+
+    let total = REAL_CODEBASE_CASES.len();
+    let nl_cases: Vec<&EvalCase> = REAL_CODEBASE_CASES.iter()
+        .filter(|c| c.query_type == "nl").collect();
+    let id_cases: Vec<&EvalCase> = REAL_CODEBASE_CASES.iter()
+        .filter(|c| c.query_type == "identifier").collect();
+
+    let mut bm25_nl = 0usize;
+    let mut hybrid_nl = 0usize;
+    let mut bm25_id = 0usize;
+    let mut hybrid_id = 0usize;
+    let mut bm25_ms = 0u128;
+    let mut hybrid_ms = 0u128;
+
+    println!();
+    println!("{:<55} {:>6} {:>8}  {}", "Query", "BM25", "Hybrid", "Type");
+    println!("{}", "-".repeat(82));
+
+    for case in REAL_CODEBASE_CASES {
+        let t0 = Instant::now();
+        let bm25_res = engine.search(
+            SearchQuery::new(case.query).with_limit(case.k).with_strategy(Strategy::Instant)
+        ).unwrap_or_default();
+        bm25_ms += t0.elapsed().as_millis();
+        let bm25_hit = bm25_res.iter().any(|r| r.file_path.contains(case.expected_file));
+
+        let t0 = Instant::now();
+        let hybrid_res = engine.search(
+            SearchQuery::new(case.query).with_limit(case.k).with_strategy(Strategy::Fast)
+        ).unwrap_or_default();
+        hybrid_ms += t0.elapsed().as_millis();
+        let hybrid_hit = hybrid_res.iter().any(|r| r.file_path.contains(case.expected_file));
+
+        match case.query_type {
+            "nl"         => { if bm25_hit { bm25_nl += 1; } if hybrid_hit { hybrid_nl += 1; } }
+            "identifier" => { if bm25_hit { bm25_id += 1; } if hybrid_hit { hybrid_id += 1; } }
+            _            => {}
+        }
+
+        let q = if case.query.len() > 53 { &case.query[..53] } else { case.query };
+        println!("{:<55} {:>6} {:>8}  {}",
+            q,
+            if bm25_hit { "HIT" } else { "miss" },
+            if hybrid_hit { "HIT" } else { "miss" },
+            case.query_type,
+        );
+    }
+
+    println!("{}", "-".repeat(82));
+
+    let nl_n  = nl_cases.len();
+    let id_n  = id_cases.len();
+    let bm25_nl_pct    = bm25_nl   as f64 / nl_n  as f64 * 100.0;
+    let hybrid_nl_pct  = hybrid_nl as f64 / nl_n  as f64 * 100.0;
+    let bm25_id_pct    = bm25_id   as f64 / id_n  as f64 * 100.0;
+    let hybrid_id_pct  = hybrid_id as f64 / id_n  as f64 * 100.0;
+    let nl_gap         = hybrid_nl_pct - bm25_nl_pct;
+
+    println!();
+    println!("=== RESULTS (real codebase, {} files) ===", engine.stats().file_count);
+    println!("NL queries    BM25: {:.0}% ({}/{}),  Hybrid: {:.0}% ({}/{}),  gap: {:+.0}%",
+        bm25_nl_pct, bm25_nl, nl_n, hybrid_nl_pct, hybrid_nl, nl_n, nl_gap);
+    println!("Identifiers   BM25: {:.0}% ({}/{}),  Hybrid: {:.0}% ({}/{})",
+        bm25_id_pct, bm25_id, id_n, hybrid_id_pct, hybrid_id, id_n);
+    println!("Latency       BM25: {}ms avg,  Hybrid: {}ms avg",
+        bm25_ms / total as u128, hybrid_ms / total as u128);
+
+    println!();
+    if nl_gap > 15.0 {
+        println!(
+            "VERDICT ▶ Hybrid beats BM25 by {:.0}% on NL queries over a real codebase.\n\
+             Fine-tuning BGE on CodeSearchNet is STRONGLY RECOMMENDED.\n\
+             Expected gain: +{:.0}–{:.0}% additional NL recall after domain-specific training.",
+            nl_gap, nl_gap * 0.3, nl_gap * 0.6
+        );
+    } else if nl_gap > 5.0 {
+        println!(
+            "VERDICT ▶ Moderate hybrid gain ({:.0}%) on NL queries.\n\
+             Consider fine-tuning if serving >50% NL queries; likely not worth it otherwise.",
+            nl_gap
+        );
+    } else {
+        println!(
+            "VERDICT ▶ Hybrid gap is {:.0}% on a real codebase.\n\
+             BM25 is the dominant signal for this query distribution.\n\
+             Fine-tuning is NOT recommended — invest in query understanding instead.",
+            nl_gap
+        );
+    }
+
+    // Regression guard: hybrid must not be worse than BM25 on NL.
+    assert!(
+        hybrid_nl >= bm25_nl.saturating_sub(1),
+        "Hybrid regressed vs BM25 on NL: bm25={} hybrid={}", bm25_nl, hybrid_nl
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 4: Real-codebase multi-model comparison
+// ---------------------------------------------------------------------------
+
+/// Compare BgeBaseEn, JinaEmbedCode, and (if `qwen3` feature enabled) Qwen3
+/// on the `REAL_CODEBASE_CASES` queries using `Strategy::Fast`.
+///
+/// Prints a full hit matrix across models so you can see which model surfaces
+/// each file and where they diverge.
+///
+/// Run with:
+/// ```bash
+/// FASTEMBED_CACHE_DIR=~/.cache/fastembed \
+///   cargo test --test embedding_eval_test real_codebase_model_comparison \
+///   -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore]
+fn real_codebase_model_comparison() {
+    let codixing_src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+
+    if !codixing_src.join("Cargo.toml").exists() {
+        eprintln!("real_codebase_model_comparison: skipped (repo root not found)");
+        return;
+    }
+
+    // Models to compare.
+    let models: Vec<(&str, EmbeddingModel)> = {
+        #[allow(unused_mut)]
+        let mut v: Vec<(&str, EmbeddingModel)> = vec![
+            ("BgeBaseEn (768d)", EmbeddingModel::BgeBaseEn),
+            ("JinaCode  (768d)", EmbeddingModel::JinaEmbedCode),
+        ];
+        #[cfg(feature = "qwen3")]
+        v.push(("Qwen3     (1024d)", EmbeddingModel::Qwen3SmallEmbedding));
+        v
+    };
+
+    let n_models = models.len();
+    let n_cases = REAL_CODEBASE_CASES.len();
+    let nl_cases: Vec<usize> = REAL_CODEBASE_CASES
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.query_type == "nl")
+        .map(|(i, _)| i)
+        .collect();
+    let id_cases: Vec<usize> = REAL_CODEBASE_CASES
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.query_type == "identifier")
+        .map(|(i, _)| i)
+        .collect();
+
+    // hit_matrix[case_idx][model_idx] = bool
+    let mut hit_matrix = vec![vec![false; n_models]; n_cases];
+    let mut build_ms = vec![0u128; n_models];
+    let mut search_ms = vec![0u128; n_models];
+
+    for (col, (label, model)) in models.iter().enumerate() {
+        // Build a fresh temp index for each model.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let src_root = codixing_src.join("crates/core/src");
+        let dest_root = tmp.path().join("src");
+        copy_dir_recursive(&src_root, &dest_root);
+
+        let mut config = IndexConfig::new(tmp.path());
+        config.embedding = EmbeddingConfig {
+            enabled: true,
+            model: model.clone(),
+            contextual_embeddings: true,
+            quantize: true,
+            reranker_enabled: false,
+            ..Default::default()
+        };
+
+        let t_build = Instant::now();
+        print!("\nBuilding index for {} ... ", label);
+        let engine = Engine::init(tmp.path(), config).expect("init failed");
+        build_ms[col] = t_build.elapsed().as_millis();
+        println!("done in {}ms ({} files, {} chunks)",
+            build_ms[col], engine.stats().file_count, engine.stats().chunk_count);
+
+        for (row, case) in REAL_CODEBASE_CASES.iter().enumerate() {
+            let t0 = Instant::now();
+            let results = engine
+                .search(
+                    SearchQuery::new(case.query)
+                        .with_limit(case.k)
+                        .with_strategy(Strategy::Fast),
+                )
+                .unwrap_or_default();
+            search_ms[col] += t0.elapsed().as_millis();
+
+            hit_matrix[row][col] = results.iter().any(|r| r.file_path.contains(case.expected_file));
+        }
+    }
+
+    // --- Print hit matrix ---
+    let col_w = 18usize;
+    let q_w = 54usize;
+    println!();
+    println!("{}", "=".repeat(q_w + col_w * n_models + 8));
+    println!("Real-codebase model comparison  (Strategy::Fast, {} queries)", n_cases);
+    println!("{}", "=".repeat(q_w + col_w * n_models + 8));
+    print!("{:<width$} {:>6}", "Query", "type", width = q_w);
+    for (label, _) in &models {
+        print!("  {:>width$}", label, width = col_w - 2);
+    }
+    println!();
+    println!("{}", "-".repeat(q_w + col_w * n_models + 8));
+
+    for (row, case) in REAL_CODEBASE_CASES.iter().enumerate() {
+        let q = if case.query.len() > q_w - 1 { &case.query[..q_w - 1] } else { case.query };
+        print!("{:<width$} {:>6}", q, case.query_type, width = q_w);
+        for col in 0..n_models {
+            print!("  {:>width$}", if hit_matrix[row][col] { "HIT" } else { "miss" }, width = col_w - 2);
+        }
+        println!();
+    }
+
+    println!("{}", "-".repeat(q_w + col_w * n_models + 8));
+
+    // NL recall row
+    print!("{:<width$} {:>6}", "NL Recall@k", "nl", width = q_w);
+    for col in 0..n_models {
+        let hits = nl_cases.iter().filter(|&&r| hit_matrix[r][col]).count();
+        print!("  {:>width$}", format!("{:.0}% ({}/{})", hits as f64 / nl_cases.len() as f64 * 100.0, hits, nl_cases.len()), width = col_w - 2);
+    }
+    println!();
+
+    // Identifier recall row
+    print!("{:<width$} {:>6}", "ID Recall@k", "id", width = q_w);
+    for col in 0..n_models {
+        let hits = id_cases.iter().filter(|&&r| hit_matrix[r][col]).count();
+        print!("  {:>width$}", format!("{:.0}% ({}/{})", hits as f64 / id_cases.len() as f64 * 100.0, hits, id_cases.len()), width = col_w - 2);
+    }
+    println!();
+
+    // Search latency row
+    print!("{:<width$} {:>6}", "Avg search latency", "", width = q_w);
+    for col in 0..n_models {
+        let avg = if n_cases > 0 { search_ms[col] / n_cases as u128 } else { 0 };
+        print!("  {:>width$}", format!("{}ms", avg), width = col_w - 2);
+    }
+    println!();
+
+    println!("{}", "=".repeat(q_w + col_w * n_models + 8));
+
+    // --- Verdict ---
+    println!();
+    let bge_nl = nl_cases.iter().filter(|&&r| hit_matrix[r][0]).count();
+    let jina_nl = nl_cases.iter().filter(|&&r| hit_matrix[r][1]).count();
+    let nl_n = nl_cases.len();
+    let gap = jina_nl as f64 / nl_n as f64 * 100.0 - bge_nl as f64 / nl_n as f64 * 100.0;
+
+    if gap > 10.0 {
+        println!("VERDICT ▶ JinaEmbedCode beats BgeBaseEn by {:.0}% on NL recall over real Rust code.", gap);
+        println!("          Switch default model to JinaEmbedCode.");
+    } else if gap > 0.0 {
+        println!("VERDICT ▶ JinaEmbedCode edges BgeBaseEn by {:.0}% — marginal gain; both are viable.", gap);
+    } else if gap == 0.0 {
+        println!("VERDICT ▶ JinaEmbedCode and BgeBaseEn tie on NL recall. Stick with BgeBaseEn (default).");
+    } else {
+        println!("VERDICT ▶ BgeBaseEn outperforms JinaEmbedCode by {:.0}% on this corpus.", -gap);
+        println!("          JinaEmbedCode does NOT improve over current default.");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 5: Qwen3 standalone benchmark (separate process — avoids OOM)
+// ---------------------------------------------------------------------------
+
+/// Benchmark Qwen3-Embedding-0.6B (1024d, candle backend) on the
+/// `REAL_CODEBASE_CASES` queries using `Strategy::Fast`.
+///
+/// **Run separately from `real_codebase_model_comparison`** — loading all
+/// three models in a single process exhausts available memory and triggers
+/// an OOM kill.  This test loads only the Qwen3 model.
+///
+/// Requires: `--features codixing-core/qwen3`
+///
+/// ```bash
+/// FASTEMBED_CACHE_DIR=~/.cache/fastembed \
+///   cargo test --test embedding_eval_test qwen3_standalone \
+///   --features codixing-core/qwen3 -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore]
+#[cfg(feature = "qwen3")]
+fn qwen3_standalone() {
+    let codixing_src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+
+    if !codixing_src.join("Cargo.toml").exists() {
+        eprintln!("qwen3_standalone: skipped (repo root not found)");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let src_root = codixing_src.join("crates/core/src");
+    let dest_root = tmp.path().join("src");
+    copy_dir_recursive(&src_root, &dest_root);
+
+    let mut config = IndexConfig::new(tmp.path());
+    config.embedding = EmbeddingConfig {
+        enabled: true,
+        model: EmbeddingModel::Qwen3SmallEmbedding,
+        contextual_embeddings: true,
+        quantize: true,
+        reranker_enabled: false,
+        ..Default::default()
+    };
+
+    println!("\nBuilding Qwen3 index (1024d, candle backend) ...");
+    let t_build = Instant::now();
+    let engine = Engine::init(tmp.path(), config).expect("init failed");
+    println!(
+        "Index built in {}ms  ({} files, {} chunks)",
+        t_build.elapsed().as_millis(),
+        engine.stats().file_count,
+        engine.stats().chunk_count,
+    );
+
+    let nl_cases: Vec<&EvalCase> = REAL_CODEBASE_CASES.iter().filter(|c| c.query_type == "nl").collect();
+    let id_cases: Vec<&EvalCase> = REAL_CODEBASE_CASES.iter().filter(|c| c.query_type == "identifier").collect();
+    let total = REAL_CODEBASE_CASES.len();
+
+    let mut nl_hits = 0usize;
+    let mut id_hits = 0usize;
+    let mut total_ms = 0u128;
+
+    println!();
+    println!("{:<55} {:>6}  {}", "Query", "Hit?", "Type");
+    println!("{}", "-".repeat(70));
+
+    for case in REAL_CODEBASE_CASES {
+        let t0 = Instant::now();
+        let results = engine
+            .search(
+                SearchQuery::new(case.query)
+                    .with_limit(case.k)
+                    .with_strategy(Strategy::Fast),
+            )
+            .unwrap_or_default();
+        total_ms += t0.elapsed().as_millis();
+
+        let hit = results.iter().any(|r| r.file_path.contains(case.expected_file));
+        match case.query_type {
+            "nl"         => { if hit { nl_hits += 1; } }
+            "identifier" => { if hit { id_hits += 1; } }
+            _            => {}
+        }
+
+        let q = if case.query.len() > 53 { &case.query[..53] } else { case.query };
+        println!("{:<55} {:>6}  {}", q, if hit { "HIT" } else { "miss" }, case.query_type);
+    }
+
+    println!("{}", "-".repeat(70));
+
+    let nl_n  = nl_cases.len();
+    let id_n  = id_cases.len();
+    let nl_pct = nl_hits as f64 / nl_n as f64 * 100.0;
+    let id_pct = id_hits as f64 / id_n as f64 * 100.0;
+    let avg_ms = if total > 0 { total_ms / total as u128 } else { 0 };
+
+    println!();
+    println!("=== Qwen3 RESULTS (real codebase, {} files) ===", engine.stats().file_count);
+    println!("NL Recall@k:    {:.0}% ({}/{})", nl_pct, nl_hits, nl_n);
+    println!("ID Recall@k:    {:.0}% ({}/{})", id_pct, id_hits, id_n);
+    println!("Avg latency:    {}ms", avg_ms);
+
+    println!();
+    // Compare against known BgeBaseEn baseline (100% NL, 100% ID).
+    if nl_pct >= 100.0 {
+        println!("VERDICT ▶ Qwen3 matches BgeBaseEn on NL recall (100%). Viable alternative.");
+    } else {
+        let gap = 100.0 - nl_pct;
+        println!(
+            "VERDICT ▶ Qwen3 trails BgeBaseEn by {:.0}% on NL recall ({:.0}% vs 100%).\n\
+             The 1.2 GB candle-backend model does NOT improve over the current default.",
+            gap, nl_pct
+        );
+    }
+}
+
+/// Recursively copy a directory tree.
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path);
+        } else {
+            std::fs::copy(&src_path, &dst_path).unwrap();
+        }
+    }
+}
+
+fn count_rs_files(root: &std::path::Path) -> usize {
+    let mut n = 0;
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() { n += count_rs_files(&p); }
+            else if p.extension().map(|x| x == "rs").unwrap_or(false) { n += 1; }
+        }
+    }
+    n
 }

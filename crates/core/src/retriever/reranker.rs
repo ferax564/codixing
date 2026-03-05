@@ -6,7 +6,7 @@
 //! pattern: cheap first-stage recall followed by expensive but precise
 //! reranking.
 
-use crate::error::CodeforgeError;
+use crate::error::CodixingError;
 use crate::retriever::SearchResult;
 
 /// Trait for reranking search results using a cross-encoder or similar model.
@@ -24,7 +24,7 @@ pub trait Reranker: Send + Sync {
         query: &str,
         results: &[SearchResult],
         top_k: usize,
-    ) -> Result<Vec<SearchResult>, CodeforgeError>;
+    ) -> Result<Vec<SearchResult>, CodixingError>;
 }
 
 /// A mock reranker that assigns predetermined scores to results.
@@ -51,7 +51,7 @@ impl Reranker for MockReranker {
         _query: &str,
         results: &[SearchResult],
         top_k: usize,
-    ) -> Result<Vec<SearchResult>, CodeforgeError> {
+    ) -> Result<Vec<SearchResult>, CodixingError> {
         let mut scored: Vec<SearchResult> = results
             .iter()
             .zip(self.scores.iter().cycle())

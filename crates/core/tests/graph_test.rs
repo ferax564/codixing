@@ -5,9 +5,9 @@ mod common;
 use std::fs;
 use std::path::Path;
 
-use codeforge_core::graph::{ImportExtractor, ImportResolver};
-use codeforge_core::language::Language;
-use codeforge_core::{Engine, IndexConfig};
+use codixing_core::graph::{ImportExtractor, ImportResolver};
+use codixing_core::language::Language;
+use codixing_core::{Engine, IndexConfig};
 use tempfile::tempdir;
 
 fn no_embed_config(root: &std::path::Path) -> IndexConfig {
@@ -100,7 +100,7 @@ fn rust_crate_import_resolves_to_file() {
             .collect();
     let resolver = ImportResolver::new(indexed, std::path::PathBuf::from("/project"));
 
-    let raw = codeforge_core::graph::extractor::RawImport {
+    let raw = codixing_core::graph::extractor::RawImport {
         path: "crate::parser".to_string(),
         language: Language::Rust,
         is_relative: true,
@@ -121,7 +121,7 @@ fn typescript_relative_import_resolves() {
         .collect();
     let resolver = ImportResolver::new(indexed, std::path::PathBuf::from("/project"));
 
-    let raw = codeforge_core::graph::extractor::RawImport {
+    let raw = codixing_core::graph::extractor::RawImport {
         path: "./foo".to_string(),
         language: Language::TypeScript,
         is_relative: true,
@@ -140,7 +140,7 @@ fn external_import_returns_none() {
         ["src/main.rs"].iter().map(|s| s.to_string()).collect();
     let resolver = ImportResolver::new(indexed, std::path::PathBuf::from("/project"));
 
-    let raw = codeforge_core::graph::extractor::RawImport {
+    let raw = codixing_core::graph::extractor::RawImport {
         path: "std::collections::HashMap".to_string(),
         language: Language::Rust,
         is_relative: false,

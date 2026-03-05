@@ -2,7 +2,7 @@ use axum::Json;
 use axum::extract::{Query, State};
 use serde::{Deserialize, Serialize};
 
-use codeforge_core::RepoMapOptions;
+use codixing_core::RepoMapOptions;
 
 use crate::error::ApiError;
 use crate::state::AppState;

@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 
 use crate::engine::Engine;
-use crate::error::{CodeforgeError, Result};
+use crate::error::{CodixingError, Result};
 use crate::retriever::SearchQuery;
 
 /// Result payload returned by all agentic operations.
@@ -140,7 +140,7 @@ impl<'a> AgenticSearchSession<'a> {
         let full_path = root.join(path);
 
         if !full_path.exists() {
-            return Err(CodeforgeError::Io(std::io::Error::new(
+            return Err(CodixingError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("file not found: {path}"),
             )));
@@ -198,7 +198,7 @@ impl<'a> AgenticSearchSession<'a> {
         let graph = self
             .engine
             .graph()
-            .ok_or_else(|| CodeforgeError::Config("failed to build code graph".to_string()))?;
+            .ok_or_else(|| CodixingError::Config("failed to build code graph".to_string()))?;
 
         // Find nodes matching the symbol name.
         let mut matching_indices = Vec::new();
@@ -323,7 +323,7 @@ impl<'a> AgenticSearchSession<'a> {
         let graph = self
             .engine
             .graph()
-            .ok_or_else(|| CodeforgeError::Config("failed to build code graph".to_string()))?;
+            .ok_or_else(|| CodixingError::Config("failed to build code graph".to_string()))?;
 
         if graph.node_count() == 0 {
             return Ok(AgenticResult::new(

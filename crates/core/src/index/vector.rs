@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use crate::error::CodeforgeError;
+use crate::error::CodixingError;
 
 /// A stored vector with its associated chunk ID.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -34,13 +34,13 @@ pub struct VectorSearchResult {
 /// Vector index trait for nearest-neighbor search.
 pub trait VectorIndex: Send + Sync {
     /// Add a vector for a chunk. If the chunk already exists, update it.
-    fn add(&mut self, chunk_id: u64, vector: Vec<f32>) -> Result<(), CodeforgeError>;
+    fn add(&mut self, chunk_id: u64, vector: Vec<f32>) -> Result<(), CodixingError>;
 
     /// Remove all vectors for the given chunk IDs.
-    fn remove_chunks(&mut self, chunk_ids: &[u64]) -> Result<(), CodeforgeError>;
+    fn remove_chunks(&mut self, chunk_ids: &[u64]) -> Result<(), CodixingError>;
 
     /// Search for `k` nearest neighbors to the query vector.
-    fn search(&self, query: &[f32], k: usize) -> Result<Vec<VectorSearchResult>, CodeforgeError>;
+    fn search(&self, query: &[f32], k: usize) -> Result<Vec<VectorSearchResult>, CodixingError>;
 
     /// Batch search: run multiple queries and return results for each.
     ///
@@ -50,7 +50,7 @@ pub trait VectorIndex: Send + Sync {
         &self,
         queries: &[Vec<f32>],
         k: usize,
-    ) -> Result<Vec<Vec<VectorSearchResult>>, CodeforgeError> {
+    ) -> Result<Vec<Vec<VectorSearchResult>>, CodixingError> {
         queries.iter().map(|q| self.search(q, k)).collect()
     }
 
@@ -63,10 +63,10 @@ pub trait VectorIndex: Send + Sync {
     }
 
     /// Save the index to disk at the given path.
-    fn save(&self, path: &Path) -> Result<(), CodeforgeError>;
+    fn save(&self, path: &Path) -> Result<(), CodixingError>;
 
     /// Load the index from disk at the given path.
-    fn load(path: &Path) -> Result<Self, CodeforgeError>
+    fn load(path: &Path) -> Result<Self, CodixingError>
     where
         Self: Sized;
 }
@@ -118,23 +118,23 @@ pub(crate) struct VectorIndexData {
 
 impl BruteForceVectorIndex {
     /// Save the index using bitcode binary serialization (faster + smaller than JSON).
-    pub fn save_binary(&self, path: &Path) -> Result<(), CodeforgeError> {
+    pub fn save_binary(&self, path: &Path) -> Result<(), CodixingError> {
         let data = VectorIndexData {
             dimension: self.dimension,
             entries: self.entries.clone(),
         };
         let bytes = bitcode::serialize(&data).map_err(|e| {
-            CodeforgeError::Embedding(format!("failed to serialize vector index: {e}"))
+            CodixingError::Embedding(format!("failed to serialize vector index: {e}"))
         })?;
         std::fs::write(path, bytes)?;
         Ok(())
     }
 
     /// Load the index from a bitcode binary file.
-    pub fn load_binary(path: &Path) -> Result<Self, CodeforgeError> {
+    pub fn load_binary(path: &Path) -> Result<Self, CodixingError> {
         let bytes = std::fs::read(path)?;
         let data: VectorIndexData = bitcode::deserialize(&bytes).map_err(|e| {
-            CodeforgeError::Embedding(format!("failed to deserialize vector index: {e}"))
+            CodixingError::Embedding(format!("failed to deserialize vector index: {e}"))
         })?;
         let mut index = Self::new(data.dimension);
         for entry in data.entries {
@@ -145,9 +145,9 @@ impl BruteForceVectorIndex {
 }
 
 impl VectorIndex for BruteForceVectorIndex {
-    fn add(&mut self, chunk_id: u64, vector: Vec<f32>) -> Result<(), CodeforgeError> {
+    fn add(&mut self, chunk_id: u64, vector: Vec<f32>) -> Result<(), CodixingError> {
         if vector.len() != self.dimension {
-            return Err(CodeforgeError::Embedding(format!(
+            return Err(CodixingError::Embedding(format!(
                 "vector dimension mismatch: expected {}, got {}",
                 self.dimension,
                 vector.len()
@@ -163,7 +163,7 @@ impl VectorIndex for BruteForceVectorIndex {
         Ok(())
     }
 
-    fn remove_chunks(&mut self, chunk_ids: &[u64]) -> Result<(), CodeforgeError> {
+    fn remove_chunks(&mut self, chunk_ids: &[u64]) -> Result<(), CodixingError> {
         let to_remove: std::collections::HashSet<u64> = chunk_ids.iter().copied().collect();
         self.entries.retain(|e| !to_remove.contains(&e.chunk_id));
         // Rebuild the index map after removal.
@@ -174,7 +174,7 @@ impl VectorIndex for BruteForceVectorIndex {
         Ok(())
     }
 
-    fn search(&self, query: &[f32], k: usize) -> Result<Vec<VectorSearchResult>, CodeforgeError> {
+    fn search(&self, query: &[f32], k: usize) -> Result<Vec<VectorSearchResult>, CodixingError> {
         if k == 0 {
             return Ok(Vec::new());
         }
@@ -212,7 +212,7 @@ impl VectorIndex for BruteForceVectorIndex {
         &self,
         queries: &[Vec<f32>],
         k: usize,
-    ) -> Result<Vec<Vec<VectorSearchResult>>, CodeforgeError> {
+    ) -> Result<Vec<Vec<VectorSearchResult>>, CodixingError> {
         use rayon::prelude::*;
         queries.par_iter().map(|q| self.search(q, k)).collect()
     }
@@ -221,7 +221,7 @@ impl VectorIndex for BruteForceVectorIndex {
         self.entries.len()
     }
 
-    fn save(&self, path: &Path) -> Result<(), CodeforgeError> {
+    fn save(&self, path: &Path) -> Result<(), CodixingError> {
         let data = serde_json::json!({
             "dimension": self.dimension,
             "entries": self.entries.iter().map(|e| {
@@ -232,16 +232,16 @@ impl VectorIndex for BruteForceVectorIndex {
             }).collect::<Vec<_>>(),
         });
         let bytes = serde_json::to_vec(&data).map_err(|e| {
-            CodeforgeError::Embedding(format!("failed to serialize vector index: {e}"))
+            CodixingError::Embedding(format!("failed to serialize vector index: {e}"))
         })?;
         std::fs::write(path, bytes)?;
         Ok(())
     }
 
-    fn load(path: &Path) -> Result<Self, CodeforgeError> {
+    fn load(path: &Path) -> Result<Self, CodixingError> {
         let bytes = std::fs::read(path)?;
         let data: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
-            CodeforgeError::Embedding(format!("failed to deserialize vector index: {e}"))
+            CodixingError::Embedding(format!("failed to deserialize vector index: {e}"))
         })?;
         let dimension = data["dimension"].as_u64().unwrap_or(384) as usize;
         let mut index = Self::new(dimension);

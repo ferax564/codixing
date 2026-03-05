@@ -9,7 +9,7 @@
 //! sequentially; we enforce this with `--test-threads 1` in the test
 //! harness or by restructuring tests to avoid the double-open pattern.
 
-use codeforge_core::{Engine, IndexConfig, SearchQuery, Strategy};
+use codixing_core::{Engine, IndexConfig, SearchQuery, Strategy};
 use tempfile::tempdir;
 
 /// Helper: run a git command in `cwd`; panics on failure.

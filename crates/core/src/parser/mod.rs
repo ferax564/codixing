@@ -5,7 +5,7 @@ use std::path::Path;
 use tracing::debug;
 use xxhash_rust::xxh3::xxh3_64;
 
-use crate::error::{CodeforgeError, Result};
+use crate::error::{CodixingError, Result};
 use crate::language::{Language, LanguageRegistry, SemanticEntity, detect_language};
 
 pub use tree_cache::TreeCache;
@@ -47,7 +47,7 @@ impl Parser {
     /// tree and entities are returned without re-parsing.
     pub fn parse_file(&self, path: &Path, source: &[u8]) -> Result<ParseResult> {
         let language =
-            detect_language(path).ok_or_else(|| CodeforgeError::UnsupportedLanguage {
+            detect_language(path).ok_or_else(|| CodixingError::UnsupportedLanguage {
                 path: path.to_path_buf(),
             })?;
 
@@ -82,7 +82,7 @@ impl Parser {
     /// The new result is stored in the cache, replacing any previous entry.
     pub fn parse_file_uncached(&self, path: &Path, source: &[u8]) -> Result<ParseResult> {
         let language =
-            detect_language(path).ok_or_else(|| CodeforgeError::UnsupportedLanguage {
+            detect_language(path).ok_or_else(|| CodixingError::UnsupportedLanguage {
                 path: path.to_path_buf(),
             })?;
 
@@ -134,7 +134,7 @@ impl Parser {
         let lang_support =
             self.registry
                 .get(language)
-                .ok_or_else(|| CodeforgeError::UnsupportedLanguage {
+                .ok_or_else(|| CodixingError::UnsupportedLanguage {
                     path: path.to_path_buf(),
                 })?;
 
@@ -143,14 +143,14 @@ impl Parser {
         let mut ts_parser = tree_sitter::Parser::new();
         ts_parser
             .set_language(&lang_support.tree_sitter_language())
-            .map_err(|e| CodeforgeError::Parse {
+            .map_err(|e| CodixingError::Parse {
                 path: path.to_path_buf(),
                 message: format!("failed to set language: {e}"),
             })?;
 
         let tree = ts_parser
             .parse(source, None)
-            .ok_or_else(|| CodeforgeError::Parse {
+            .ok_or_else(|| CodixingError::Parse {
                 path: path.to_path_buf(),
                 message: "tree-sitter returned no tree".to_string(),
             })?;

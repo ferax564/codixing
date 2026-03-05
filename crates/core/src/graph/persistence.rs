@@ -4,7 +4,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::{CodeGraph, ReferenceKind, SymbolNode};
-use crate::error::{CodeforgeError, Result};
+use crate::error::{CodixingError, Result};
 
 // ---------------------------------------------------------------------------
 // Binary (bitcode) persistence
@@ -16,7 +16,7 @@ use crate::error::{CodeforgeError, Result};
 pub fn save_graph_binary(graph: &CodeGraph, path: &Path) -> Result<()> {
     let sg = graph.to_serializable();
     let bytes = bitcode::serialize(&sg)
-        .map_err(|e| CodeforgeError::Serialization(format!("failed to serialize graph: {e}")))?;
+        .map_err(|e| CodixingError::Serialization(format!("failed to serialize graph: {e}")))?;
     fs::write(path, bytes)?;
     Ok(())
 }
@@ -25,7 +25,7 @@ pub fn save_graph_binary(graph: &CodeGraph, path: &Path) -> Result<()> {
 pub fn load_graph_binary(path: &Path) -> Result<CodeGraph> {
     let bytes = fs::read(path)?;
     let sg: SerializableGraph = bitcode::deserialize(&bytes)
-        .map_err(|e| CodeforgeError::Serialization(format!("failed to deserialize graph: {e}")))?;
+        .map_err(|e| CodixingError::Serialization(format!("failed to deserialize graph: {e}")))?;
     Ok(CodeGraph::from_serializable(&sg))
 }
 
@@ -43,7 +43,7 @@ struct SerializableGraph {
 pub fn save_graph(graph: &CodeGraph, path: &Path) -> Result<()> {
     let sg = graph.to_serializable();
     let json = serde_json::to_string_pretty(&sg)
-        .map_err(|e| CodeforgeError::Serialization(format!("failed to serialize graph: {e}")))?;
+        .map_err(|e| CodixingError::Serialization(format!("failed to serialize graph: {e}")))?;
     fs::write(path, json)?;
     Ok(())
 }
@@ -52,7 +52,7 @@ pub fn save_graph(graph: &CodeGraph, path: &Path) -> Result<()> {
 pub fn load_graph(path: &Path) -> Result<CodeGraph> {
     let json = fs::read_to_string(path)?;
     let sg: SerializableGraph = serde_json::from_str(&json)
-        .map_err(|e| CodeforgeError::Serialization(format!("failed to deserialize graph: {e}")))?;
+        .map_err(|e| CodixingError::Serialization(format!("failed to deserialize graph: {e}")))?;
     Ok(CodeGraph::from_serializable(&sg))
 }
 

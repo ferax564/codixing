@@ -23,7 +23,7 @@ pub use onnx::OnnxEmbedder;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::CodeforgeError;
+use crate::error::CodixingError;
 
 /// Trait for embedding text into dense float vectors.
 ///
@@ -31,14 +31,14 @@ use crate::error::CodeforgeError;
 /// tasks and worker threads.
 pub trait Embedder: Send + Sync {
     /// Embed a single text string into a vector.
-    fn embed(&self, text: &str) -> Result<Vec<f32>, CodeforgeError>;
+    fn embed(&self, text: &str) -> Result<Vec<f32>, CodixingError>;
 
     /// Embed a batch of texts.
     ///
     /// The default implementation calls [`embed`](Embedder::embed) in a loop.
     /// Implementations backed by a batched runtime should override this for
     /// better throughput.
-    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, CodeforgeError> {
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, CodixingError> {
         texts.iter().map(|t| self.embed(t)).collect()
     }
 
@@ -62,7 +62,7 @@ impl MockEmbedder {
 }
 
 impl Embedder for MockEmbedder {
-    fn embed(&self, text: &str) -> Result<Vec<f32>, CodeforgeError> {
+    fn embed(&self, text: &str) -> Result<Vec<f32>, CodixingError> {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 

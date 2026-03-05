@@ -10,7 +10,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{CodeforgeError, Result};
+use crate::error::{CodixingError, Result};
 
 /// Serializable representation of the trigram index data.
 #[derive(Serialize, Deserialize)]
@@ -158,7 +158,7 @@ impl TrigramIndex {
             chunks: self.chunks.iter().map(|(k, v)| (*k, v.clone())).collect(),
         };
         let bytes = bitcode::serialize(&data).map_err(|e| {
-            CodeforgeError::Serialization(format!("failed to serialize trigram index: {e}"))
+            CodixingError::Serialization(format!("failed to serialize trigram index: {e}"))
         })?;
         std::fs::write(path, bytes)?;
         Ok(())
@@ -168,7 +168,7 @@ impl TrigramIndex {
     pub fn load_binary(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)?;
         let data: TrigramIndexData = bitcode::deserialize(&bytes).map_err(|e| {
-            CodeforgeError::Serialization(format!("failed to deserialize trigram index: {e}"))
+            CodixingError::Serialization(format!("failed to deserialize trigram index: {e}"))
         })?;
         Ok(Self {
             index: data.index.into_iter().collect(),

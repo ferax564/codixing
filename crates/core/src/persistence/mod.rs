@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::config::IndexConfig;
-use crate::error::{CodeforgeError, Result};
+use crate::error::{CodixingError, Result};
 use crate::graph::GraphData;
 
-/// Directory name for the CodeForge index store.
-const CODEFORGE_DIR: &str = ".codeforge";
+/// Directory name for the Codixing index store.
+const CODEFORGE_DIR: &str = ".codixing";
 const CONFIG_FILE: &str = "config.json";
 const META_FILE: &str = "meta.json";
 const TANTIVY_DIR: &str = "tantivy";
@@ -58,7 +58,7 @@ impl Default for IndexMeta {
     }
 }
 
-/// Manages the `.codeforge/` directory layout on disk.
+/// Manages the `.codixing/` directory layout on disk.
 ///
 /// Provides creation, opening, and persistence of the index configuration,
 /// metadata, symbol tables, and tree hashes.
@@ -68,16 +68,16 @@ pub struct IndexStore {
 }
 
 impl IndexStore {
-    /// Initialize a new `.codeforge/` directory structure at the given root.
+    /// Initialize a new `.codixing/` directory structure at the given root.
     ///
     /// Creates the directory layout and writes default config and metadata files.
     /// Returns an error if the directory already exists.
     pub fn init(root: &Path, config: &IndexConfig) -> Result<Self> {
-        let codeforge_dir = root.join(CODEFORGE_DIR);
-        fs::create_dir_all(&codeforge_dir)?;
-        fs::create_dir_all(codeforge_dir.join(TANTIVY_DIR))?;
-        fs::create_dir_all(codeforge_dir.join(VECTORS_DIR))?;
-        fs::create_dir_all(codeforge_dir.join(GRAPH_DIR))?;
+        let codixing_dir = root.join(CODEFORGE_DIR);
+        fs::create_dir_all(&codixing_dir)?;
+        fs::create_dir_all(codixing_dir.join(TANTIVY_DIR))?;
+        fs::create_dir_all(codixing_dir.join(VECTORS_DIR))?;
+        fs::create_dir_all(codixing_dir.join(GRAPH_DIR))?;
 
         let store = Self {
             root: root.to_path_buf(),
@@ -89,13 +89,13 @@ impl IndexStore {
         Ok(store)
     }
 
-    /// Open an existing `.codeforge/` directory.
+    /// Open an existing `.codixing/` directory.
     ///
-    /// Returns [`CodeforgeError::IndexNotFound`] if the directory does not exist.
+    /// Returns [`CodixingError::IndexNotFound`] if the directory does not exist.
     pub fn open(root: &Path) -> Result<Self> {
-        let codeforge_dir = root.join(CODEFORGE_DIR);
-        if !codeforge_dir.is_dir() {
-            return Err(CodeforgeError::IndexNotFound {
+        let codixing_dir = root.join(CODEFORGE_DIR);
+        if !codixing_dir.is_dir() {
+            return Err(CodixingError::IndexNotFound {
                 path: root.to_path_buf(),
             });
         }
@@ -104,34 +104,34 @@ impl IndexStore {
         })
     }
 
-    /// Check if a `.codeforge/` directory exists at root.
+    /// Check if a `.codixing/` directory exists at root.
     pub fn exists(root: &Path) -> bool {
         root.join(CODEFORGE_DIR).is_dir()
     }
 
-    /// Path to the `.codeforge/` directory.
-    pub fn codeforge_dir(&self) -> PathBuf {
+    /// Path to the `.codixing/` directory.
+    pub fn codixing_dir(&self) -> PathBuf {
         self.root.join(CODEFORGE_DIR)
     }
 
     /// Path to the tantivy index directory.
     pub fn tantivy_dir(&self) -> PathBuf {
-        self.codeforge_dir().join(TANTIVY_DIR)
+        self.codixing_dir().join(TANTIVY_DIR)
     }
 
     /// Path to the `symbols.bin` file.
     pub fn symbols_path(&self) -> PathBuf {
-        self.codeforge_dir().join(SYMBOLS_FILE)
+        self.codixing_dir().join(SYMBOLS_FILE)
     }
 
     /// Path to the `tree_hashes.bin` file.
     pub fn tree_hashes_path(&self) -> PathBuf {
-        self.codeforge_dir().join(TREE_HASHES_FILE)
+        self.codixing_dir().join(TREE_HASHES_FILE)
     }
 
     /// Path to the `vectors/` sub-directory.
     pub fn vectors_dir(&self) -> PathBuf {
-        self.codeforge_dir().join(VECTORS_DIR)
+        self.codixing_dir().join(VECTORS_DIR)
     }
 
     /// Path to the usearch HNSW index binary.
@@ -146,14 +146,14 @@ impl IndexStore {
 
     /// Path to the chunk metadata binary.
     pub fn chunk_meta_path(&self) -> PathBuf {
-        self.codeforge_dir().join(CHUNK_META_FILE)
+        self.codixing_dir().join(CHUNK_META_FILE)
     }
 
     /// Save the [`IndexConfig`] to `config.json`.
     pub fn save_config(&self, config: &IndexConfig) -> Result<()> {
-        let path = self.codeforge_dir().join(CONFIG_FILE);
+        let path = self.codixing_dir().join(CONFIG_FILE);
         let json = serde_json::to_string_pretty(config).map_err(|e| {
-            CodeforgeError::Serialization(format!("failed to serialize config: {e}"))
+            CodixingError::Serialization(format!("failed to serialize config: {e}"))
         })?;
         fs::write(&path, json)?;
         Ok(())
@@ -161,36 +161,36 @@ impl IndexStore {
 
     /// Load the [`IndexConfig`] from `config.json`.
     pub fn load_config(&self) -> Result<IndexConfig> {
-        let path = self.codeforge_dir().join(CONFIG_FILE);
+        let path = self.codixing_dir().join(CONFIG_FILE);
         let json = fs::read_to_string(&path)?;
         let config: IndexConfig = serde_json::from_str(&json).map_err(|e| {
-            CodeforgeError::Serialization(format!("failed to deserialize config: {e}"))
+            CodixingError::Serialization(format!("failed to deserialize config: {e}"))
         })?;
         Ok(config)
     }
 
     /// Save the index metadata to `meta.json`.
     pub fn save_meta(&self, meta: &IndexMeta) -> Result<()> {
-        let path = self.codeforge_dir().join(META_FILE);
+        let path = self.codixing_dir().join(META_FILE);
         let json = serde_json::to_string_pretty(meta)
-            .map_err(|e| CodeforgeError::Serialization(format!("failed to serialize meta: {e}")))?;
+            .map_err(|e| CodixingError::Serialization(format!("failed to serialize meta: {e}")))?;
         fs::write(&path, json)?;
         Ok(())
     }
 
     /// Load the index metadata from `meta.json`.
     pub fn load_meta(&self) -> Result<IndexMeta> {
-        let path = self.codeforge_dir().join(META_FILE);
+        let path = self.codixing_dir().join(META_FILE);
         let json = fs::read_to_string(&path)?;
         let meta: IndexMeta = serde_json::from_str(&json).map_err(|e| {
-            CodeforgeError::Serialization(format!("failed to deserialize meta: {e}"))
+            CodixingError::Serialization(format!("failed to deserialize meta: {e}"))
         })?;
         Ok(meta)
     }
 
     /// Path to the `graph/` sub-directory.
     pub fn graph_dir(&self) -> PathBuf {
-        self.codeforge_dir().join(GRAPH_DIR)
+        self.codixing_dir().join(GRAPH_DIR)
     }
 
     /// Path to the `graph/graph.bin` file.
@@ -203,7 +203,7 @@ impl IndexStore {
         // Ensure the directory exists (may not on older indexes opened before Phase 3).
         fs::create_dir_all(self.graph_dir())?;
         let bytes = bitcode::serialize(data).map_err(|e| {
-            CodeforgeError::Serialization(format!("failed to serialize graph: {e}"))
+            CodixingError::Serialization(format!("failed to serialize graph: {e}"))
         })?;
         fs::write(self.graph_path(), bytes)?;
         Ok(())
@@ -217,7 +217,7 @@ impl IndexStore {
         }
         let bytes = fs::read(&path)?;
         let data: GraphData = bitcode::deserialize(&bytes).map_err(|e| {
-            CodeforgeError::Serialization(format!("failed to deserialize graph: {e}"))
+            CodixingError::Serialization(format!("failed to deserialize graph: {e}"))
         })?;
         Ok(Some(data))
     }
@@ -237,7 +237,7 @@ impl IndexStore {
     /// Save tree hashes (bitcode-serialized `Vec<(PathBuf, u64)>`).
     pub fn save_tree_hashes(&self, hashes: &[(PathBuf, u64)]) -> Result<()> {
         let bytes = bitcode::serialize(hashes).map_err(|e| {
-            CodeforgeError::Serialization(format!("failed to serialize tree hashes: {e}"))
+            CodixingError::Serialization(format!("failed to serialize tree hashes: {e}"))
         })?;
         fs::write(self.tree_hashes_path(), bytes)?;
         Ok(())
@@ -247,7 +247,7 @@ impl IndexStore {
     pub fn load_tree_hashes(&self) -> Result<Vec<(PathBuf, u64)>> {
         let bytes = fs::read(self.tree_hashes_path())?;
         let hashes: Vec<(PathBuf, u64)> = bitcode::deserialize(&bytes).map_err(|e| {
-            CodeforgeError::Serialization(format!("failed to deserialize tree hashes: {e}"))
+            CodixingError::Serialization(format!("failed to deserialize tree hashes: {e}"))
         })?;
         Ok(hashes)
     }
@@ -282,10 +282,10 @@ mod tests {
 
         let store = IndexStore::init(root, &config).unwrap();
 
-        assert!(store.codeforge_dir().is_dir());
+        assert!(store.codixing_dir().is_dir());
         assert!(store.tantivy_dir().is_dir());
-        assert!(store.codeforge_dir().join(CONFIG_FILE).is_file());
-        assert!(store.codeforge_dir().join(META_FILE).is_file());
+        assert!(store.codixing_dir().join(CONFIG_FILE).is_file());
+        assert!(store.codixing_dir().join(META_FILE).is_file());
         assert!(IndexStore::exists(root));
     }
 
@@ -298,7 +298,7 @@ mod tests {
         IndexStore::init(root, &config).unwrap();
         let store = IndexStore::open(root).unwrap();
 
-        assert!(store.codeforge_dir().is_dir());
+        assert!(store.codixing_dir().is_dir());
     }
 
     #[test]
@@ -308,7 +308,7 @@ mod tests {
 
         let err = IndexStore::open(root).unwrap_err();
         assert!(
-            matches!(err, CodeforgeError::IndexNotFound { .. }),
+            matches!(err, CodixingError::IndexNotFound { .. }),
             "expected IndexNotFound, got: {err}"
         );
     }
@@ -406,12 +406,12 @@ mod tests {
 
         let store = IndexStore::init(root, &config).unwrap();
 
-        assert_eq!(store.codeforge_dir(), root.join(".codeforge"));
-        assert_eq!(store.tantivy_dir(), root.join(".codeforge/tantivy"));
-        assert_eq!(store.symbols_path(), root.join(".codeforge/symbols.bin"));
+        assert_eq!(store.codixing_dir(), root.join(".codixing"));
+        assert_eq!(store.tantivy_dir(), root.join(".codixing/tantivy"));
+        assert_eq!(store.symbols_path(), root.join(".codixing/symbols.bin"));
         assert_eq!(
             store.tree_hashes_path(),
-            root.join(".codeforge/tree_hashes.bin")
+            root.join(".codixing/tree_hashes.bin")
         );
     }
 }

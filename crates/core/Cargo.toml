@@ -1,10 +1,10 @@
 [package]
-name = "codeforge-core"
+name = "codixing-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Core engine for CodeForge — AST parsing, indexing, and retrieval"
+description = "Core engine for Codixing — AST parsing, indexing, and retrieval"
 
 [features]
 ## Enable the optional Qdrant vector backend.
@@ -18,9 +18,9 @@ qdrant = ["dep:qdrant-client", "dep:tokio"]
 ## cached in the fastembed cache directory (~/.cache/huggingface/).
 ##
 ## Build with:
-##   cargo build --features codeforge-core/qwen3
+##   cargo build --features codixing-core/qwen3
 ## Run comparison benchmark (requires model download):
-##   cargo test --test model_comparison_test --features codeforge-core/qwen3 -- --ignored --nocapture
+##   cargo test --test model_comparison_test --features codixing-core/qwen3 -- --ignored --nocapture
 qwen3 = ["fastembed/qwen3", "dep:candle-core"]
 
 [dependencies]

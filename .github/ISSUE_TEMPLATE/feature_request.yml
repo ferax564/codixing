@@ -1,0 +1,54 @@
+name: Feature Request
+description: Suggest an improvement or new capability
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the [roadmap](../ROADMAP.md) and open issues before submitting — your idea may already be planned.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - New language support
+        - Search / retrieval quality
+        - MCP tools
+        - CLI
+        - REST API
+        - Performance
+        - VS Code extension
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that Codixing doesn't support today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: Describe the feature you'd like. Include example CLI commands, API shapes, or config if relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What workarounds have you tried?
+
+  - type: checkboxes
+    id: willing
+    attributes:
+      label: Contribution
+      options:
+        - label: I am willing to implement this and submit a PR

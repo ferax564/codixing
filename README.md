@@ -1,14 +1,14 @@
-# CodeForge
+# Codixing
 
 Ultra-fast code retrieval engine for AI agents — beats `grep` at its own game.
 
-CodeForge is a Rust-native engine that gives AI coding agents precisely the right context from any codebase, regardless of size. It combines structure-aware AST parsing (tree-sitter), hybrid search (BM25 + vector), a live code dependency graph with PageRank scoring, and AI-optimized token-budgeted output into a single, blazing-fast binary.
+Codixing is a Rust-native engine that gives AI coding agents precisely the right context from any codebase, regardless of size. It combines structure-aware AST parsing (tree-sitter), hybrid search (BM25 + vector), a live code dependency graph with PageRank scoring, and AI-optimized token-budgeted output into a single, blazing-fast binary.
 
 ## Why Not Just Grep?
 
 Claude Code and similar agents currently use `grep`, `find`, and `cat` for code navigation. These tools are fast, but they have a fundamental problem: **they return everything, always**. A single `rg b2Vec2` on a real C++ game codebase returns 2,240 hits — 225,343 bytes — burning context before any reasoning happens.
 
-CodeForge solves this with three properties grep cannot replicate:
+Codixing solves this with three properties grep cannot replicate:
 
 1. **Bounded output** — `limit=20` caps results so context never overflows
 2. **Structural awareness** — finds where a symbol is *defined*, not just where it appears
@@ -16,11 +16,11 @@ CodeForge solves this with three properties grep cannot replicate:
 
 ---
 
-## Benchmark: CodeForge Daemon vs Native Shell Tools
+## Benchmark: Codixing Daemon vs Native Shell Tools
 
-Measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — 246,000 lines of C++, 770 files. CodeForge running in daemon mode (engine pre-loaded, Unix socket IPC ~6ms overhead).
+Measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — 246,000 lines of C++, 770 files. Codixing running in daemon mode (engine pre-loaded, Unix socket IPC ~6ms overhead).
 
-| Operation | Native tool | Native | CodeForge | Speed | Tokens |
+| Operation | Native tool | Native | Codixing | Speed | Tokens |
 |-----------|------------|-------:|----------:|------:|-------:|
 | Literal search | `rg` (all hits) | 23ms | 24ms | ≈ same | **−61%** |
 | Regex + file filter (4,102 hits) | `rg --type cpp` | 18ms | 10ms | **1.8×** | **−99%** |
@@ -32,14 +32,14 @@ Measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — 246,000 lines o
 | Architecture overview | `find + wc -l \| sort` | n/a | 109ms | PageRank-sorted | structural |
 | Semantic / conceptual search | keyword-guessing grep | n/a | 38ms | **natural language** | structured |
 
-> **The b2Vec2 case is the decisive number.** Raw `rg b2Vec2` returns 225,343 bytes (2,240 lines) — CodeForge returns the top 20 in 1,332 bytes. Same signal, **99% less waste**, band-merged by adjacent-chunk deduplication.
+> **The b2Vec2 case is the decisive number.** Raw `rg b2Vec2` returns 225,343 bytes (2,240 lines) — Codixing returns the top 20 in 1,332 bytes. Same signal, **99% less waste**, band-merged by adjacent-chunk deduplication.
 
 ### What grep cannot do at all
 
 - PageRank-ranked architecture map (importance ≠ file size)
 - Transitive import graph at arbitrary depth
 - Semantic / conceptual search (BM25 understands intent, not just strings)
-- Automatic token budget management (grep overflows; CodeForge caps)
+- Automatic token budget management (grep overflows; Codixing caps)
 - Symbol-table lookup (definition vs. every mention)
 
 ---
@@ -51,42 +51,42 @@ Measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — 246,000 lines o
 cargo build --release --workspace
 
 # Index a codebase (BM25 only — fast, no GPU needed)
-./target/release/codeforge init . --no-embeddings
+./target/release/codixing init . --no-embeddings
 
 # Or with semantic search (BGE-Base-EN-v1.5, local ONNX inference)
-./target/release/codeforge init .
+./target/release/codixing init .
 
 # Search
-codeforge search "authentication handler"
-codeforge search "parse config" --strategy thorough
+codixing search "authentication handler"
+codixing search "parse config" --strategy thorough
 
 # Symbol lookup
-codeforge symbols Engine
-codeforge symbols --file src/main.rs
+codixing symbols Engine
+codixing symbols --file src/main.rs
 
 # Dependency graph
-codeforge callers src/engine.rs          # who imports this?
-codeforge callees src/engine.rs          # what does this import?
-codeforge dependencies src/main.rs --depth 2
+codixing callers src/engine.rs          # who imports this?
+codixing callees src/engine.rs          # what does this import?
+codixing dependencies src/main.rs --depth 2
 
 # Multi-repo: index a second codebase alongside the primary
-codeforge init . --also ../shared-lib --also ../api-server
+codixing init . --also ../shared-lib --also ../api-server
 
 # Incremental sync (re-indexes only changed files)
-codeforge sync
+codixing sync
 ```
 
 ---
 
 ## Claude Code Integration (MCP)
 
-CodeForge exposes all its tools via the [Model Context Protocol](https://modelcontextprotocol.io) — Claude Code picks them up automatically.
+Codixing exposes all its tools via the [Model Context Protocol](https://modelcontextprotocol.io) — Claude Code picks them up automatically.
 
 ### Register once
 
 ```bash
-claude mcp add --scope user --transport stdio codeforge \
-  -- /path/to/codeforge-mcp --root /path/to/your/project
+claude mcp add --scope user --transport stdio codixing \
+  -- /path/to/codixing-mcp --root /path/to/your/project
 ```
 
 Or edit `~/.claude.json` directly:
@@ -94,9 +94,9 @@ Or edit `~/.claude.json` directly:
 ```json
 {
   "mcpServers": {
-    "codeforge": {
+    "codixing": {
       "type": "stdio",
-      "command": "/path/to/codeforge-mcp",
+      "command": "/path/to/codixing-mcp",
       "args": ["--root", "/path/to/your/project"]
     }
   }
@@ -109,9 +109,9 @@ Normal mode spawns a new process per call (~30ms cold start). Daemon mode loads 
 
 ```bash
 # Start daemon (keeps running, auto-updates index on file saves)
-codeforge-mcp --root /path/to/project --daemon &
+codixing-mcp --root /path/to/project --daemon &
 
-# All subsequent codeforge-mcp calls auto-proxy through the daemon
+# All subsequent codixing-mcp calls auto-proxy through the daemon
 ```
 
 The daemon runs a background file watcher. When you save a file, the index updates within ~100ms. Claude Code always queries a fresh index.
@@ -135,20 +135,20 @@ The daemon runs a background file watcher. When you save a file, the index updat
 
 ## VS Code / Cursor Extension
 
-The `editors/vscode/` directory contains a TypeScript extension that integrates CodeForge directly into your editor.
+The `editors/vscode/` directory contains a TypeScript extension that integrates Codixing directly into your editor.
 
 **Commands** (`Ctrl+Shift+P` / `Cmd+Shift+P`):
 
 | Command | What it does |
 |---------|-------------|
-| `CodeForge: Index Workspace` | Build or rebuild the index for the current project |
-| `CodeForge: Sync Index` | Re-index only changed files since last sync |
-| `CodeForge: Search` | Interactive code search with inline results |
-| `CodeForge: Show Repo Map` | Display PageRank-sorted architecture overview |
-| `CodeForge: Start Daemon` | Launch the daemon for faster subsequent MCP calls |
-| `CodeForge: Register MCP Server` | Add codeforge to `~/.claude.json` and `~/.cursor/mcp.json` |
+| `Codixing: Index Workspace` | Build or rebuild the index for the current project |
+| `Codixing: Sync Index` | Re-index only changed files since last sync |
+| `Codixing: Search` | Interactive code search with inline results |
+| `Codixing: Show Repo Map` | Display PageRank-sorted architecture overview |
+| `Codixing: Start Daemon` | Launch the daemon for faster subsequent MCP calls |
+| `Codixing: Register MCP Server` | Add codixing to `~/.claude.json` and `~/.cursor/mcp.json` |
 
-**Status bar** shows `$(check) indexed` when a `.codeforge/` index exists, `$(circle-slash) not indexed` otherwise.
+**Status bar** shows `$(check) indexed` when a `.codixing/` index exists, `$(circle-slash) not indexed` otherwise.
 
 **Install from source:**
 ```bash
@@ -173,7 +173,7 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 | **File watcher latency** | ≤100ms from save to queryable |
 | **Daemon IPC overhead** | ~6ms per call (Unix socket round-trip) |
 | **BM25 search** | <10ms p99 |
-| **Test suite** | 244 tests (including retrieval quality regression suite) |
+| **Test suite** | 249 tests (including retrieval quality regression suite) |
 
 ### Init speed breakdown (0.87s on 246K LoC)
 
@@ -182,7 +182,7 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 | File discovery | ~5ms | Directory walk, 770 files |
 | Parse + chunk + BM25 index | ~600ms | rayon parallel, all CPU cores |
 | Graph build (imports + PageRank) | ~200ms | Parallel resolution, single sequential insert pass |
-| Persist to `.codeforge/` | ~50ms | bitcode + Tantivy flush |
+| Persist to `.codixing/` | ~50ms | bitcode + Tantivy flush |
 
 > **Why it's fast:** `build_graph()` reuses the import lists extracted during the parallel parse phase — no second file read, no second tree-sitter parse. Files are parsed exactly once.
 
@@ -198,7 +198,7 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 - **Repo map generation** — Aider-style, token-budgeted output sorted by PageRank (importance) not file size
 - **Live index freshness** — Daemon file watcher updates the in-memory engine within 100ms of any file save; no restart needed
 - **`.gitignore`-aware indexing** — File walker respects `.gitignore`, `.ignore`, and global gitignore (same as ripgrep); no manual exclude lists needed
-- **Hash-based incremental sync** — `codeforge sync` diffs xxh3 content hashes and re-indexes only changed files; no git required
+- **Hash-based incremental sync** — `codixing sync` diffs xxh3 content hashes and re-indexes only changed files; no git required
 - **MCP server** — 10 tools exposed via JSON-RPC 2.0; Claude Code registers with one command
 - **Concurrent symbol table** — DashMap-backed with exact, prefix, and substring matching
 - **Single binary, zero runtime deps** — No JVM, no Docker, no external databases
@@ -218,7 +218,7 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│                           CodeForge Engine                              │
+│                           Codixing Engine                              │
 │                                                                         │
 │  ┌─────────────┐  ┌──────────┐  ┌──────────────┐  ┌─────────────────┐  │
 │  │ Tree-sitter  │  │ Tantivy  │  │    Symbol    │  │   Code Graph    │  │
@@ -287,7 +287,8 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 | **Phase 3: Graph Intelligence** | ✅ Complete | Import graph, PageRank, repo map — 165 tests |
 | **Phase 4: Agent Integration** | ✅ Complete | MCP (10 tools), daemon mode, 2.6× faster init, live watcher — 222 tests |
 | **Phase 5: Production Hardening** | ✅ Complete | Field boosts, band merging, asymmetric RRF, call graph edges, sync, .gitignore walker — 232 tests |
-| **Phase 6: Ecosystem Expansion** | ✅ Complete | Tier 2 languages (Ruby/Swift/Kotlin/Scala), multi-repo, VS Code extension, CI matrix, Qdrant backend — 243 tests |
+| **Phase 6: Ecosystem Expansion** | ✅ Complete | Tier 2 languages (Ruby/Swift/Kotlin/Scala), multi-repo, VS Code extension, CI matrix, Qdrant backend — 244 tests |
+| **Phase 7: Git Sync + Qwen3 + Eval** | ✅ Complete | Git-aware incremental sync, Qwen3 candle backend, embedding eval harness — 249 tests |
 
 ---
 
@@ -295,7 +296,7 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 232 tests
+cargo test --workspace        # 249 tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 ```
