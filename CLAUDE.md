@@ -78,6 +78,13 @@ CodeForge is a Rust-native code retrieval engine for AI agents. It combines tree
 - GitHub Actions CI: `.github/workflows/ci.yml` (3-platform matrix) + `release.yml` (4-arch cross-compile on `v*`)
 - Optional Qdrant backend: `VectorBackend` trait + `QdrantVectorIndex` behind `--features qdrant`; configured via `QDRANT_URL` / `QDRANT_COLLECTION`
 
+
+**Phase 7 — Git Sync + Qwen3 + Eval Harness: COMPLETE (249 tests)**
+- Git-aware incremental sync: `IndexMeta.git_commit`, `git_head_commit()` / `git_diff_since()` (no extra crate, pure std::process::Command); `Engine::git_sync()` → `GitSyncStats`; CLI: `codeforge git-sync`; 5 integration tests (changed/deleted/renamed/no-op/non-git-dir)
+- Qwen3 candle backend: `EmbedBackend` enum (Onnx | Qwen3); `EmbeddingModel::Qwen3SmallEmbedding` (1024d); fastembed 5.12 + candle-core 0.9.1; feature flag: `--features qwen3`
+- Embedding eval harness: `tests/embedding_eval_test.rs` — 12-query suite (4 identifier + 8 NL); `compare_bm25_vs_hybrid_recall` + `compare_embedding_models`; auto-verdict on whether fine-tuning is warranted; all `#[ignore]` (require model download)
+- Server depth fix: REST graph routes now route `depth > 1` through `transitive_callers/callees`
+
 ## Language & Toolchain
 
 - **Language**: Rust (stable toolchain, 2024 edition)
@@ -193,6 +200,7 @@ codeforge/
 - **P3:** ~~MCP server + enhanced embeddings~~ — **DONE** (Phase 4A-4E, 10 MCP tools, daemon, sync)
 - **P4:** ~~production hardening~~ — **DONE** (Phase 5, field boosts, band merging, reranker, call graph)
 - **P5:** ~~ecosystem expansion~~ — **DONE** (Phase 6, 244 tests, Tier 2 langs, multi-repo, VS Code ext, CI, Qdrant)
-- **P6 (next):** git-aware init, Zig/PHP Tier 2, `read_symbol` MCP wiring, telemetry, comprehensive benchmarks.
+- **P6:** ~~git-aware init, embedding eval harness, Qwen3 backend~~ — **DONE** (Phase 7, 249 tests)
+- **P7 (next):** Zig/PHP Tier 2, fine-tune BGE on CodeSearchNet if eval shows >15% NL gap, telemetry, comprehensive benchmarks.
 
 Roadmap reference: `ROADMAP.md`.
