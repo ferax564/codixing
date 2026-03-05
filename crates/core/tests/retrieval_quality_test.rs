@@ -11,7 +11,6 @@
 //! - Fast: total test time << 1 s.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
 
 use tempfile::TempDir;
 

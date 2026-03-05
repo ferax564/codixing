@@ -9,7 +9,7 @@ CodeForge is a Rust-native code retrieval engine for AI agents. It combines tree
 
 ## Current Status
 
-**Phase 4A (Agent Integration): COMPLETE** — 222 tests, version 0.4.0
+**Phase 6 (Ecosystem Expansion): COMPLETE** — 244 tests
 
 ### What's been delivered across all phases
 
@@ -45,7 +45,7 @@ CodeForge is a Rust-native code retrieval engine for AI agents. It combines tree
 - CLI: `codeforge graph`, `codeforge callers`, `codeforge callees`, `codeforge dependencies`
 - REST: `POST /graph/repo-map`, `GET /graph/callers`, `GET /graph/callees`, `GET /graph/stats`
 
-**Phase 4A — Agent Integration: COMPLETE**
+**Phase 4A–4E — Agent Integration + Performance: COMPLETE**
 - MCP server binary (`codeforge-mcp`): JSON-RPC 2.0 over stdin/stdout for Claude Code integration
 - 10 MCP tools: `code_search`, `find_symbol`, `get_references`, `get_repo_map`, `search_usages`, `get_transitive_deps`, `index_status`, `read_file`, `grep_code`, `read_symbol`
 - `grep_code`: regex/literal file search with context lines, glob filter, match highlighting (beats raw grep for LLM token budget)
@@ -55,6 +55,28 @@ CodeForge is a Rust-native code retrieval engine for AI agents. It combines tree
 - `explore` strategy: BM25 first-pass + graph neighbor expansion (RepoHyper Search-then-Expand pattern)
 - `Engine::search_usages()`: BM25 + graph boost for symbol reference lookup
 - CLI: `codeforge usages` subcommand; `--strategy explore` added to `search`
+- Daemon mode + live file watcher; `Engine::sync()` + `codeforge sync` (hash-based incremental)
+- Batched Tantivy commits in `apply_changes()` (N fsyncs → 1)
+
+**Phase 5 — Production Hardening: COMPLETE**
+- Tantivy field boosts: `signature` ×3.0, `entity_names` ×2.0 (definitions rank above mentions)
+- Asymmetric RRF routing: `is_identifier_query()` → BM25-dominant (k=20/90) vs vector-dominant (k=90/20)
+- LDAR-style band merging: adjacent same-file chunks within 3 lines merged; 25–91% fewer tokens
+- `.gitignore`-aware walker via `ignore::WalkBuilder` (same as ripgrep)
+- `Strategy::Deep`: BGE-Reranker-Base cross-encoder; opt-in via `--reranker`
+- Personalized PageRank: `Engine::personalized_pagerank(seed_files)`
+- Symbol-level call graph edges: `CallExtractor` for Rust/Python/TS/JS/Go
+- Retrieval quality test suite: `tests/retrieval_quality_test.rs` (Recall@k + precision guards)
+
+**Phase 6 — Ecosystem Expansion: COMPLETE (244 tests)**
+- Tier 2 languages: Ruby (`tree-sitter-ruby`), Swift (`tree-sitter-swift`), Kotlin (`tree-sitter-kotlin-ng`), Scala (`tree-sitter-scala`)
+  - Note: `tree-sitter-kotlin` (0.3.x) requires ts < 0.23; use `tree-sitter-kotlin-ng` instead
+  - Swift: `struct`/`extension` both parse as `class_declaration` — differentiated by first keyword child
+  - Kotlin: `interface` parses as `class_declaration` with `interface` keyword child
+- Multi-repo: `IndexConfig.extra_roots: Vec<PathBuf>`; `normalize_path()` / `resolve_path()` / `all_roots()`; CLI `codeforge init --also <DIR>`
+- VS Code / Cursor extension: `editors/vscode/`; 6 commands; auto-registers MCP in `~/.claude.json` + `~/.cursor/mcp.json`
+- GitHub Actions CI: `.github/workflows/ci.yml` (3-platform matrix) + `release.yml` (4-arch cross-compile on `v*`)
+- Optional Qdrant backend: `VectorBackend` trait + `QdrantVectorIndex` behind `--features qdrant`; configured via `QDRANT_URL` / `QDRANT_COLLECTION`
 
 ## Language & Toolchain
 
@@ -165,10 +187,12 @@ codeforge/
 
 ## Priority Alignment (2026)
 
-- **P0:** ~~implement Phase 1 MVP~~ — **DONE** (111 tests, 10 languages, BM25 search, CLI, file watcher)
-- **P1:** ~~semantic + hybrid retrieval and REST server~~ — **DONE** (Phase 2, 131 tests, hybrid+MMR, REST API)
-- **P2:** ~~graph intelligence~~ — **DONE** (Phase 3, 165 tests, PageRank, repo map, graph CLI/REST)
-- **P3:** ~~MCP server + enhanced embeddings + explore strategy~~ — **DONE** (Phase 4A, 167 tests, 7 MCP tools, contextual embeddings, int8 quantization, explore strategy)
-- **P4:** gRPC depth, multi-repo support, cross-encoder reranker, production benchmark hardening.
+- **P0:** ~~Phase 1 MVP~~ — **DONE** (111 tests, 10 languages, BM25 search, CLI, file watcher)
+- **P1:** ~~semantic + hybrid retrieval and REST server~~ — **DONE** (Phase 2, hybrid+MMR, REST API)
+- **P2:** ~~graph intelligence~~ — **DONE** (Phase 3, PageRank, repo map, graph CLI/REST)
+- **P3:** ~~MCP server + enhanced embeddings~~ — **DONE** (Phase 4A-4E, 10 MCP tools, daemon, sync)
+- **P4:** ~~production hardening~~ — **DONE** (Phase 5, field boosts, band merging, reranker, call graph)
+- **P5:** ~~ecosystem expansion~~ — **DONE** (Phase 6, 244 tests, Tier 2 langs, multi-repo, VS Code ext, CI, Qdrant)
+- **P6 (next):** git-aware init, Zig/PHP Tier 2, `read_symbol` MCP wiring, telemetry, comprehensive benchmarks.
 
 Roadmap reference: `ROADMAP.md`.

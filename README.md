@@ -68,6 +68,12 @@ codeforge symbols --file src/main.rs
 codeforge callers src/engine.rs          # who imports this?
 codeforge callees src/engine.rs          # what does this import?
 codeforge dependencies src/main.rs --depth 2
+
+# Multi-repo: index a second codebase alongside the primary
+codeforge init . --also ../shared-lib --also ../api-server
+
+# Incremental sync (re-indexes only changed files)
+codeforge sync
 ```
 
 ---
@@ -127,6 +133,33 @@ The daemon runs a background file watcher. When you save a file, the index updat
 
 ---
 
+## VS Code / Cursor Extension
+
+The `editors/vscode/` directory contains a TypeScript extension that integrates CodeForge directly into your editor.
+
+**Commands** (`Ctrl+Shift+P` / `Cmd+Shift+P`):
+
+| Command | What it does |
+|---------|-------------|
+| `CodeForge: Index Workspace` | Build or rebuild the index for the current project |
+| `CodeForge: Sync Index` | Re-index only changed files since last sync |
+| `CodeForge: Search` | Interactive code search with inline results |
+| `CodeForge: Show Repo Map` | Display PageRank-sorted architecture overview |
+| `CodeForge: Start Daemon` | Launch the daemon for faster subsequent MCP calls |
+| `CodeForge: Register MCP Server` | Add codeforge to `~/.claude.json` and `~/.cursor/mcp.json` |
+
+**Status bar** shows `$(check) indexed` when a `.codeforge/` index exists, `$(circle-slash) not indexed` otherwise.
+
+**Install from source:**
+```bash
+cd editors/vscode
+npm install
+npm run compile
+# Then F5 in VS Code to launch the Extension Development Host
+```
+
+---
+
 ## Performance
 
 All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a real C++ game engine, 246K lines across 770 files.
@@ -140,7 +173,7 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 | **File watcher latency** | ≤100ms from save to queryable |
 | **Daemon IPC overhead** | ~6ms per call (Unix socket round-trip) |
 | **BM25 search** | <10ms p99 |
-| **Test suite** | 232 tests (including retrieval quality regression suite) |
+| **Test suite** | 244 tests (including retrieval quality regression suite) |
 
 ### Init speed breakdown (0.87s on 246K LoC)
 
