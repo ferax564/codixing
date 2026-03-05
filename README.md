@@ -6,7 +6,7 @@ CodeForge is a Rust-native engine that gives AI coding agents precisely the righ
 
 ## Why Not Just Grep?
 
-Claude Code and similar agents currently use `grep`, `find`, and `cat` for code navigation. These tools are fast, but they have a fundamental problem: **they return everything, always**. A single `grep -r 'b2Vec2'` on a real C++ game codebase returns 2,240 hits — 56,000 tokens, burning 28% of Claude's context window before any reasoning happens.
+Claude Code and similar agents currently use `grep`, `find`, and `cat` for code navigation. These tools are fast, but they have a fundamental problem: **they return everything, always**. A single `rg b2Vec2` on a real C++ game codebase returns 2,240 hits — 225,343 bytes — burning context before any reasoning happens.
 
 CodeForge solves this with three properties grep cannot replicate:
 
@@ -22,17 +22,17 @@ Measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — 246,000 lines o
 
 | Operation | Native tool | Native | CodeForge | Speed | Tokens |
 |-----------|------------|-------:|----------:|------:|-------:|
-| Literal search | `grep -r` (all hits) | 73ms | 26ms | **2.8×** | ≈ same |
-| Regex + file filter | `grep -rE --include='*.h'` | 56ms | 12ms | **4.6×** | −38% |
-| High-freq pattern (2,240 hits) | `grep -r` (unbounded) | 69ms | 6ms | **12×** | **−99%** |
-| Find class definition | `grep -rn 'class ...'` | 82ms | 8ms | **10×** | structured |
-| Read large file | `cat file` (full) | 4ms | 6ms | −1.3× | **−56%** |
-| Reverse dependency lookup | `grep -rl '#include'` | 67ms | 6ms | **11×** | −92% |
-| Transitive dep chain (depth 2) | manual multi-hop grep | 6ms | 6ms | ≈ same | −66% |
-| Architecture overview | `find + wc -l \| sort` | 38ms | 104ms | −2.7× | PageRank |
-| Semantic / conceptual search | keyword-guessing grep | 67ms | 37ms | **1.8×** | natural language |
+| Literal search | `rg` (all hits) | 23ms | 24ms | ≈ same | **−61%** |
+| Regex + file filter (4,102 hits) | `rg --type cpp` | 18ms | 10ms | **1.8×** | **−99%** |
+| High-freq pattern (2,240 hits) | `rg` (unbounded) | 20ms | 7ms | **2.9×** | **−99%** |
+| Find class definition | `rg -n 'class ...'` | 16ms | 8ms | **1.9×** | structured |
+| Read large file | `cat file` (full) | 3ms | 6ms | −1.8× | **−91%** |
+| Reverse dependency lookup | `rg -rl` | 13ms | 7ms | **1.8×** | **−99%** |
+| Transitive dep chain (depth 2) | manual multi-hop grep | n/a | 7ms | structural | −66% |
+| Architecture overview | `find + wc -l \| sort` | n/a | 109ms | PageRank-sorted | structural |
+| Semantic / conceptual search | keyword-guessing grep | n/a | 38ms | **natural language** | structured |
 
-> **The b2Vec2 case is the decisive number.** Raw `grep` returns 56,335 tokens — 28% of Claude's 200K context budget — in a single call. CodeForge returns the top 20 results in 333 tokens. Same information, 99% less waste.
+> **The b2Vec2 case is the decisive number.** Raw `rg b2Vec2` returns 225,343 bytes (2,240 lines) — CodeForge returns the top 20 in 1,332 bytes. Same signal, **99% less waste**, band-merged by adjacent-chunk deduplication.
 
 ### What grep cannot do at all
 
@@ -140,7 +140,7 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 | **File watcher latency** | ≤100ms from save to queryable |
 | **Daemon IPC overhead** | ~6ms per call (Unix socket round-trip) |
 | **BM25 search** | <10ms p99 |
-| **Test suite** | 222 tests |
+| **Test suite** | 232 tests (including retrieval quality regression suite) |
 
 ### Init speed breakdown (0.87s on 246K LoC)
 
@@ -158,11 +158,14 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 ## Key Features
 
 - **AST-aware chunking** — Tree-sitter parsing across 10 language families; never splits a function in half
-- **BM25 full-text search** — Tantivy-backed with a custom code tokenizer (camelCase, snake_case, dot.path splitting)
-- **Hybrid retrieval** — BM25 + vector (fastembed BGE-Base-EN-v1.5, 768 dims) fused with Reciprocal Rank Fusion; MMR deduplication on `thorough` strategy
-- **Code dependency graph** — Import extraction for all 10 languages, petgraph `DiGraph`, PageRank scoring; transparently boosts search result ranking
+- **BM25 full-text search** — Tantivy-backed with a custom code tokenizer; `signature` field ×3.0 and `entity_names` ×2.0 field boosts ensure definitions rank above mentions
+- **Hybrid retrieval** — BM25 + vector (fastembed BGE-Base-EN-v1.5, 768 dims) fused with asymmetric Reciprocal Rank Fusion; identifier queries route BM25-dominant, natural language routes vector-dominant
+- **Code dependency graph** — Import + call extraction for all 10 languages, petgraph `DiGraph`, PageRank scoring; transparently boosts search result ranking
+- **Band merging** — Adjacent same-file result chunks within 3 lines are merged before rendering; reduces token output by 25–91% on typical codebases
 - **Repo map generation** — Aider-style, token-budgeted output sorted by PageRank (importance) not file size
 - **Live index freshness** — Daemon file watcher updates the in-memory engine within 100ms of any file save; no restart needed
+- **`.gitignore`-aware indexing** — File walker respects `.gitignore`, `.ignore`, and global gitignore (same as ripgrep); no manual exclude lists needed
+- **Hash-based incremental sync** — `codeforge sync` diffs xxh3 content hashes and re-indexes only changed files; no git required
 - **MCP server** — 10 tools exposed via JSON-RPC 2.0; Claude Code registers with one command
 - **Concurrent symbol table** — DashMap-backed with exact, prefix, and substring matching
 - **Single binary, zero runtime deps** — No JVM, no Docker, no external databases
@@ -248,7 +251,7 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 | **Phase 2: Semantic Search** | ✅ Complete | BGE-Base embeddings, hybrid RRF+MMR, REST API |
 | **Phase 3: Graph Intelligence** | ✅ Complete | Import graph, PageRank, repo map — 165 tests |
 | **Phase 4: Agent Integration** | ✅ Complete | MCP (10 tools), daemon mode, 2.6× faster init, live watcher — 222 tests |
-| **Phase 5: Production Hardening** | Planned | See [ROADMAP.md](ROADMAP.md) |
+| **Phase 5: Production Hardening** | ✅ Complete | Field boosts, band merging, asymmetric RRF, call graph edges, sync, .gitignore walker — 232 tests |
 
 ---
 
@@ -256,7 +259,7 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 222 tests
+cargo test --workspace        # 232 tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 ```

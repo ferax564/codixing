@@ -16,8 +16,8 @@ use crate::embedder::Embedder;
 use crate::error::{CodeforgeError, Result};
 use crate::formatter;
 use crate::graph::{
-    CodeGraph, GraphStats, ImportExtractor, ImportResolver, RepoMapOptions, compute_pagerank,
-    generate_repo_map,
+    CallExtractor, CodeGraph, GraphStats, ImportExtractor, ImportResolver, RepoMapOptions,
+    compute_pagerank, generate_repo_map,
 };
 use crate::graph::extractor::RawImport;
 use crate::index::TantivyIndex;
@@ -159,6 +159,9 @@ impl Engine {
         // Import lists extracted during parse — reused by build_graph to avoid
         // a second file-read + parse pass (each file is parsed exactly once).
         let pending_imports: DashMap<String, (Vec<RawImport>, Language)> = DashMap::new();
+        // Call names extracted during parse — resolved into Calls edges after
+        // the symbol table is fully populated (end of parallel phase).
+        let pending_calls: DashMap<String, Vec<String>> = DashMap::new();
 
         let ctx = IndexContext {
             root: &root,
@@ -171,6 +174,7 @@ impl Engine {
             chunk_meta_map: &chunk_meta_map,
             pending_embeds: &pending_embeds,
             pending_imports: &pending_imports,
+            pending_calls: &pending_calls,
         };
 
         // Process files in parallel: parse → chunk → index → extract symbols.
@@ -204,9 +208,10 @@ impl Engine {
 
         // Build dependency graph using pre-extracted import lists (no re-parse).
         let graph = if config.graph.enabled {
-            let g = build_graph(&files, &root, &config, &parser, &pending_imports);
+            let mut g = build_graph(&files, &root, &config, &parser, &pending_imports);
+            // Resolve call-site edges using the now-complete symbol table.
+            add_call_edges(&mut g, &symbols, &pending_calls);
             let scores = compute_pagerank(&g, config.graph.damping, config.graph.iterations);
-            let mut g = g;
             g.apply_pagerank(&scores);
             let flat = g.to_flat();
             if let Err(e) = store.save_graph(&flat) {
@@ -717,6 +722,7 @@ impl Engine {
         // reindex). apply_changes() calls with false and does one pass at the end.
         let file_language = result.language;
         let raw_imports = ImportExtractor::extract(&result.tree, &source, file_language);
+        let call_names = CallExtractor::extract_calls(&result.tree, &source, file_language);
         if let Some(ref mut graph) = self.graph {
             graph.remove_file_edges(&rel_str);
             let indexed: std::collections::HashSet<String> =
@@ -727,6 +733,23 @@ impl Engine {
                     let target_lang =
                         detect_language(std::path::Path::new(&target)).unwrap_or(file_language);
                     graph.add_edge(&rel_str, &target, &raw.path, file_language, target_lang);
+                }
+            }
+            // Resolve call edges using the global symbol table.
+            let mut seen_call_targets = std::collections::HashSet::new();
+            for name in &call_names {
+                let syms = self.symbols.lookup(name);
+                let targets: Vec<&str> = syms
+                    .iter()
+                    .map(|s| s.file_path.as_str())
+                    .filter(|&fp| fp != rel_str.as_str())
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                if targets.len() == 1 && seen_call_targets.insert(targets[0].to_string()) {
+                    let target_lang =
+                        detect_language(std::path::Path::new(targets[0])).unwrap_or(file_language);
+                    graph.add_call_edge(&rel_str, targets[0], name, file_language, target_lang);
                 }
             }
             if do_graph_finalize {
@@ -824,6 +847,23 @@ impl Engine {
         &self.symbols
     }
 
+    /// Compute personalized PageRank anchored to `seed_files`.
+    ///
+    /// Files closer to the seeds in the import graph score higher.  Useful for
+    /// context-aware ranking ("what files matter given I'm working in X?").
+    /// Falls back to global PageRank when `seed_files` is empty.
+    pub fn personalized_pagerank(&self, seed_files: &[&str]) -> HashMap<String, f32> {
+        match &self.graph {
+            Some(graph) => crate::graph::compute_personalized_pagerank(
+                graph,
+                self.config.graph.damping,
+                self.config.graph.iterations,
+                seed_files,
+            ),
+            None => HashMap::new(),
+        }
+    }
+
     /// Start watching the project directory for file changes.
     pub fn watch(&self) -> Result<crate::watcher::FileWatcher> {
         crate::watcher::FileWatcher::new(&self.config.root, &self.config)
@@ -886,6 +926,58 @@ impl Engine {
     /// This works without `git` and handles any form of file drift (editor saves,
     /// `git pull`, manual copies, etc.). For an already-current index the method
     /// returns in milliseconds (hash scan only, no Tantivy commit).
+    /// Embed all chunks that are in the BM25 index but not yet in the vector index.
+    ///
+    /// Useful when a project was first initialized with `--no-embeddings` and
+    /// embeddings are later desired.  Persists the updated vector index to disk.
+    /// Returns the number of chunks that were embedded.
+    pub fn embed_remaining(&mut self) -> Result<usize> {
+        let embedder = self
+            .embedder
+            .as_ref()
+            .ok_or_else(|| {
+                CodeforgeError::Config(
+                    "embeddings not enabled — re-init with embedding support".into(),
+                )
+            })?
+            .clone();
+
+        let vec_idx = self.vector.as_mut().ok_or_else(|| {
+            CodeforgeError::Config("vector index not available".into())
+        })?;
+
+        // Determine which chunk IDs already have vector representations.
+        let embedded: std::collections::HashSet<u64> = vec_idx
+            .file_chunks()
+            .values()
+            .flatten()
+            .copied()
+            .collect();
+
+        let unembedded: Vec<u64> = self
+            .chunk_meta
+            .iter()
+            .map(|e| *e.key())
+            .filter(|id| !embedded.contains(id))
+            .collect();
+
+        if unembedded.is_empty() {
+            info!("all chunks already embedded; nothing to do");
+            return Ok(0);
+        }
+
+        info!(count = unembedded.len(), "embedding remaining chunks");
+
+        // Re-use the existing batch helper — build a pending DashMap with the IDs.
+        let pending: DashMap<u64, String> =
+            unembedded.iter().map(|&id| (id, String::new())).collect();
+        let contextual = self.config.embedding.contextual_embeddings;
+        embed_and_index_chunks(&pending, &self.chunk_meta, &embedder, vec_idx, contextual)?;
+
+        self.save()?;
+        Ok(unembedded.len())
+    }
+
     pub fn sync(&mut self) -> Result<SyncStats> {
         use std::collections::{HashMap, HashSet};
         use crate::watcher::{ChangeKind, FileChange};
@@ -1311,6 +1403,9 @@ struct IndexContext<'a> {
     /// Imports extracted during parsing, keyed by relative path.
     /// Reused by `build_graph` to avoid re-reading/re-parsing files.
     pending_imports: &'a DashMap<String, (Vec<RawImport>, Language)>,
+    /// Call names extracted during parsing: rel_path → Vec<callee_name>.
+    /// Resolved into `EdgeKind::Calls` edges after the symbol table is complete.
+    pending_calls: &'a DashMap<String, Vec<String>>,
 }
 
 /// Process a single file: parse → chunk → index → extract symbols.
@@ -1364,6 +1459,12 @@ fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
     let raw_imports = ImportExtractor::extract(&result.tree, &source, result.language);
     ctx.pending_imports
         .insert(rel_str.clone(), (raw_imports, result.language));
+
+    // Extract call sites for later call-graph edge resolution.
+    let call_names = CallExtractor::extract_calls(&result.tree, &source, result.language);
+    if !call_names.is_empty() {
+        ctx.pending_calls.insert(rel_str.clone(), call_names);
+    }
 
     debug!(
         path = %rel_str,
@@ -1441,42 +1542,95 @@ fn embed_and_index_chunks(
 }
 
 /// Walk the directory tree and collect all source files with supported extensions.
+///
+/// Uses the `ignore` crate so that `.gitignore`, `.ignore`, and
+/// `.git/info/exclude` rules are honoured automatically (same as ripgrep).
+/// The explicit `config.exclude_patterns` are applied as a secondary guard
+/// for repos with incomplete `.gitignore` coverage.
 fn walk_source_files(root: &Path, config: &IndexConfig) -> Result<Vec<PathBuf>> {
+    use ignore::WalkBuilder;
+
     let mut files = Vec::new();
-    walk_dir_recursive(root, config, &mut files)?;
+    for entry in WalkBuilder::new(root)
+        .standard_filters(true) // honour .gitignore / .ignore / global gitignore
+        .hidden(true) // skip dot-files not covered by .gitignore
+        .build()
+    {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(error = %e, "directory walk error");
+                continue;
+            }
+        };
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        // Secondary guard: explicit exclude patterns (exact path component match).
+        let excluded = path.components().any(|c| {
+            let s = c.as_os_str().to_string_lossy();
+            config.exclude_patterns.iter().any(|p| p == s.as_ref())
+        });
+        if excluded {
+            continue;
+        }
+        if config.languages.is_empty() {
+            if detect_language(path).is_some() {
+                files.push(path.to_path_buf());
+            }
+        } else if let Some(lang) = detect_language(path) {
+            if config.languages.contains(&lang.name().to_lowercase()) {
+                files.push(path.to_path_buf());
+            }
+        }
+    }
     Ok(files)
 }
 
-/// Recursive directory walker that respects exclude patterns.
-fn walk_dir_recursive(dir: &Path, config: &IndexConfig, files: &mut Vec<PathBuf>) -> Result<()> {
-    let entries = fs::read_dir(dir)?;
+/// Resolve call-site names against the symbol table and add `EdgeKind::Calls`
+/// edges to the graph.
+///
+/// Only adds an edge when exactly one file (other than the caller) defines a
+/// symbol with the given name — this conservative heuristic avoids false edges
+/// from ubiquitous names like `new`, `parse`, or `fmt`.
+fn add_call_edges(
+    graph: &mut CodeGraph,
+    symbols: &SymbolTable,
+    pending_calls: &DashMap<String, Vec<String>>,
+) {
+    let mut total = 0usize;
+    for entry in pending_calls.iter() {
+        let from_file = entry.key();
+        let call_names = entry.value();
+        let from_lang = graph
+            .node(from_file)
+            .map(|n| n.language)
+            .unwrap_or(Language::Rust);
 
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
-        let file_name = entry.file_name();
-        let name = file_name.to_string_lossy();
-
-        if config.exclude_patterns.iter().any(|p| p == name.as_ref()) {
-            continue;
-        }
-
-        if path.is_dir() {
-            walk_dir_recursive(&path, config, files)?;
-        } else if path.is_file() {
-            if config.languages.is_empty() {
-                if detect_language(&path).is_some() {
-                    files.push(path);
-                }
-            } else if let Some(lang) = detect_language(&path) {
-                if config.languages.contains(&lang.name().to_lowercase()) {
-                    files.push(path);
+        let mut seen_targets = std::collections::HashSet::new();
+        for name in call_names {
+            let syms = symbols.lookup(name);
+            // Collect unique defining files, excluding the caller itself.
+            let target_files: std::collections::HashSet<&str> = syms
+                .iter()
+                .map(|s| s.file_path.as_str())
+                .filter(|&fp| fp != from_file.as_str())
+                .collect();
+            if target_files.len() == 1 {
+                let target = *target_files.iter().next().unwrap();
+                if seen_targets.insert(target.to_string()) {
+                    let target_lang =
+                        detect_language(std::path::Path::new(target)).unwrap_or(from_lang);
+                    graph.add_call_edge(from_file, target, name, from_lang, target_lang);
+                    total += 1;
                 }
             }
         }
     }
-
-    Ok(())
+    if total > 0 {
+        info!(call_edges = total, "added call-site edges to graph");
+    }
 }
 
 /// Build a dependency graph from pre-extracted import lists (populated during

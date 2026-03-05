@@ -34,6 +34,7 @@ thiserror.workspace = true
 tracing.workspace = true
 regex.workspace = true
 glob.workspace = true
+ignore.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

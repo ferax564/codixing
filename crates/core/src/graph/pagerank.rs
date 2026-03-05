@@ -100,6 +100,126 @@ pub fn compute_pagerank(
     result
 }
 
+/// Personalized PageRank anchored to a set of seed files.
+///
+/// The teleportation distribution is concentrated on `seeds` instead of being
+/// uniform over all nodes.  Files closer (in graph distance) to the seeds
+/// receive higher scores, making this useful for query-time relevance ranking
+/// when the user's context is known (e.g., "what files matter given I'm editing
+/// `engine.rs`?").
+///
+/// Falls back to standard [`compute_pagerank`] when `seeds` is empty.
+pub fn compute_personalized_pagerank(
+    graph: &CodeGraph,
+    damping: f32,
+    iterations: usize,
+    seeds: &[&str],
+) -> HashMap<String, f32> {
+    if seeds.is_empty() {
+        return compute_pagerank(graph, damping, iterations);
+    }
+
+    let nodes: Vec<&str> = graph
+        .nodes_by_pagerank()
+        .iter()
+        .map(|n| n.file_path.as_str())
+        .collect();
+
+    let n = nodes.len();
+    if n == 0 {
+        return HashMap::new();
+    }
+
+    // Compute the personalization weight for each node.
+    // Seed nodes that actually exist in the graph share (1 - damping) equally.
+    let valid_seeds: Vec<&str> = seeds
+        .iter()
+        .copied()
+        .filter(|&s| nodes.contains(&s))
+        .collect();
+    let seed_weight = if valid_seeds.is_empty() {
+        0.0_f32
+    } else {
+        1.0 / valid_seeds.len() as f32
+    };
+    let seed_set: std::collections::HashSet<&str> = valid_seeds.iter().copied().collect();
+
+    let teleport = |path: &str| -> f32 {
+        if seed_set.is_empty() {
+            (1.0 - damping) / n as f32
+        } else if seed_set.contains(path) {
+            (1.0 - damping) * seed_weight
+        } else {
+            0.0
+        }
+    };
+
+    let init = 1.0 / n as f32;
+    let mut rank: HashMap<&str, f32> = nodes.iter().map(|&p| (p, init)).collect();
+
+    let mut out_edges: HashMap<&str, Vec<&str>> = HashMap::new();
+    for &path in &nodes {
+        let callees: Vec<&str> = graph
+            .callees(path)
+            .iter()
+            .filter_map(|c| nodes.iter().find(|&&n| n == c.as_str()).copied())
+            .collect();
+        out_edges.insert(path, callees);
+    }
+
+    for _ in 0..iterations {
+        let mut new_rank: HashMap<&str, f32> = nodes.iter().map(|&p| (p, 0.0)).collect();
+
+        let dangling_sum: f32 = nodes
+            .iter()
+            .filter(|&&p| out_edges.get(p).map(|v| v.is_empty()).unwrap_or(true))
+            .map(|&p| rank.get(p).copied().unwrap_or(0.0))
+            .sum();
+
+        for &from in &nodes {
+            let r = rank.get(from).copied().unwrap_or(0.0);
+            let outs = out_edges.get(from).cloned().unwrap_or_default();
+            if !outs.is_empty() {
+                let share = r / outs.len() as f32;
+                for to in outs {
+                    *new_rank.entry(to).or_insert(0.0) += share;
+                }
+            }
+        }
+
+        // Dangling rank redistributes according to the personalization vector.
+        let mut max_delta = 0.0_f32;
+        for &path in &nodes {
+            let old = rank.get(path).copied().unwrap_or(0.0);
+            let propagated = new_rank.get(path).copied().unwrap_or(0.0);
+            let dangling = if seed_set.is_empty() {
+                damping * dangling_sum / n as f32
+            } else if seed_set.contains(path) {
+                damping * dangling_sum * seed_weight
+            } else {
+                0.0
+            };
+            let updated = teleport(path) + damping * propagated + dangling;
+            *new_rank.entry(path).or_insert(0.0) = updated;
+            max_delta = max_delta.max((updated - old).abs());
+        }
+
+        rank = new_rank;
+        if max_delta < 1e-6 {
+            break;
+        }
+    }
+
+    let max_score = rank.values().cloned().fold(0.0_f32, f32::max);
+    if max_score > 0.0 {
+        rank.into_iter()
+            .map(|(k, v)| (k.to_string(), v / max_score))
+            .collect()
+    } else {
+        rank.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

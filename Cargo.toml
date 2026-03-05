@@ -71,5 +71,8 @@ regex = "1"
 # Glob pattern matching
 glob = "0.3"
 
+# .gitignore-aware directory walking
+ignore = "0.4"
+
 # Testing
 tempfile = "3"

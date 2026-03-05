@@ -79,7 +79,16 @@ impl Retriever for HybridRetriever<'_> {
             "hybrid: fusing results"
         );
 
-        let mut fused = rrf_fuse(&bm25_results, &vec_results, self.rrf_k);
+        // Asymmetric RRF: identifier queries weight BM25 higher (lower k →
+        // larger score contribution from top-ranked BM25 hits); natural-language
+        // queries weight the semantic vector list higher.
+        let base = self.rrf_k;
+        let (k_bm25, k_vec) = if is_identifier_query(&query.query) {
+            (base / 3.0, base * 1.5) // BM25 dominates for exact-name lookups
+        } else {
+            (base * 1.5, base / 3.0) // vector dominates for conceptual queries
+        };
+        let mut fused = rrf_fuse_asymmetric(&bm25_results, &vec_results, k_bm25, k_vec);
 
         // Apply file filter (already applied inside sub-retrievers, but
         // bm25_results post-filter may differ from pre-filter ranking so
@@ -91,6 +100,76 @@ impl Retriever for HybridRetriever<'_> {
         fused.truncate(query.limit);
         Ok(fused)
     }
+}
+
+/// Classify a search query as identifier-like vs. natural-language.
+///
+/// Identifier queries have no spaces and consist of word characters plus common
+/// code separators (`_`, `::`, `.`, `->`, `/`).  They benefit from BM25 over
+/// semantic search because the tokeniser already handles camelCase/snake_case
+/// splitting.
+pub fn is_identifier_query(query: &str) -> bool {
+    if query.contains(' ') {
+        return false;
+    }
+    !query.is_empty()
+        && query
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | ':' | '.' | '-' | '>' | '/'))
+}
+
+/// Asymmetric Reciprocal Rank Fusion: uses separate `k` constants for each list.
+///
+/// Allows callers to weight one list more heavily than the other — useful when
+/// query type strongly favours one retrieval method (e.g. BM25 for identifiers,
+/// vector for natural-language descriptions).
+pub fn rrf_fuse_asymmetric(
+    list_a: &[SearchResult],
+    list_b: &[SearchResult],
+    k_a: f32,
+    k_b: f32,
+) -> Vec<SearchResult> {
+    let a_map: HashMap<&str, &SearchResult> =
+        list_a.iter().map(|r| (r.chunk_id.as_str(), r)).collect();
+    let b_map: HashMap<&str, &SearchResult> =
+        list_b.iter().map(|r| (r.chunk_id.as_str(), r)).collect();
+
+    let mut all_ids: Vec<&str> = a_map.keys().copied().collect();
+    for id in b_map.keys() {
+        if !a_map.contains_key(id) {
+            all_ids.push(id);
+        }
+    }
+
+    let mut scored: Vec<(&str, f32)> = all_ids
+        .into_iter()
+        .map(|id| {
+            let score_a = list_a
+                .iter()
+                .position(|r| r.chunk_id == id)
+                .map(|r| 1.0 / (k_a + r as f32 + 1.0))
+                .unwrap_or(0.0);
+            let score_b = list_b
+                .iter()
+                .position(|r| r.chunk_id == id)
+                .map(|r| 1.0 / (k_b + r as f32 + 1.0))
+                .unwrap_or(0.0);
+            (id, score_a + score_b)
+        })
+        .collect();
+
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    scored
+        .into_iter()
+        .filter_map(|(id, score)| {
+            let base = a_map.get(id).copied().or_else(|| b_map.get(id).copied())?;
+            Some(SearchResult {
+                score,
+                ..base.clone()
+            })
+        })
+        .collect()
 }
 
 /// Reciprocal Rank Fusion of two ranked result lists.

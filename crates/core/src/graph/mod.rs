@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use crate::language::Language;
 
 // Re-export public types from sub-modules.
-pub use extractor::ImportExtractor;
-pub use pagerank::compute_pagerank;
+pub use extractor::{CallExtractor, ImportExtractor};
+pub use pagerank::{compute_pagerank, compute_personalized_pagerank};
 pub use repomap::{RepoMapOptions, generate_repo_map};
 pub use resolver::ImportResolver;
 
@@ -24,6 +24,10 @@ pub enum EdgeKind {
     Resolved,
     /// The import refers to an external package / stdlib and could not be resolved.
     External,
+    /// A function/method call site resolved to a symbol defined in another file.
+    /// These edges are extracted from call expressions via [`CallExtractor`] and
+    /// complement import edges with fine-grained call-level coupling information.
+    Calls,
 }
 
 /// A node in the dependency graph representing a single source file.
@@ -67,6 +71,8 @@ pub struct GraphStats {
     pub edge_count: usize,
     pub resolved_edges: usize,
     pub external_edges: usize,
+    /// Number of call-site edges added by [`CallExtractor`].
+    pub call_edges: usize,
 }
 
 /// In-memory dependency graph over source files.
@@ -357,14 +363,46 @@ impl CodeGraph {
         g
     }
 
+    /// Add a call-site edge between two files.
+    ///
+    /// Unlike import edges, call edges represent actual function invocations
+    /// (as resolved by the symbol table after the parallel parse phase).
+    pub fn add_call_edge(
+        &mut self,
+        from: &str,
+        to: &str,
+        callee_name: &str,
+        from_lang: Language,
+        to_lang: Language,
+    ) {
+        let from_idx = self.get_or_insert_node(from, from_lang);
+        let to_idx = self.get_or_insert_node(to, to_lang);
+        self.graph.add_edge(
+            from_idx,
+            to_idx,
+            CodeEdge {
+                raw_import: callee_name.to_string(),
+                kind: EdgeKind::Calls,
+            },
+        );
+        if let Some(n) = self.graph.node_weight_mut(from_idx) {
+            n.out_degree += 1;
+        }
+        if let Some(n) = self.graph.node_weight_mut(to_idx) {
+            n.in_degree += 1;
+        }
+    }
+
     /// Compute graph statistics.
     pub fn stats(&self) -> GraphStats {
         let mut resolved = 0usize;
         let mut external = 0usize;
+        let mut calls = 0usize;
         for e in self.graph.edge_weights() {
             match e.kind {
                 EdgeKind::Resolved => resolved += 1,
                 EdgeKind::External => external += 1,
+                EdgeKind::Calls => calls += 1,
             }
         }
         GraphStats {
@@ -372,6 +410,7 @@ impl CodeGraph {
             edge_count: self.graph.edge_count(),
             resolved_edges: resolved,
             external_edges: external,
+            call_edges: calls,
         }
     }
 
