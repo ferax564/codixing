@@ -1,426 +1,1555 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CodeForge — Code Retrieval Engine for AI Agents</title>
-    <style>
-        :root {
-            --bg: #0a0a0f;
-            --surface: #12121a;
-            --border: #1e1e2e;
-            --text: #e0e0e8;
-            --text-dim: #8888a0;
-            --accent: #6366f1;
-            --accent-glow: #818cf830;
-            --green: #22c55e;
-            --orange: #f59e0b;
-        }
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CodeForge | Code Retrieval Engine For AI Agents</title>
+  <meta name="description" content="CodeForge is a Rust-native retrieval engine for AI coding agents with AST-aware search, dependency graph intelligence, and token-budgeted output." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #000000;
+      --bg-1: #0a0a0f;
+      --bg-2: #0d1117;
+      --bg-3: #161b22;
+      --border: rgba(48, 54, 61, 0.8);
+      --border-glow: rgba(0, 212, 170, 0.25);
+      --cyan: #00d4aa;
+      --cyan-dim: rgba(0, 212, 170, 0.08);
+      --cyan-mid: rgba(0, 212, 170, 0.15);
+      --purple: #8b5cf6;
+      --purple-dim: rgba(139, 92, 246, 0.08);
+      --orange: #f97316;
+      --text: #f0f6fc;
+      --text-muted: #8b949e;
+      --text-dim: #484f58;
+      --green: #3fb950;
+      --red: #f85149;
+      --yellow: #e3b341;
+      --radius: 12px;
+      --radius-lg: 20px;
+    }
 
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
 
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-            background: var(--bg);
-            color: var(--text);
-            line-height: 1.6;
-        }
+    html { scroll-behavior: smooth; }
 
-        .container {
-            max-width: 960px;
-            margin: 0 auto;
-            padding: 0 24px;
-        }
+    body {
+      font-family: "Inter", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
 
-        /* Hero */
-        .hero {
-            padding: 80px 0 60px;
-            text-align: center;
-        }
+    ::selection { background: rgba(0, 212, 170, 0.2); }
 
-        .hero h1 {
-            font-size: 3.2rem;
-            font-weight: 800;
-            letter-spacing: -0.03em;
-            margin-bottom: 16px;
-            background: linear-gradient(135deg, #e0e0e8 0%, #6366f1 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 3px; }
 
-        .hero .tagline {
-            font-size: 1.25rem;
-            color: var(--text-dim);
-            max-width: 600px;
-            margin: 0 auto 32px;
-        }
+    /* ── Grid background ── */
+    .grid-bg {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 0;
+      background-image:
+        linear-gradient(rgba(0,212,170,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,212,170,0.03) 1px, transparent 1px);
+      background-size: 60px 60px;
+      mask-image: radial-gradient(ellipse 80% 50% at 50% 0%, black 30%, transparent 100%);
+    }
 
-        .badge {
-            display: inline-block;
-            padding: 6px 14px;
-            border-radius: 20px;
-            font-size: 0.8rem;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
+    /* ── Glows ── */
+    .glow-orb {
+      position: fixed;
+      border-radius: 50%;
+      pointer-events: none;
+      z-index: 0;
+      filter: blur(120px);
+      opacity: 0.4;
+    }
+    .glow-orb-1 {
+      width: 600px; height: 600px;
+      top: -200px; left: -100px;
+      background: radial-gradient(circle, rgba(0,212,170,0.15) 0%, transparent 70%);
+      animation: drift1 20s ease-in-out infinite alternate;
+    }
+    .glow-orb-2 {
+      width: 500px; height: 500px;
+      top: 20%; right: -150px;
+      background: radial-gradient(circle, rgba(139,92,246,0.12) 0%, transparent 70%);
+      animation: drift2 25s ease-in-out infinite alternate;
+    }
+    .glow-orb-3 {
+      width: 400px; height: 400px;
+      bottom: 20%; left: 30%;
+      background: radial-gradient(circle, rgba(0,212,170,0.08) 0%, transparent 70%);
+      animation: drift3 18s ease-in-out infinite alternate;
+    }
 
-        .badge-complete {
-            background: #22c55e20;
-            color: var(--green);
-            border: 1px solid #22c55e40;
-        }
+    @keyframes drift1 { from { transform: translate(0,0); } to { transform: translate(60px, 80px); } }
+    @keyframes drift2 { from { transform: translate(0,0); } to { transform: translate(-50px, 60px); } }
+    @keyframes drift3 { from { transform: translate(0,0); } to { transform: translate(40px, -60px); } }
 
-        /* Code block */
-        .code-block {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 24px 28px;
-            margin: 40px auto;
-            max-width: 640px;
-            text-align: left;
-            font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', monospace;
-            font-size: 0.9rem;
-            line-height: 1.8;
-            overflow-x: auto;
-        }
+    /* ── Layout ── */
+    .wrapper { position: relative; z-index: 1; max-width: 1160px; margin: 0 auto; padding: 0 24px; }
 
-        .code-block .comment { color: #6b7280; }
-        .code-block .cmd { color: var(--green); }
-        .code-block .output { color: var(--text-dim); }
+    /* ── Nav ── */
+    nav {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 100;
+      padding: 0 24px;
+      height: 64px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(20px);
+      border-bottom: 1px solid var(--border);
+      animation: slideDown 0.6s ease both;
+    }
 
-        /* Features grid */
-        .features {
-            padding: 60px 0;
-        }
+    @keyframes slideDown {
+      from { opacity: 0; transform: translateY(-16px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
 
-        .features h2 {
-            text-align: center;
-            font-size: 1.8rem;
-            margin-bottom: 40px;
-            font-weight: 700;
-        }
+    .nav-inner { max-width: 1160px; margin: 0 auto; width: 100%; display: flex; align-items: center; justify-content: space-between; }
 
-        .feature-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-            gap: 20px;
-        }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      text-decoration: none;
+      color: var(--text);
+      font-weight: 700;
+      font-size: 1.05rem;
+      letter-spacing: -0.01em;
+    }
 
-        .feature-card {
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 24px;
-            transition: border-color 0.2s;
-        }
+    .brand-icon {
+      width: 32px; height: 32px;
+      background: linear-gradient(135deg, var(--cyan), #0099ff);
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 0 20px rgba(0,212,170,0.4), inset 0 1px 0 rgba(255,255,255,0.1);
+      font-size: 16px;
+      position: relative;
+      overflow: hidden;
+    }
 
-        .feature-card:hover {
-            border-color: var(--accent);
-            box-shadow: 0 0 20px var(--accent-glow);
-        }
+    .brand-icon::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(135deg, transparent 40%, rgba(255,255,255,0.15));
+    }
 
-        .feature-card h3 {
-            font-size: 1.05rem;
-            margin-bottom: 8px;
-            font-weight: 600;
-        }
+    .brand-icon svg { position: relative; z-index: 1; }
 
-        .feature-card p {
-            color: var(--text-dim);
-            font-size: 0.9rem;
-        }
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
 
-        /* Languages */
-        .languages {
-            padding: 60px 0;
-            text-align: center;
-        }
+    .nav-links a {
+      text-decoration: none;
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      padding: 7px 14px;
+      border-radius: 8px;
+      transition: color 0.2s, background 0.2s;
+    }
 
-        .languages h2 {
-            font-size: 1.8rem;
-            margin-bottom: 12px;
-            font-weight: 700;
-        }
+    .nav-links a:hover { color: var(--text); background: var(--bg-3); }
 
-        .languages .subtitle {
-            color: var(--text-dim);
-            margin-bottom: 32px;
-        }
+    .nav-cta {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      text-decoration: none;
+      color: var(--bg);
+      background: var(--cyan);
+      font-size: 0.88rem;
+      font-weight: 600;
+      padding: 7px 16px;
+      border-radius: 8px;
+      transition: opacity 0.2s, box-shadow 0.2s, transform 0.2s;
+    }
 
-        .lang-tags {
-            display: flex;
-            flex-wrap: wrap;
-            justify-content: center;
-            gap: 10px;
-        }
+    .nav-cta:hover { opacity: 0.9; transform: translateY(-1px); box-shadow: 0 8px 20px rgba(0,212,170,0.3); }
 
-        .lang-tag {
-            padding: 8px 16px;
-            border-radius: 8px;
-            font-size: 0.85rem;
-            font-weight: 500;
-            background: var(--surface);
-            border: 1px solid var(--border);
-        }
+    /* ── Hero ── */
+    .hero {
+      padding: 160px 0 100px;
+      text-align: center;
+      position: relative;
+    }
 
-        .lang-tag.active {
-            border-color: var(--accent);
-            background: #6366f115;
-        }
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--cyan-dim);
+      border: 1px solid var(--border-glow);
+      color: var(--cyan);
+      font-size: 0.78rem;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 6px 14px;
+      border-radius: 999px;
+      margin-bottom: 28px;
+      animation: fadeInUp 0.7s ease 0.1s both;
+    }
 
-        /* Stats */
-        .stats {
-            padding: 60px 0;
-        }
+    .badge-dot {
+      width: 6px; height: 6px;
+      background: var(--cyan);
+      border-radius: 50%;
+      animation: pulse 2s ease infinite;
+    }
 
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 20px;
-            text-align: center;
-        }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(0.8); }
+    }
 
-        @media (max-width: 640px) {
-            .stats-grid { grid-template-columns: repeat(2, 1fr); }
-        }
+    .hero h1 {
+      font-size: clamp(2.8rem, 6vw, 5.2rem);
+      font-weight: 700;
+      line-height: 1.04;
+      letter-spacing: -0.04em;
+      margin-bottom: 24px;
+      animation: fadeInUp 0.7s ease 0.2s both;
+    }
 
-        .stat-item .number {
-            font-size: 2rem;
-            font-weight: 800;
-            color: var(--accent);
-        }
+    .grad {
+      background: linear-gradient(135deg, var(--cyan) 0%, #0099ff 50%, var(--purple) 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
 
-        .stat-item .label {
-            font-size: 0.85rem;
-            color: var(--text-dim);
-            margin-top: 4px;
-        }
+    .hero-sub {
+      color: var(--text-muted);
+      font-size: 1.15rem;
+      max-width: 58ch;
+      margin: 0 auto 36px;
+      line-height: 1.7;
+      animation: fadeInUp 0.7s ease 0.3s both;
+    }
 
-        /* Roadmap */
-        .roadmap {
-            padding: 60px 0;
-        }
+    .hero-cta {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      animation: fadeInUp 0.7s ease 0.4s both;
+      margin-bottom: 72px;
+    }
 
-        .roadmap h2 {
-            text-align: center;
-            font-size: 1.8rem;
-            margin-bottom: 40px;
-            font-weight: 700;
-        }
+    .btn-primary {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--cyan);
+      color: var(--bg);
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 0.95rem;
+      padding: 13px 24px;
+      border-radius: 10px;
+      transition: transform 0.2s, box-shadow 0.2s, opacity 0.2s;
+      box-shadow: 0 0 0 1px rgba(0,212,170,0.4), 0 8px 30px rgba(0,212,170,0.2);
+    }
 
-        .roadmap-item {
-            display: flex;
-            gap: 20px;
-            padding: 20px 0;
-            border-bottom: 1px solid var(--border);
-        }
+    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 0 0 1px rgba(0,212,170,0.6), 0 16px 40px rgba(0,212,170,0.3); opacity: 0.95; }
 
-        .roadmap-item:last-child { border-bottom: none; }
+    .btn-secondary {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: transparent;
+      color: var(--text);
+      text-decoration: none;
+      font-weight: 500;
+      font-size: 0.95rem;
+      padding: 13px 24px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      transition: transform 0.2s, border-color 0.2s, background 0.2s;
+    }
 
-        .roadmap-phase {
-            min-width: 100px;
-            font-weight: 700;
-            font-size: 0.9rem;
-        }
+    .btn-secondary:hover { transform: translateY(-2px); border-color: var(--cyan); background: var(--cyan-dim); }
 
-        .roadmap-desc {
-            flex: 1;
-        }
+    /* ── Metrics strip ── */
+    .metrics-strip {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+      animation: fadeInUp 0.7s ease 0.5s both;
+    }
 
-        .roadmap-desc h4 {
-            font-size: 1rem;
-            margin-bottom: 4px;
-        }
+    .metric-item {
+      background: var(--bg-1);
+      padding: 24px 20px;
+      text-align: center;
+      transition: background 0.2s;
+    }
 
-        .roadmap-desc p {
-            color: var(--text-dim);
-            font-size: 0.85rem;
-        }
+    .metric-item:hover { background: var(--bg-2); }
 
-        .roadmap-status {
-            min-width: 90px;
-            text-align: right;
-        }
+    .metric-val {
+      display: block;
+      font-size: 1.8rem;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      color: var(--cyan);
+      font-variant-numeric: tabular-nums;
+    }
 
-        /* Footer */
-        .footer {
-            padding: 40px 0;
-            text-align: center;
-            border-top: 1px solid var(--border);
-            color: var(--text-dim);
-            font-size: 0.85rem;
-        }
+    .metric-label {
+      display: block;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
 
-        .footer a {
-            color: var(--accent);
-            text-decoration: none;
-        }
+    /* ── Section layout ── */
+    section {
+      padding: 100px 0;
+    }
 
-        .footer a:hover { text-decoration: underline; }
-    </style>
+    .section-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--cyan);
+      margin-bottom: 16px;
+    }
+
+    .section-label::before {
+      content: '';
+      width: 20px; height: 1px;
+      background: var(--cyan);
+    }
+
+    .section-title {
+      font-size: clamp(1.8rem, 3vw, 2.6rem);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      margin-bottom: 16px;
+      line-height: 1.15;
+    }
+
+    .section-sub {
+      color: var(--text-muted);
+      font-size: 1.05rem;
+      max-width: 60ch;
+      margin-bottom: 48px;
+      line-height: 1.7;
+    }
+
+    /* ── Demo Terminal ── */
+    .demo-section {
+      background: var(--bg-1);
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .demo-layout {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 32px;
+      align-items: center;
+    }
+
+    .demo-text .section-sub { margin-bottom: 24px; }
+
+    .demo-stat-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .demo-stat {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px 16px;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+
+    .demo-stat-icon {
+      width: 32px; height: 32px;
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 15px;
+      flex-shrink: 0;
+    }
+
+    .demo-stat-icon.cyan { background: var(--cyan-dim); }
+    .demo-stat-icon.purple { background: var(--purple-dim); }
+    .demo-stat-icon.orange { background: rgba(249,115,22,0.08); }
+
+    .demo-stat-text strong { display: block; font-size: 0.9rem; font-weight: 600; }
+    .demo-stat-text span { font-size: 0.82rem; color: var(--text-muted); }
+
+    .terminal {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+      box-shadow: 0 0 0 1px rgba(0,212,170,0.05), 0 40px 80px rgba(0,0,0,0.6);
+    }
+
+    .terminal-header {
+      background: var(--bg-3);
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .dot { width: 12px; height: 12px; border-radius: 50%; }
+    .dot-r { background: #ff5f57; }
+    .dot-y { background: #ffbd2e; }
+    .dot-g { background: #28ca41; }
+
+    .terminal-title {
+      margin-left: 8px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.78rem;
+      color: var(--text-dim);
+    }
+
+    .terminal-body {
+      padding: 20px 24px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.82rem;
+      line-height: 1.7;
+      min-height: 340px;
+    }
+
+    .t-line { display: flex; gap: 8px; }
+    .t-prompt { color: var(--cyan); user-select: none; }
+    .t-cmd { color: var(--text); }
+    .t-comment { color: var(--text-dim); }
+    .t-output { color: var(--text-muted); padding-left: 16px; }
+    .t-success { color: var(--green); }
+    .t-info { color: var(--cyan); }
+    .t-warn { color: var(--yellow); }
+    .t-blank { height: 8px; }
+    .t-section { color: var(--purple); font-weight: 600; }
+
+    .cursor {
+      display: inline-block;
+      width: 7px;
+      height: 1em;
+      background: var(--cyan);
+      border-radius: 1px;
+      vertical-align: text-bottom;
+      margin-left: 2px;
+      animation: blink 1.1s step-end infinite;
+    }
+
+    @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
+    /* ── Benchmark ── */
+    .bench-grid {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr;
+      gap: 24px;
+    }
+
+    .bench-card {
+      background: var(--bg-1);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 28px;
+      transition: border-color 0.3s;
+    }
+
+    .bench-card:hover { border-color: var(--border-glow); }
+
+    .bench-card h3 {
+      font-size: 1rem;
+      font-weight: 600;
+      margin-bottom: 20px;
+      color: var(--text-muted);
+    }
+
+    .bench-card h3 code {
+      font-family: "JetBrains Mono", monospace;
+      color: var(--cyan);
+      background: var(--cyan-dim);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.85em;
+    }
+
+    .comparison {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .comp-item {
+      background: var(--bg-2);
+      border-radius: var(--radius);
+      padding: 16px;
+      border: 1px solid var(--border);
+    }
+
+    .comp-tag {
+      display: inline-block;
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 3px 8px;
+      border-radius: 4px;
+      margin-bottom: 10px;
+    }
+
+    .comp-tag.bad { background: rgba(248, 81, 73, 0.15); color: var(--red); border: 1px solid rgba(248,81,73,0.2); }
+    .comp-tag.good { background: rgba(63, 185, 80, 0.15); color: var(--green); border: 1px solid rgba(63,185,80,0.2); }
+
+    .comp-code {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      line-height: 1.6;
+    }
+
+    .comp-code .cmd { color: var(--text); }
+    .comp-code .num { color: var(--orange); font-weight: 600; }
+    .comp-code .ok { color: var(--green); }
+
+    .bar-chart { margin-top: 16px; }
+
+    .bar-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 10px;
+    }
+
+    .bar-label { font-size: 0.82rem; color: var(--text-muted); width: 90px; flex-shrink: 0; }
+
+    .bar-track {
+      flex: 1;
+      height: 8px;
+      background: var(--bg-3);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    .bar-fill {
+      height: 100%;
+      border-radius: 4px;
+      transform-origin: left;
+      transform: scaleX(0);
+      transition: transform 1s ease 0.3s;
+    }
+
+    .bar-fill.bad { background: linear-gradient(90deg, var(--red), #ff8080); }
+    .bar-fill.good { background: linear-gradient(90deg, var(--cyan), #00ffcc); }
+    .bar-fill.animated { transform: scaleX(var(--w, 1)); }
+
+    .bar-val { font-size: 0.8rem; font-family: "JetBrains Mono", monospace; color: var(--text-muted); width: 80px; text-align: right; flex-shrink: 0; }
+
+    .insight-card {
+      background: var(--bg-1);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 28px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+
+    .insight-card h3 { font-size: 1.05rem; margin-bottom: 12px; }
+    .insight-card p { color: var(--text-muted); font-size: 0.95rem; line-height: 1.7; }
+    .insight-card .highlight { color: var(--cyan); font-weight: 600; }
+
+    /* ── Features ── */
+    .features-section { background: var(--bg); }
+
+    .feature-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+    }
+
+    .feature-card {
+      background: var(--bg-1);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 28px;
+      transition: border-color 0.3s, transform 0.3s, background 0.3s;
+      cursor: default;
+      opacity: 0;
+      transform: translateY(24px);
+    }
+
+    .feature-card.visible {
+      opacity: 1;
+      transform: translateY(0);
+      transition: opacity 0.5s ease, transform 0.5s ease, border-color 0.3s, background 0.3s;
+    }
+
+    .feature-card:hover {
+      border-color: var(--border-glow);
+      background: var(--bg-2);
+      transform: translateY(-4px) !important;
+    }
+
+    .feature-icon {
+      width: 44px; height: 44px;
+      border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 22px;
+      margin-bottom: 18px;
+    }
+
+    .feature-icon.cyan { background: var(--cyan-dim); box-shadow: 0 0 20px rgba(0,212,170,0.1); }
+    .feature-icon.purple { background: var(--purple-dim); box-shadow: 0 0 20px rgba(139,92,246,0.1); }
+    .feature-icon.orange { background: rgba(249,115,22,0.08); }
+    .feature-icon.blue { background: rgba(0,153,255,0.08); }
+    .feature-icon.green { background: rgba(63,185,80,0.08); }
+    .feature-icon.pink { background: rgba(236,72,153,0.08); }
+
+    .feature-card h3 {
+      font-size: 1rem;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .feature-card p {
+      color: var(--text-muted);
+      font-size: 0.88rem;
+      line-height: 1.65;
+    }
+
+    .feature-tag {
+      display: inline-block;
+      margin-top: 14px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.72rem;
+      color: var(--cyan);
+      background: var(--cyan-dim);
+      padding: 3px 8px;
+      border-radius: 4px;
+    }
+
+    /* ── MCP Tools ── */
+    .mcp-section { background: var(--bg-1); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+
+    .mcp-layout {
+      display: grid;
+      grid-template-columns: 1fr 1.4fr;
+      gap: 48px;
+      align-items: start;
+    }
+
+    .tools-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .tool-card {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      transition: border-color 0.2s, background 0.2s;
+      cursor: default;
+    }
+
+    .tool-card:hover { border-color: var(--border-glow); background: var(--bg-3); }
+
+    .tool-name {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.82rem;
+      color: var(--cyan);
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .tool-desc {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+
+    .mcp-code-block {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+    }
+
+    .code-tabs {
+      display: flex;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-3);
+    }
+
+    .code-tab {
+      padding: 10px 18px;
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: color 0.2s, border-color 0.2s;
+      font-family: "JetBrains Mono", monospace;
+      user-select: none;
+    }
+
+    .code-tab.active { color: var(--cyan); border-color: var(--cyan); }
+
+    .code-pane {
+      display: none;
+      padding: 20px 24px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.8rem;
+      line-height: 1.7;
+    }
+
+    .code-pane.active { display: block; }
+
+    .c-key { color: var(--purple); }
+    .c-str { color: var(--yellow); }
+    .c-num { color: var(--orange); }
+    .c-cmt { color: var(--text-dim); }
+    .c-fn { color: var(--cyan); }
+    .c-kw { color: var(--red); }
+    .c-ok { color: var(--green); }
+
+    /* ── Quickstart ── */
+    .quickstart-section { background: var(--bg); }
+
+    .quickstart-layout {
+      display: grid;
+      grid-template-columns: 1fr 1.5fr;
+      gap: 48px;
+      align-items: start;
+    }
+
+    .steps-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+
+    .step {
+      display: flex;
+      gap: 16px;
+      padding: 20px 0;
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+
+    .step:last-child { border-bottom: none; }
+    .step:hover { opacity: 0.8; }
+
+    .step-num {
+      width: 28px; height: 28px;
+      border-radius: 50%;
+      background: var(--bg-3);
+      border: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: var(--text-muted);
+      flex-shrink: 0;
+      transition: background 0.2s, border-color 0.2s, color 0.2s;
+    }
+
+    .step.active .step-num {
+      background: var(--cyan);
+      border-color: var(--cyan);
+      color: var(--bg);
+    }
+
+    .step-content h4 { font-size: 0.95rem; margin-bottom: 4px; }
+    .step-content p { font-size: 0.85rem; color: var(--text-muted); line-height: 1.5; }
+
+    .code-window {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      overflow: hidden;
+      box-shadow: 0 0 0 1px rgba(0,212,170,0.04), 0 40px 80px rgba(0,0,0,0.5);
+      position: sticky;
+      top: 80px;
+    }
+
+    .code-window-header {
+      background: var(--bg-3);
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .code-window-title {
+      margin-left: 8px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.78rem;
+      color: var(--text-dim);
+    }
+
+    .code-window-body {
+      padding: 24px;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.83rem;
+      line-height: 1.75;
+      overflow-x: auto;
+      min-height: 280px;
+    }
+
+    .code-pane-qs { display: none; }
+    .code-pane-qs.active { display: block; }
+
+    .ln { color: var(--text-dim); user-select: none; display: inline-block; width: 28px; text-align: right; margin-right: 16px; }
+
+    /* ── CTA Banner ── */
+    .cta-banner {
+      margin: 0;
+      padding: 100px 0;
+      text-align: center;
+      background: var(--bg-1);
+      border-top: 1px solid var(--border);
+    }
+
+    .cta-banner h2 {
+      font-size: clamp(2rem, 4vw, 3.2rem);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      margin-bottom: 16px;
+    }
+
+    .cta-banner p {
+      color: var(--text-muted);
+      font-size: 1.05rem;
+      max-width: 50ch;
+      margin: 0 auto 36px;
+    }
+
+    /* ── Footer ── */
+    footer {
+      background: var(--bg);
+      border-top: 1px solid var(--border);
+      padding: 40px 24px;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.88rem;
+    }
+
+    footer a { color: var(--cyan); text-decoration: none; }
+    footer a:hover { opacity: 0.8; }
+
+    .footer-inner { max-width: 1160px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; }
+
+    .footer-brand { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--text); }
+
+    .footer-links { display: flex; gap: 24px; }
+    .footer-links a { color: var(--text-muted); }
+
+    /* ── Animations ── */
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .reveal {
+      opacity: 0;
+      transform: translateY(24px);
+      transition: opacity 0.6s ease, transform 0.6s ease;
+    }
+
+    .reveal.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    /* ── Responsive ── */
+    @media (max-width: 900px) {
+      .demo-layout, .bench-grid, .mcp-layout, .quickstart-layout { grid-template-columns: 1fr; }
+      .feature-grid { grid-template-columns: repeat(2, 1fr); }
+      .tools-grid { grid-template-columns: 1fr; }
+      .metrics-strip { grid-template-columns: repeat(2, 1fr); }
+      .comparison { grid-template-columns: 1fr; }
+      .code-window { position: static; }
+    }
+
+    @media (max-width: 600px) {
+      .hero h1 { font-size: 2.4rem; }
+      .hero { padding: 120px 0 60px; }
+      .nav-links { display: none; }
+      .feature-grid { grid-template-columns: 1fr; }
+      .metrics-strip { grid-template-columns: 1fr 1fr; }
+      .footer-inner { flex-direction: column; align-items: center; }
+    }
+  </style>
 </head>
 <body>
-    <div class="container">
-        <!-- Hero -->
-        <section class="hero">
-            <h1>CodeForge</h1>
-            <p class="tagline">
-                Ultra-fast code retrieval engine for AI agents.
-                Structure-aware parsing, BM25 search, and AI-optimized output in a single Rust binary.
-            </p>
-            <span class="badge badge-complete">Phase 1 Complete</span>
-        </section>
+  <div class="grid-bg"></div>
+  <div class="glow-orb glow-orb-1"></div>
+  <div class="glow-orb glow-orb-2"></div>
+  <div class="glow-orb glow-orb-3"></div>
 
-        <!-- Quick Start -->
-        <div class="code-block">
-            <div><span class="comment"># Index any codebase</span></div>
-            <div><span class="cmd">$ codeforge init .</span></div>
-            <div><span class="output">Indexed 28 files, 136 chunks, 370 symbols in 0.27s</span></div>
-            <br>
-            <div><span class="comment"># Search with natural language</span></div>
-            <div><span class="cmd">$ codeforge search "authentication handler"</span></div>
-            <div><span class="output">1. src/auth.rs [L12-L45] (Rust) score=14.2</span></div>
-            <div><span class="output">   fn verify_token(token: &str) -> Result&lt;Claims&gt;</span></div>
-            <br>
-            <div><span class="comment"># Explore symbols</span></div>
-            <div><span class="cmd">$ codeforge symbols Engine</span></div>
-            <div><span class="output">Struct   Engine    src/engine.rs    L35-L44</span></div>
-            <div><span class="output">Impl     Engine    src/engine.rs    L45-L284</span></div>
+  <!-- Nav -->
+  <nav>
+    <div class="nav-inner">
+      <a class="brand" href="https://github.com/aferrarelli/codeforge">
+        <div class="brand-icon">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="16 18 22 12 16 6"></polyline>
+            <polyline points="8 6 2 12 8 18"></polyline>
+          </svg>
         </div>
-
-        <!-- Features -->
-        <section class="features">
-            <h2>Built for AI Agents</h2>
-            <div class="feature-grid">
-                <div class="feature-card">
-                    <h3>AST-Aware Chunking</h3>
-                    <p>Tree-sitter parsing across 10 language families. Functions are never split in half. The cAST algorithm recursively splits and merges to produce semantically complete chunks.</p>
-                </div>
-                <div class="feature-card">
-                    <h3>Code-Aware Search</h3>
-                    <p>Custom tokenizer splits camelCase, snake_case, and dot.path identifiers. BM25 ranking via Tantivy means searching for "parse config" finds parseConfig, parse_config, and ParseConfigError.</p>
-                </div>
-                <div class="feature-card">
-                    <h3>Concurrent Symbol Table</h3>
-                    <p>DashMap-backed symbol lookup with exact match, prefix search, and fuzzy pattern matching. Thread-safe for parallel indexing with zero contention.</p>
-                </div>
-                <div class="feature-card">
-                    <h3>Incremental Indexing</h3>
-                    <p>File watcher with 100ms debounce detects changes instantly. Only modified files are re-parsed and re-indexed. Sub-500ms from save to searchable.</p>
-                </div>
-                <div class="feature-card">
-                    <h3>Single Binary</h3>
-                    <p>No JVM, no Docker, no external databases, no Python. Pure Rust with zero runtime dependencies. Just one binary that works everywhere.</p>
-                </div>
-                <div class="feature-card">
-                    <h3>111 Tests</h3>
-                    <p>97 unit tests + 14 integration tests covering multi-language indexing, search accuracy, chunker boundaries, and file watcher lifecycle. All passing, zero warnings.</p>
-                </div>
-            </div>
-        </section>
-
-        <!-- Stats -->
-        <section class="stats">
-            <div class="stats-grid">
-                <div class="stat-item">
-                    <div class="number">10</div>
-                    <div class="label">Languages</div>
-                </div>
-                <div class="stat-item">
-                    <div class="number">111</div>
-                    <div class="label">Tests</div>
-                </div>
-                <div class="stat-item">
-                    <div class="number">0.27s</div>
-                    <div class="label">Index Time (28 files)</div>
-                </div>
-                <div class="stat-item">
-                    <div class="number">0</div>
-                    <div class="label">Runtime Deps</div>
-                </div>
-            </div>
-        </section>
-
-        <!-- Languages -->
-        <section class="languages">
-            <h2>10 Languages, One Engine</h2>
-            <p class="subtitle">Full AST parsing and entity extraction for every Tier 1 language</p>
-            <div class="lang-tags">
-                <span class="lang-tag active">Rust</span>
-                <span class="lang-tag active">Python</span>
-                <span class="lang-tag active">TypeScript</span>
-                <span class="lang-tag active">JavaScript</span>
-                <span class="lang-tag active">TSX</span>
-                <span class="lang-tag active">Go</span>
-                <span class="lang-tag active">Java</span>
-                <span class="lang-tag active">C</span>
-                <span class="lang-tag active">C++</span>
-                <span class="lang-tag active">C#</span>
-                <span class="lang-tag">Ruby</span>
-                <span class="lang-tag">PHP</span>
-                <span class="lang-tag">Swift</span>
-                <span class="lang-tag">Kotlin</span>
-                <span class="lang-tag">Scala</span>
-                <span class="lang-tag">Zig</span>
-            </div>
-        </section>
-
-        <!-- Roadmap -->
-        <section class="roadmap">
-            <h2>Roadmap</h2>
-            <div class="roadmap-item">
-                <div class="roadmap-phase">Phase 1</div>
-                <div class="roadmap-desc">
-                    <h4>Foundation</h4>
-                    <p>AST parsing, cAST chunking, BM25 search, symbol table, CLI, file watcher, persistence</p>
-                </div>
-                <div class="roadmap-status">
-                    <span class="badge badge-complete">Complete</span>
-                </div>
-            </div>
-            <div class="roadmap-item">
-                <div class="roadmap-phase">Phase 2</div>
-                <div class="roadmap-desc">
-                    <h4>Semantic Search</h4>
-                    <p>Vector embeddings, HNSW index, hybrid BM25+vector retrieval with RRF, REST API for ForgePipe integration</p>
-                </div>
-                <div class="roadmap-status">
-                    <span class="badge" style="background:#f59e0b20;color:var(--orange);border:1px solid #f59e0b40">Next</span>
-                </div>
-            </div>
-            <div class="roadmap-item">
-                <div class="roadmap-phase">Phase 3</div>
-                <div class="roadmap-desc">
-                    <h4>Graph Intelligence</h4>
-                    <p>Code dependency graph, PageRank relevance, Aider-style repo maps</p>
-                </div>
-                <div class="roadmap-status"></div>
-            </div>
-            <div class="roadmap-item">
-                <div class="roadmap-phase">Phase 4</div>
-                <div class="roadmap-desc">
-                    <h4>Agent Integration</h4>
-                    <p>MCP server, gRPC API, multi-repo support, git-aware features</p>
-                </div>
-                <div class="roadmap-status"></div>
-            </div>
-            <div class="roadmap-item">
-                <div class="roadmap-phase">Phase 5</div>
-                <div class="roadmap-desc">
-                    <h4>Production Hardening</h4>
-                    <p>Benchmarks, fuzzing, Tier 2 languages, distributed deployment</p>
-                </div>
-                <div class="roadmap-status"></div>
-            </div>
-        </section>
-
-        <!-- Footer -->
-        <footer class="footer">
-            <p>CodeForge is open source. <a href="https://github.com/aferrarelli/codeforge">GitHub</a></p>
-        </footer>
+        CodeForge
+      </a>
+      <div class="nav-links">
+        <a href="#demo">How It Works</a>
+        <a href="#benchmark">Benchmark</a>
+        <a href="#features">Features</a>
+        <a href="#quickstart">Quick Start</a>
+        <a href="#mcp">MCP Tools</a>
+      </div>
+      <a class="nav-cta" href="https://github.com/aferrarelli/codeforge">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+        GitHub
+      </a>
     </div>
+  </nav>
+
+  <!-- Hero -->
+  <div class="wrapper">
+    <div class="hero">
+      <div class="hero-badge">
+        <span class="badge-dot"></span>
+        Rust-native &bull; 244 tests &bull; MCP-ready
+      </div>
+      <h1>Code retrieval<br><span class="grad">built for AI agents</span></h1>
+      <p class="hero-sub">
+        CodeForge gives your coding agent exactly the code it needs&mdash;not 2,000 grep hits.
+        AST-aware chunking, hybrid BM25+vector search, and dependency graph ranking in a single Rust binary.
+      </p>
+      <div class="hero-cta">
+        <a class="btn-primary" href="https://github.com/aferrarelli/codeforge">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+          View on GitHub
+        </a>
+        <a class="btn-secondary" href="#quickstart">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+          Quick Start
+        </a>
+      </div>
+      <div class="metrics-strip">
+        <div class="metric-item">
+          <span class="metric-val" data-count="0.87" data-suffix="s" data-decimals="2">0.87s</span>
+          <span class="metric-label">BM25 + graph init (246k LoC)</span>
+        </div>
+        <div class="metric-item">
+          <span class="metric-val">&lt;10ms</span>
+          <span class="metric-label">BM25 search latency p99</span>
+        </div>
+        <div class="metric-item">
+          <span class="metric-val" data-count="99" data-suffix="%">0%</span>
+          <span class="metric-label">output reduction on high-hit queries</span>
+        </div>
+        <div class="metric-item">
+          <span class="metric-val" data-count="244" data-suffix="">0</span>
+          <span class="metric-label">core + integration tests</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Demo Terminal -->
+  <section id="demo" class="demo-section">
+    <div class="wrapper">
+      <div class="demo-layout">
+        <div class="demo-text">
+          <div class="section-label">How it works</div>
+          <h2 class="section-title">One binary.<br>Zero infrastructure.</h2>
+          <p class="section-sub">
+            Index your codebase once, then query it with natural language or symbol names.
+            CodeForge handles the rest&mdash;ranking by definition relevance, graph centrality, and semantic similarity.
+          </p>
+          <div class="demo-stat-list">
+            <div class="demo-stat">
+              <div class="demo-stat-icon cyan">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#00d4aa" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+              </div>
+              <div class="demo-stat-text">
+                <strong>Hybrid search</strong>
+                <span>BM25 + vector fusion with 5 strategy levels</span>
+              </div>
+            </div>
+            <div class="demo-stat">
+              <div class="demo-stat-icon purple">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+              </div>
+              <div class="demo-stat-text">
+                <strong>Graph-boosted ranking</strong>
+                <span>PageRank scores surfaces high-impact definitions first</span>
+              </div>
+            </div>
+            <div class="demo-stat">
+              <div class="demo-stat-icon orange">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f97316" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+              </div>
+              <div class="demo-stat-text">
+                <strong>Token-budgeted output</strong>
+                <span>Context always fits within your agent's context window</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="terminal">
+          <div class="terminal-header">
+            <span class="dot dot-r"></span>
+            <span class="dot dot-y"></span>
+            <span class="dot dot-g"></span>
+            <span class="terminal-title">codeforge &mdash; bash</span>
+          </div>
+          <div class="terminal-body" id="typewriter-terminal">
+            <div class="t-line"><span class="t-comment"># Index a repository</span></div>
+            <div class="t-blank"></div>
+            <div class="t-line"><span class="t-prompt">$</span><span class="t-cmd">&nbsp;codeforge init . --no-embeddings</span></div>
+            <div class="t-line"><span class="t-output t-success">&#10003; Indexed 770 files, 14,203 symbols</span></div>
+            <div class="t-line"><span class="t-output t-info">&#9654; Init: 0.87s (246,000 LoC)</span></div>
+            <div class="t-blank"></div>
+            <div class="t-line"><span class="t-comment"># Search with hybrid strategy</span></div>
+            <div class="t-blank"></div>
+            <div class="t-line"><span class="t-prompt">$</span><span class="t-cmd">&nbsp;codeforge search "authentication handler" --strategy fast</span></div>
+            <div class="t-line"><span class="t-output t-section">&#9658; src/auth/handler.rs:42 [score: 0.94]</span></div>
+            <div class="t-line"><span class="t-output">  pub fn handle_auth_request(req: Request) -&gt; Result&lt;Token&gt;</span></div>
+            <div class="t-line"><span class="t-output t-section">&#9658; src/middleware/jwt.rs:18 [score: 0.87]</span></div>
+            <div class="t-line"><span class="t-output">  pub fn verify_jwt(token: &amp;str) -&gt; Result&lt;Claims&gt;</span></div>
+            <div class="t-blank"></div>
+            <div class="t-line"><span class="t-comment"># Follow the dependency graph</span></div>
+            <div class="t-blank"></div>
+            <div class="t-line"><span class="t-prompt">$</span><span class="t-cmd">&nbsp;codeforge callees src/auth/handler.rs --depth 2</span></div>
+            <div class="t-line"><span class="t-output t-info">  jwt.rs &rarr; crypto.rs &rarr; openssl.rs</span></div>
+            <div class="t-line"><span class="t-output">  auth.rs &rarr; db/user.rs &rarr; models.rs</span></div>
+            <div class="t-blank"></div>
+            <div class="t-line"><span class="t-prompt">$</span><span class="cursor"></span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Benchmark -->
+  <section id="benchmark">
+    <div class="wrapper">
+      <div class="reveal">
+        <div class="section-label">Benchmark</div>
+        <h2 class="section-title">Signal that matters</h2>
+        <p class="section-sub">On the OpenClaw C++ codebase (246,000 lines, 770 files), CodeForge returns bounded, agent-usable context instead of raw grep floods.</p>
+      </div>
+      <div class="bench-grid">
+        <div class="bench-card reveal">
+          <h3>The <code>b2Vec2</code> query</h3>
+          <div class="comparison">
+            <div class="comp-item">
+              <span class="comp-tag bad">Unbounded</span>
+              <div class="comp-code">
+                <div class="cmd">rg b2Vec2</div>
+                <div><span class="num">2,240</span> hits</div>
+                <div><span class="num">225,343</span> bytes</div>
+                <div style="margin-top:6px;color:var(--red)">Unusable for agents</div>
+              </div>
+            </div>
+            <div class="comp-item">
+              <span class="comp-tag good">Bounded</span>
+              <div class="comp-code">
+                <div class="cmd">codeforge search b2Vec2</div>
+                <div><span class="ok">20</span> ranked hits</div>
+                <div><span class="ok">1,332</span> bytes</div>
+                <div style="margin-top:6px;color:var(--green)">Token-budget safe</div>
+              </div>
+            </div>
+          </div>
+          <div class="bar-chart">
+            <div class="bar-row">
+              <span class="bar-label">ripgrep</span>
+              <div class="bar-track"><div class="bar-fill bad" style="--w:1" data-width="1"></div></div>
+              <span class="bar-val">225 KB</span>
+            </div>
+            <div class="bar-row">
+              <span class="bar-label">codeforge</span>
+              <div class="bar-track"><div class="bar-fill good" style="--w:0.006" data-width="0.006"></div></div>
+              <span class="bar-val">1.3 KB</span>
+            </div>
+          </div>
+        </div>
+        <div class="insight-card reveal" style="transition-delay:0.15s">
+          <h3>What this changes in practice</h3>
+          <p>
+            Agents stay inside their token budget, see <span class="highlight">definitions ranked above noisy mentions</span>, and can follow transitive dependencies in a single MCP call.
+          </p>
+          <br>
+          <p>
+            The <span class="highlight">graph PageRank boost</span> ensures that high-centrality modules (called from many places) surface first&mdash;giving agents the architectural context they need to reason correctly.
+          </p>
+          <br>
+          <p>
+            Adjacent same-file chunks are <span class="highlight">band-merged</span> before delivery, reducing token count by 25&ndash;91% compared to naive chunked output.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features -->
+  <section id="features" class="features-section">
+    <div class="wrapper">
+      <div class="reveal">
+        <div class="section-label">Capabilities</div>
+        <h2 class="section-title">Built for production<br>agent loops</h2>
+        <p class="section-sub">Every component designed to maximize retrieval precision while minimizing token waste.</p>
+      </div>
+      <div class="feature-grid">
+        <div class="feature-card">
+          <div class="feature-icon cyan">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#00d4aa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+          </div>
+          <h3>AST-aware chunking</h3>
+          <p>Tree-sitter parsing across 14 languages keeps functions and classes semantically intact. No more mid-function splits corrupting context.</p>
+          <span class="feature-tag">Rust &bull; Python &bull; TS &bull; Go &bull; Java &bull; C++ &bull; +8</span>
+        </div>
+        <div class="feature-card" style="--delay:0.07s">
+          <div class="feature-icon purple">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          </div>
+          <h3>Hybrid retrieval</h3>
+          <p>BM25 + BGE-Base-EN vector fusion with Reciprocal Rank Fusion. Five strategy levels from <code style="color:var(--cyan);font-size:0.85em">instant</code> to <code style="color:var(--cyan);font-size:0.85em">deep</code> cross-encoder reranking.</p>
+          <span class="feature-tag">RRF &bull; MMR &bull; Asymmetric routing</span>
+        </div>
+        <div class="feature-card" style="--delay:0.14s">
+          <div class="feature-icon orange">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#f97316" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M6 9v6M15 6H9m6 12H9"/></svg>
+          </div>
+          <h3>Graph intelligence</h3>
+          <p>Import and call graph with iterative PageRank. Callers, callees, and transitive dependency traversal exposed as first-class queries.</p>
+          <span class="feature-tag">PageRank &bull; petgraph &bull; Personalized PR</span>
+        </div>
+        <div class="feature-card" style="--delay:0.21s">
+          <div class="feature-icon blue">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#0099ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+          </div>
+          <h3>Live index state</h3>
+          <p>Hash-based incremental sync, <code style="color:var(--cyan);font-size:0.85em">.gitignore</code>-aware file walking, and daemon watcher keep your index aligned with every save.</p>
+          <span class="feature-tag">notify &bull; Unix socket daemon &bull; &lt;500ms update</span>
+        </div>
+        <div class="feature-card" style="--delay:0.28s">
+          <div class="feature-icon green">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#3fb950" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+          </div>
+          <h3>MCP-ready</h3>
+          <p>10 JSON-RPC 2.0 tools exposed for Claude Code and any MCP-capable client. Auto-registers in <code style="color:var(--cyan);font-size:0.85em">~/.claude.json</code> via VS Code extension.</p>
+          <span class="feature-tag">10 tools &bull; stdin/stdout &bull; Unix socket</span>
+        </div>
+        <div class="feature-card" style="--delay:0.35s">
+          <div class="feature-icon pink">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#ec4899" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+          </div>
+          <h3>Zero runtime stack</h3>
+          <p>Single statically-linked Rust binary under 50MB. No JVM, no Docker, no external database required. Works on macOS, Linux, and Windows.</p>
+          <span class="feature-tag">Single binary &bull; Tantivy &bull; usearch</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- MCP Tools -->
+  <section id="mcp" class="mcp-section">
+    <div class="wrapper">
+      <div class="mcp-layout">
+        <div>
+          <div class="section-label reveal">MCP Integration</div>
+          <h2 class="section-title reveal">10 tools for<br>your AI agent</h2>
+          <p class="section-sub reveal">CodeForge exposes retrieval, symbols, graph traversal, file reading, and diagnostics over the Model Context Protocol.</p>
+          <div class="tools-grid reveal">
+            <div class="tool-card">
+              <div class="tool-name">code_search</div>
+              <div class="tool-desc">Bounded hybrid search across all strategies</div>
+            </div>
+            <div class="tool-card">
+              <div class="tool-name">find_symbol</div>
+              <div class="tool-desc">Case-insensitive definition lookup</div>
+            </div>
+            <div class="tool-card">
+              <div class="tool-name">read_symbol</div>
+              <div class="tool-desc">Full source of any symbol by name</div>
+            </div>
+            <div class="tool-card">
+              <div class="tool-name">get_repo_map</div>
+              <div class="tool-desc">Token-budgeted PageRank architecture map</div>
+            </div>
+            <div class="tool-card">
+              <div class="tool-name">get_references</div>
+              <div class="tool-desc">Callers + callees for any file</div>
+            </div>
+            <div class="tool-card">
+              <div class="tool-name">get_transitive_deps</div>
+              <div class="tool-desc">Blast-radius multi-hop traversal</div>
+            </div>
+            <div class="tool-card">
+              <div class="tool-name">search_usages</div>
+              <div class="tool-desc">All usage locations for a symbol</div>
+            </div>
+            <div class="tool-card">
+              <div class="tool-name">grep_code</div>
+              <div class="tool-desc">Regex/literal search with context lines</div>
+            </div>
+            <div class="tool-card">
+              <div class="tool-name">read_file</div>
+              <div class="tool-desc">Raw source with optional line range</div>
+            </div>
+            <div class="tool-card">
+              <div class="tool-name">index_status</div>
+              <div class="tool-desc">Diagnostic report with full index stats</div>
+            </div>
+          </div>
+        </div>
+        <div class="mcp-code-block reveal" style="transition-delay:0.2s">
+          <div class="code-tabs">
+            <div class="code-tab active" data-pane="claude-json">~/.claude.json</div>
+            <div class="code-tab" data-pane="search-call">code_search</div>
+            <div class="code-tab" data-pane="graph-call">get_references</div>
+          </div>
+          <div class="code-pane active" id="pane-claude-json">
+<span class="c-cmt">// Auto-configured by VS Code extension</span>
+<span class="c-key">{</span>
+  <span class="c-str">"mcpServers"</span>: <span class="c-key">{</span>
+    <span class="c-str">"codeforge"</span>: <span class="c-key">{</span>
+      <span class="c-str">"command"</span>: <span class="c-str">"/usr/local/bin/codeforge-mcp"</span>,
+      <span class="c-str">"args"</span>: [
+        <span class="c-str">"--root"</span>,
+        <span class="c-str">"/path/to/your/project"</span>,
+        <span class="c-str">"--daemon"</span>
+      ]
+    <span class="c-key">}</span>
+  <span class="c-key">}</span>
+<span class="c-key">}</span>
+          </div>
+          <div class="code-pane" id="pane-search-call">
+<span class="c-cmt">// MCP tool call</span>
+<span class="c-key">{</span>
+  <span class="c-str">"method"</span>: <span class="c-str">"tools/call"</span>,
+  <span class="c-str">"params"</span>: <span class="c-key">{</span>
+    <span class="c-str">"name"</span>: <span class="c-str">"code_search"</span>,
+    <span class="c-str">"arguments"</span>: <span class="c-key">{</span>
+      <span class="c-str">"query"</span>: <span class="c-str">"authentication handler"</span>,
+      <span class="c-str">"strategy"</span>: <span class="c-str">"fast"</span>,
+      <span class="c-str">"limit"</span>: <span class="c-num">10</span>
+    <span class="c-key">}</span>
+  <span class="c-key">}</span>
+<span class="c-key">}</span>
+
+<span class="c-cmt">// Returns ranked chunks, token-budgeted</span>
+<span class="c-ok">// &lt;10ms p99 on 1M+ LoC</span>
+          </div>
+          <div class="code-pane" id="pane-graph-call">
+<span class="c-cmt">// Walk the dependency graph</span>
+<span class="c-key">{</span>
+  <span class="c-str">"method"</span>: <span class="c-str">"tools/call"</span>,
+  <span class="c-str">"params"</span>: <span class="c-key">{</span>
+    <span class="c-str">"name"</span>: <span class="c-str">"get_references"</span>,
+    <span class="c-str">"arguments"</span>: <span class="c-key">{</span>
+      <span class="c-str">"file"</span>: <span class="c-str">"src/auth/handler.rs"</span>
+    <span class="c-key">}</span>
+  <span class="c-key">}</span>
+<span class="c-key">}</span>
+
+<span class="c-cmt">// Returns callers + callees with scores</span>
+<span class="c-ok">// PageRank-sorted by graph centrality</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Quick Start -->
+  <section id="quickstart" class="quickstart-section">
+    <div class="wrapper">
+      <div class="reveal">
+        <div class="section-label">Quick Start</div>
+        <h2 class="section-title">Up in 60 seconds</h2>
+        <p class="section-sub">Build once, index once, then search immediately. No config files required.</p>
+      </div>
+      <div class="quickstart-layout">
+        <div class="steps-list">
+          <div class="step active" data-step="build">
+            <div class="step-num">1</div>
+            <div class="step-content">
+              <h4>Build from source</h4>
+              <p>Compile the full workspace with release optimizations.</p>
+            </div>
+          </div>
+          <div class="step" data-step="index">
+            <div class="step-num">2</div>
+            <div class="step-content">
+              <h4>Index your repository</h4>
+              <p>Fast BM25-only init, or full hybrid with embeddings.</p>
+            </div>
+          </div>
+          <div class="step" data-step="search">
+            <div class="step-num">3</div>
+            <div class="step-content">
+              <h4>Search and explore</h4>
+              <p>Natural language queries, symbol lookups, and graph traversal.</p>
+            </div>
+          </div>
+          <div class="step" data-step="mcp-setup">
+            <div class="step-num">4</div>
+            <div class="step-content">
+              <h4>Connect to Claude Code</h4>
+              <p>Run as MCP daemon and add to your Claude config.</p>
+            </div>
+          </div>
+        </div>
+        <div class="code-window reveal" style="transition-delay:0.2s">
+          <div class="code-window-header">
+            <span class="dot dot-r"></span>
+            <span class="dot dot-y"></span>
+            <span class="dot dot-g"></span>
+            <span class="code-window-title" id="code-window-filename">build.sh</span>
+          </div>
+          <div class="code-window-body">
+            <div class="code-pane-qs active" id="qs-build">
+<span class="ln">1</span><span class="c-cmt"># Clone and build</span>
+<span class="ln">2</span><span style="color:var(--text)">git clone https://github.com/aferrarelli/codeforge</span>
+<span class="ln">3</span><span style="color:var(--text)">cd codeforge</span>
+<span class="ln">4</span><span style="color:var(--text)"></span>
+<span class="ln">5</span><span class="c-cmt"># Compile release binaries</span>
+<span class="ln">6</span><span style="color:var(--text)">cargo build --release --workspace</span>
+<span class="ln">7</span><span style="color:var(--text)"></span>
+<span class="ln">8</span><span class="c-cmt"># Binaries available at:</span>
+<span class="ln">9</span><span class="c-ok">./target/release/codeforge</span>
+<span class="ln">10</span><span class="c-ok">./target/release/codeforge-mcp</span>
+            </div>
+            <div class="code-pane-qs" id="qs-index">
+<span class="ln">1</span><span class="c-cmt"># Fast init (BM25 only, &lt;1s on 250k LoC)</span>
+<span class="ln">2</span><span style="color:var(--text)">codeforge init . --no-embeddings</span>
+<span class="ln">3</span><span style="color:var(--text)"></span>
+<span class="ln">4</span><span class="c-cmt"># Full hybrid with semantic search</span>
+<span class="ln">5</span><span style="color:var(--text)">codeforge init .</span>
+<span class="ln">6</span><span style="color:var(--text)"></span>
+<span class="ln">7</span><span class="c-cmt"># Multi-repo (index additional roots)</span>
+<span class="ln">8</span><span style="color:var(--text)">codeforge init . --also ../shared-lib</span>
+<span class="ln">9</span><span style="color:var(--text)"></span>
+<span class="ln">10</span><span class="c-cmt"># Keep index up-to-date incrementally</span>
+<span class="ln">11</span><span style="color:var(--text)">codeforge sync .</span>
+            </div>
+            <div class="code-pane-qs" id="qs-search">
+<span class="ln">1</span><span class="c-cmt"># Hybrid search with strategy</span>
+<span class="ln">2</span><span style="color:var(--text)">codeforge search "error handling" --strategy fast</span>
+<span class="ln">3</span><span style="color:var(--text)"></span>
+<span class="ln">4</span><span class="c-cmt"># Symbol lookup</span>
+<span class="ln">5</span><span style="color:var(--text)">codeforge symbols Engine</span>
+<span class="ln">6</span><span style="color:var(--text)"></span>
+<span class="ln">7</span><span class="c-cmt"># Dependency graph</span>
+<span class="ln">8</span><span style="color:var(--text)">codeforge callers src/engine.rs --depth 2</span>
+<span class="ln">9</span><span style="color:var(--text)">codeforge callees src/engine.rs</span>
+<span class="ln">10</span><span style="color:var(--text)"></span>
+<span class="ln">11</span><span class="c-cmt"># Repository architecture map</span>
+<span class="ln">12</span><span style="color:var(--text)">codeforge graph --token-budget 4000</span>
+            </div>
+            <div class="code-pane-qs" id="qs-mcp-setup">
+<span class="ln">1</span><span class="c-cmt"># Start MCP daemon (stays warm)</span>
+<span class="ln">2</span><span style="color:var(--text)">codeforge-mcp --root . --daemon &amp;</span>
+<span class="ln">3</span><span style="color:var(--text)"></span>
+<span class="ln">4</span><span class="c-cmt"># Add to ~/.claude.json manually</span>
+<span class="ln">5</span><span style="color:var(--purple)">{</span>
+<span class="ln">6</span><span style="color:var(--text)">  </span><span class="c-str">"mcpServers"</span><span style="color:var(--text)">: {</span>
+<span class="ln">7</span><span style="color:var(--text)">    </span><span class="c-str">"codeforge"</span><span style="color:var(--text)">: {</span>
+<span class="ln">8</span><span style="color:var(--text)">      </span><span class="c-str">"command"</span><span style="color:var(--text)">: </span><span class="c-str">"/path/codeforge-mcp"</span><span style="color:var(--text)">,</span>
+<span class="ln">9</span><span style="color:var(--text)">      </span><span class="c-str">"args"</span><span style="color:var(--text)">: [</span><span class="c-str">"--root"</span><span style="color:var(--text)">, </span><span class="c-str">"."</span><span style="color:var(--text)">, </span><span class="c-str">"--daemon"</span><span style="color:var(--text)">]</span>
+<span class="ln">10</span><span style="color:var(--text)">    }</span>
+<span class="ln">11</span><span style="color:var(--text)">  }</span>
+<span class="ln">12</span><span style="color:var(--purple)">}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA Banner -->
+  <div class="cta-banner">
+    <div class="wrapper">
+      <div class="reveal">
+        <h2>Give your agent a<br><span class="grad">real code understanding</span></h2>
+        <p>Open source, single binary, zero configuration. Works with Claude Code, Cursor, and any MCP-capable client.</p>
+        <div class="hero-cta" style="margin-bottom:0">
+          <a class="btn-primary" href="https://github.com/aferrarelli/codeforge">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+            Star on GitHub
+          </a>
+          <a class="btn-secondary" href="#quickstart">
+            Read the docs
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Footer -->
+  <footer>
+    <div class="footer-inner">
+      <div class="footer-brand">
+        <div class="brand-icon" style="width:24px;height:24px;border-radius:6px">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
+        </div>
+        CodeForge
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/aferrarelli/codeforge">GitHub</a>
+        <a href="https://github.com/aferrarelli/codeforge/blob/main/README.md">Docs</a>
+        <a href="https://github.com/aferrarelli/codeforge/blob/main/ROADMAP.md">Roadmap</a>
+      </div>
+      <span>Open source &bull; MIT License</span>
+    </div>
+  </footer>
+
+  <script>
+    // ── Intersection Observer for reveal animations ──
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(e => {
+        if (e.isIntersecting) {
+          e.target.classList.add('visible');
+          // Also trigger bar animations
+          e.target.querySelectorAll('.bar-fill').forEach(b => b.classList.add('animated'));
+          observer.unobserve(e.target);
+        }
+      });
+    }, { threshold: 0.12 });
+
+    document.querySelectorAll('.reveal, .feature-card').forEach(el => observer.observe(el));
+
+    // Staggered feature cards
+    document.querySelectorAll('.feature-card').forEach((card, i) => {
+      card.style.transitionDelay = (i * 0.07) + 's';
+    });
+
+    // Trigger bar animations for in-viewport bench cards
+    const barObserver = new IntersectionObserver((entries) => {
+      entries.forEach(e => {
+        if (e.isIntersecting) {
+          e.target.querySelectorAll('.bar-fill').forEach(b => b.classList.add('animated'));
+          barObserver.unobserve(e.target);
+        }
+      });
+    }, { threshold: 0.3 });
+
+    document.querySelectorAll('.bench-card').forEach(el => barObserver.observe(el));
+
+    // ── Animated counter ──
+    function animateCounter(el) {
+      const target = parseFloat(el.dataset.count);
+      const suffix = el.dataset.suffix || '';
+      const decimals = parseInt(el.dataset.decimals || 0);
+      const duration = 1600;
+      const start = performance.now();
+
+      function update(now) {
+        const elapsed = now - start;
+        const progress = Math.min(elapsed / duration, 1);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        const current = target * eased;
+        el.textContent = current.toFixed(decimals) + suffix;
+        if (progress < 1) requestAnimationFrame(update);
+      }
+
+      requestAnimationFrame(update);
+    }
+
+    const counterObserver = new IntersectionObserver((entries) => {
+      entries.forEach(e => {
+        if (e.isIntersecting) {
+          e.target.querySelectorAll('[data-count]').forEach(animateCounter);
+          counterObserver.unobserve(e.target);
+        }
+      });
+    }, { threshold: 0.5 });
+
+    document.querySelectorAll('.metrics-strip').forEach(el => counterObserver.observe(el));
+
+    // ── MCP code tabs ──
+    document.querySelectorAll('.code-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        const pane = tab.dataset.pane;
+        tab.closest('.mcp-code-block').querySelectorAll('.code-tab').forEach(t => t.classList.remove('active'));
+        tab.closest('.mcp-code-block').querySelectorAll('.code-pane').forEach(p => p.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById('pane-' + pane).classList.add('active');
+      });
+    });
+
+    // ── Quickstart steps ──
+    const stepFiles = {
+      'build': 'build.sh',
+      'index': 'index.sh',
+      'search': 'search.sh',
+      'mcp-setup': 'claude.json'
+    };
+
+    document.querySelectorAll('.step').forEach(step => {
+      step.addEventListener('click', () => {
+        document.querySelectorAll('.step').forEach(s => s.classList.remove('active'));
+        document.querySelectorAll('.code-pane-qs').forEach(p => p.classList.remove('active'));
+        step.classList.add('active');
+        const key = step.dataset.step;
+        document.getElementById('qs-' + key).classList.add('active');
+        document.getElementById('code-window-filename').textContent = stepFiles[key];
+      });
+    });
+
+    // ── Nav active scroll highlight ──
+    const sections = document.querySelectorAll('section[id], div[id]');
+    const navLinks = document.querySelectorAll('.nav-links a');
+
+    window.addEventListener('scroll', () => {
+      let current = '';
+      sections.forEach(s => {
+        if (window.scrollY >= s.offsetTop - 100) current = s.id;
+      });
+      navLinks.forEach(a => {
+        a.style.color = a.getAttribute('href') === '#' + current ? 'var(--cyan)' : '';
+      });
+    }, { passive: true });
+  </script>
 </body>
 </html>

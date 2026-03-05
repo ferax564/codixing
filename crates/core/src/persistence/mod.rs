@@ -36,6 +36,13 @@ pub struct IndexMeta {
     pub symbol_count: usize,
     /// ISO 8601 timestamp of the last indexing run.
     pub last_indexed: String,
+    /// Git commit hash recorded at last index build/sync.
+    ///
+    /// `None` if git is unavailable or the project is not in a git repo.
+    /// Used by [`Engine::git_sync`] to compute the minimal diff since the
+    /// last indexed commit, enabling sub-second re-opens after `git pull`.
+    #[serde(default)]
+    pub git_commit: Option<String>,
 }
 
 impl Default for IndexMeta {
@@ -46,6 +53,7 @@ impl Default for IndexMeta {
             chunk_count: 0,
             symbol_count: 0,
             last_indexed: String::new(),
+            git_commit: None,
         }
     }
 }
@@ -344,6 +352,7 @@ mod tests {
             chunk_count: 128,
             symbol_count: 500,
             last_indexed: "2026-02-07T12:00:00Z".to_string(),
+            git_commit: Some("abc123def456".to_string()),
         };
         store.save_meta(&meta).unwrap();
         let loaded = store.load_meta().unwrap();

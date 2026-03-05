@@ -11,11 +11,25 @@ description = "Core engine for CodeForge — AST parsing, indexing, and retrieva
 ## Requires a running Qdrant instance; connection URL via `QDRANT_URL` env var.
 qdrant = ["dep:qdrant-client", "dep:tokio"]
 
+## Enable the Qwen3 embedding model (candle backend, CPU-only by default).
+##
+## Adds `EmbeddingModel::Qwen3SmallEmbedding` (Qwen/Qwen3-Embedding-0.6B, 1024 dims).
+## On first use the model weights (~1.2 GB) are downloaded from Hugging Face and
+## cached in the fastembed cache directory (~/.cache/huggingface/).
+##
+## Build with:
+##   cargo build --features codeforge-core/qwen3
+## Run comparison benchmark (requires model download):
+##   cargo test --test model_comparison_test --features codeforge-core/qwen3 -- --ignored --nocapture
+qwen3 = ["fastembed/qwen3", "dep:candle-core"]
+
 [dependencies]
 # Optional Qdrant backend
 qdrant-client = { workspace = true, optional = true }
 # Tokio runtime — only pulled in when the qdrant feature is enabled
 tokio = { workspace = true, optional = true }
+# candle-core — only pulled in when the qwen3 feature is enabled
+candle-core = { workspace = true, optional = true }
 
 tree-sitter.workspace = true
 tree-sitter-rust.workspace = true

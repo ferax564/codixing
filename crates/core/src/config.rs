@@ -94,6 +94,16 @@ pub enum EmbeddingModel {
     /// Jina Embeddings v2 Base Code — 768 dimensions, optimised for code/text retrieval.
     /// Trained on code-specific corpora; recommended for pure-code repositories.
     JinaEmbedCode,
+    /// Qwen3-Embedding-0.6B — 1024 dimensions, candle (pure-Rust) backend.
+    ///
+    /// Uses the `Qwen/Qwen3-Embedding-0.6B` checkpoint from Hugging Face.
+    /// Weights (~1.2 GB) are downloaded on first use and cached by hf-hub.
+    ///
+    /// **Requires the `qwen3` Cargo feature** (`--features codeforge-core/qwen3`).
+    /// Unlike the ONNX-backed models above this variant runs the full Transformer
+    /// in Rust via the candle ML framework rather than ONNX Runtime.
+    #[cfg(feature = "qwen3")]
+    Qwen3SmallEmbedding,
 }
 
 /// Configuration for the vector embedding pipeline.

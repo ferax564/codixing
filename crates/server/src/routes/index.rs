@@ -33,6 +33,7 @@ pub async fn reindex_handler(
 
     let mut engine = state.write().await;
     engine.reindex_file(&path)?;
+    engine.save()?;
 
     Ok(Json(ReindexResponse {
         status: "ok",
@@ -64,6 +65,7 @@ pub async fn remove_file_handler(
 
     let mut engine = state.write().await;
     engine.remove_file(&path)?;
+    engine.save()?;
 
     Ok(Json(RemoveFileResponse {
         status: "ok",

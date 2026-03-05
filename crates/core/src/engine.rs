@@ -63,6 +63,17 @@ pub struct SyncStats {
     pub unchanged: usize,
 }
 
+/// Statistics returned by [`Engine::git_sync`].
+#[derive(Debug, Clone, Default)]
+pub struct GitSyncStats {
+    /// Number of modified or added files that were re-indexed.
+    pub modified: usize,
+    /// Number of deleted files that were removed from the index.
+    pub removed: usize,
+    /// `true` when HEAD already matches the stored commit — nothing was done.
+    pub unchanged: bool,
+}
+
 /// A single regex/literal match produced by [`Engine::grep_code`].
 #[derive(Debug, Clone)]
 pub struct GrepMatch {
@@ -80,6 +91,67 @@ pub struct GrepMatch {
     pub before: Vec<String>,
     /// Context lines immediately after the match.
     pub after: Vec<String>,
+}
+
+// -------------------------------------------------------------------------
+// Git helpers (private free functions, no external dependency)
+// -------------------------------------------------------------------------
+
+/// Return the current HEAD commit hash, or `None` if git is unavailable / not a repo.
+fn git_head_commit(root: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8(out.stdout)
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+/// Return files changed between `since_commit` and the working tree HEAD.
+///
+/// Returns `(modified_or_added, deleted)` path lists (absolute).
+/// Returns `None` if git is unavailable or the command fails.
+fn git_diff_since(root: &Path, since_commit: &str) -> Option<(Vec<PathBuf>, Vec<PathBuf>)> {
+    let out = std::process::Command::new("git")
+        .args(["diff", "--name-status", since_commit])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(out.stdout).ok()?;
+
+    let mut modified = Vec::new();
+    let mut deleted = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.split('\t');
+        let status = parts.next()?;
+        match status.chars().next()? {
+            'D' => {
+                let path_str = parts.next()?.trim();
+                deleted.push(root.join(path_str));
+            }
+            // Rename/copy records are: Rxxx <old> <new> / Cxxx <old> <new>
+            'R' | 'C' => {
+                let old_path = parts.next()?.trim();
+                let new_path = parts.next()?.trim();
+                deleted.push(root.join(old_path));
+                modified.push(root.join(new_path));
+            }
+            // A=Added, M=Modified, T=Type changed, etc.
+            _ => {
+                let path_str = parts.next()?.trim();
+                modified.push(root.join(path_str));
+            }
+        }
+    }
+    Some((modified, deleted))
 }
 
 /// Top-level facade that wires together parsing, chunking, indexing,
@@ -252,12 +324,15 @@ impl Engine {
             vec_idx.save(&store.vector_index_path(), &store.file_chunks_path())?;
         }
 
+        // Record the current git HEAD so git_sync() can diff from this point.
+        let git_commit = git_head_commit(&root);
         let idx_meta = IndexMeta {
             version: "0.3.0".to_string(),
             file_count: files.len(),
             chunk_count: total_chunks,
             symbol_count: total_symbols,
             last_indexed: unix_timestamp_string(),
+            git_commit,
         };
         store.save_meta(&idx_meta)?;
 
@@ -1057,7 +1132,125 @@ impl Engine {
         })
     }
 
+    /// Git-aware incremental sync: re-indexes only files that changed since the
+    /// last indexed git commit.
+    ///
+    /// # Algorithm
+    /// 1. Read the `git_commit` stored in `IndexMeta` (written by the last
+    ///    `init` / `save` / `git_sync` that ran in a git repo).
+    /// 2. Query `git rev-parse HEAD` for the current commit.
+    /// 3. If they are equal the index is already up to date — return immediately.
+    /// 4. Run `git diff --name-status <stored_commit>` to get the exact file
+    ///    delta.
+    /// 5. Convert it to [`FileChange`] events and pass them to
+    ///    [`Self::apply_changes`] (single Tantivy commit, single PageRank pass).
+    /// 6. Call [`Self::save`] to persist everything including the new HEAD.
+    ///
+    /// # No-op conditions
+    /// - git is not installed or the project is not in a git repository.
+    /// - The index was created without git (no stored commit).
+    /// - HEAD already equals the stored commit.
+    ///
+    /// In all no-op cases the method returns [`GitSyncStats::unchanged`] = `true`
+    /// and skips all I/O.
+    pub fn git_sync(&mut self) -> Result<GitSyncStats> {
+        use crate::watcher::{ChangeKind, FileChange};
+
+        // Load stored git commit from the persisted meta.
+        let stored_commit = match self.store.load_meta()?.git_commit {
+            Some(c) => c,
+            None => {
+                debug!("git_sync: no stored git commit in meta — skipping");
+                return Ok(GitSyncStats {
+                    unchanged: true,
+                    ..Default::default()
+                });
+            }
+        };
+
+        // Get the current HEAD.
+        let head = match git_head_commit(&self.config.root) {
+            Some(h) => h,
+            None => {
+                debug!("git_sync: git unavailable or not a repo — skipping");
+                return Ok(GitSyncStats {
+                    unchanged: true,
+                    ..Default::default()
+                });
+            }
+        };
+
+        if head == stored_commit {
+            debug!(commit = %head, "git_sync: already up-to-date");
+            return Ok(GitSyncStats {
+                unchanged: true,
+                ..Default::default()
+            });
+        }
+
+        info!(from = %stored_commit, to = %head, "git_sync: computing diff");
+
+        let (modified_paths, deleted_paths) = match git_diff_since(&self.config.root, &stored_commit) {
+            Some(delta) => delta,
+            None => {
+                warn!("git_sync: git diff failed — falling back to no-op");
+                return Ok(GitSyncStats {
+                    unchanged: true,
+                    ..Default::default()
+                });
+            }
+        };
+
+        // Build FileChange list, filtering to supported source files.
+        let mut changes: Vec<FileChange> = Vec::new();
+
+        for path in &modified_paths {
+            if crate::language::detect_language(path).is_some() {
+                changes.push(FileChange {
+                    path: path.clone(),
+                    kind: ChangeKind::Modified,
+                });
+            }
+        }
+        for path in &deleted_paths {
+            changes.push(FileChange {
+                path: path.clone(),
+                kind: ChangeKind::Removed,
+            });
+        }
+
+        let n_modified = changes
+            .iter()
+            .filter(|c| matches!(c.kind, ChangeKind::Modified))
+            .count();
+        let n_removed = changes
+            .iter()
+            .filter(|c| matches!(c.kind, ChangeKind::Removed))
+            .count();
+
+        info!(modified = n_modified, removed = n_removed, "git_sync: applying changes");
+
+        if !changes.is_empty() {
+            self.apply_changes(&changes)?;
+            self.save()?;
+        } else {
+            // Diff produced no indexable changes (e.g. only docs/assets changed).
+            // Still update the stored commit so next call is a true no-op.
+            self.save()?;
+        }
+
+        Ok(GitSyncStats {
+            modified: n_modified,
+            removed: n_removed,
+            unchanged: false,
+        })
+    }
+
     /// Persist current state to disk.
+    ///
+    /// Records the current git HEAD commit (if available) in the stored
+    /// [`IndexMeta`] so that subsequent [`Engine::git_sync`] calls can compute
+    /// the minimal diff rather than doing a full re-index.
     pub fn save(&self) -> Result<()> {
         let sym_bytes = serialize_symbols(&self.symbols)?;
         self.store.save_symbols_bytes(&sym_bytes)?;
@@ -1094,12 +1287,15 @@ impl Engine {
         }
 
         let stats = self.stats();
+        // Record the current git HEAD so git_sync() can diff from this point.
+        let git_commit = git_head_commit(&self.config.root);
         let meta = IndexMeta {
             version: "0.3.0".to_string(),
             file_count: stats.file_count,
             chunk_count: stats.chunk_count,
             symbol_count: stats.symbol_count,
             last_indexed: unix_timestamp_string(),
+            git_commit,
         };
         self.store.save_meta(&meta)?;
 
@@ -1133,12 +1329,25 @@ impl Engine {
             .unwrap_or_default()
     }
 
-    /// Return transitive dependencies of `file_path` up to `depth` hops.
-    pub fn dependencies(&self, file_path: &str, depth: usize) -> Vec<String> {
+    /// Return files that transitively import `file_path` up to `depth` hops.
+    pub fn transitive_callers(&self, file_path: &str, depth: usize) -> Vec<String> {
+        self.graph
+            .as_ref()
+            .map(|g| g.transitive_callers(file_path, depth))
+            .unwrap_or_default()
+    }
+
+    /// Return files that `file_path` transitively imports up to `depth` hops.
+    pub fn transitive_callees(&self, file_path: &str, depth: usize) -> Vec<String> {
         self.graph
             .as_ref()
             .map(|g| g.transitive_callees(file_path, depth))
             .unwrap_or_default()
+    }
+
+    /// Return transitive dependencies of `file_path` up to `depth` hops.
+    pub fn dependencies(&self, file_path: &str, depth: usize) -> Vec<String> {
+        self.transitive_callees(file_path, depth)
     }
 
     /// Return graph statistics, or `None` if the graph has not been built.

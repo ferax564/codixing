@@ -29,7 +29,12 @@ tree-sitter-scala = "0.24"
 tantivy = "0.22"
 
 # Embeddings + vector index
-fastembed = "5"
+# Pin to 5.12 which introduced the `qwen3` candle feature (5.12.0+).
+fastembed = { version = "5.12", default-features = true }
+# candle-core is an optional dep pulled in transitively when fastembed's `qwen3`
+# feature is enabled.  We declare it in the workspace so crates can add it as
+# optional and re-export its Device/DType types without repeating the version.
+candle-core = { version = "0.9.1" }
 usearch = "2"
 
 # Async runtime & HTTP server

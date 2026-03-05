@@ -84,7 +84,7 @@ pub async fn callers_handler(
     let files = if params.depth <= 1 {
         engine.callers(&params.file)
     } else {
-        engine.dependencies(&params.file, params.depth)
+        engine.transitive_callers(&params.file, params.depth)
     };
     let count = files.len();
     Ok(Json(FilesResponse { files, count }))
@@ -99,7 +99,11 @@ pub async fn callees_handler(
     Query(params): Query<FileDepthQuery>,
 ) -> Result<Json<FilesResponse>, ApiError> {
     let engine = state.read().await;
-    let files = engine.callees(&params.file);
+    let files = if params.depth <= 1 {
+        engine.callees(&params.file)
+    } else {
+        engine.transitive_callees(&params.file, params.depth)
+    };
     let count = files.len();
     Ok(Json(FilesResponse { files, count }))
 }
