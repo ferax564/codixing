@@ -144,7 +144,23 @@ Core indexing and BM25 retrieval end-to-end.
 
 ---
 
-## Phase 5: Production Hardening — Planned
+## Phase 6: Ecosystem Expansion — COMPLETE
+
+**Delivered:** March 2026
+**Tests:** 243 total (was 232 — +11 new language tests)
+
+- [x] **Tier 2 language support** — Ruby (tree-sitter-ruby 0.23.1), Swift (tree-sitter-swift 0.7.1), Kotlin (tree-sitter-kotlin-ng 1.1.0), Scala (tree-sitter-scala 0.24.0); full AST entity extraction + import graph integration
+- [x] **Multi-repo support** — `IndexConfig.extra_roots: Vec<PathBuf>`; `normalize_path()` / `resolve_path()` / `all_roots()`; CLI: `codeforge init --also <DIR>`
+- [x] **VS Code / Cursor extension** — 6 commands (index, sync, search, repo map, daemon, MCP register); auto-registers in `~/.claude.json` + `~/.cursor/mcp.json`; status bar indicator
+- [x] **Cross-platform CI** — GitHub Actions matrix: ubuntu-latest / macos-latest / windows-latest; release workflow on `v*` tags for 4 target architectures
+- [x] **Optional Qdrant vector backend** — `VectorBackend` trait abstraction; `QdrantVectorIndex` behind `--features qdrant`; configured via `QDRANT_URL` / `QDRANT_COLLECTION` env vars
+
+---
+
+## Phase 5: Production Hardening — COMPLETE
+
+**Delivered:** March 2026
+**Tests:** 232 total (was 222 — +10 new retrieval quality tests)
 
 **Goal:** Reliability, broader language coverage, and real-world agent integrations.
 
@@ -170,13 +186,14 @@ Core indexing and BM25 retrieval end-to-end.
 - [x] **Retrieval quality test suite** — `tests/retrieval_quality_test.rs`; 10 Recall@k + precision assertions on synthetic codebase
 
 **P2 — Scope expansion**
-- [ ] **Tier 2 language support** — Ruby, Swift, Kotlin, Scala, Zig (tree-sitter grammars exist; need language trait + import resolver implementations)
-- [ ] **Multi-repo support** — index multiple roots, query across them; needed for monorepos and cross-service agent workflows
+- [x] **Tier 2 language support** — Ruby, Swift, Kotlin, Scala (Phase 6)
+- [x] **Multi-repo support** — `extra_roots`, normalize_path, CLI `--also` flag (Phase 6)
 - [ ] **`read_symbol` tool** — return full source of a named function/class (already partially implemented via symbol table + file reader; needs MCP wiring)
+- [ ] **Tier 2 extension** — Zig, PHP (tree-sitter grammars exist)
 
 **P3 — Production ops**
-- [ ] **Cross-platform CI** — Linux, macOS, Windows GitHub Actions matrix
+- [x] **Cross-platform CI** — Linux, macOS, Windows GitHub Actions matrix (Phase 6)
+- [x] **Optional Qdrant backend** — VectorBackend trait + QdrantVectorIndex; `--features qdrant` (Phase 6)
 - [ ] **Comprehensive benchmarks** — automated comparison vs Aider, Cline, Cursor retrieval layers with reproducible harness
-- [ ] **Tier 2 language support** — Ruby, PHP, Swift, Kotlin, Scala, Zig
-- [ ] **Optional Qdrant backend** — for distributed deployments where the index must live outside the binary
+- [ ] **Git-aware incremental init** — `git diff --name-only <last-indexed-commit>`; sub-100ms re-open after pull
 - [ ] **Telemetry** — OpenTelemetry spans for indexing + retrieval latency in production environments

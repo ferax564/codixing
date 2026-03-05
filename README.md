@@ -177,6 +177,7 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 | Tier | Languages |
 |------|-----------|
 | **Tier 1** (full AST + graph) | Rust, Python, TypeScript, TSX, JavaScript, Go, Java, C, C++, C# |
+| **Tier 2** (full AST + graph) | Ruby, Swift, Kotlin, Scala |
 
 ---
 
@@ -253,6 +254,7 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 | **Phase 3: Graph Intelligence** | ✅ Complete | Import graph, PageRank, repo map — 165 tests |
 | **Phase 4: Agent Integration** | ✅ Complete | MCP (10 tools), daemon mode, 2.6× faster init, live watcher — 222 tests |
 | **Phase 5: Production Hardening** | ✅ Complete | Field boosts, band merging, asymmetric RRF, call graph edges, sync, .gitignore walker — 232 tests |
+| **Phase 6: Ecosystem Expansion** | ✅ Complete | Tier 2 languages (Ruby/Swift/Kotlin/Scala), multi-repo, VS Code extension, CI matrix, Qdrant backend — 243 tests |
 
 ---
 
