@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 52" fill="none">
+  <defs>
+    <linearGradient id="iconGrad" x1="0" y1="0" x2="52" y2="52" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#00d4aa"/>
+      <stop offset="100%" stop-color="#0055ff"/>
+    </linearGradient>
+    <linearGradient id="textGrad" x1="0" y1="0" x2="240" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="100%" stop-color="#c8d6e5"/>
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="1.5" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Icon background -->
+  <rect width="52" height="52" rx="11" fill="url(#iconGrad)"/>
+  <!-- Subtle inner highlight -->
+  <rect x="1" y="1" width="50" height="25" rx="10" fill="white" fill-opacity="0.08"/>
+
+  <!-- Left chevron < -->
+  <path d="M22 16L13 26L22 36" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)"/>
+  <!-- Forward slash / -->
+  <line x1="28" y1="15" x2="24" y2="37" stroke="white" stroke-width="3" stroke-linecap="round" filter="url(#glow)"/>
+  <!-- Right chevron > -->
+  <path d="M30 16L39 26L30 36" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)"/>
+
+  <!-- Wordmark -->
+  <text x="64" y="35" font-family="Inter, system-ui, -apple-system, sans-serif" font-weight="700" font-size="22" letter-spacing="-0.8" fill="url(#textGrad)">CodeForge</text>
+</svg>

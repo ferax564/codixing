@@ -8,6 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <style>
     :root {
       --bg: #000000;
@@ -58,10 +59,9 @@
       pointer-events: none;
       z-index: 0;
       background-image:
-        linear-gradient(rgba(0,212,170,0.03) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(0,212,170,0.03) 1px, transparent 1px);
+        linear-gradient(rgba(0,212,170,0.07) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,212,170,0.07) 1px, transparent 1px);
       background-size: 60px 60px;
-      mask-image: radial-gradient(ellipse 80% 50% at 50% 0%, black 30%, transparent 100%);
     }
 
     /* ── Glows ── */
@@ -70,25 +70,25 @@
       border-radius: 50%;
       pointer-events: none;
       z-index: 0;
-      filter: blur(120px);
-      opacity: 0.4;
+      filter: blur(100px);
+      opacity: 1;
     }
     .glow-orb-1 {
-      width: 600px; height: 600px;
-      top: -200px; left: -100px;
-      background: radial-gradient(circle, rgba(0,212,170,0.15) 0%, transparent 70%);
+      width: 700px; height: 700px;
+      top: -250px; left: -150px;
+      background: radial-gradient(circle, rgba(0,212,170,0.38) 0%, transparent 70%);
       animation: drift1 20s ease-in-out infinite alternate;
     }
     .glow-orb-2 {
-      width: 500px; height: 500px;
-      top: 20%; right: -150px;
-      background: radial-gradient(circle, rgba(139,92,246,0.12) 0%, transparent 70%);
+      width: 600px; height: 600px;
+      top: 15%; right: -200px;
+      background: radial-gradient(circle, rgba(139,92,246,0.3) 0%, transparent 70%);
       animation: drift2 25s ease-in-out infinite alternate;
     }
     .glow-orb-3 {
-      width: 400px; height: 400px;
-      bottom: 20%; left: 30%;
-      background: radial-gradient(circle, rgba(0,212,170,0.08) 0%, transparent 70%);
+      width: 500px; height: 500px;
+      bottom: 15%; left: 25%;
+      background: radial-gradient(circle, rgba(0,153,255,0.22) 0%, transparent 70%);
       animation: drift3 18s ease-in-out infinite alternate;
     }
 
@@ -449,9 +449,12 @@
       font-size: 0.82rem;
       line-height: 1.7;
       min-height: 340px;
+      overflow-x: auto;
     }
 
-    .t-line { display: flex; gap: 8px; }
+    .t-line { white-space: nowrap; }
+
+    .t-line { display: flex; gap: 8px; white-space: nowrap; }
     .t-prompt { color: var(--cyan); user-select: none; }
     .t-cmd { color: var(--text); }
     .t-comment { color: var(--text-dim); }
@@ -711,6 +714,11 @@
       overflow: hidden;
     }
 
+    .code-panes-container {
+      position: relative;
+      height: 320px;
+    }
+
     .code-tabs {
       display: flex;
       border-bottom: 1px solid var(--border);
@@ -732,10 +740,15 @@
 
     .code-pane {
       display: none;
+      position: absolute;
+      inset: 0;
       padding: 20px 24px;
       font-family: "JetBrains Mono", monospace;
       font-size: 0.8rem;
       line-height: 1.7;
+      white-space: pre;
+      overflow-x: auto;
+      overflow-y: auto;
     }
 
     .code-pane.active { display: block; }
@@ -825,15 +838,24 @@
     }
 
     .code-window-body {
+      position: relative;
+      height: 380px;
+      overflow: hidden;
+    }
+
+    .code-pane-qs {
+      display: none;
+      position: absolute;
+      inset: 0;
       padding: 24px;
       font-family: "JetBrains Mono", monospace;
       font-size: 0.83rem;
       line-height: 1.75;
+      white-space: pre;
       overflow-x: auto;
-      min-height: 280px;
+      overflow-y: auto;
     }
 
-    .code-pane-qs { display: none; }
     .code-pane-qs.active { display: block; }
 
     .ln { color: var(--text-dim); user-select: none; display: inline-block; width: 28px; text-align: right; margin-right: 16px; }
@@ -928,13 +950,7 @@
   <nav>
     <div class="nav-inner">
       <a class="brand" href="https://github.com/ferax564/codeforge">
-        <div class="brand-icon">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="16 18 22 12 16 6"></polyline>
-            <polyline points="8 6 2 12 8 18"></polyline>
-          </svg>
-        </div>
-        CodeForge
+        <img src="logo.svg" alt="CodeForge" height="32" style="display:block;" />
       </a>
       <div class="nav-links">
         <a href="#demo">How It Works</a>
@@ -1007,7 +1023,7 @@
           <div class="demo-stat-list">
             <div class="demo-stat">
               <div class="demo-stat-icon cyan">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#00d4aa" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#00d4aa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/><path d="M11 8v6M8 11h6"/></svg>
               </div>
               <div class="demo-stat-text">
                 <strong>Hybrid search</strong>
@@ -1016,7 +1032,7 @@
             </div>
             <div class="demo-stat">
               <div class="demo-stat-icon purple">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><path d="M7 12h5l5-5M7 12h5l5 5"/></svg>
               </div>
               <div class="demo-stat-text">
                 <strong>Graph-boosted ranking</strong>
@@ -1025,7 +1041,7 @@
             </div>
             <div class="demo-stat">
               <div class="demo-stat-icon orange">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f97316" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f97316" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/><path d="M7 8h3M7 11h5"/></svg>
               </div>
               <div class="demo-stat-text">
                 <strong>Token-budgeted output</strong>
@@ -1142,7 +1158,7 @@
       <div class="feature-grid">
         <div class="feature-card">
           <div class="feature-icon cyan">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#00d4aa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#00d4aa" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="4" r="2"/><circle cx="4" cy="18" r="2"/><circle cx="20" cy="18" r="2"/><path d="M12 6v4M12 10l-6 6M12 10l6 6"/></svg>
           </div>
           <h3>AST-aware chunking</h3>
           <p>Tree-sitter parsing across 14 languages keeps functions and classes semantically intact. No more mid-function splits corrupting context.</p>
@@ -1150,7 +1166,7 @@
         </div>
         <div class="feature-card" style="--delay:0.07s">
           <div class="feature-icon purple">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3H6a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3h12a3 3 0 0 0 3-3 3 3 0 0 0-3-3z"/></svg>
           </div>
           <h3>Hybrid retrieval</h3>
           <p>BM25 + BGE-Base-EN vector fusion with Reciprocal Rank Fusion. Five strategy levels from <code style="color:var(--cyan);font-size:0.85em">instant</code> to <code style="color:var(--cyan);font-size:0.85em">deep</code> cross-encoder reranking.</p>
@@ -1158,7 +1174,7 @@
         </div>
         <div class="feature-card" style="--delay:0.14s">
           <div class="feature-icon orange">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#f97316" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M6 9v6M15 6H9m6 12H9"/></svg>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#f97316" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><circle cx="19" cy="10" r="2"/><path d="M12 7l-5.5 10M12 7l5.5 11M12 7l7 1M19 12l-12 5.5"/></svg>
           </div>
           <h3>Graph intelligence</h3>
           <p>Import and call graph with iterative PageRank. Callers, callees, and transitive dependency traversal exposed as first-class queries.</p>
@@ -1166,7 +1182,7 @@
         </div>
         <div class="feature-card" style="--delay:0.21s">
           <div class="feature-icon blue">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#0099ff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#0099ff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
           </div>
           <h3>Live index state</h3>
           <p>Hash-based incremental sync, <code style="color:var(--cyan);font-size:0.85em">.gitignore</code>-aware file walking, and daemon watcher keep your index aligned with every save.</p>
@@ -1174,7 +1190,7 @@
         </div>
         <div class="feature-card" style="--delay:0.28s">
           <div class="feature-icon green">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#3fb950" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#3fb950" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 17h6M17 14v6"/><path d="M7 10v4M10 7h4M17 10v4"/></svg>
           </div>
           <h3>MCP-ready</h3>
           <p>10 JSON-RPC 2.0 tools exposed for Claude Code and any MCP-capable client. Auto-registers in <code style="color:var(--cyan);font-size:0.85em">~/.claude.json</code> via VS Code extension.</p>
@@ -1182,7 +1198,7 @@
         </div>
         <div class="feature-card" style="--delay:0.35s">
           <div class="feature-icon pink">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#ec4899" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#ec4899" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
           </div>
           <h3>Zero runtime stack</h3>
           <p>Single statically-linked Rust binary under 50MB. No JVM, no Docker, no external database required. Works on macOS, Linux, and Windows.</p>
@@ -1249,6 +1265,7 @@
             <div class="code-tab" data-pane="search-call">code_search</div>
             <div class="code-tab" data-pane="graph-call">get_references</div>
           </div>
+          <div class="code-panes-container">
           <div class="code-pane active" id="pane-claude-json">
 <span class="c-cmt">// Auto-configured by VS Code extension</span>
 <span class="c-key">{</span>
@@ -1296,6 +1313,7 @@
 <span class="c-cmt">// Returns callers + callees with scores</span>
 <span class="c-ok">// PageRank-sorted by graph centrality</span>
           </div>
+          </div><!-- /code-panes-container -->
         </div>
       </div>
     </div>
@@ -1430,10 +1448,7 @@
   <footer>
     <div class="footer-inner">
       <div class="footer-brand">
-        <div class="brand-icon" style="width:24px;height:24px;border-radius:6px">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
-        </div>
-        CodeForge
+        <img src="logo.svg" alt="CodeForge" height="26" style="display:block;opacity:0.8;" />
       </div>
       <div class="footer-links">
         <a href="https://github.com/ferax564/codeforge">GitHub</a>
