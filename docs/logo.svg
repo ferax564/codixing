@@ -27,5 +27,5 @@
   <path d="M30 16L39 26L30 36" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)"/>
 
   <!-- Wordmark -->
-  <text x="64" y="35" font-family="Inter, system-ui, -apple-system, sans-serif" font-weight="700" font-size="22" letter-spacing="-0.8" fill="url(#textGrad)">CodeForge</text>
+  <text x="64" y="35" font-family="Inter, system-ui, -apple-system, sans-serif" font-weight="700" font-size="22" letter-spacing="-0.8" fill="url(#textGrad)">Codixing</text>
 </svg>
