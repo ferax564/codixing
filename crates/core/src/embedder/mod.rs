@@ -12,6 +12,9 @@ pub const BGE_SMALL_EN_DIMS: usize = 384;
 /// Number of dimensions for BGE Base EN v1.5.
 pub const BGE_BASE_EN_DIMS: usize = 768;
 
+/// Number of dimensions for Jina Embeddings v2 Base Code.
+pub const JINA_EMBED_CODE_DIMS: usize = 768;
+
 /// Wrapper around a fastembed [`TextEmbedding`] model.
 ///
 /// `TextEmbedding::embed` requires `&mut self`, so the model is wrapped in a
@@ -32,6 +35,9 @@ impl Embedder {
         let (fastembed_model, dims) = match model_cfg {
             EmbeddingModel::BgeSmallEn => (FastEmbedModel::BGESmallENV15, BGE_SMALL_EN_DIMS),
             EmbeddingModel::BgeBaseEn => (FastEmbedModel::BGEBaseENV15, BGE_BASE_EN_DIMS),
+            EmbeddingModel::JinaEmbedCode => {
+                (FastEmbedModel::JinaEmbeddingsV2BaseCode, JINA_EMBED_CODE_DIMS)
+            }
         };
 
         info!(?fastembed_model, dims, "loading embedding model");

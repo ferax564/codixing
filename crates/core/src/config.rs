@@ -85,6 +85,9 @@ pub enum EmbeddingModel {
     /// BGE Base English v1.5 — 768 dimensions, higher quality (new default).
     #[default]
     BgeBaseEn,
+    /// Jina Embeddings v2 Base Code — 768 dimensions, optimised for code/text retrieval.
+    /// Trained on code-specific corpora; recommended for pure-code repositories.
+    JinaEmbedCode,
 }
 
 /// Configuration for the vector embedding pipeline.

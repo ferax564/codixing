@@ -152,6 +152,17 @@ enum Command {
         path: PathBuf,
     },
 
+    /// Embed all un-embedded chunks in an existing BM25-only index.
+    ///
+    /// Run this after initialising with `--no-embeddings` to add vector search
+    /// capability without a full re-index.  Only chunks that lack vector
+    /// representations are embedded; existing vectors are not re-computed.
+    Embed {
+        /// Project root to embed (defaults to current directory).
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+
     /// Start the REST API server.
     Serve {
         /// Host to bind to.
@@ -242,6 +253,7 @@ async fn main() -> Result<()> {
         } => cmd_usages(symbol, limit, file),
         Command::Update { path, dry_run } => cmd_update(path, dry_run),
         Command::Sync { path } => cmd_sync(path),
+        Command::Embed { path } => cmd_embed(path),
         Command::Serve { host, port, path } => cmd_serve(host, port, path).await,
     }
 }
@@ -679,6 +691,30 @@ fn cmd_sync(path: PathBuf) -> Result<()> {
         added, modified, removed, unchanged,
         start.elapsed().as_secs_f64(),
     );
+
+    Ok(())
+}
+
+fn cmd_embed(path: PathBuf) -> Result<()> {
+    let root = path
+        .canonicalize()
+        .with_context(|| format!("path not found: {}", path.display()))?;
+
+    let mut engine = Engine::open(&root)
+        .with_context(|| "no index found — run `codeforge init` first")?;
+
+    let start = Instant::now();
+    let embedded = engine.embed_remaining()?;
+
+    if embedded == 0 {
+        eprintln!("all chunks already embedded; nothing to do");
+    } else {
+        eprintln!(
+            "embedded {} chunk(s) in {:.2}s",
+            embedded,
+            start.elapsed().as_secs_f64()
+        );
+    }
 
     Ok(())
 }

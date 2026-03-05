@@ -424,7 +424,7 @@ impl TantivyIndex {
     pub fn search(&self, query_str: &str, limit: usize) -> Result<Vec<(String, f32)>> {
         let searcher = self.reader.searcher();
 
-        let query_parser = QueryParser::for_index(
+        let mut query_parser = QueryParser::for_index(
             &self.index,
             vec![
                 self.fields.content,
@@ -433,6 +433,10 @@ impl TantivyIndex {
                 self.fields.scope_chain,
             ],
         );
+        // Boost exact-name and signature fields so symbol lookups rank above
+        // raw content hits — mirrors what Elasticsearch `multi_match boost` does.
+        query_parser.set_field_boost(self.fields.signature, 3.0);
+        query_parser.set_field_boost(self.fields.entity_names, 2.0);
 
         let query = query_parser.parse_query(query_str)?;
         let top_docs = searcher.search(&query, &TopDocs::with_limit(limit))?;
@@ -461,7 +465,7 @@ impl TantivyIndex {
     ) -> Result<Vec<(f32, tantivy::TantivyDocument)>> {
         let searcher = self.reader.searcher();
 
-        let query_parser = QueryParser::for_index(
+        let mut query_parser = QueryParser::for_index(
             &self.index,
             vec![
                 self.fields.content,
@@ -470,6 +474,8 @@ impl TantivyIndex {
                 self.fields.scope_chain,
             ],
         );
+        query_parser.set_field_boost(self.fields.signature, 3.0);
+        query_parser.set_field_boost(self.fields.entity_names, 2.0);
 
         let query = query_parser.parse_query(query_str)?;
         let top_docs = searcher.search(&query, &TopDocs::with_limit(limit))?;

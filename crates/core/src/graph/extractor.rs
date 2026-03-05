@@ -416,6 +416,129 @@ fn extract_csharp(tree: &Tree, source: &[u8]) -> Vec<RawImport> {
     imports
 }
 
+// ---------------------------------------------------------------------------
+// CallExtractor — function/method call sites
+// ---------------------------------------------------------------------------
+
+/// Extracts the names of called functions/methods from a tree-sitter AST.
+///
+/// Only simple call names are extracted (direct identifiers and the last
+/// segment of qualified calls).  Used to build `EdgeKind::Calls` edges in the
+/// dependency graph.
+pub struct CallExtractor;
+
+impl CallExtractor {
+    /// Walk the AST and return callee names for the given language.
+    pub fn extract_calls(tree: &Tree, source: &[u8], language: Language) -> Vec<String> {
+        match language {
+            Language::Rust => extract_rust_calls(tree, source),
+            Language::Python => extract_python_calls(tree, source),
+            Language::TypeScript | Language::Tsx | Language::JavaScript => {
+                extract_js_calls(tree, source)
+            }
+            Language::Go => extract_go_calls(tree, source),
+            // Java, C, C++, C# — tree-sitter node shapes differ; skip for now.
+            _ => Vec::new(),
+        }
+    }
+}
+
+fn extract_rust_calls(tree: &Tree, source: &[u8]) -> Vec<String> {
+    let mut calls = Vec::new();
+    walk_all(tree.root_node(), &mut |node| {
+        if node.kind() != "call_expression" {
+            return;
+        }
+        if let Some(func) = node.child_by_field_name("function") {
+            let name = match func.kind() {
+                "identifier" => node_text(&func, source).to_string(),
+                "scoped_identifier" => func
+                    .child_by_field_name("name")
+                    .map(|n| node_text(&n, source).to_string())
+                    .unwrap_or_default(),
+                "field_expression" => func
+                    .child_by_field_name("field")
+                    .map(|n| node_text(&n, source).to_string())
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            if !name.is_empty() {
+                calls.push(name);
+            }
+        }
+    });
+    calls
+}
+
+fn extract_python_calls(tree: &Tree, source: &[u8]) -> Vec<String> {
+    let mut calls = Vec::new();
+    walk_all(tree.root_node(), &mut |node| {
+        if node.kind() != "call" {
+            return;
+        }
+        if let Some(func) = node.child_by_field_name("function") {
+            let name = match func.kind() {
+                "identifier" => node_text(&func, source).to_string(),
+                "attribute" => func
+                    .child_by_field_name("attribute")
+                    .map(|n| node_text(&n, source).to_string())
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            if !name.is_empty() {
+                calls.push(name);
+            }
+        }
+    });
+    calls
+}
+
+fn extract_js_calls(tree: &Tree, source: &[u8]) -> Vec<String> {
+    let mut calls = Vec::new();
+    walk_all(tree.root_node(), &mut |node| {
+        if node.kind() != "call_expression" {
+            return;
+        }
+        if let Some(func) = node.child_by_field_name("function") {
+            let name = match func.kind() {
+                "identifier" => node_text(&func, source).to_string(),
+                "member_expression" => func
+                    .child_by_field_name("property")
+                    .map(|n| node_text(&n, source).to_string())
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            if !name.is_empty() {
+                calls.push(name);
+            }
+        }
+    });
+    calls
+}
+
+fn extract_go_calls(tree: &Tree, source: &[u8]) -> Vec<String> {
+    let mut calls = Vec::new();
+    walk_all(tree.root_node(), &mut |node| {
+        if node.kind() != "call_expression" {
+            return;
+        }
+        if let Some(func) = node.child_by_field_name("function") {
+            let name = match func.kind() {
+                "identifier" => node_text(&func, source).to_string(),
+                "selector_expression" => func
+                    .child_by_field_name("field")
+                    .map(|n| node_text(&n, source).to_string())
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            if !name.is_empty() {
+                calls.push(name);
+            }
+        }
+    });
+    calls
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

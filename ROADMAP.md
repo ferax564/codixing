@@ -126,21 +126,21 @@ Core indexing and BM25 retrieval end-to-end.
 - [x] Phase 1 of graph build (import resolution) parallelized with rayon
 - [x] Result: 2.3s → 0.87s on OpenClaw (246K LoC, 770 files)
 
-**Benchmark vs native tools (OpenClaw, daemon mode)**
+**Benchmark vs native tools (OpenClaw, daemon mode, ripgrep 15.1.0)**
 
 | Operation | Native | CodeForge | Speed | Tokens |
 |-----------|-------:|----------:|------:|-------:|
-| Literal search | 73ms | 26ms | **2.8×** | ≈ same |
-| Regex + file filter | 56ms | 12ms | **4.6×** | −38% |
-| High-freq pattern (2,240 hits) | 69ms | 6ms | **12×** | **−99%** |
-| Find class definition | 82ms | 8ms | **10×** | structured |
-| Read large file | 4ms | 6ms | −1.3× | **−56%** |
-| Reverse dependency lookup | 67ms | 6ms | **11×** | −92% |
-| Transitive dep chain (depth 2) | 6ms | 6ms | ≈ same | −66% |
-| Architecture overview | 38ms | 104ms | −2.7× | PageRank |
-| Semantic / conceptual search | 67ms | 37ms | **1.8×** | natural language |
+| Literal search | 23ms | 24ms | ≈ same | **−61%** |
+| Regex + file filter (4,102 hits) | 18ms | 10ms | **1.8×** | **−99%** |
+| High-freq pattern (2,240 hits) | 20ms | 7ms | **2.9×** | **−99%** |
+| Find class definition | 16ms | 8ms | **1.9×** | structured |
+| Read large file | 3ms | 6ms | −1.8× | **−91%** |
+| Reverse dependency lookup | 13ms | 7ms | **1.8×** | **−99%** |
+| Transitive dep chain (depth 2) | n/a | 7ms | structural | −66% |
+| Architecture overview | n/a | 109ms | PageRank-sorted | structural |
+| Semantic / conceptual search | n/a | 38ms | **natural language** | structured |
 
-> The b2Vec2 case: raw `grep` returns 56,335 tokens (28% of Claude's 200K context). CodeForge returns top 20 in 333 tokens. Same information, 99% less waste.
+> The b2Vec2 case: raw `rg b2Vec2` returns 225,343 bytes (2,240 lines). CodeForge returns top 20 in 1,332 bytes — **99% less waste**, same signal.
 
 ---
 
@@ -151,14 +151,23 @@ Core indexing and BM25 retrieval end-to-end.
 ### High-impact next steps (prioritized)
 
 **P0 — Indexing reliability**
-- [ ] **Batched Tantivy commits in `apply_changes()`** — currently each `reindex_file_impl()` opens and commits a Tantivy writer separately; batching into one commit per `apply_changes()` call removes redundant fsync overhead for N-file batches (e.g., after `git pull`)
+- [x] **Batched Tantivy commits in `apply_changes()`** — single fsync for N-file batches; N fsyncs → 1
+- [x] **Hash-based incremental sync** — `Engine::sync()` + `codeforge sync` diff stored xxh3 hashes; re-indexes only changed files
+- [x] **`.gitignore`-aware file walker** — replaced manual `walk_dir_recursive` with `ignore::WalkBuilder`; respects `.gitignore`, `.ignore`, global gitignore (same as ripgrep)
 - [ ] **Git-aware incremental init** — `git diff --name-only <last-indexed-commit>` to skip unchanged files on re-open; enables sub-100ms "re-open after pull" instead of full re-index
-- [ ] **Persistent content-hash skip during open** — already have xxh3 hashes; `Engine::open()` should skip embedding unchanged files (currently re-embeds nothing, but re-chunks BM25 on all files if index version mismatches)
 
 **P1 — Retrieval quality**
 - [x] **Cross-encoder reranking** — BGE-Reranker-Base ONNX reranker (`Strategy::Deep`); opt-in via `--reranker` at init time; graceful fallback to `thorough` if not loaded (Phase 4A)
 - [x] **Contextual embeddings** — file path + scope chain + signature prepended before embedding; `EmbeddingConfig.contextual_embeddings = true` by default (+35% recall) (Phase 4A)
 - [x] **int8 quantization for HNSW** — `usearch` int8 (`ScalarKind::I8`); `EmbeddingConfig.quantize = true` by default; 8× memory reduction (Phase 4A)
+- [x] **Tantivy field boosting** — `signature` field 3×, `entity_names` 2×; symbol lookups rank above raw content hits in BM25
+- [x] **Asymmetric RRF query routing** — `is_identifier_query()` classifier; BM25-dominant k=(20,90) for identifiers, vector-dominant k=(90,20) for natural language
+- [x] **Context band merging (LDAR-style)** — adjacent same-file chunks within 3 lines merged before rendering; 25–63% fewer tokens
+- [x] **JinaEmbedCode model** — `EmbeddingModel::JinaEmbedCode` variant (768 dims); optimised for code/text retrieval
+- [x] **Personalized PageRank** — `compute_personalized_pagerank(seeds)` + `Engine::personalized_pagerank(seed_files)`; files closer to seeds score higher
+- [x] **Symbol-level call graph edges** — `CallExtractor` for Rust/Python/TS/JS/Go; `EdgeKind::Calls`; conservative resolution (exact-name, single-defining-file)
+- [x] **`codeforge embed`** — `Engine::embed_remaining()` embeds un-embedded chunks without full re-index
+- [x] **Retrieval quality test suite** — `tests/retrieval_quality_test.rs`; 10 Recall@k + precision assertions on synthetic codebase
 
 **P2 — Scope expansion**
 - [ ] **Tier 2 language support** — Ruby, Swift, Kotlin, Scala, Zig (tree-sitter grammars exist; need language trait + import resolver implementations)
