@@ -1,9 +1,38 @@
+pub mod qdrant;
+
 use std::collections::HashMap;
 use std::path::Path;
 
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, new_index};
 
 use crate::error::{CodeforgeError, Result};
+
+/// Pluggable vector search backend.
+///
+/// Implement this trait to provide alternative storage for code chunk vectors.
+/// The default implementation is [`VectorIndex`] (usearch HNSW, in-process).
+/// An optional Qdrant backend is available behind `#[cfg(feature = "qdrant")]`.
+pub trait VectorBackend: Send + Sync {
+    /// Add a vector associated with `chunk_id` and `file_path`.
+    fn add(&self, chunk_id: u64, vector: &[f32], file_path: &str) -> Result<()>;
+
+    /// Search for the `k` nearest vectors to `query`.
+    ///
+    /// Returns `(chunk_id, score)` pairs.
+    fn search(&self, query: &[f32], k: usize) -> Result<Vec<(u64, f32)>>;
+
+    /// Remove all vectors associated with `file_path`.
+    fn remove_file(&mut self, file_path: &str) -> Result<()>;
+
+    /// Total number of indexed vectors.
+    fn size(&self) -> usize;
+
+    /// Return the file-to-chunk-id mapping (owned clone, suitable for diagnostics).
+    fn file_chunks_owned(&self) -> HashMap<String, Vec<u64>>;
+
+    /// Persist the index to `dir`.
+    fn save(&self, dir: &Path) -> Result<()>;
+}
 
 /// Approximate nearest-neighbour HNSW index backed by usearch.
 ///
@@ -164,6 +193,42 @@ impl VectorIndex {
     }
 }
 
+impl VectorBackend for VectorIndex {
+    fn add(&self, chunk_id: u64, vector: &[f32], _file_path: &str) -> Result<()> {
+        // Shared-reference add (no file_chunks tracking). Use add_mut for full tracking.
+        let needed = self.inner.size() + 1;
+        self.inner
+            .reserve(needed)
+            .map_err(|e| CodeforgeError::VectorIndex(format!("reserve failed: {e}")))?;
+        self.inner
+            .add(chunk_id, vector)
+            .map_err(|e| CodeforgeError::VectorIndex(format!("add failed: {e}")))?;
+        Ok(())
+    }
+
+    fn search(&self, query: &[f32], k: usize) -> Result<Vec<(u64, f32)>> {
+        VectorIndex::search(self, query, k)
+    }
+
+    fn remove_file(&mut self, file_path: &str) -> Result<()> {
+        VectorIndex::remove_file(self, file_path)
+    }
+
+    fn size(&self) -> usize {
+        self.len()
+    }
+
+    fn file_chunks_owned(&self) -> HashMap<String, Vec<u64>> {
+        self.file_chunks.clone()
+    }
+
+    fn save(&self, dir: &Path) -> Result<()> {
+        let index_path = dir.join("vectors.usearch");
+        let file_chunks_path = dir.join("file_chunks.bin");
+        VectorIndex::save(self, &index_path, &file_chunks_path)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +273,13 @@ mod tests {
         let idx = VectorIndex::new(4, false).unwrap();
         let results = idx.search(&unit_vec(4, 0), 5).unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn vector_index_implements_backend_trait() {
+        // Compile-time check: VectorIndex must satisfy VectorBackend.
+        fn _assert_backend<T: VectorBackend>() {}
+        _assert_backend::<VectorIndex>();
     }
 
     #[test]

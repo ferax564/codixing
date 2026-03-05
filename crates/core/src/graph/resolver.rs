@@ -43,6 +43,10 @@ impl ImportResolver {
                 }
             }
             Language::CSharp => self.resolve_csharp(&raw.path),
+            Language::Ruby => self.resolve_ruby(&raw.path, source_file, raw.is_relative),
+            Language::Swift => None, // Swift module imports are external frameworks.
+            Language::Kotlin => self.resolve_kotlin(&raw.path),
+            Language::Scala => self.resolve_scala(&raw.path),
         }
     }
 
@@ -260,6 +264,89 @@ impl ImportResolver {
         let as_src = format!("src/{as_file}");
         if self.indexed_files.contains(&as_src) {
             return Some(as_src);
+        }
+        None
+    }
+
+    // -------------------------------------------------------------------------
+    // Ruby
+    // -------------------------------------------------------------------------
+
+    fn resolve_ruby(&self, import: &str, source_file: &str, is_relative: bool) -> Option<String> {
+        if is_relative {
+            // `require_relative './lib/foo'` → resolve relative to source file dir.
+            let source_dir = parent_dir(source_file);
+            let joined = join_paths(&source_dir, import);
+            let norm = normalize_path(&joined);
+            // Try as-is, then with `.rb` extension.
+            if self.indexed_files.contains(&norm) {
+                return Some(norm.clone());
+            }
+            let with_ext = format!("{norm}.rb");
+            if self.indexed_files.contains(&with_ext) {
+                return Some(with_ext);
+            }
+        } else {
+            // Absolute require: `require 'lib/foo'` → try `lib/foo.rb`.
+            let as_file = if import.ends_with(".rb") {
+                import.to_string()
+            } else {
+                format!("{import}.rb")
+            };
+            if self.indexed_files.contains(&as_file) {
+                return Some(as_file.clone());
+            }
+            // Also try under `lib/`.
+            let as_lib = format!("lib/{as_file}");
+            if self.indexed_files.contains(&as_lib) {
+                return Some(as_lib);
+            }
+        }
+        None
+    }
+
+    // -------------------------------------------------------------------------
+    // Kotlin
+    // -------------------------------------------------------------------------
+
+    fn resolve_kotlin(&self, import: &str) -> Option<String> {
+        // Strip wildcard: `com.example.*` → `com/example`
+        let stripped = import.trim_end_matches(".*");
+        let path = stripped.replace('.', "/");
+        let as_file = format!("{path}.kt");
+        if self.indexed_files.contains(&as_file) {
+            return Some(as_file.clone());
+        }
+        let as_src = format!("src/{as_file}");
+        if self.indexed_files.contains(&as_src) {
+            return Some(as_src);
+        }
+        let as_main = format!("src/main/kotlin/{as_file}");
+        if self.indexed_files.contains(&as_main) {
+            return Some(as_main);
+        }
+        None
+    }
+
+    // -------------------------------------------------------------------------
+    // Scala
+    // -------------------------------------------------------------------------
+
+    fn resolve_scala(&self, import: &str) -> Option<String> {
+        // Strip wildcard: `com.example._` → `com/example`
+        let stripped = import.trim_end_matches("._");
+        let path = stripped.replace('.', "/");
+        let as_file = format!("{path}.scala");
+        if self.indexed_files.contains(&as_file) {
+            return Some(as_file.clone());
+        }
+        let as_src = format!("src/{as_file}");
+        if self.indexed_files.contains(&as_src) {
+            return Some(as_src);
+        }
+        let as_main = format!("src/main/scala/{as_file}");
+        if self.indexed_files.contains(&as_main) {
+            return Some(as_main);
         }
         None
     }

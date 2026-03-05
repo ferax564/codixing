@@ -96,7 +96,7 @@ async fn main() -> Result<()> {
             let engine = load_engine(&root).await?;
             let engine = Arc::new(Mutex::new(engine));
             info!("CodeForge MCP server ready — listening on stdin");
-            let stdin  = tokio::io::stdin();
+            let stdin = tokio::io::stdin();
             let stdout = tokio::io::stdout();
             run_jsonrpc_loop(
                 engine,
@@ -187,7 +187,10 @@ async fn run_daemon(engine: Arc<Mutex<Engine>>, socket_path: &Path) -> Result<()
                 continue;
             }
 
-            info!(count = changes.len(), "daemon: file changes detected, updating index");
+            info!(
+                count = changes.len(),
+                "daemon: file changes detected, updating index"
+            );
             let mut eng = engine_for_watch.lock().expect("engine lock poisoned");
             if let Err(e) = eng.apply_changes(&changes) {
                 warn!(error = %e, "daemon: apply_changes failed");
@@ -199,10 +202,7 @@ async fn run_daemon(engine: Arc<Mutex<Engine>>, socket_path: &Path) -> Result<()
     });
 
     loop {
-        let (stream, _addr) = listener
-            .accept()
-            .await
-            .context("daemon: accept failed")?;
+        let (stream, _addr) = listener.accept().await.context("daemon: accept failed")?;
 
         let engine_clone = Arc::clone(&engine);
         tokio::spawn(async move {
@@ -214,10 +214,7 @@ async fn run_daemon(engine: Arc<Mutex<Engine>>, socket_path: &Path) -> Result<()
 }
 
 /// Handle one client connection: run a JSON-RPC loop over the socket stream.
-async fn handle_socket_connection(
-    stream: UnixStream,
-    engine: Arc<Mutex<Engine>>,
-) -> Result<()> {
+async fn handle_socket_connection(stream: UnixStream, engine: Arc<Mutex<Engine>>) -> Result<()> {
     let (read_half, write_half) = stream.into_split();
     run_jsonrpc_loop(
         engine,
@@ -246,7 +243,7 @@ async fn run_proxy(socket_path: &Path) -> Result<()> {
 
     // Use into_split() so we can call shutdown() on the write half.
     let (mut sock_read, mut sock_write) = stream.into_split();
-    let mut stdin  = tokio::io::stdin();
+    let mut stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
 
     // Forward stdin → socket, then half-close the write side so the daemon
@@ -315,8 +312,7 @@ where
             Ok(r) => r,
             Err(e) => {
                 warn!(error = %e, "failed to parse JSON-RPC request");
-                let err =
-                    JsonRpcError::internal_error(Value::Null, &format!("Parse error: {e}"));
+                let err = JsonRpcError::internal_error(Value::Null, &format!("Parse error: {e}"));
                 write_line(&mut writer, &err).await?;
                 continue;
             }
@@ -374,11 +370,7 @@ fn handle_tools_list(id: Value) -> Value {
     serde_json::to_value(JsonRpcResponse::new(id, result)).unwrap_or(Value::Null)
 }
 
-async fn handle_tools_call(
-    engine: &Arc<Mutex<Engine>>,
-    id: Value,
-    params: Option<Value>,
-) -> Value {
+async fn handle_tools_call(engine: &Arc<Mutex<Engine>>, id: Value, params: Option<Value>) -> Value {
     let params = match params {
         Some(p) => p,
         None => {
@@ -390,8 +382,7 @@ async fn handle_tools_call(
     let tool_name = match params.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
         None => {
-            let err =
-                JsonRpcError::invalid_params(id, "missing 'name' in tools/call params");
+            let err = JsonRpcError::invalid_params(id, "missing 'name' in tools/call params");
             return serde_json::to_value(err).unwrap_or(Value::Null);
         }
     };

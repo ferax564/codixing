@@ -15,11 +15,11 @@ use crate::config::IndexConfig;
 use crate::embedder::Embedder;
 use crate::error::{CodeforgeError, Result};
 use crate::formatter;
+use crate::graph::extractor::RawImport;
 use crate::graph::{
     CallExtractor, CodeGraph, GraphStats, ImportExtractor, ImportResolver, RepoMapOptions,
     compute_pagerank, generate_repo_map,
 };
-use crate::graph::extractor::RawImport;
 use crate::index::TantivyIndex;
 use crate::language::{Language, SemanticEntity, detect_language};
 use crate::parser::Parser;
@@ -641,8 +641,9 @@ impl Engine {
             self.config.root.join(path)
         };
 
-        let rel_path = abs_path.strip_prefix(&self.config.root).unwrap_or(path);
-        let rel_str = normalize_path(rel_path);
+        let rel_str = self.config.normalize_path(&abs_path).unwrap_or_else(|| {
+            normalize_path(abs_path.strip_prefix(&self.config.root).unwrap_or(path))
+        });
 
         // Remove old data.
         self.tantivy.remove_file(&rel_str)?;
@@ -793,8 +794,9 @@ impl Engine {
 
     /// Remove a file from the index entirely.
     pub fn remove_file(&mut self, path: &Path) -> Result<()> {
-        let rel_path = path.strip_prefix(&self.config.root).unwrap_or(path);
-        let rel_str = normalize_path(rel_path);
+        let rel_str = self.config.normalize_path(path).unwrap_or_else(|| {
+            normalize_path(path.strip_prefix(&self.config.root).unwrap_or(path))
+        });
 
         self.remove_file_inner(path, &rel_str)?;
         self.tantivy.commit()?;
@@ -891,8 +893,14 @@ impl Engine {
                     }
                 }
                 ChangeKind::Removed => {
-                    let rel = change.path.strip_prefix(&self.config.root).unwrap_or(&change.path);
-                    let rel_str = normalize_path(rel);
+                    let rel_str = self.config.normalize_path(&change.path).unwrap_or_else(|| {
+                        normalize_path(
+                            change
+                                .path
+                                .strip_prefix(&self.config.root)
+                                .unwrap_or(&change.path),
+                        )
+                    });
                     if let Err(e) = self.remove_file_inner(&change.path, &rel_str) {
                         warn!(path = %change.path.display(), error = %e, "failed to remove");
                     }
@@ -905,8 +913,11 @@ impl Engine {
 
         // Single PageRank recompute for the entire batch.
         if let Some(ref mut graph) = self.graph {
-            let scores =
-                compute_pagerank(graph, self.config.graph.damping, self.config.graph.iterations);
+            let scores = compute_pagerank(
+                graph,
+                self.config.graph.damping,
+                self.config.graph.iterations,
+            );
             graph.apply_pagerank(&scores);
             let flat = graph.to_flat();
             if let Err(e) = self.store.save_graph(&flat) {
@@ -942,17 +953,14 @@ impl Engine {
             })?
             .clone();
 
-        let vec_idx = self.vector.as_mut().ok_or_else(|| {
-            CodeforgeError::Config("vector index not available".into())
-        })?;
+        let vec_idx = self
+            .vector
+            .as_mut()
+            .ok_or_else(|| CodeforgeError::Config("vector index not available".into()))?;
 
         // Determine which chunk IDs already have vector representations.
-        let embedded: std::collections::HashSet<u64> = vec_idx
-            .file_chunks()
-            .values()
-            .flatten()
-            .copied()
-            .collect();
+        let embedded: std::collections::HashSet<u64> =
+            vec_idx.file_chunks().values().flatten().copied().collect();
 
         let unembedded: Vec<u64> = self
             .chunk_meta
@@ -979,8 +987,8 @@ impl Engine {
     }
 
     pub fn sync(&mut self) -> Result<SyncStats> {
-        use std::collections::{HashMap, HashSet};
         use crate::watcher::{ChangeKind, FileChange};
+        use std::collections::{HashMap, HashSet};
 
         // Load stored hashes (absolute path → xxh3). Missing file → treat as empty (full re-index).
         let old_hashes: HashMap<PathBuf, u64> = self
@@ -1041,7 +1049,12 @@ impl Engine {
             info!("index already up-to-date");
         }
 
-        Ok(SyncStats { added, modified, removed, unchanged })
+        Ok(SyncStats {
+            added,
+            modified,
+            removed,
+            unchanged,
+        })
     }
 
     /// Persist current state to disk.
@@ -1165,9 +1178,7 @@ impl Engine {
             ..query.clone()
         };
 
-        let mut candidates = if let (Some(emb), Some(vec_idx)) =
-            (&self.embedder, &self.vector)
-        {
+        let mut candidates = if let (Some(emb), Some(vec_idx)) = (&self.embedder, &self.vector) {
             let retriever = HybridRetriever::new(
                 &self.tantivy,
                 Arc::clone(emb),
@@ -1195,8 +1206,11 @@ impl Engine {
         }
 
         // Re-sort descending by the new scores.
-        candidates
-            .sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Apply file filter and truncate to requested limit.
         if let Some(ref filter) = query.file_filter {
@@ -1237,7 +1251,10 @@ impl Engine {
         line_start: Option<u64>,
         line_end: Option<u64>,
     ) -> Result<Option<String>> {
-        let abs = self.config.root.join(path);
+        let abs = self
+            .config
+            .resolve_path(path)
+            .unwrap_or_else(|| self.config.root.join(path));
         if !abs.exists() {
             return Ok(None);
         }
@@ -1338,7 +1355,10 @@ impl Engine {
                 }
             }
 
-            let abs = self.config.root.join(rel_path);
+            let abs = self
+                .config
+                .resolve_path(rel_path)
+                .unwrap_or_else(|| self.config.root.join(rel_path));
             let content = match fs::read_to_string(&abs) {
                 Ok(c) => c,
                 Err(e) => {
@@ -1413,8 +1433,10 @@ fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
     let source = fs::read(path)?;
     let result = ctx.parser.parse_file(path, &source)?;
 
-    let rel_path = path.strip_prefix(ctx.root).unwrap_or(path);
-    let rel_str = normalize_path(rel_path);
+    let rel_str = ctx
+        .config
+        .normalize_path(path)
+        .unwrap_or_else(|| normalize_path(path.strip_prefix(ctx.root).unwrap_or(path)));
 
     let chunker = CastChunker;
     let chunks = chunker.chunk(
@@ -1547,44 +1569,65 @@ fn embed_and_index_chunks(
 /// `.git/info/exclude` rules are honoured automatically (same as ripgrep).
 /// The explicit `config.exclude_patterns` are applied as a secondary guard
 /// for repos with incomplete `.gitignore` coverage.
+///
+/// When `config.extra_roots` is non-empty, all extra roots are also walked.
+/// Returned paths are absolute; callers use `config.normalize_path()` to
+/// produce the final relative (possibly-prefixed) string key.
 fn walk_source_files(root: &Path, config: &IndexConfig) -> Result<Vec<PathBuf>> {
     use ignore::WalkBuilder;
 
     let mut files = Vec::new();
-    for entry in WalkBuilder::new(root)
-        .standard_filters(true) // honour .gitignore / .ignore / global gitignore
-        .hidden(true) // skip dot-files not covered by .gitignore
-        .build()
-    {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(e) => {
-                warn!(error = %e, "directory walk error");
+
+    // Helper closure: collect matching files from a single directory tree.
+    let mut collect = |walk_root: &Path| {
+        for entry in WalkBuilder::new(walk_root)
+            .standard_filters(true) // honour .gitignore / .ignore / global gitignore
+            .hidden(true) // skip dot-files not covered by .gitignore
+            .build()
+        {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!(error = %e, "directory walk error");
+                    continue;
+                }
+            };
+            let path = entry.path();
+            if !path.is_file() {
                 continue;
             }
-        };
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        // Secondary guard: explicit exclude patterns (exact path component match).
-        let excluded = path.components().any(|c| {
-            let s = c.as_os_str().to_string_lossy();
-            config.exclude_patterns.iter().any(|p| p == s.as_ref())
-        });
-        if excluded {
-            continue;
-        }
-        if config.languages.is_empty() {
-            if detect_language(path).is_some() {
-                files.push(path.to_path_buf());
+            // Secondary guard: explicit exclude patterns (exact path component match).
+            let excluded = path.components().any(|c| {
+                let s = c.as_os_str().to_string_lossy();
+                config.exclude_patterns.iter().any(|p| p == s.as_ref())
+            });
+            if excluded {
+                continue;
             }
-        } else if let Some(lang) = detect_language(path) {
-            if config.languages.contains(&lang.name().to_lowercase()) {
-                files.push(path.to_path_buf());
+            if config.languages.is_empty() {
+                if detect_language(path).is_some() {
+                    files.push(path.to_path_buf());
+                }
+            } else if let Some(lang) = detect_language(path) {
+                if config.languages.contains(&lang.name().to_lowercase()) {
+                    files.push(path.to_path_buf());
+                }
             }
         }
+    };
+
+    // Walk the primary root.
+    collect(root);
+
+    // Walk any extra roots.
+    for extra in &config.extra_roots {
+        if !extra.exists() {
+            warn!(path = %extra.display(), "extra root does not exist, skipping");
+            continue;
+        }
+        collect(extra);
     }
+
     Ok(files)
 }
 
@@ -1645,13 +1688,17 @@ fn add_call_edges(
 fn build_graph(
     files: &[PathBuf],
     root: &Path,
-    _config: &IndexConfig,
+    config: &IndexConfig,
     parser: &Parser,
     import_cache: &DashMap<String, (Vec<RawImport>, Language)>,
 ) -> CodeGraph {
     let indexed: std::collections::HashSet<String> = files
         .iter()
-        .map(|p| normalize_path(p.strip_prefix(root).unwrap_or(p)))
+        .map(|p| {
+            config
+                .normalize_path(p)
+                .unwrap_or_else(|| normalize_path(p.strip_prefix(root).unwrap_or(p)))
+        })
         .collect();
 
     let resolver = ImportResolver::new(indexed, root.to_path_buf());
@@ -1662,7 +1709,9 @@ fn build_graph(
     let resolved: Vec<ResolvedFile> = files
         .par_iter()
         .filter_map(|abs_path| {
-            let rel_str = normalize_path(abs_path.strip_prefix(root).unwrap_or(abs_path));
+            let rel_str = config
+                .normalize_path(abs_path)
+                .unwrap_or_else(|| normalize_path(abs_path.strip_prefix(root).unwrap_or(abs_path)));
 
             let (raw_imports, language) = if let Some(entry) = import_cache.get(&rel_str) {
                 // Fast path: use imports extracted during process_file (no I/O).
@@ -1677,7 +1726,9 @@ fn build_graph(
                     .ok()?;
                 let lang_support = parser.registry().get(language)?;
                 let mut ts_parser = tree_sitter::Parser::new();
-                ts_parser.set_language(&lang_support.tree_sitter_language()).ok()?;
+                ts_parser
+                    .set_language(&lang_support.tree_sitter_language())
+                    .ok()?;
                 let tree = ts_parser.parse(&source, None)?;
                 (ImportExtractor::extract(&tree, &source, language), language)
             };
@@ -1686,8 +1737,7 @@ fn build_graph(
                 .iter()
                 .filter_map(|raw| {
                     resolver.resolve(raw, &rel_str).map(|target| {
-                        let tl = detect_language(std::path::Path::new(&target))
-                            .unwrap_or(language);
+                        let tl = detect_language(std::path::Path::new(&target)).unwrap_or(language);
                         (target, raw.path.clone(), tl)
                     })
                 })

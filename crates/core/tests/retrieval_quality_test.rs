@@ -15,8 +15,8 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 
-use codeforge_core::{Engine, IndexConfig, SearchQuery, Strategy};
 use codeforge_core::config::EmbeddingConfig;
+use codeforge_core::{Engine, IndexConfig, SearchQuery, Strategy};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -196,12 +196,7 @@ impl VectorIndex {
 }
 
 /// Assert that `expected_file` appears in the top `k` results for `query`.
-fn assert_recall(
-    engine: &Engine,
-    query: &str,
-    expected_file: &str,
-    k: usize,
-) {
+fn assert_recall(engine: &Engine, query: &str, expected_file: &str, k: usize) {
     let results = engine
         .search(SearchQuery {
             query: query.to_string(),
@@ -291,7 +286,10 @@ fn top1_parser_is_parser_file() {
         .unwrap_or_default();
 
     let top = results.first().map(|r| r.file_path.as_str()).unwrap_or("");
-    assert_eq!(top, "src/parser.rs", "top-1 for 'Parser new' should be parser.rs, got {top}");
+    assert_eq!(
+        top, "src/parser.rs",
+        "top-1 for 'Parser new' should be parser.rs, got {top}"
+    );
 }
 
 #[test]

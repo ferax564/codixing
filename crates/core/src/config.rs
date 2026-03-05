@@ -56,6 +56,12 @@ pub struct IndexConfig {
     /// Root directory of the project being indexed.
     pub root: PathBuf,
 
+    /// Additional root directories to index alongside the primary root.
+    /// File paths from extra roots are prefixed with the directory's base name.
+    /// Example: extra root `/home/user/shared-lib` → prefix `shared-lib/`
+    #[serde(default)]
+    pub extra_roots: Vec<PathBuf>,
+
     /// Languages to index (empty = auto-detect all supported).
     #[serde(default)]
     pub languages: HashSet<String>,
@@ -126,6 +132,14 @@ pub struct EmbeddingConfig {
     /// or by setting this field in config.
     #[serde(default)]
     pub reranker_enabled: bool,
+
+    /// Use Qdrant as the vector backend instead of the embedded HNSW index.
+    ///
+    /// Requires the `qdrant` Cargo feature (`--features qdrant`) and a running
+    /// Qdrant instance reachable at `QDRANT_URL` (default `http://localhost:6334`).
+    /// When disabled (the default) the local usearch HNSW index is used.
+    #[serde(default)]
+    pub qdrant_enabled: bool,
 }
 
 impl Default for EmbeddingConfig {
@@ -138,6 +152,7 @@ impl Default for EmbeddingConfig {
             contextual_embeddings: default_contextual_embeddings(),
             quantize: default_quantize(),
             reranker_enabled: false,
+            qdrant_enabled: false,
         }
     }
 }
@@ -210,12 +225,74 @@ impl IndexConfig {
     pub fn new(root: impl AsRef<Path>) -> Self {
         Self {
             root: root.as_ref().to_path_buf(),
+            extra_roots: Vec::new(),
             languages: HashSet::new(),
             exclude_patterns: default_exclude_patterns(),
             chunk: ChunkConfig::default(),
             embedding: EmbeddingConfig::default(),
             graph: GraphConfig::default(),
         }
+    }
+
+    /// Returns an iterator over all roots: primary root first, then extra roots.
+    pub fn all_roots(&self) -> impl Iterator<Item = &PathBuf> {
+        std::iter::once(&self.root).chain(self.extra_roots.iter())
+    }
+
+    /// Given an absolute file path, return the normalized relative string path.
+    ///
+    /// For files under the primary root, no prefix is added (backwards-compatible).
+    /// For files under an extra root, the result is prefixed with the extra root's
+    /// directory base name, e.g. `shared-lib/src/types.rs`.
+    ///
+    /// Returns `None` if the path does not fall under any known root.
+    pub fn normalize_path(&self, abs_path: &Path) -> Option<String> {
+        // Try primary root first (no prefix — backwards-compatible).
+        if let Ok(rel) = abs_path.strip_prefix(&self.root) {
+            return Some(rel.to_string_lossy().replace('\\', "/"));
+        }
+        // Try extra roots (prefix = base name of the extra root directory).
+        for extra in &self.extra_roots {
+            if let Ok(rel) = abs_path.strip_prefix(extra) {
+                let prefix = extra
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| extra.to_string_lossy().into_owned());
+                return Some(format!(
+                    "{}/{}",
+                    prefix,
+                    rel.to_string_lossy().replace('\\', "/")
+                ));
+            }
+        }
+        None
+    }
+
+    /// Resolve a normalized relative path back to an absolute filesystem path.
+    ///
+    /// Tries the primary root first, then each extra root (stripping the prefix).
+    /// Returns `None` if the path cannot be mapped to any root.
+    pub fn resolve_path(&self, rel_path: &str) -> Option<PathBuf> {
+        // Try primary root directly.
+        let primary_abs = self.root.join(rel_path);
+        if primary_abs.exists() {
+            return Some(primary_abs);
+        }
+        // Try extra roots: strip the prefix (base name) and check.
+        for extra in &self.extra_roots {
+            let prefix = extra
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| extra.to_string_lossy().into_owned());
+            let with_slash = format!("{}/", prefix);
+            if let Some(stripped) = rel_path.strip_prefix(&with_slash) {
+                let candidate = extra.join(stripped);
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
     }
 }
 

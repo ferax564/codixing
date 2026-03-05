@@ -480,8 +480,7 @@ mod tests {
 
         // The k-th result should have similarity >= all non-selected vectors.
         let min_topk_sim = results.last().unwrap().similarity;
-        let topk_ids: std::collections::HashSet<u64> =
-            results.iter().map(|r| r.chunk_id).collect();
+        let topk_ids: std::collections::HashSet<u64> = results.iter().map(|r| r.chunk_id).collect();
         for entry in &idx.entries {
             if !topk_ids.contains(&entry.chunk_id) {
                 let sim = BruteForceVectorIndex::cosine_similarity(&query, &entry.vector);

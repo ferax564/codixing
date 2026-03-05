@@ -512,23 +512,21 @@ fn call_grep_code(engine: &Engine, args: &Value) -> (String, bool) {
         None => return ("Missing required argument: pattern".to_string(), true),
     };
 
-    let literal = args.get("literal").and_then(|v| v.as_bool()).unwrap_or(false);
+    let literal = args
+        .get("literal")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let file_glob = args.get("file_glob").and_then(|v| v.as_str());
     let context_lines = args
         .get("context_lines")
         .and_then(|v| v.as_u64())
         .unwrap_or(0)
         .min(5) as usize;
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(50) as usize;
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
 
     match engine.grep_code(pattern, literal, file_glob, context_lines, limit) {
         Err(e) => (format!("grep_code error: {e}"), true),
-        Ok(matches) if matches.is_empty() => {
-            (format!("No matches found for `{pattern}`."), false)
-        }
+        Ok(matches) if matches.is_empty() => (format!("No matches found for `{pattern}`."), false),
         Ok(matches) => (format_grep_matches(pattern, &matches), false),
     }
 }

@@ -3,8 +3,12 @@ pub mod cpp;
 pub mod csharp;
 pub mod go;
 pub mod java;
+pub mod kotlin;
 pub mod python;
+pub mod ruby;
 pub mod rust;
+pub mod scala;
+pub mod swift;
 pub mod typescript;
 
 use std::path::Path;
@@ -25,6 +29,11 @@ pub enum Language {
     C,
     Cpp,
     CSharp,
+    // Tier 2
+    Ruby,
+    Swift,
+    Kotlin,
+    Scala,
 }
 
 impl Language {
@@ -41,6 +50,10 @@ impl Language {
             Self::C => "C",
             Self::Cpp => "C++",
             Self::CSharp => "C#",
+            Self::Ruby => "Ruby",
+            Self::Swift => "Swift",
+            Self::Kotlin => "Kotlin",
+            Self::Scala => "Scala",
         }
     }
 
@@ -57,6 +70,10 @@ impl Language {
             Self::C => &["c", "h"],
             Self::Cpp => &["cpp", "cxx", "cc", "hpp", "hxx", "hh"],
             Self::CSharp => &["cs"],
+            Self::Ruby => &["rb", "rake", "gemspec"],
+            Self::Swift => &["swift"],
+            Self::Kotlin => &["kt", "kts"],
+            Self::Scala => &["scala", "sc"],
         }
     }
 }
@@ -73,6 +90,10 @@ pub const ALL_LANGUAGES: &[Language] = &[
     Language::C,
     Language::Cpp,
     Language::CSharp,
+    Language::Ruby,
+    Language::Swift,
+    Language::Kotlin,
+    Language::Scala,
 ];
 
 /// The kind of semantic entity extracted from an AST.
@@ -134,7 +155,7 @@ pub struct LanguageRegistry {
 }
 
 impl LanguageRegistry {
-    /// Build a registry with all Tier 1 languages.
+    /// Build a registry with all supported languages (Tier 1 + Tier 2).
     pub fn new() -> Self {
         let impls: Vec<Arc<dyn LanguageSupport>> = vec![
             Arc::new(rust::RustLanguage),
@@ -147,6 +168,10 @@ impl LanguageRegistry {
             Arc::new(c::CLanguage),
             Arc::new(cpp::CppLanguage),
             Arc::new(csharp::CSharpLanguage),
+            Arc::new(ruby::RubyLanguage),
+            Arc::new(swift::SwiftLanguage),
+            Arc::new(kotlin::KotlinLanguage),
+            Arc::new(scala::ScalaLanguage),
         ];
         Self { impls }
     }
@@ -260,6 +285,16 @@ mod tests {
         assert_eq!(
             detect_language(Path::new("Program.cs")),
             Some(Language::CSharp)
+        );
+        assert_eq!(detect_language(Path::new("app.rb")), Some(Language::Ruby));
+        assert_eq!(
+            detect_language(Path::new("Main.swift")),
+            Some(Language::Swift)
+        );
+        assert_eq!(detect_language(Path::new("Foo.kt")), Some(Language::Kotlin));
+        assert_eq!(
+            detect_language(Path::new("Bar.scala")),
+            Some(Language::Scala)
         );
     }
 

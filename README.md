@@ -229,6 +229,7 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 | Full-text search | `tantivy` 0.22 | BM25 scoring, inverted index |
 | Vector embeddings | `fastembed` 5 | BGE-Base-EN-v1.5 (768d), local ONNX |
 | Vector index | `usearch` 2 | HNSW approximate nearest-neighbour + int8 quantization |
+| Vector index (Qdrant) | `qdrant-client` 1 | Optional distributed backend; enable with `--features qdrant` |
 | Code graph | `petgraph` 0.8 | `DiGraph` + PageRank |
 | Token counting | `tiktoken-rs` 0.9 | cl100k_base budget enforcement |
 | HTTP server | `axum` 0.8 | Async REST API |

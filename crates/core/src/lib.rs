@@ -22,3 +22,4 @@ pub use error::{CodeforgeError, Result};
 pub use graph::{CodeEdge, CodeGraph, CodeNode, EdgeKind, GraphStats, RepoMapOptions};
 pub use retriever::{ChunkMeta, SearchQuery, SearchResult, Strategy};
 pub use symbols::Symbol;
+pub use vector::VectorBackend;
