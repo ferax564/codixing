@@ -508,7 +508,11 @@ fn cmd_callees(file: String, depth: usize) -> Result<()> {
         )
     })?;
 
-    let callees = engine.callees(&file);
+    let callees = if depth <= 1 {
+        engine.callees(&file)
+    } else {
+        engine.dependencies(&file, depth)
+    };
     if callees.is_empty() {
         eprintln!("No dependencies found for \"{}\"", file);
         return Ok(());
@@ -517,7 +521,6 @@ fn cmd_callees(file: String, depth: usize) -> Result<()> {
     for c in &callees {
         println!("{c}");
     }
-    let _ = depth; // depth not yet used for direct callees (always 1)
     eprintln!("\n{} dependency/dependencies found.", callees.len());
     Ok(())
 }

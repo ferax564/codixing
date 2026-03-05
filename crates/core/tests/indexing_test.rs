@@ -286,3 +286,155 @@ fn normalize_path_prefixes_extra_roots() {
     let abs3 = PathBuf::from("/tmp/other.rs");
     assert_eq!(config.normalize_path(&abs3), None);
 }
+
+/// Verify that Tier 2 languages (Ruby, Swift, Kotlin, Scala) are indexed,
+/// their symbols extracted, and their content is searchable via BM25.
+#[test]
+fn tier2_languages_indexed_and_searchable() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    // Ruby
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("src/user.rb"),
+        r#"
+# Handles user authentication.
+class User
+  def initialize(name)
+    @name = name
+  end
+
+  def authenticate(password)
+    !password.empty?
+  end
+end
+"#,
+    )
+    .unwrap();
+
+    // Swift
+    fs::write(
+        root.join("src/Network.swift"),
+        r#"
+/// Manages HTTP connections.
+class NetworkManager {
+    var baseURL: String
+
+    init(baseURL: String) {
+        self.baseURL = baseURL
+    }
+
+    func fetchData(endpoint: String) -> Data? {
+        return nil
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    // Kotlin
+    fs::write(
+        root.join("src/Repository.kt"),
+        r#"
+/** Data repository for database access. */
+class UserRepository(private val db: Database) {
+    fun findById(id: Int): User? = db.query("SELECT * FROM users WHERE id = $id")
+    fun save(user: User): Boolean = db.execute("INSERT INTO users VALUES (?)", user)
+}
+
+interface Database {
+    fun query(sql: String): Any?
+    fun execute(sql: String, vararg params: Any): Boolean
+}
+"#,
+    )
+    .unwrap();
+
+    // Scala
+    fs::write(
+        root.join("src/Calculator.scala"),
+        r#"
+/** Arithmetic operations. */
+object Calculator {
+  def add(a: Int, b: Int): Int = a + b
+  def multiply(a: Int, b: Int): Int = a * b
+}
+
+trait Numeric {
+  def zero: Int
+  def combine(a: Int, b: Int): Int
+}
+"#,
+    )
+    .unwrap();
+
+    let engine = Engine::init(root, no_embed_config(root)).unwrap();
+    let stats = engine.stats();
+
+    assert_eq!(stats.file_count, 4, "expected all 4 tier-2 files indexed");
+    assert!(stats.chunk_count >= 4, "expected at least 1 chunk per file");
+    assert!(
+        stats.symbol_count >= 4,
+        "expected at least 1 symbol per file, got {}",
+        stats.symbol_count
+    );
+
+    // Symbol lookup for each language.
+    let ruby_syms = engine.symbols("User", None).unwrap();
+    assert!(
+        ruby_syms.iter().any(|s| s.file_path.contains("user.rb")),
+        "expected Ruby class 'User' in symbol table"
+    );
+
+    let swift_syms = engine.symbols("NetworkManager", None).unwrap();
+    assert!(
+        swift_syms
+            .iter()
+            .any(|s| s.file_path.contains("Network.swift")),
+        "expected Swift class 'NetworkManager' in symbol table"
+    );
+
+    let kotlin_syms = engine.symbols("UserRepository", None).unwrap();
+    assert!(
+        kotlin_syms
+            .iter()
+            .any(|s| s.file_path.contains("Repository.kt")),
+        "expected Kotlin class 'UserRepository' in symbol table"
+    );
+
+    let scala_syms = engine.symbols("Calculator", None).unwrap();
+    assert!(
+        scala_syms
+            .iter()
+            .any(|s| s.file_path.contains("Calculator.scala")),
+        "expected Scala object 'Calculator' in symbol table"
+    );
+
+    // BM25 search should find content from all 4 languages.
+    let results = engine
+        .search(
+            SearchQuery::new("authentication password")
+                .with_limit(5)
+                .with_strategy(Strategy::Instant),
+        )
+        .unwrap_or_default();
+    assert!(
+        results.iter().any(|r| r.file_path.contains("user.rb")),
+        "BM25 search for 'authentication' should surface user.rb"
+    );
+
+    let results = engine
+        .search(
+            SearchQuery::new("arithmetic multiply")
+                .with_limit(5)
+                .with_strategy(Strategy::Instant),
+        )
+        .unwrap_or_default();
+    assert!(
+        results
+            .iter()
+            .any(|r| r.file_path.contains("Calculator.scala")),
+        "BM25 search for 'arithmetic multiply' should surface Calculator.scala"
+    );
+}
