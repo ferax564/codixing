@@ -1,0 +1,1193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Docs | Codixing</title>
+  <meta name="description" content="Full documentation for Codixing — installation, CLI reference, search strategies, MCP tools, REST API, and configuration." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <style>
+    :root {
+      --bg: #000000;
+      --bg-1: #0a0a0f;
+      --bg-2: #0d1117;
+      --bg-3: #161b22;
+      --border: rgba(48, 54, 61, 0.8);
+      --border-glow: rgba(0, 212, 170, 0.25);
+      --cyan: #00d4aa;
+      --cyan-dim: rgba(0, 212, 170, 0.08);
+      --cyan-mid: rgba(0, 212, 170, 0.15);
+      --purple: #8b5cf6;
+      --purple-dim: rgba(139, 92, 246, 0.08);
+      --orange: #f97316;
+      --text: #f0f6fc;
+      --text-muted: #8b949e;
+      --text-dim: #484f58;
+      --green: #3fb950;
+      --red: #f85149;
+      --yellow: #e3b341;
+      --radius: 12px;
+      --sidebar-w: 260px;
+      --nav-h: 64px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: "Inter", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.7;
+      overflow-x: hidden;
+    }
+
+    ::selection { background: rgba(0,212,170,0.2); }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 3px; }
+
+    /* ── Nav ── */
+    nav {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 100;
+      height: var(--nav-h);
+      display: flex;
+      align-items: center;
+      padding: 0 24px;
+      background: rgba(0,0,0,0.75);
+      backdrop-filter: blur(20px);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .nav-inner {
+      max-width: 1400px;
+      margin: 0 auto;
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      text-decoration: none;
+      color: var(--text);
+      font-weight: 700;
+      font-size: 1.05rem;
+    }
+
+    .brand-icon {
+      width: 32px; height: 32px;
+      background: linear-gradient(135deg, var(--cyan), #0099ff);
+      border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      box-shadow: 0 0 20px rgba(0,212,170,0.4);
+    }
+
+    .nav-links { display: flex; align-items: center; gap: 4px; }
+    .nav-links a {
+      text-decoration: none;
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      padding: 7px 14px;
+      border-radius: 8px;
+      transition: color 0.2s, background 0.2s;
+    }
+    .nav-links a:hover { color: var(--text); background: var(--bg-3); }
+    .nav-links a.active { color: var(--cyan); }
+
+    .nav-cta {
+      display: flex; align-items: center; gap: 6px;
+      text-decoration: none;
+      color: var(--bg);
+      background: var(--cyan);
+      font-size: 0.88rem;
+      font-weight: 600;
+      padding: 7px 16px;
+      border-radius: 8px;
+      transition: opacity 0.2s, transform 0.2s;
+    }
+    .nav-cta:hover { opacity: 0.9; transform: translateY(-1px); }
+
+    /* ── Layout ── */
+    .docs-layout {
+      display: flex;
+      max-width: 1400px;
+      margin: 0 auto;
+      padding-top: var(--nav-h);
+      min-height: 100vh;
+    }
+
+    /* ── Sidebar ── */
+    .sidebar {
+      width: var(--sidebar-w);
+      flex-shrink: 0;
+      position: sticky;
+      top: var(--nav-h);
+      height: calc(100vh - var(--nav-h));
+      overflow-y: auto;
+      padding: 32px 16px 40px 24px;
+      border-right: 1px solid var(--border);
+    }
+
+    .sidebar::-webkit-scrollbar { width: 4px; }
+
+    .sidebar-group { margin-bottom: 28px; }
+
+    .sidebar-group-label {
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      padding: 0 8px;
+      margin-bottom: 6px;
+    }
+
+    .sidebar a {
+      display: block;
+      text-decoration: none;
+      color: var(--text-muted);
+      font-size: 0.875rem;
+      padding: 5px 8px;
+      border-radius: 6px;
+      transition: color 0.15s, background 0.15s;
+      border-left: 2px solid transparent;
+    }
+
+    .sidebar a:hover { color: var(--text); background: var(--bg-3); }
+    .sidebar a.active { color: var(--cyan); border-left-color: var(--cyan); background: var(--cyan-dim); }
+
+    /* ── Content ── */
+    .docs-content {
+      flex: 1;
+      min-width: 0;
+      padding: 48px 64px 120px 64px;
+      max-width: 860px;
+    }
+
+    /* ── Sections ── */
+    .doc-section { margin-bottom: 80px; scroll-margin-top: calc(var(--nav-h) + 24px); }
+
+    .doc-section h2 {
+      font-size: 1.8rem;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      margin-bottom: 12px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .doc-section h3 {
+      font-size: 1.15rem;
+      font-weight: 600;
+      margin: 36px 0 12px;
+      color: var(--text);
+    }
+
+    .doc-section h4 {
+      font-size: 0.95rem;
+      font-weight: 600;
+      margin: 24px 0 8px;
+      color: var(--cyan);
+      font-family: "JetBrains Mono", monospace;
+    }
+
+    .doc-section p {
+      color: var(--text-muted);
+      margin-bottom: 16px;
+      font-size: 0.97rem;
+    }
+
+    .doc-section ul, .doc-section ol {
+      color: var(--text-muted);
+      font-size: 0.97rem;
+      padding-left: 20px;
+      margin-bottom: 16px;
+    }
+
+    .doc-section li { margin-bottom: 6px; }
+    .doc-section li strong { color: var(--text); }
+
+    /* ── Code ── */
+    code {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.85em;
+      background: var(--bg-3);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 2px 6px;
+      color: var(--cyan);
+    }
+
+    pre {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+      overflow-x: auto;
+      margin: 16px 0 24px;
+      position: relative;
+    }
+
+    pre code {
+      background: none;
+      border: none;
+      padding: 0;
+      font-size: 0.875rem;
+      color: var(--text);
+      line-height: 1.7;
+    }
+
+    .pre-label {
+      font-size: 0.72rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      margin-bottom: 8px;
+      font-family: "JetBrains Mono", monospace;
+    }
+
+    /* ── Syntax colours ── */
+    .tok-comment { color: var(--text-dim); }
+    .tok-key { color: var(--purple); }
+    .tok-str { color: var(--green); }
+    .tok-num { color: var(--orange); }
+    .tok-kw { color: var(--cyan); }
+    .tok-cmd { color: var(--cyan); }
+    .tok-flag { color: var(--yellow); }
+    .tok-out { color: var(--text-muted); }
+
+    /* ── Callout ── */
+    .callout {
+      display: flex;
+      gap: 12px;
+      padding: 14px 18px;
+      border-radius: var(--radius);
+      margin: 20px 0;
+      font-size: 0.92rem;
+    }
+
+    .callout-info { background: var(--cyan-dim); border: 1px solid var(--border-glow); color: var(--text-muted); }
+    .callout-warn { background: rgba(249,115,22,0.08); border: 1px solid rgba(249,115,22,0.25); color: var(--text-muted); }
+    .callout-icon { flex-shrink: 0; font-size: 1rem; margin-top: 1px; }
+
+    /* ── Table ── */
+    .doc-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.88rem;
+      margin: 16px 0 28px;
+    }
+
+    .doc-table th {
+      text-align: left;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text-dim);
+      font-size: 0.75rem;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .doc-table td {
+      padding: 10px 14px;
+      border-bottom: 1px solid rgba(48,54,61,0.4);
+      color: var(--text-muted);
+      vertical-align: top;
+    }
+
+    .doc-table td:first-child { color: var(--text); font-family: "JetBrains Mono", monospace; font-size: 0.82rem; }
+    .doc-table tr:last-child td { border-bottom: none; }
+
+    /* ── Badge ── */
+    .badge {
+      display: inline-block;
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-family: "JetBrains Mono", monospace;
+      vertical-align: middle;
+      margin-left: 6px;
+    }
+
+    .badge-cyan { background: var(--cyan-dim); color: var(--cyan); border: 1px solid var(--border-glow); }
+    .badge-purple { background: var(--purple-dim); color: var(--purple); border: 1px solid rgba(139,92,246,0.25); }
+    .badge-orange { background: rgba(249,115,22,0.08); color: var(--orange); border: 1px solid rgba(249,115,22,0.25); }
+
+    /* ── Strategy grid ── */
+    .strategy-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 12px;
+      margin: 16px 0 28px;
+    }
+
+    .strategy-card {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+      transition: border-color 0.2s;
+    }
+
+    .strategy-card:hover { border-color: var(--cyan); }
+    .strategy-card .s-name { font-family: "JetBrains Mono", monospace; color: var(--cyan); font-size: 0.9rem; font-weight: 600; margin-bottom: 6px; }
+    .strategy-card .s-desc { font-size: 0.82rem; color: var(--text-muted); margin-bottom: 10px; }
+    .strategy-card .s-meta { font-size: 0.75rem; color: var(--text-dim); }
+
+    /* ── Tool card ── */
+    .tool-card {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-bottom: 20px;
+      overflow: hidden;
+    }
+
+    .tool-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-3);
+    }
+
+    .tool-name { font-family: "JetBrains Mono", monospace; font-size: 0.95rem; font-weight: 600; color: var(--cyan); }
+    .tool-desc { font-size: 0.85rem; color: var(--text-muted); margin-left: auto; }
+    .tool-body { padding: 16px 20px; }
+    .tool-body p { font-size: 0.9rem; color: var(--text-muted); margin-bottom: 12px; }
+
+    /* ── Lang grid ── */
+    .lang-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 12px 0 24px;
+    }
+
+    .lang-pill {
+      background: var(--bg-3);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 4px 14px;
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      font-family: "JetBrains Mono", monospace;
+    }
+
+    /* ── Footer ── */
+    .docs-footer {
+      text-align: center;
+      padding: 40px 24px;
+      color: var(--text-dim);
+      font-size: 0.85rem;
+      border-top: 1px solid var(--border);
+    }
+
+    .docs-footer a { color: var(--cyan); text-decoration: none; }
+
+    /* ── Mobile ── */
+    @media (max-width: 900px) {
+      .sidebar { display: none; }
+      .docs-content { padding: 32px 24px 80px; }
+    }
+
+    @media (max-width: 600px) {
+      .nav-links { display: none; }
+      .docs-content { padding: 24px 16px 60px; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Nav -->
+  <nav>
+    <div class="nav-inner">
+      <a class="brand" href="/">
+        <div class="brand-icon">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="16 18 22 12 16 6"></polyline>
+            <polyline points="8 6 2 12 8 18"></polyline>
+          </svg>
+        </div>
+        Codixing
+      </a>
+      <div class="nav-links">
+        <a href="/">Home</a>
+        <a href="/docs" class="active">Docs</a>
+        <a href="https://github.com/ferax564/codixing">GitHub</a>
+      </div>
+      <a class="nav-cta" href="https://github.com/ferax564/codixing">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
+        GitHub
+      </a>
+    </div>
+  </nav>
+
+  <div class="docs-layout">
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-group">
+        <div class="sidebar-group-label">Getting Started</div>
+        <a href="#installation">Installation</a>
+        <a href="#quickstart">Quick Start</a>
+      </div>
+      <div class="sidebar-group">
+        <div class="sidebar-group-label">CLI Reference</div>
+        <a href="#cli-init">init</a>
+        <a href="#cli-search">search</a>
+        <a href="#cli-symbols">symbols</a>
+        <a href="#cli-graph">graph</a>
+        <a href="#cli-callers">callers / callees</a>
+        <a href="#cli-usages">usages</a>
+        <a href="#cli-sync">sync / git-sync</a>
+      </div>
+      <div class="sidebar-group">
+        <div class="sidebar-group-label">Search</div>
+        <a href="#strategies">Strategies</a>
+        <a href="#hybrid">Hybrid Retrieval</a>
+      </div>
+      <div class="sidebar-group">
+        <div class="sidebar-group-label">MCP Integration</div>
+        <a href="#mcp-setup">Setup</a>
+        <a href="#mcp-tools">Tools Reference</a>
+      </div>
+      <div class="sidebar-group">
+        <div class="sidebar-group-label">REST API</div>
+        <a href="#api-search">Search & Symbols</a>
+        <a href="#api-graph">Graph</a>
+        <a href="#api-index">Index</a>
+      </div>
+      <div class="sidebar-group">
+        <div class="sidebar-group-label">Configuration</div>
+        <a href="#config">Index Config</a>
+        <a href="#embeddings">Embeddings</a>
+      </div>
+      <div class="sidebar-group">
+        <div class="sidebar-group-label">Reference</div>
+        <a href="#languages">Language Support</a>
+        <a href="#architecture">Architecture</a>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="docs-content">
+
+      <!-- Installation -->
+      <section class="doc-section" id="installation">
+        <h2>Installation</h2>
+        <p>Codixing is distributed as a Rust workspace. There are no runtime dependencies — the final binary is statically linked and under 50 MB.</p>
+
+        <h3>Build from source</h3>
+        <p>You need the Rust stable toolchain. Install it with <a href="https://rustup.rs" style="color:var(--cyan)">rustup</a> if you haven't already.</p>
+
+        <div class="pre-label">shell</div>
+        <pre><code><span class="tok-comment"># Clone the repository</span>
+git clone https://github.com/ferax564/codixing
+cd codixing
+
+<span class="tok-comment"># Build all binaries with release optimisations</span>
+cargo build --release --workspace
+
+<span class="tok-comment"># Binaries are now at:</span>
+./target/release/codixing       <span class="tok-comment"># CLI</span>
+./target/release/codixing-mcp   <span class="tok-comment"># MCP server</span>
+./target/release/codixing-server <span class="tok-comment"># REST API server</span></code></pre>
+
+        <h3>Optional features</h3>
+        <table class="doc-table">
+          <thead><tr><th>Feature flag</th><th>What it enables</th></tr></thead>
+          <tbody>
+            <tr><td>--features qdrant</td><td>Qdrant vector backend instead of the built-in usearch HNSW index</td></tr>
+            <tr><td>--features qwen3</td><td>Qwen3-Embedding-0.6B via candle (1024-dim, GPU-optional)</td></tr>
+          </tbody>
+        </table>
+
+        <div class="callout callout-info">
+          <span class="callout-icon">ℹ</span>
+          <span>The default build uses BGE-Base-EN-v1.5 (768-dim) via ONNX through fastembed. No GPU or external model server required.</span>
+        </div>
+      </section>
+
+      <!-- Quick Start -->
+      <section class="doc-section" id="quickstart">
+        <h2>Quick Start</h2>
+        <p>Index a repository, search it, and wire it up to Claude Code in under a minute.</p>
+
+        <div class="pre-label">shell</div>
+        <pre><code><span class="tok-comment"># 1. Index your project (BM25 only — instant, no model download)</span>
+<span class="tok-cmd">codixing init</span> . <span class="tok-flag">--no-embeddings</span>
+<span class="tok-out">✓ Indexed 770 files, 14,203 symbols in 0.87s</span>
+
+<span class="tok-comment"># 2. Search with natural language</span>
+<span class="tok-cmd">codixing search</span> "authentication handler"
+<span class="tok-out">► src/auth/handler.rs:42  [score: 0.94]
+pub fn handle_auth_request(req: Request) -&gt; Result&lt;Token&gt;</span>
+
+<span class="tok-comment"># 3. Or with full hybrid (downloads BGE model on first run)</span>
+<span class="tok-cmd">codixing init</span> .
+<span class="tok-cmd">codixing search</span> "authentication handler" <span class="tok-flag">--strategy fast</span></code></pre>
+
+        <h3>Connect to Claude Code</h3>
+        <div class="pre-label">shell</div>
+        <pre><code><span class="tok-comment"># Start MCP daemon (keeps engine warm in memory)</span>
+<span class="tok-cmd">codixing-mcp</span> <span class="tok-flag">--root</span> /path/to/your/project <span class="tok-flag">--daemon</span></code></pre>
+
+        <p>Then add to your <code>~/.claude.json</code>:</p>
+
+        <div class="pre-label">~/.claude.json</div>
+        <pre><code>{
+  <span class="tok-key">"mcpServers"</span>: {
+    <span class="tok-key">"codixing"</span>: {
+      <span class="tok-key">"command"</span>: <span class="tok-str">"/path/to/codixing-mcp"</span>,
+      <span class="tok-key">"args"</span>: [<span class="tok-str">"--root"</span>, <span class="tok-str">"/path/to/your/project"</span>, <span class="tok-str">"--daemon"</span>]
+    }
+  }
+}</code></pre>
+      </section>
+
+      <!-- CLI: init -->
+      <section class="doc-section" id="cli-init">
+        <h2>CLI — <code>init</code></h2>
+        <p>Initialises a Codixing index inside the <code>.codixing/</code> directory at the given path. Safe to re-run — it performs an incremental update on an existing index.</p>
+
+        <div class="pre-label">usage</div>
+        <pre><code>codixing init &lt;PATH&gt; [OPTIONS]</code></pre>
+
+        <table class="doc-table">
+          <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td>--no-embeddings</td><td>false</td><td>Skip vector embedding — BM25 only. Much faster init, no model download.</td></tr>
+            <tr><td>--also &lt;DIR&gt;</td><td>—</td><td>Add an extra root directory to the same index (multi-repo mode).</td></tr>
+            <tr><td>--force</td><td>false</td><td>Wipe and rebuild the index from scratch.</td></tr>
+          </tbody>
+        </table>
+
+        <div class="pre-label">examples</div>
+        <pre><code><span class="tok-comment"># Fast BM25-only index of current directory</span>
+codixing init . --no-embeddings
+
+<span class="tok-comment"># Full hybrid index</span>
+codixing init /path/to/project
+
+<span class="tok-comment"># Multi-repo: index two roots together</span>
+codixing init . --also ../shared-lib</code></pre>
+      </section>
+
+      <!-- CLI: search -->
+      <section class="doc-section" id="cli-search">
+        <h2>CLI — <code>search</code></h2>
+        <p>Query the index with a natural language phrase or symbol name. Results are ranked by score, graph centrality, and deduped with MMR.</p>
+
+        <div class="pre-label">usage</div>
+        <pre><code>codixing search &lt;QUERY&gt; [OPTIONS]</code></pre>
+
+        <table class="doc-table">
+          <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td>--strategy &lt;S&gt;</td><td>fast</td><td>One of: <code>instant</code>, <code>fast</code>, <code>thorough</code>, <code>explore</code>, <code>deep</code></td></tr>
+            <tr><td>--limit &lt;N&gt;</td><td>20</td><td>Maximum number of results to return</td></tr>
+            <tr><td>--tokens &lt;N&gt;</td><td>8000</td><td>Token budget for output (cl100k)</td></tr>
+            <tr><td>--lang &lt;L&gt;</td><td>—</td><td>Filter results to a specific language (e.g. <code>rust</code>, <code>python</code>)</td></tr>
+            <tr><td>--reranker</td><td>false</td><td>Enable cross-encoder reranking (implies <code>deep</code> strategy)</td></tr>
+          </tbody>
+        </table>
+
+        <div class="pre-label">examples</div>
+        <pre><code><span class="tok-comment"># Natural language query, default strategy</span>
+codixing search "parse JWT token"
+
+<span class="tok-comment"># Identifier query — auto-routes to BM25-dominant</span>
+codixing search "TokenVerifier"
+
+<span class="tok-comment"># Thorough hybrid with custom token budget</span>
+codixing search "database connection pool" --strategy thorough --tokens 4000
+
+<span class="tok-comment"># Cross-encoder reranking for highest precision</span>
+codixing search "error handling middleware" --reranker</code></pre>
+      </section>
+
+      <!-- CLI: symbols -->
+      <section class="doc-section" id="cli-symbols">
+        <h2>CLI — <code>symbols</code></h2>
+        <p>Look up definitions (functions, structs, classes, methods) by name. Case-insensitive substring match across all indexed files.</p>
+
+        <div class="pre-label">usage</div>
+        <pre><code>codixing symbols &lt;NAME&gt; [OPTIONS]</code></pre>
+
+        <table class="doc-table">
+          <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td>--kind &lt;K&gt;</td><td>—</td><td>Filter by symbol kind: <code>function</code>, <code>class</code>, <code>struct</code>, <code>method</code>, <code>interface</code></td></tr>
+            <tr><td>--limit &lt;N&gt;</td><td>20</td><td>Max results</td></tr>
+          </tbody>
+        </table>
+
+        <div class="pre-label">examples</div>
+        <pre><code><span class="tok-comment"># Find all symbols named "authenticate"</span>
+codixing symbols authenticate
+
+<span class="tok-comment"># Only structs matching "config"</span>
+codixing symbols config --kind struct</code></pre>
+      </section>
+
+      <!-- CLI: graph -->
+      <section class="doc-section" id="cli-graph">
+        <h2>CLI — <code>graph</code></h2>
+        <p>Display graph statistics and top PageRank-scored files for the indexed repository.</p>
+
+        <div class="pre-label">usage</div>
+        <pre><code>codixing graph [OPTIONS]
+
+<span class="tok-comment"># Show top 20 highest-PageRank files</span>
+codixing graph --top 20</code></pre>
+
+        <div class="pre-label">example output</div>
+        <pre><code><span class="tok-out">Graph: 770 nodes, 4,821 edges
+Top files by PageRank:
+  1.000  src/engine.rs
+  0.742  src/index/bm25.rs
+  0.681  src/retriever/hybrid.rs
+  0.594  src/graph/pagerank.rs
+  ...</span></code></pre>
+      </section>
+
+      <!-- CLI: callers/callees -->
+      <section class="doc-section" id="cli-callers">
+        <h2>CLI — <code>callers</code> / <code>callees</code></h2>
+        <p>Traverse the import and call graph to find who depends on a file, or what a file depends on.</p>
+
+        <div class="pre-label">usage</div>
+        <pre><code>codixing callers &lt;FILE&gt; [--depth &lt;N&gt;]
+codixing callees &lt;FILE&gt; [--depth &lt;N&gt;]</code></pre>
+
+        <table class="doc-table">
+          <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td>--depth &lt;N&gt;</td><td>1</td><td>Traversal depth. <code>--depth 2</code> returns transitive neighbours.</td></tr>
+          </tbody>
+        </table>
+
+        <div class="pre-label">examples</div>
+        <pre><code><span class="tok-comment"># Who imports src/auth/handler.rs?</span>
+codixing callers src/auth/handler.rs
+
+<span class="tok-comment"># What does handler.rs transitively depend on?</span>
+codixing callees src/auth/handler.rs --depth 2
+<span class="tok-out">jwt.rs → crypto.rs → openssl.rs
+handler.rs → db/user.rs → models.rs</span></code></pre>
+      </section>
+
+      <!-- CLI: usages -->
+      <section class="doc-section" id="cli-usages">
+        <h2>CLI — <code>usages</code></h2>
+        <p>Find all files and locations where a symbol is referenced. Combines BM25 with graph-boosted scoring.</p>
+
+        <div class="pre-label">usage</div>
+        <pre><code>codixing usages &lt;SYMBOL&gt; [--limit &lt;N&gt;]</code></pre>
+
+        <div class="pre-label">example</div>
+        <pre><code>codixing usages "HybridRetriever" --limit 10
+<span class="tok-out">► src/retriever/hybrid.rs:14   [def]
+► src/engine.rs:88             [call]
+► tests/retrieval_test.rs:22   [call]</span></code></pre>
+      </section>
+
+      <!-- CLI: sync -->
+      <section class="doc-section" id="cli-sync">
+        <h2>CLI — <code>sync</code> &amp; <code>git-sync</code></h2>
+
+        <h3>sync</h3>
+        <p>Hash-based incremental sync. Walks all files, hashes content (xxh3), and only reindexes files that have changed or been deleted since the last run.</p>
+
+        <div class="pre-label">usage</div>
+        <pre><code>codixing sync [PATH]</code></pre>
+
+        <h3>git-sync</h3>
+        <p>Git-aware incremental sync. Uses <code>git diff --name-status</code> between the last indexed commit and <code>HEAD</code>. Faster than <code>sync</code> on large repos since it only processes files reported by git.</p>
+
+        <div class="pre-label">usage</div>
+        <pre><code>codixing git-sync [PATH]
+
+<span class="tok-out">GitSyncStats { changed: 3, deleted: 1, unchanged: 766 }
+Sync complete in 0.12s</span></code></pre>
+
+        <div class="callout callout-info">
+          <span class="callout-icon">ℹ</span>
+          <span><code>git-sync</code> requires the directory to be a git repository. Falls back gracefully with an error if not.</span>
+        </div>
+      </section>
+
+      <!-- Strategies -->
+      <section class="doc-section" id="strategies">
+        <h2>Search Strategies</h2>
+        <p>Every search command and MCP tool accepts a <code>strategy</code> parameter. Choose based on your latency and precision requirements.</p>
+
+        <div class="strategy-grid">
+          <div class="strategy-card">
+            <div class="s-name">instant</div>
+            <div class="s-desc">BM25 only. No vector scoring, no graph boost.</div>
+            <div class="s-meta">~2ms · zero model required</div>
+          </div>
+          <div class="strategy-card">
+            <div class="s-name">fast</div>
+            <div class="s-desc">BM25 + vector RRF fusion + graph PageRank boost.</div>
+            <div class="s-meta">~10ms · default</div>
+          </div>
+          <div class="strategy-card">
+            <div class="s-name">thorough</div>
+            <div class="s-desc">Same as fast but with MMR deduplication applied.</div>
+            <div class="s-meta">~15ms</div>
+          </div>
+          <div class="strategy-card">
+            <div class="s-name">explore</div>
+            <div class="s-desc">BM25 first-pass then graph neighbour expansion (RepoHyper-style).</div>
+            <div class="s-meta">~20ms · best for architecture queries</div>
+          </div>
+          <div class="strategy-card">
+            <div class="s-name">deep</div>
+            <div class="s-desc">thorough + BGE-Reranker-Base cross-encoder second pass.</div>
+            <div class="s-meta">~80–150ms · highest precision</div>
+          </div>
+        </div>
+
+        <h3>Asymmetric routing</h3>
+        <p>Codixing automatically detects whether a query looks like an identifier (e.g. <code>TokenVerifier</code>, <code>b2Vec2</code>) and adjusts the RRF weights accordingly:</p>
+        <ul>
+          <li><strong>Identifier queries</strong> → BM25-dominant (k=20/90) — exact token match matters more</li>
+          <li><strong>Natural language queries</strong> → vector-dominant (k=90/20) — semantic similarity matters more</li>
+        </ul>
+      </section>
+
+      <!-- Hybrid -->
+      <section class="doc-section" id="hybrid">
+        <h2>Hybrid Retrieval</h2>
+
+        <h3>BM25</h3>
+        <p>Tantivy-powered full-text index with a custom <code>CodeTokenizer</code> that splits on camelCase, snake_case, and punctuation. Field boosts ensure definitions outrank mentions:</p>
+        <ul>
+          <li><strong>signature</strong> field: ×3.0 boost</li>
+          <li><strong>entity_names</strong> field: ×2.0 boost</li>
+          <li><strong>content</strong> field: ×1.0</li>
+        </ul>
+
+        <h3>Vector</h3>
+        <p>BGE-Base-EN-v1.5 (768-dim) embeddings via fastembed ONNX, stored in a usearch HNSW index with int8 quantisation (8× memory reduction). Chunks are embedded with contextual prefixes for better recall:</p>
+
+        <div class="pre-label">contextual prefix format</div>
+        <pre><code><span class="tok-str">"{file_path} | {scope_chain} | {signature}\n{content}"</span></code></pre>
+
+        <h3>Reciprocal Rank Fusion (RRF)</h3>
+        <p>BM25 and vector results are merged with RRF. The formula assigns a score to each candidate based on its rank in each list:</p>
+        <pre><code>score(d) = Σ  1 / (k + rank_i(d))</code></pre>
+
+        <h3>Band merging (LDAR)</h3>
+        <p>Adjacent chunks from the same file within 3 lines of each other are merged before output. This reduces token count by 25–91% on high-hit queries without losing context.</p>
+      </section>
+
+      <!-- MCP Setup -->
+      <section class="doc-section" id="mcp-setup">
+        <h2>MCP — Setup</h2>
+        <p>The <code>codixing-mcp</code> binary implements JSON-RPC 2.0 over stdin/stdout and is compatible with Claude Code and any MCP-capable client.</p>
+
+        <h3>Standard mode</h3>
+        <p>A new engine instance is loaded per invocation. Suitable for occasional use.</p>
+        <div class="pre-label">shell</div>
+        <pre><code>codixing-mcp --root /path/to/project</code></pre>
+
+        <h3>Daemon mode</h3>
+        <p>The first invocation starts a background daemon that holds the engine in memory and serves subsequent calls over a Unix socket (<code>.codixing/daemon.sock</code>). This gives 4–5× faster throughput on cheap operations.</p>
+        <div class="pre-label">shell</div>
+        <pre><code>codixing-mcp --root /path/to/project --daemon</code></pre>
+
+        <h3>Auto-init</h3>
+        <p>If no index exists at <code>--root</code>, the MCP server automatically runs <code>init --no-embeddings</code> before serving the first request. No manual setup required when connecting from Claude Code.</p>
+
+        <h3>VS Code / Cursor extension</h3>
+        <p>Install the extension from <code>editors/vscode/</code>. It exposes 6 commands and auto-writes the MCP server entry to both <code>~/.claude.json</code> and <code>~/.cursor/mcp.json</code>.</p>
+      </section>
+
+      <!-- MCP Tools -->
+      <section class="doc-section" id="mcp-tools">
+        <h2>MCP — Tools Reference</h2>
+        <p>All tools are called via JSON-RPC 2.0 <code>tools/call</code> with a <code>name</code> and <code>arguments</code> object.</p>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name">code_search</span>
+            <span class="tool-desc">Hybrid search across all strategies</span>
+          </div>
+          <div class="tool-body">
+            <p>The primary retrieval tool. Runs BM25 + vector fusion with optional graph boost and MMR deduplication.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"query"</span>:    <span class="tok-str">"authentication middleware"</span>,  <span class="tok-comment">// required</span>
+  <span class="tok-key">"strategy"</span>: <span class="tok-str">"fast"</span>,                     <span class="tok-comment">// instant|fast|thorough|explore|deep</span>
+  <span class="tok-key">"limit"</span>:    <span class="tok-num">20</span>,
+  <span class="tok-key">"tokens"</span>:   <span class="tok-num">8000</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name">find_symbol</span>
+            <span class="tool-desc">Case-insensitive definition lookup</span>
+          </div>
+          <div class="tool-body">
+            <p>Searches the symbol table for definitions matching the given name. Returns file path, line number, kind, and signature.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"name"</span>: <span class="tok-str">"HybridRetriever"</span>,
+  <span class="tok-key">"kind"</span>: <span class="tok-str">"struct"</span>  <span class="tok-comment">// optional: function|class|struct|method|interface</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name">read_symbol</span>
+            <span class="tool-desc">Full source of any symbol by name</span>
+          </div>
+          <div class="tool-body">
+            <p>Returns the complete source block for a symbol (function body, struct definition, class, etc.), token-budgeted.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"name"</span>:   <span class="tok-str">"handle_auth_request"</span>,
+  <span class="tok-key">"tokens"</span>: <span class="tok-num">4000</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name">get_repo_map</span>
+            <span class="tool-desc">Token-budgeted PageRank architecture map</span>
+          </div>
+          <div class="tool-body">
+            <p>Returns an Aider-style repository map: files sorted by PageRank with their top-level symbol signatures. Excellent for giving an agent a high-level orientation of a codebase.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"tokens"</span>: <span class="tok-num">4000</span>,
+  <span class="tok-key">"seed_files"</span>: [<span class="tok-str">"src/engine.rs"</span>]  <span class="tok-comment">// optional: personalised PageRank seed</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name">get_references</span>
+            <span class="tool-desc">Callers + callees for any file</span>
+          </div>
+          <div class="tool-body">
+            <p>Returns the direct import/call graph neighbours of a file — who imports it, and what it imports.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"file"</span>:  <span class="tok-str">"src/auth/handler.rs"</span>,
+  <span class="tok-key">"depth"</span>: <span class="tok-num">1</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name">get_transitive_deps</span>
+            <span class="tool-desc">Blast-radius multi-hop traversal</span>
+          </div>
+          <div class="tool-body">
+            <p>Returns all transitive dependencies (or dependents) of a file up to the specified depth. Useful for impact analysis before a refactor.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"file"</span>:      <span class="tok-str">"src/index/bm25.rs"</span>,
+  <span class="tok-key">"direction"</span>: <span class="tok-str">"callers"</span>,  <span class="tok-comment">// "callers" | "callees"</span>
+  <span class="tok-key">"depth"</span>:     <span class="tok-num">3</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name">search_usages</span>
+            <span class="tool-desc">All usage locations for a symbol</span>
+          </div>
+          <div class="tool-body">
+            <p>Combines BM25 with graph boost to find every location a symbol is referenced across the codebase.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"symbol"</span>: <span class="tok-str">"PageRank"</span>,
+  <span class="tok-key">"limit"</span>:  <span class="tok-num">30</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name">grep_code</span>
+            <span class="tool-desc">Regex/literal search with context lines</span>
+          </div>
+          <div class="tool-body">
+            <p>Token-budgeted grep with match highlighting, context lines, and glob filtering. Designed for LLM consumption — far more efficient than raw <code>rg</code> output.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"pattern"</span>:  <span class="tok-str">"fn handle_\\w+"</span>,
+  <span class="tok-key">"glob"</span>:     <span class="tok-str">"**/*.rs"</span>,     <span class="tok-comment">// optional file filter</span>
+  <span class="tok-key">"context"</span>:  <span class="tok-num">2</span>,              <span class="tok-comment">// lines before/after match</span>
+  <span class="tok-key">"literal"</span>:  <span class="tok-num">false</span>,          <span class="tok-comment">// true = treat pattern as literal string</span>
+  <span class="tok-key">"tokens"</span>:   <span class="tok-num">4000</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name">read_file</span>
+            <span class="tool-desc">Raw source with optional line range</span>
+          </div>
+          <div class="tool-body">
+            <p>Returns the raw source of a file, optionally sliced to a line range. Respects the token budget.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"path"</span>:       <span class="tok-str">"src/engine.rs"</span>,
+  <span class="tok-key">"start_line"</span>: <span class="tok-num">80</span>,   <span class="tok-comment">// optional</span>
+  <span class="tok-key">"end_line"</span>:   <span class="tok-num">140</span>,  <span class="tok-comment">// optional</span>
+  <span class="tok-key">"tokens"</span>:     <span class="tok-num">4000</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name">index_status</span>
+            <span class="tool-desc">Diagnostic report with full index stats</span>
+          </div>
+          <div class="tool-body">
+            <p>Returns a snapshot of the current index state: file count, symbol count, vector count, graph node/edge counts, last sync commit, and strategy availability.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{}  <span class="tok-comment">// no parameters required</span></code></pre>
+          </div>
+        </div>
+      </section>
+
+      <!-- API: Search -->
+      <section class="doc-section" id="api-search">
+        <h2>REST API — Search &amp; Symbols</h2>
+        <p>Start the server with <code>codixing-server --root /path/to/project</code>. Defaults to <code>http://localhost:3000</code>.</p>
+
+        <h4>POST /search</h4>
+        <div class="pre-label">request</div>
+        <pre><code>{
+  <span class="tok-key">"query"</span>:    <span class="tok-str">"authentication middleware"</span>,
+  <span class="tok-key">"strategy"</span>: <span class="tok-str">"fast"</span>,
+  <span class="tok-key">"limit"</span>:    <span class="tok-num">20</span>,
+  <span class="tok-key">"tokens"</span>:   <span class="tok-num">8000</span>
+}</code></pre>
+
+        <h4>GET /symbols?name=&lt;NAME&gt;&amp;kind=&lt;KIND&gt;</h4>
+        <div class="pre-label">example</div>
+        <pre><code>GET /symbols?name=authenticate&kind=function</code></pre>
+
+        <h4>GET /health</h4>
+        <p>Returns <code>200 OK</code> with <code>{"status":"ok"}</code> when the engine is ready.</p>
+
+        <h4>GET /status</h4>
+        <p>Returns full index statistics: file count, symbol count, vector count, graph stats.</p>
+      </section>
+
+      <!-- API: Graph -->
+      <section class="doc-section" id="api-graph">
+        <h2>REST API — Graph</h2>
+
+        <h4>POST /graph/repo-map</h4>
+        <div class="pre-label">request</div>
+        <pre><code>{
+  <span class="tok-key">"tokens"</span>:     <span class="tok-num">4000</span>,
+  <span class="tok-key">"seed_files"</span>: [<span class="tok-str">"src/engine.rs"</span>]
+}</code></pre>
+
+        <h4>GET /graph/callers?file=&lt;PATH&gt;&amp;depth=&lt;N&gt;</h4>
+        <h4>GET /graph/callees?file=&lt;PATH&gt;&amp;depth=&lt;N&gt;</h4>
+        <h4>GET /graph/stats</h4>
+        <p>Returns node count, edge count, and the top 10 files by PageRank score.</p>
+      </section>
+
+      <!-- API: Index -->
+      <section class="doc-section" id="api-index">
+        <h2>REST API — Index</h2>
+
+        <h4>POST /index/reindex</h4>
+        <p>Triggers a full incremental sync (equivalent to <code>codixing sync</code>).</p>
+
+        <h4>POST /index/file</h4>
+        <div class="pre-label">request</div>
+        <pre><code>{
+  <span class="tok-key">"path"</span>: <span class="tok-str">"src/auth/handler.rs"</span>
+}</code></pre>
+        <p>Re-indexes a single file. Used by editor integrations on save.</p>
+      </section>
+
+      <!-- Config -->
+      <section class="doc-section" id="config">
+        <h2>Configuration</h2>
+        <p>Codixing stores its index in a <code>.codixing/</code> directory at the repository root. There is no config file required — all defaults are sensible. Advanced tuning is done via <code>IndexConfig</code> in library usage.</p>
+
+        <h3>IndexConfig fields</h3>
+        <table class="doc-table">
+          <thead><tr><th>Field</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td>root</td><td>—</td><td>Primary repository root path</td></tr>
+            <tr><td>extra_roots</td><td>[]</td><td>Additional roots for multi-repo indexing</td></tr>
+            <tr><td>chunk_config</td><td>—</td><td>Max chunk tokens, overlap lines</td></tr>
+            <tr><td>embedding_config</td><td>—</td><td>Model selection, batch size</td></tr>
+            <tr><td>graph_config</td><td>—</td><td>PageRank damping, max iterations</td></tr>
+          </tbody>
+        </table>
+
+        <h3>.codixing/ directory layout</h3>
+        <div class="pre-label">directory</div>
+        <pre><code>.codixing/
+├── index/          <span class="tok-comment"># Tantivy BM25 index segments</span>
+├── vectors/        <span class="tok-comment"># usearch HNSW index + id map</span>
+├── graph/
+│   └── graph.bin   <span class="tok-comment"># petgraph bitcode serialisation</span>
+├── symbols.bin     <span class="tok-comment"># DashMap symbol table (bitcode)</span>
+└── meta.bin        <span class="tok-comment"># IndexMeta: file hashes, last git commit</span></code></pre>
+      </section>
+
+      <!-- Embeddings -->
+      <section class="doc-section" id="embeddings">
+        <h2>Embeddings</h2>
+
+        <h3>BGE-Base-EN-v1.5 (default)</h3>
+        <p>768-dimensional embeddings via fastembed ONNX. Downloaded automatically on first <code>init</code> (no <code>--no-embeddings</code> flag). Stored in the system model cache. int8 quantised at index time.</p>
+
+        <h3>Qwen3-Embedding-0.6B <span class="badge badge-orange">feature flag</span></h3>
+        <p>1024-dimensional embeddings via candle. Requires building with <code>--features qwen3</code>. Suitable for GPU-accelerated environments or when higher-dimensional representations are preferred.</p>
+        <div class="pre-label">shell</div>
+        <pre><code>cargo build --release --features qwen3
+codixing init . --embedding-model qwen3</code></pre>
+
+        <h3>Qdrant backend <span class="badge badge-purple">feature flag</span></h3>
+        <p>Replaces the built-in usearch HNSW index with an external Qdrant instance. Useful for team deployments where the vector index is shared.</p>
+        <div class="pre-label">shell</div>
+        <pre><code>cargo build --release --features qdrant
+QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=codixing codixing init .</code></pre>
+      </section>
+
+      <!-- Languages -->
+      <section class="doc-section" id="languages">
+        <h2>Language Support</h2>
+        <p>Codixing uses tree-sitter for AST-aware parsing. All 14 languages below get full chunking, symbol extraction, and import graph edges.</p>
+
+        <h3>Tier 1 — Full support</h3>
+        <div class="lang-grid">
+          <span class="lang-pill">Rust</span>
+          <span class="lang-pill">Python</span>
+          <span class="lang-pill">TypeScript</span>
+          <span class="lang-pill">TSX</span>
+          <span class="lang-pill">JavaScript</span>
+          <span class="lang-pill">Go</span>
+          <span class="lang-pill">Java</span>
+          <span class="lang-pill">C</span>
+          <span class="lang-pill">C++</span>
+          <span class="lang-pill">C#</span>
+        </div>
+
+        <h3>Tier 2 — Full support</h3>
+        <div class="lang-grid">
+          <span class="lang-pill">Ruby</span>
+          <span class="lang-pill">Swift</span>
+          <span class="lang-pill">Kotlin</span>
+          <span class="lang-pill">Scala</span>
+        </div>
+
+        <p>Files in unsupported languages are indexed with a line-based fallback chunker — they appear in BM25 results but not in the symbol table or graph.</p>
+
+        <div class="callout callout-info">
+          <span class="callout-icon">ℹ</span>
+          <span>Zig and PHP are planned for the next roadmap phase. The <code>.gitignore</code>-aware walker (via the <code>ignore</code> crate, same as ripgrep) automatically skips build artefacts, vendor directories, and binary files.</span>
+        </div>
+      </section>
+
+      <!-- Architecture -->
+      <section class="doc-section" id="architecture">
+        <h2>Architecture</h2>
+        <p>Codixing is a Rust workspace with four crates:</p>
+
+        <table class="doc-table">
+          <thead><tr><th>Crate</th><th>Role</th></tr></thead>
+          <tbody>
+            <tr><td>core</td><td>Engine library — all retrieval, indexing, graph, and embedding logic</td></tr>
+            <tr><td>cli</td><td>Binary wrapping core with clap subcommands</td></tr>
+            <tr><td>server</td><td>Axum REST API server exposing core over HTTP</td></tr>
+            <tr><td>mcp</td><td>JSON-RPC 2.0 stdin/stdout MCP server for Claude Code</td></tr>
+          </tbody>
+        </table>
+
+        <h3>Retrieval pipeline</h3>
+        <div class="pre-label">data flow</div>
+        <pre><code>Query
+  │
+  ├─► BM25Retriever (Tantivy)
+  │     └─ CodeTokenizer → camelCase/snake_case split
+  │     └─ Field boosts: signature ×3, entity_names ×2
+  │
+  ├─► VectorRetriever (usearch HNSW)
+  │     └─ BGE-Base-EN-v1.5 (fastembed ONNX)
+  │     └─ Contextual prefix embedding
+  │
+  ├─► RRF Fusion (asymmetric k weights)
+  │
+  ├─► Graph boost: score *= 1 + 0.3 * pagerank
+  │
+  ├─► MMR deduplication (thorough+)
+  │
+  └─► Band merge + token budget → formatted output</code></pre>
+
+        <h3>Key design constraints</h3>
+        <ul>
+          <li><strong>tree_sitter::Parser is !Send</strong> — a fresh parser is created per call, never stored in structs.</li>
+          <li><strong>petgraph NodeIndex is fragile</strong> — <code>remove_node()</code> does a swap-remove; always keep <code>path_to_node: HashMap</code> in sync.</li>
+          <li><strong>bitcode serialisation</strong> — uses <code>bitcode::serialize/deserialize</code> (serde feature), not <code>encode/decode</code>.</li>
+        </ul>
+      </section>
+
+    </main>
+  </div>
+
+  <footer class="docs-footer">
+    <p>Codixing is open source under the MIT License. <a href="https://github.com/ferax564/codixing">View on GitHub</a> · <a href="/">Back to home</a></p>
+  </footer>
+
+  <script>
+    // ── Scrollspy: highlight sidebar link matching visible section ──
+    const sections = document.querySelectorAll('.doc-section');
+    const sidebarLinks = document.querySelectorAll('.sidebar a');
+
+    const spy = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          const id = entry.target.id;
+          sidebarLinks.forEach(a => {
+            a.classList.toggle('active', a.getAttribute('href') === '#' + id);
+          });
+        }
+      });
+    }, { rootMargin: '-64px 0px -60% 0px', threshold: 0 });
+
+    sections.forEach(s => spy.observe(s));
+  </script>
+</body>
+</html>
