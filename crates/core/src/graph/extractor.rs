@@ -31,6 +31,10 @@ impl ImportExtractor {
             Language::Java => extract_java(tree, source),
             Language::C | Language::Cpp => extract_c(tree, source, language),
             Language::CSharp => extract_csharp(tree, source),
+            Language::Ruby => extract_ruby(tree, source),
+            Language::Swift => extract_swift(tree, source),
+            Language::Kotlin => extract_kotlin(tree, source),
+            Language::Scala => extract_scala(tree, source),
         }
     }
 }
@@ -411,6 +415,184 @@ fn extract_csharp(tree: &Tree, source: &[u8]) -> Vec<RawImport> {
                     is_relative: false,
                 });
             }
+        }
+    });
+    imports
+}
+
+// ---------------------------------------------------------------------------
+// Ruby
+// ---------------------------------------------------------------------------
+
+fn extract_ruby(tree: &Tree, source: &[u8]) -> Vec<RawImport> {
+    let mut imports = Vec::new();
+    walk_all(tree.root_node(), &mut |node| {
+        if node.kind() != "call" {
+            return;
+        }
+        // Look for `require`, `require_relative`, or `include` method calls.
+        let method_text = node
+            .child_by_field_name("method")
+            .map(|n| node_text(&n, source))
+            .unwrap_or("");
+        match method_text {
+            "require" | "require_relative" => {
+                let is_relative = method_text == "require_relative";
+                if let Some(args) = node.child_by_field_name("arguments") {
+                    let mut c = args.walk();
+                    for arg in args.named_children(&mut c) {
+                        if arg.kind() == "string" || arg.kind() == "string_content" {
+                            let raw = node_text(&arg, source);
+                            let path = strip_quotes(raw.trim());
+                            if !path.is_empty() {
+                                imports.push(RawImport {
+                                    path: path.to_string(),
+                                    language: Language::Ruby,
+                                    is_relative,
+                                });
+                            }
+                        } else {
+                            // May be a bare string node with string_content children.
+                            let mut ic = arg.walk();
+                            for inner in arg.children(&mut ic) {
+                                if inner.kind() == "string_content" {
+                                    let path = node_text(&inner, source);
+                                    if !path.is_empty() {
+                                        imports.push(RawImport {
+                                            path: path.to_string(),
+                                            language: Language::Ruby,
+                                            is_relative,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "include" => {
+                // `include Module` — constant reference.
+                if let Some(args) = node.child_by_field_name("arguments") {
+                    let mut c = args.walk();
+                    for arg in args.named_children(&mut c) {
+                        let t = node_text(&arg, source).trim().to_string();
+                        if !t.is_empty() {
+                            imports.push(RawImport {
+                                path: t,
+                                language: Language::Ruby,
+                                is_relative: false,
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    });
+    imports
+}
+
+// ---------------------------------------------------------------------------
+// Swift
+// ---------------------------------------------------------------------------
+
+fn extract_swift(tree: &Tree, source: &[u8]) -> Vec<RawImport> {
+    let mut imports = Vec::new();
+    walk_all(tree.root_node(), &mut |node| {
+        if node.kind() != "import_declaration" {
+            return;
+        }
+        // `import Foundation` or `import class UIKit.UIView`
+        let text = node_text(&node, source).trim().to_string();
+        // Strip leading `import` keyword and optional access-kind (class, struct, …).
+        let after_import = text.strip_prefix("import").unwrap_or("").trim();
+        // Strip optional access kind: class, struct, enum, protocol, typealias, func, var, let.
+        let module = strip_swift_access_kind(after_import);
+        if !module.is_empty() {
+            // The first component (before any `.`) is the module name.
+            let module_name = module.split('.').next().unwrap_or(module);
+            imports.push(RawImport {
+                path: module_name.to_string(),
+                language: Language::Swift,
+                is_relative: false,
+            });
+        }
+    });
+    imports
+}
+
+/// Strip an optional Swift import access kind from an import path token.
+fn strip_swift_access_kind(s: &str) -> &str {
+    const ACCESS_KINDS: &[&str] = &[
+        "class ",
+        "struct ",
+        "enum ",
+        "protocol ",
+        "typealias ",
+        "func ",
+        "var ",
+        "let ",
+    ];
+    for ak in ACCESS_KINDS {
+        if let Some(rest) = s.strip_prefix(ak) {
+            return rest.trim();
+        }
+    }
+    s
+}
+
+// ---------------------------------------------------------------------------
+// Kotlin
+// ---------------------------------------------------------------------------
+
+fn extract_kotlin(tree: &Tree, source: &[u8]) -> Vec<RawImport> {
+    let mut imports = Vec::new();
+    walk_all(tree.root_node(), &mut |node| {
+        if node.kind() != "import_header" {
+            return;
+        }
+        // `import com.example.Foo` or `import com.example.*`
+        let text = node_text(&node, source).trim().to_string();
+        let path = text
+            .strip_prefix("import ")
+            .unwrap_or("")
+            .trim_end_matches(';')
+            .trim()
+            .to_string();
+        if !path.is_empty() {
+            imports.push(RawImport {
+                path,
+                language: Language::Kotlin,
+                is_relative: false,
+            });
+        }
+    });
+    imports
+}
+
+// ---------------------------------------------------------------------------
+// Scala
+// ---------------------------------------------------------------------------
+
+fn extract_scala(tree: &Tree, source: &[u8]) -> Vec<RawImport> {
+    let mut imports = Vec::new();
+    walk_all(tree.root_node(), &mut |node| {
+        if node.kind() != "import_declaration" {
+            return;
+        }
+        // `import com.example.Foo` or `import com.example._`
+        let text = node_text(&node, source).trim().to_string();
+        let path = text
+            .strip_prefix("import ")
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !path.is_empty() {
+            imports.push(RawImport {
+                path,
+                language: Language::Scala,
+                is_relative: false,
+            });
         }
     });
     imports

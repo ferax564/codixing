@@ -35,9 +35,10 @@ impl Embedder {
         let (fastembed_model, dims) = match model_cfg {
             EmbeddingModel::BgeSmallEn => (FastEmbedModel::BGESmallENV15, BGE_SMALL_EN_DIMS),
             EmbeddingModel::BgeBaseEn => (FastEmbedModel::BGEBaseENV15, BGE_BASE_EN_DIMS),
-            EmbeddingModel::JinaEmbedCode => {
-                (FastEmbedModel::JinaEmbeddingsV2BaseCode, JINA_EMBED_CODE_DIMS)
-            }
+            EmbeddingModel::JinaEmbedCode => (
+                FastEmbedModel::JinaEmbeddingsV2BaseCode,
+                JINA_EMBED_CODE_DIMS,
+            ),
         };
 
         info!(?fastembed_model, dims, "loading embedding model");

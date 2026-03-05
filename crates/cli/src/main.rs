@@ -22,6 +22,13 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
 
+        /// Additional directories to index alongside the primary root.
+        /// File paths from each extra root are prefixed with its directory name.
+        /// Example: --also ../shared-lib produces paths like `shared-lib/src/types.rs`
+        /// Can be specified multiple times: --also ../shared-lib --also ../api-types
+        #[arg(long = "also", value_name = "DIR")]
+        also: Vec<PathBuf>,
+
         /// Only index these languages (comma-separated, e.g. "rust,python").
         #[arg(long, value_delimiter = ',')]
         languages: Vec<String>,
@@ -218,10 +225,11 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Init {
             path,
+            also,
             languages,
             no_embeddings,
             reranker,
-        } => cmd_init(path, languages, no_embeddings, reranker),
+        } => cmd_init(path, also, languages, no_embeddings, reranker),
         Command::Search {
             query,
             limit,
@@ -258,12 +266,27 @@ async fn main() -> Result<()> {
     }
 }
 
-fn cmd_init(path: PathBuf, languages: Vec<String>, no_embeddings: bool, reranker: bool) -> Result<()> {
+fn cmd_init(
+    path: PathBuf,
+    also: Vec<PathBuf>,
+    languages: Vec<String>,
+    no_embeddings: bool,
+    reranker: bool,
+) -> Result<()> {
     let root = path
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
 
     let mut config = IndexConfig::new(&root);
+
+    // Resolve and register extra roots.
+    for extra in also {
+        let extra_abs = extra
+            .canonicalize()
+            .with_context(|| format!("--also path not found: {}", extra.display()))?;
+        config.extra_roots.push(extra_abs);
+    }
+
     for lang in &languages {
         config.languages.insert(lang.to_lowercase());
     }
@@ -274,7 +297,18 @@ fn cmd_init(path: PathBuf, languages: Vec<String>, no_embeddings: bool, reranker
         config.embedding.reranker_enabled = true;
     }
 
-    eprintln!("Indexing {}...", root.display());
+    if config.extra_roots.is_empty() {
+        eprintln!("Indexing {}...", root.display());
+    } else {
+        eprintln!(
+            "Indexing {} (+ {} extra roots)...",
+            root.display(),
+            config.extra_roots.len()
+        );
+        for extra in &config.extra_roots {
+            eprintln!("  + {}", extra.display());
+        }
+    }
     let start = Instant::now();
 
     let engine = Engine::init(&root, config).with_context(|| "failed to initialize index")?;
@@ -680,15 +714,23 @@ fn cmd_sync(path: PathBuf) -> Result<()> {
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
 
-    let mut engine = Engine::open(&root)
-        .with_context(|| "no index found — run `codeforge init` first")?;
+    let mut engine =
+        Engine::open(&root).with_context(|| "no index found — run `codeforge init` first")?;
 
     let start = Instant::now();
-    let SyncStats { added, modified, removed, unchanged } = engine.sync()?;
+    let SyncStats {
+        added,
+        modified,
+        removed,
+        unchanged,
+    } = engine.sync()?;
 
     eprintln!(
         "sync complete: {} added, {} modified, {} removed, {} unchanged ({:.2}s)",
-        added, modified, removed, unchanged,
+        added,
+        modified,
+        removed,
+        unchanged,
         start.elapsed().as_secs_f64(),
     );
 
@@ -700,8 +742,8 @@ fn cmd_embed(path: PathBuf) -> Result<()> {
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
 
-    let mut engine = Engine::open(&root)
-        .with_context(|| "no index found — run `codeforge init` first")?;
+    let mut engine =
+        Engine::open(&root).with_context(|| "no index found — run `codeforge init` first")?;
 
     let start = Instant::now();
     let embedded = engine.embed_remaining()?;

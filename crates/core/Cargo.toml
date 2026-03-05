@@ -6,7 +6,17 @@ license.workspace = true
 rust-version.workspace = true
 description = "Core engine for CodeForge — AST parsing, indexing, and retrieval"
 
+[features]
+## Enable the optional Qdrant vector backend.
+## Requires a running Qdrant instance; connection URL via `QDRANT_URL` env var.
+qdrant = ["dep:qdrant-client", "dep:tokio"]
+
 [dependencies]
+# Optional Qdrant backend
+qdrant-client = { workspace = true, optional = true }
+# Tokio runtime — only pulled in when the qdrant feature is enabled
+tokio = { workspace = true, optional = true }
+
 tree-sitter.workspace = true
 tree-sitter-rust.workspace = true
 tree-sitter-python.workspace = true
@@ -17,6 +27,10 @@ tree-sitter-java.workspace = true
 tree-sitter-c.workspace = true
 tree-sitter-cpp.workspace = true
 tree-sitter-c-sharp.workspace = true
+tree-sitter-ruby.workspace = true
+tree-sitter-swift.workspace = true
+tree-sitter-kotlin-ng.workspace = true
+tree-sitter-scala.workspace = true
 
 petgraph.workspace = true
 tantivy.workspace = true

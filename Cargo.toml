@@ -20,6 +20,10 @@ tree-sitter-java = "0.23"
 tree-sitter-c = "0.24"
 tree-sitter-cpp = "0.23"
 tree-sitter-c-sharp = "0.23"
+tree-sitter-ruby = "0.23"
+tree-sitter-swift = "0.7"
+tree-sitter-kotlin-ng = "1.1"
+tree-sitter-scala = "0.24"
 
 # Search
 tantivy = "0.22"
@@ -73,6 +77,9 @@ glob = "0.3"
 
 # .gitignore-aware directory walking
 ignore = "0.4"
+
+# Optional Qdrant vector backend (enable with --features qdrant)
+qdrant-client = { version = "1", default-features = false, features = ["serde"] }
 
 # Testing
 tempfile = "3"

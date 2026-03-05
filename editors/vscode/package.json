@@ -1,0 +1,90 @@
+{
+  "name": "codeforge",
+  "displayName": "CodeForge",
+  "description": "Ultra-fast code retrieval for AI agents — structural search, dependency graph, MCP integration",
+  "version": "0.1.0",
+  "publisher": "codeforge",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "search",
+    "AI",
+    "MCP",
+    "code intelligence",
+    "Claude"
+  ],
+  "activationEvents": [
+    "workspaceContains:.codeforge",
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codeforge.indexWorkspace",
+        "title": "CodeForge: Index Workspace"
+      },
+      {
+        "command": "codeforge.syncIndex",
+        "title": "CodeForge: Sync Index"
+      },
+      {
+        "command": "codeforge.search",
+        "title": "CodeForge: Search..."
+      },
+      {
+        "command": "codeforge.showRepoMap",
+        "title": "CodeForge: Show Repo Map"
+      },
+      {
+        "command": "codeforge.startDaemon",
+        "title": "CodeForge: Start Daemon"
+      },
+      {
+        "command": "codeforge.registerMcpServer",
+        "title": "CodeForge: Register MCP Server"
+      }
+    ],
+    "configuration": {
+      "title": "CodeForge",
+      "properties": {
+        "codeforge.binaryPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the codeforge binary. Leave empty to auto-detect from PATH or common locations."
+        },
+        "codeforge.mcpBinaryPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the codeforge-mcp binary. Leave empty to auto-detect."
+        },
+        "codeforge.autoStartDaemon": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically start the codeforge-mcp daemon when the extension activates."
+        },
+        "codeforge.embeddings": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable vector embeddings when initializing a new index (slower init, better search quality)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "@vscode/vsce": "^3.0.0"
+  }
+}

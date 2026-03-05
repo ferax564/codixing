@@ -18,9 +18,8 @@ use std::sync::LazyLock;
 
 /// Cached AVX2+FMA feature detection result. Evaluated once on first access.
 #[cfg(target_arch = "x86_64")]
-static HAS_AVX2_FMA: LazyLock<bool> = LazyLock::new(|| {
-    is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")
-});
+static HAS_AVX2_FMA: LazyLock<bool> =
+    LazyLock::new(|| is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma"));
 
 /// Scalar (non-SIMD) implementations, always available.
 pub mod scalar {
