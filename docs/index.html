@@ -884,13 +884,6 @@
     }
 
     /* ── Waitlist ── */
-    .waitlist-section {
-      background: var(--bg-1);
-      border-top: 1px solid var(--border);
-      padding: 96px 24px;
-      text-align: center;
-    }
-
     .waitlist-inner {
       max-width: 560px;
       margin: 0 auto;
@@ -907,6 +900,10 @@
       color: var(--text-muted);
       font-size: 1rem;
       margin-bottom: 32px;
+    }
+
+    .hero-waitlist {
+      margin-top: 32px;
     }
 
     .waitlist-form {
@@ -1087,6 +1084,18 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
           Quick Start
         </a>
+      </div>
+      <div class="hero-waitlist">
+        <form class="waitlist-form" id="waitlist-form" action="https://api.web3forms.com/submit" method="POST">
+          <input type="hidden" name="access_key" value="f01f7163-477d-4edb-b535-eb51817f5772" />
+          <input type="email" name="email" placeholder="you@company.com" required autocomplete="email" />
+          <button type="submit" id="waitlist-btn">Get notified</button>
+        </form>
+        <div class="waitlist-success" id="waitlist-success">
+          You're on the list. We'll reach out when the hosted tier launches.
+        </div>
+        <div class="waitlist-error" id="waitlist-error">Something went wrong — try again.</div>
+        <p class="waitlist-fine">Get notified when the hosted version ships. No spam.</p>
       </div>
       <div class="metrics-strip">
         <div class="metric-item">
@@ -1544,26 +1553,6 @@
     </div>
   </div>
 
-  <!-- Email capture -->
-  <section id="waitlist" class="waitlist-section">
-    <div class="wrapper">
-      <div class="reveal waitlist-inner">
-        <h2>Get notified when the <span class="grad">hosted version</span> ships</h2>
-        <p>One shared index for your whole team, always fresh — no daemon to run.<br>Leave your email and we'll let you know when it's ready.</p>
-        <form class="waitlist-form" id="waitlist-form" action="https://api.web3forms.com/submit" method="POST">
-          <input type="hidden" name="access_key" value="f01f7163-477d-4edb-b535-eb51817f5772" />
-          <input type="email" name="email" placeholder="you@company.com" required autocomplete="email" />
-          <button type="submit" id="waitlist-btn">Notify me</button>
-        </form>
-        <div class="waitlist-success" id="waitlist-success">
-          You're on the list. We'll reach out when the hosted tier launches.
-        </div>
-        <div class="waitlist-error" id="waitlist-error">Something went wrong — try again or email us directly.</div>
-        <p class="waitlist-fine">No spam. Unsubscribe any time.</p>
-      </div>
-    </div>
-  </section>
-
   <!-- Footer -->
   <footer>
     <div class="footer-inner">
@@ -1574,7 +1563,7 @@
         <a href="https://github.com/ferax564/codixing">GitHub</a>
         <a href="https://github.com/ferax564/codixing/blob/main/README.md">Docs</a>
         <a href="https://github.com/ferax564/codixing/blob/main/ROADMAP.md">Roadmap</a>
-        <a href="#waitlist">Early access</a>
+        <a href="#">Early access</a>
       </div>
       <span>Open source &bull; MIT License</span>
     </div>
