@@ -613,10 +613,7 @@ fn compare_bm25_vs_hybrid_recall() {
 #[test]
 #[ignore]
 fn compare_embedding_models() {
-    let nl_cases: Vec<&EvalCase> = EVAL_CASES
-        .iter()
-        .filter(|c| c.query_type == "nl")
-        .collect();
+    let nl_cases: Vec<&EvalCase> = EVAL_CASES.iter().filter(|c| c.query_type == "nl").collect();
 
     let nl_count = nl_cases.len();
 
@@ -690,10 +687,7 @@ fn compare_embedding_models() {
         };
         print!("{:<width$}", display_query, width = header_pad);
         for col in 0..results.len() {
-            print!(
-                "{:>20}",
-                if hit_matrix[row][col] { "HIT" } else { "miss" }
-            );
+            print!("{:>20}", if hit_matrix[row][col] { "HIT" } else { "miss" });
         }
         println!();
     }
@@ -704,7 +698,10 @@ fn compare_embedding_models() {
     print!("{:<width$}", "NL Recall@k", width = header_pad);
     for (_, hits, _) in &results {
         let recall_pct = *hits as f64 / nl_count as f64 * 100.0;
-        print!("{:>20}", format!("{:.0}% ({}/{})", recall_pct, hits, nl_count));
+        print!(
+            "{:>20}",
+            format!("{:.0}% ({}/{})", recall_pct, hits, nl_count)
+        );
     }
     println!();
 
@@ -814,7 +811,7 @@ const REAL_CODEBASE_CASES: &[EvalCase] = &[
     },
     EvalCase {
         query: "split camelCase and snake_case identifiers into tokens",
-        expected_file: "tantivy",   // CodeTokenizer is in index/tantivy.rs
+        expected_file: "tantivy", // CodeTokenizer is in index/tantivy.rs
         k: 5,
         query_type: "nl",
     },
@@ -857,7 +854,7 @@ const REAL_CODEBASE_CASES: &[EvalCase] = &[
     },
     EvalCase {
         query: "BM25Retriever",
-        expected_file: "bm25",   // retriever/bm25.rs
+        expected_file: "bm25", // retriever/bm25.rs
         k: 3,
         query_type: "identifier",
     },
@@ -880,9 +877,9 @@ const REAL_CODEBASE_CASES: &[EvalCase] = &[
 fn real_codebase_bm25_vs_hybrid() {
     // Path to the actual codixing source tree — skip if not available.
     let codixing_src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()   // crates/core → crates
+        .parent() // crates/core → crates
         .unwrap()
-        .parent()   // crates → repo root
+        .parent() // crates → repo root
         .unwrap()
         .to_path_buf();
 
@@ -909,21 +906,28 @@ fn real_codebase_bm25_vs_hybrid() {
         ..Default::default()
     };
 
-    println!("\nBuilding index over real codixing source ({} files)...",
-        count_rs_files(tmp.path()));
+    println!(
+        "\nBuilding index over real codixing source ({} files)...",
+        count_rs_files(tmp.path())
+    );
     let t_build = Instant::now();
     let engine = Engine::init(tmp.path(), config).expect("init failed");
-    println!("Index built in {}ms  ({} files, {} chunks)",
+    println!(
+        "Index built in {}ms  ({} files, {} chunks)",
         t_build.elapsed().as_millis(),
         engine.stats().file_count,
         engine.stats().chunk_count,
     );
 
     let total = REAL_CODEBASE_CASES.len();
-    let nl_cases: Vec<&EvalCase> = REAL_CODEBASE_CASES.iter()
-        .filter(|c| c.query_type == "nl").collect();
-    let id_cases: Vec<&EvalCase> = REAL_CODEBASE_CASES.iter()
-        .filter(|c| c.query_type == "identifier").collect();
+    let nl_cases: Vec<&EvalCase> = REAL_CODEBASE_CASES
+        .iter()
+        .filter(|c| c.query_type == "nl")
+        .collect();
+    let id_cases: Vec<&EvalCase> = REAL_CODEBASE_CASES
+        .iter()
+        .filter(|c| c.query_type == "identifier")
+        .collect();
 
     let mut bm25_nl = 0usize;
     let mut hybrid_nl = 0usize;
@@ -938,27 +942,58 @@ fn real_codebase_bm25_vs_hybrid() {
 
     for case in REAL_CODEBASE_CASES {
         let t0 = Instant::now();
-        let bm25_res = engine.search(
-            SearchQuery::new(case.query).with_limit(case.k).with_strategy(Strategy::Instant)
-        ).unwrap_or_default();
+        let bm25_res = engine
+            .search(
+                SearchQuery::new(case.query)
+                    .with_limit(case.k)
+                    .with_strategy(Strategy::Instant),
+            )
+            .unwrap_or_default();
         bm25_ms += t0.elapsed().as_millis();
-        let bm25_hit = bm25_res.iter().any(|r| r.file_path.contains(case.expected_file));
+        let bm25_hit = bm25_res
+            .iter()
+            .any(|r| r.file_path.contains(case.expected_file));
 
         let t0 = Instant::now();
-        let hybrid_res = engine.search(
-            SearchQuery::new(case.query).with_limit(case.k).with_strategy(Strategy::Fast)
-        ).unwrap_or_default();
+        let hybrid_res = engine
+            .search(
+                SearchQuery::new(case.query)
+                    .with_limit(case.k)
+                    .with_strategy(Strategy::Fast),
+            )
+            .unwrap_or_default();
         hybrid_ms += t0.elapsed().as_millis();
-        let hybrid_hit = hybrid_res.iter().any(|r| r.file_path.contains(case.expected_file));
+        let hybrid_hit = hybrid_res
+            .iter()
+            .any(|r| r.file_path.contains(case.expected_file));
 
         match case.query_type {
-            "nl"         => { if bm25_hit { bm25_nl += 1; } if hybrid_hit { hybrid_nl += 1; } }
-            "identifier" => { if bm25_hit { bm25_id += 1; } if hybrid_hit { hybrid_id += 1; } }
-            _            => {}
+            "nl" => {
+                if bm25_hit {
+                    bm25_nl += 1;
+                }
+                if hybrid_hit {
+                    hybrid_nl += 1;
+                }
+            }
+            "identifier" => {
+                if bm25_hit {
+                    bm25_id += 1;
+                }
+                if hybrid_hit {
+                    hybrid_id += 1;
+                }
+            }
+            _ => {}
         }
 
-        let q = if case.query.len() > 53 { &case.query[..53] } else { case.query };
-        println!("{:<55} {:>6} {:>8}  {}",
+        let q = if case.query.len() > 53 {
+            &case.query[..53]
+        } else {
+            case.query
+        };
+        println!(
+            "{:<55} {:>6} {:>8}  {}",
             q,
             if bm25_hit { "HIT" } else { "miss" },
             if hybrid_hit { "HIT" } else { "miss" },
@@ -968,22 +1003,32 @@ fn real_codebase_bm25_vs_hybrid() {
 
     println!("{}", "-".repeat(82));
 
-    let nl_n  = nl_cases.len();
-    let id_n  = id_cases.len();
-    let bm25_nl_pct    = bm25_nl   as f64 / nl_n  as f64 * 100.0;
-    let hybrid_nl_pct  = hybrid_nl as f64 / nl_n  as f64 * 100.0;
-    let bm25_id_pct    = bm25_id   as f64 / id_n  as f64 * 100.0;
-    let hybrid_id_pct  = hybrid_id as f64 / id_n  as f64 * 100.0;
-    let nl_gap         = hybrid_nl_pct - bm25_nl_pct;
+    let nl_n = nl_cases.len();
+    let id_n = id_cases.len();
+    let bm25_nl_pct = bm25_nl as f64 / nl_n as f64 * 100.0;
+    let hybrid_nl_pct = hybrid_nl as f64 / nl_n as f64 * 100.0;
+    let bm25_id_pct = bm25_id as f64 / id_n as f64 * 100.0;
+    let hybrid_id_pct = hybrid_id as f64 / id_n as f64 * 100.0;
+    let nl_gap = hybrid_nl_pct - bm25_nl_pct;
 
     println!();
-    println!("=== RESULTS (real codebase, {} files) ===", engine.stats().file_count);
-    println!("NL queries    BM25: {:.0}% ({}/{}),  Hybrid: {:.0}% ({}/{}),  gap: {:+.0}%",
-        bm25_nl_pct, bm25_nl, nl_n, hybrid_nl_pct, hybrid_nl, nl_n, nl_gap);
-    println!("Identifiers   BM25: {:.0}% ({}/{}),  Hybrid: {:.0}% ({}/{})",
-        bm25_id_pct, bm25_id, id_n, hybrid_id_pct, hybrid_id, id_n);
-    println!("Latency       BM25: {}ms avg,  Hybrid: {}ms avg",
-        bm25_ms / total as u128, hybrid_ms / total as u128);
+    println!(
+        "=== RESULTS (real codebase, {} files) ===",
+        engine.stats().file_count
+    );
+    println!(
+        "NL queries    BM25: {:.0}% ({}/{}),  Hybrid: {:.0}% ({}/{}),  gap: {:+.0}%",
+        bm25_nl_pct, bm25_nl, nl_n, hybrid_nl_pct, hybrid_nl, nl_n, nl_gap
+    );
+    println!(
+        "Identifiers   BM25: {:.0}% ({}/{}),  Hybrid: {:.0}% ({}/{})",
+        bm25_id_pct, bm25_id, id_n, hybrid_id_pct, hybrid_id, id_n
+    );
+    println!(
+        "Latency       BM25: {}ms avg,  Hybrid: {}ms avg",
+        bm25_ms / total as u128,
+        hybrid_ms / total as u128
+    );
 
     println!();
     if nl_gap > 15.0 {
@@ -991,7 +1036,9 @@ fn real_codebase_bm25_vs_hybrid() {
             "VERDICT ▶ Hybrid beats BM25 by {:.0}% on NL queries over a real codebase.\n\
              Fine-tuning BGE on CodeSearchNet is STRONGLY RECOMMENDED.\n\
              Expected gain: +{:.0}–{:.0}% additional NL recall after domain-specific training.",
-            nl_gap, nl_gap * 0.3, nl_gap * 0.6
+            nl_gap,
+            nl_gap * 0.3,
+            nl_gap * 0.6
         );
     } else if nl_gap > 5.0 {
         println!(
@@ -1011,7 +1058,9 @@ fn real_codebase_bm25_vs_hybrid() {
     // Regression guard: hybrid must not be worse than BM25 on NL.
     assert!(
         hybrid_nl >= bm25_nl.saturating_sub(1),
-        "Hybrid regressed vs BM25 on NL: bm25={} hybrid={}", bm25_nl, hybrid_nl
+        "Hybrid regressed vs BM25 on NL: bm25={} hybrid={}",
+        bm25_nl,
+        hybrid_nl
     );
 }
 
@@ -1099,8 +1148,12 @@ fn real_codebase_model_comparison() {
         print!("\nBuilding index for {} ... ", label);
         let engine = Engine::init(tmp.path(), config).expect("init failed");
         build_ms[col] = t_build.elapsed().as_millis();
-        println!("done in {}ms ({} files, {} chunks)",
-            build_ms[col], engine.stats().file_count, engine.stats().chunk_count);
+        println!(
+            "done in {}ms ({} files, {} chunks)",
+            build_ms[col],
+            engine.stats().file_count,
+            engine.stats().chunk_count
+        );
 
         for (row, case) in REAL_CODEBASE_CASES.iter().enumerate() {
             let t0 = Instant::now();
@@ -1113,7 +1166,9 @@ fn real_codebase_model_comparison() {
                 .unwrap_or_default();
             search_ms[col] += t0.elapsed().as_millis();
 
-            hit_matrix[row][col] = results.iter().any(|r| r.file_path.contains(case.expected_file));
+            hit_matrix[row][col] = results
+                .iter()
+                .any(|r| r.file_path.contains(case.expected_file));
         }
     }
 
@@ -1122,7 +1177,10 @@ fn real_codebase_model_comparison() {
     let q_w = 54usize;
     println!();
     println!("{}", "=".repeat(q_w + col_w * n_models + 8));
-    println!("Real-codebase model comparison  (Strategy::Fast, {} queries)", n_cases);
+    println!(
+        "Real-codebase model comparison  (Strategy::Fast, {} queries)",
+        n_cases
+    );
     println!("{}", "=".repeat(q_w + col_w * n_models + 8));
     print!("{:<width$} {:>6}", "Query", "type", width = q_w);
     for (label, _) in &models {
@@ -1132,10 +1190,18 @@ fn real_codebase_model_comparison() {
     println!("{}", "-".repeat(q_w + col_w * n_models + 8));
 
     for (row, case) in REAL_CODEBASE_CASES.iter().enumerate() {
-        let q = if case.query.len() > q_w - 1 { &case.query[..q_w - 1] } else { case.query };
+        let q = if case.query.len() > q_w - 1 {
+            &case.query[..q_w - 1]
+        } else {
+            case.query
+        };
         print!("{:<width$} {:>6}", q, case.query_type, width = q_w);
         for col in 0..n_models {
-            print!("  {:>width$}", if hit_matrix[row][col] { "HIT" } else { "miss" }, width = col_w - 2);
+            print!(
+                "  {:>width$}",
+                if hit_matrix[row][col] { "HIT" } else { "miss" },
+                width = col_w - 2
+            );
         }
         println!();
     }
@@ -1146,7 +1212,16 @@ fn real_codebase_model_comparison() {
     print!("{:<width$} {:>6}", "NL Recall@k", "nl", width = q_w);
     for col in 0..n_models {
         let hits = nl_cases.iter().filter(|&&r| hit_matrix[r][col]).count();
-        print!("  {:>width$}", format!("{:.0}% ({}/{})", hits as f64 / nl_cases.len() as f64 * 100.0, hits, nl_cases.len()), width = col_w - 2);
+        print!(
+            "  {:>width$}",
+            format!(
+                "{:.0}% ({}/{})",
+                hits as f64 / nl_cases.len() as f64 * 100.0,
+                hits,
+                nl_cases.len()
+            ),
+            width = col_w - 2
+        );
     }
     println!();
 
@@ -1154,14 +1229,27 @@ fn real_codebase_model_comparison() {
     print!("{:<width$} {:>6}", "ID Recall@k", "id", width = q_w);
     for col in 0..n_models {
         let hits = id_cases.iter().filter(|&&r| hit_matrix[r][col]).count();
-        print!("  {:>width$}", format!("{:.0}% ({}/{})", hits as f64 / id_cases.len() as f64 * 100.0, hits, id_cases.len()), width = col_w - 2);
+        print!(
+            "  {:>width$}",
+            format!(
+                "{:.0}% ({}/{})",
+                hits as f64 / id_cases.len() as f64 * 100.0,
+                hits,
+                id_cases.len()
+            ),
+            width = col_w - 2
+        );
     }
     println!();
 
     // Search latency row
     print!("{:<width$} {:>6}", "Avg search latency", "", width = q_w);
     for col in 0..n_models {
-        let avg = if n_cases > 0 { search_ms[col] / n_cases as u128 } else { 0 };
+        let avg = if n_cases > 0 {
+            search_ms[col] / n_cases as u128
+        } else {
+            0
+        };
         print!("  {:>width$}", format!("{}ms", avg), width = col_w - 2);
     }
     println!();
@@ -1176,14 +1264,25 @@ fn real_codebase_model_comparison() {
     let gap = jina_nl as f64 / nl_n as f64 * 100.0 - bge_nl as f64 / nl_n as f64 * 100.0;
 
     if gap > 10.0 {
-        println!("VERDICT ▶ JinaEmbedCode beats BgeBaseEn by {:.0}% on NL recall over real Rust code.", gap);
+        println!(
+            "VERDICT ▶ JinaEmbedCode beats BgeBaseEn by {:.0}% on NL recall over real Rust code.",
+            gap
+        );
         println!("          Switch default model to JinaEmbedCode.");
     } else if gap > 0.0 {
-        println!("VERDICT ▶ JinaEmbedCode edges BgeBaseEn by {:.0}% — marginal gain; both are viable.", gap);
+        println!(
+            "VERDICT ▶ JinaEmbedCode edges BgeBaseEn by {:.0}% — marginal gain; both are viable.",
+            gap
+        );
     } else if gap == 0.0 {
-        println!("VERDICT ▶ JinaEmbedCode and BgeBaseEn tie on NL recall. Stick with BgeBaseEn (default).");
+        println!(
+            "VERDICT ▶ JinaEmbedCode and BgeBaseEn tie on NL recall. Stick with BgeBaseEn (default)."
+        );
     } else {
-        println!("VERDICT ▶ BgeBaseEn outperforms JinaEmbedCode by {:.0}% on this corpus.", -gap);
+        println!(
+            "VERDICT ▶ BgeBaseEn outperforms JinaEmbedCode by {:.0}% on this corpus.",
+            -gap
+        );
         println!("          JinaEmbedCode does NOT improve over current default.");
     }
 }
@@ -1247,8 +1346,14 @@ fn qwen3_standalone() {
         engine.stats().chunk_count,
     );
 
-    let nl_cases: Vec<&EvalCase> = REAL_CODEBASE_CASES.iter().filter(|c| c.query_type == "nl").collect();
-    let id_cases: Vec<&EvalCase> = REAL_CODEBASE_CASES.iter().filter(|c| c.query_type == "identifier").collect();
+    let nl_cases: Vec<&EvalCase> = REAL_CODEBASE_CASES
+        .iter()
+        .filter(|c| c.query_type == "nl")
+        .collect();
+    let id_cases: Vec<&EvalCase> = REAL_CODEBASE_CASES
+        .iter()
+        .filter(|c| c.query_type == "identifier")
+        .collect();
     let total = REAL_CODEBASE_CASES.len();
 
     let mut nl_hits = 0usize;
@@ -1270,27 +1375,53 @@ fn qwen3_standalone() {
             .unwrap_or_default();
         total_ms += t0.elapsed().as_millis();
 
-        let hit = results.iter().any(|r| r.file_path.contains(case.expected_file));
+        let hit = results
+            .iter()
+            .any(|r| r.file_path.contains(case.expected_file));
         match case.query_type {
-            "nl"         => { if hit { nl_hits += 1; } }
-            "identifier" => { if hit { id_hits += 1; } }
-            _            => {}
+            "nl" => {
+                if hit {
+                    nl_hits += 1;
+                }
+            }
+            "identifier" => {
+                if hit {
+                    id_hits += 1;
+                }
+            }
+            _ => {}
         }
 
-        let q = if case.query.len() > 53 { &case.query[..53] } else { case.query };
-        println!("{:<55} {:>6}  {}", q, if hit { "HIT" } else { "miss" }, case.query_type);
+        let q = if case.query.len() > 53 {
+            &case.query[..53]
+        } else {
+            case.query
+        };
+        println!(
+            "{:<55} {:>6}  {}",
+            q,
+            if hit { "HIT" } else { "miss" },
+            case.query_type
+        );
     }
 
     println!("{}", "-".repeat(70));
 
-    let nl_n  = nl_cases.len();
-    let id_n  = id_cases.len();
+    let nl_n = nl_cases.len();
+    let id_n = id_cases.len();
     let nl_pct = nl_hits as f64 / nl_n as f64 * 100.0;
     let id_pct = id_hits as f64 / id_n as f64 * 100.0;
-    let avg_ms = if total > 0 { total_ms / total as u128 } else { 0 };
+    let avg_ms = if total > 0 {
+        total_ms / total as u128
+    } else {
+        0
+    };
 
     println!();
-    println!("=== Qwen3 RESULTS (real codebase, {} files) ===", engine.stats().file_count);
+    println!(
+        "=== Qwen3 RESULTS (real codebase, {} files) ===",
+        engine.stats().file_count
+    );
     println!("NL Recall@k:    {:.0}% ({}/{})", nl_pct, nl_hits, nl_n);
     println!("ID Recall@k:    {:.0}% ({}/{})", id_pct, id_hits, id_n);
     println!("Avg latency:    {}ms", avg_ms);
@@ -1329,8 +1460,11 @@ fn count_rs_files(root: &std::path::Path) -> usize {
     if let Ok(entries) = std::fs::read_dir(root) {
         for e in entries.flatten() {
             let p = e.path();
-            if p.is_dir() { n += count_rs_files(&p); }
-            else if p.extension().map(|x| x == "rs").unwrap_or(false) { n += 1; }
+            if p.is_dir() {
+                n += count_rs_files(&p);
+            } else if p.extension().map(|x| x == "rs").unwrap_or(false) {
+                n += 1;
+            }
         }
     }
     n

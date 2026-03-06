@@ -202,9 +202,8 @@ impl IndexStore {
     pub fn save_graph(&self, data: &GraphData) -> Result<()> {
         // Ensure the directory exists (may not on older indexes opened before Phase 3).
         fs::create_dir_all(self.graph_dir())?;
-        let bytes = bitcode::serialize(data).map_err(|e| {
-            CodixingError::Serialization(format!("failed to serialize graph: {e}"))
-        })?;
+        let bytes = bitcode::serialize(data)
+            .map_err(|e| CodixingError::Serialization(format!("failed to serialize graph: {e}")))?;
         fs::write(self.graph_path(), bytes)?;
         Ok(())
     }

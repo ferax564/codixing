@@ -5,7 +5,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use codixing_core::{Engine, GitSyncStats, IndexConfig, RepoMapOptions, SearchQuery, Strategy, SyncStats};
+use codixing_core::{
+    Engine, GitSyncStats, IndexConfig, RepoMapOptions, SearchQuery, Strategy, SyncStats,
+};
 
 #[derive(Parser)]
 #[command(name = "codixing", about = "Code retrieval engine for AI agents")]

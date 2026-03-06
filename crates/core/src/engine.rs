@@ -1250,16 +1250,17 @@ impl Engine {
 
         info!(from = %stored_commit, to = %head, "git_sync: computing diff");
 
-        let (modified_paths, deleted_paths) = match git_diff_since(&self.config.root, &stored_commit) {
-            Some(delta) => delta,
-            None => {
-                warn!("git_sync: git diff failed — falling back to no-op");
-                return Ok(GitSyncStats {
-                    unchanged: true,
-                    ..Default::default()
-                });
-            }
-        };
+        let (modified_paths, deleted_paths) =
+            match git_diff_since(&self.config.root, &stored_commit) {
+                Some(delta) => delta,
+                None => {
+                    warn!("git_sync: git diff failed — falling back to no-op");
+                    return Ok(GitSyncStats {
+                        unchanged: true,
+                        ..Default::default()
+                    });
+                }
+            };
 
         // Build FileChange list, filtering to supported source files.
         let mut changes: Vec<FileChange> = Vec::new();
@@ -1288,7 +1289,11 @@ impl Engine {
             .filter(|c| matches!(c.kind, ChangeKind::Removed))
             .count();
 
-        info!(modified = n_modified, removed = n_removed, "git_sync: applying changes");
+        info!(
+            modified = n_modified,
+            removed = n_removed,
+            "git_sync: applying changes"
+        );
 
         if !changes.is_empty() {
             self.apply_changes(&changes)?;

@@ -118,9 +118,13 @@ impl Embedder {
         );
 
         let device = Device::Cpu;
-        let model =
-            fastembed::Qwen3TextEmbedding::from_hf(QWEN3_SMALL_REPO, &device, DType::F32, QWEN3_MAX_LENGTH)
-                .map_err(|e| CodixingError::Embedding(format!("failed to load Qwen3 model: {e}")))?;
+        let model = fastembed::Qwen3TextEmbedding::from_hf(
+            QWEN3_SMALL_REPO,
+            &device,
+            DType::F32,
+            QWEN3_MAX_LENGTH,
+        )
+        .map_err(|e| CodixingError::Embedding(format!("failed to load Qwen3 model: {e}")))?;
 
         Ok(Self {
             backend: EmbedBackend::Qwen3(Mutex::new(model)),
