@@ -1443,8 +1443,8 @@
           <div class="step active" data-step="build">
             <div class="step-num">1</div>
             <div class="step-content">
-              <h4>Build from source</h4>
-              <p>Compile the full workspace with release optimizations.</p>
+              <h4>Install</h4>
+              <p>One command — downloads the right binary for your OS and architecture.</p>
             </div>
           </div>
           <div class="step" data-step="index">
@@ -1474,20 +1474,20 @@
             <span class="dot dot-r"></span>
             <span class="dot dot-y"></span>
             <span class="dot dot-g"></span>
-            <span class="code-window-title" id="code-window-filename">build.sh</span>
+            <span class="code-window-title" id="code-window-filename">install.sh</span>
           </div>
           <div class="code-window-body">
             <div class="code-pane-qs active" id="qs-build">
-<span class="ln">1</span><span class="c-cmt"># Clone and build</span>
-<span class="ln">2</span><span style="color:var(--text)">git clone https://github.com/ferax564/codixing</span>
-<span class="ln">3</span><span style="color:var(--text)">cd codixing</span>
-<span class="ln">4</span><span style="color:var(--text)"></span>
-<span class="ln">5</span><span class="c-cmt"># Compile release binaries</span>
-<span class="ln">6</span><span style="color:var(--text)">cargo build --release --workspace</span>
-<span class="ln">7</span><span style="color:var(--text)"></span>
-<span class="ln">8</span><span class="c-cmt"># Binaries available at:</span>
-<span class="ln">9</span><span class="c-ok">./target/release/codixing</span>
-<span class="ln">10</span><span class="c-ok">./target/release/codixing-mcp</span>
+<span class="ln">1</span><span class="c-cmt"># macOS &amp; Linux — auto-detects OS and arch</span>
+<span class="ln">2</span><span style="color:var(--text)">curl -fsSL https://codixing.com/install.sh | sh</span>
+<span class="ln">3</span><span style="color:var(--text)"></span>
+<span class="ln">4</span><span class="c-cmt"># Installs three binaries to /usr/local/bin:</span>
+<span class="ln">5</span><span class="c-ok">✓ codixing</span>
+<span class="ln">6</span><span class="c-ok">✓ codixing-mcp</span>
+<span class="ln">7</span><span class="c-ok">✓ codixing-server</span>
+<span class="ln">8</span><span style="color:var(--text)"></span>
+<span class="ln">9</span><span class="c-cmt"># Or build from source (requires Rust)</span>
+<span class="ln">10</span><span style="color:var(--text)">cargo build --release --workspace</span>
             </div>
             <div class="code-pane-qs" id="qs-index">
 <span class="ln">1</span><span class="c-cmt"># Fast init (BM25 only, &lt;1s on 250k LoC)</span>

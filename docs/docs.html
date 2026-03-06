@@ -489,10 +489,23 @@
       <!-- Installation -->
       <section class="doc-section" id="installation">
         <h2>Installation</h2>
-        <p>Codixing is distributed as a Rust workspace. There are no runtime dependencies — the final binary is statically linked and under 50 MB.</p>
+        <p>Codixing ships as pre-built static binaries for macOS and Linux. No Rust toolchain or compilation required.</p>
+
+        <h3>One-line install (recommended)</h3>
+        <p>Downloads the correct binary for your OS and architecture, and places it in <code>/usr/local/bin</code>.</p>
+
+        <div class="pre-label">shell</div>
+        <pre><code>curl -fsSL https://codixing.com/install.sh | sh</code></pre>
+
+        <p>Installs three binaries: <code>codixing</code> (CLI), <code>codixing-mcp</code> (MCP server), <code>codixing-server</code> (REST API).</p>
+
+        <div class="callout callout-info">
+          <span class="callout-icon">ℹ</span>
+          <span>Supported platforms: macOS (Apple Silicon + Intel), Linux (x86_64). Windows binaries are available on the <a href="https://github.com/ferax564/codixing/releases" style="color:var(--cyan)">releases page</a> for manual install.</span>
+        </div>
 
         <h3>Build from source</h3>
-        <p>You need the Rust stable toolchain. Install it with <a href="https://rustup.rs" style="color:var(--cyan)">rustup</a> if you haven't already.</p>
+        <p>If you prefer to compile yourself, you need the Rust stable toolchain via <a href="https://rustup.rs" style="color:var(--cyan)">rustup</a>.</p>
 
         <div class="pre-label">shell</div>
         <pre><code><span class="tok-comment"># Clone the repository</span>

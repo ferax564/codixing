@@ -1,8 +1,16 @@
 # Codixing
 
-**Website: [codixing.com](https://codixing.com)**
+**Website: [codixing.com](https://codixing.com)** · **[Docs](https://codixing.com/docs)**
 
 Ultra-fast code retrieval engine for AI agents — beats `grep` at its own game.
+
+## Install
+
+```sh
+curl -fsSL https://codixing.com/install.sh | sh
+```
+
+Installs `codixing`, `codixing-mcp`, and `codixing-server` to `/usr/local/bin`. macOS and Linux only. Windows binaries are on the [releases page](https://github.com/ferax564/codixing/releases).
 
 Codixing is a Rust-native engine that gives AI coding agents precisely the right context from any codebase, regardless of size. It combines structure-aware AST parsing (tree-sitter), hybrid search (BM25 + vector), a live code dependency graph with PageRank scoring, and AI-optimized token-budgeted output into a single, blazing-fast binary.
 
