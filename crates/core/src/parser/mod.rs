@@ -46,10 +46,9 @@ impl Parser {
     /// If the cache already holds a result whose content hash matches, the cached
     /// tree and entities are returned without re-parsing.
     pub fn parse_file(&self, path: &Path, source: &[u8]) -> Result<ParseResult> {
-        let language =
-            detect_language(path).ok_or_else(|| CodixingError::UnsupportedLanguage {
-                path: path.to_path_buf(),
-            })?;
+        let language = detect_language(path).ok_or_else(|| CodixingError::UnsupportedLanguage {
+            path: path.to_path_buf(),
+        })?;
 
         let content_hash = xxh3_64(source);
 
@@ -81,10 +80,9 @@ impl Parser {
     ///
     /// The new result is stored in the cache, replacing any previous entry.
     pub fn parse_file_uncached(&self, path: &Path, source: &[u8]) -> Result<ParseResult> {
-        let language =
-            detect_language(path).ok_or_else(|| CodixingError::UnsupportedLanguage {
-                path: path.to_path_buf(),
-            })?;
+        let language = detect_language(path).ok_or_else(|| CodixingError::UnsupportedLanguage {
+            path: path.to_path_buf(),
+        })?;
 
         let content_hash = xxh3_64(source);
         let result = self.do_parse(path, source, language, content_hash)?;
