@@ -1,0 +1,1346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Codixing Graph Atlas</title>
+  <meta
+    name="description"
+    content="Live 3D graph atlas for code structure, git history, and evolving dependency links."
+  />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+    rel="stylesheet"
+  />
+  <style>
+    :root {
+      --bg: #041018;
+      --bg-deep: #02070d;
+      --panel: rgba(8, 17, 29, 0.78);
+      --panel-strong: rgba(11, 23, 39, 0.9);
+      --line: rgba(129, 161, 193, 0.16);
+      --line-strong: rgba(129, 161, 193, 0.3);
+      --text: #f5f7fb;
+      --muted: #97a8bc;
+      --cyan: #69e5ff;
+      --mint: #80f7c4;
+      --amber: #ffc56b;
+      --rose: #ff8c8c;
+      --shadow: 0 28px 90px rgba(0, 0, 0, 0.35);
+      --radius: 22px;
+      --radius-sm: 14px;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html,
+    body {
+      height: 100%;
+      background:
+        radial-gradient(circle at 15% 20%, rgba(105, 229, 255, 0.16), transparent 30%),
+        radial-gradient(circle at 85% 18%, rgba(255, 197, 107, 0.12), transparent 28%),
+        radial-gradient(circle at 50% 100%, rgba(128, 247, 196, 0.12), transparent 38%),
+        linear-gradient(180deg, #06111a 0%, var(--bg-deep) 100%);
+      color: var(--text);
+      overflow: hidden;
+    }
+
+    body {
+      font-family: "Space Grotesk", sans-serif;
+    }
+
+    button,
+    input,
+    select {
+      font: inherit;
+      color: inherit;
+    }
+
+    button {
+      border: 0;
+      cursor: pointer;
+      background: none;
+    }
+
+    .noise,
+    .grid {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+    }
+
+    .noise {
+      opacity: 0.06;
+      background-image:
+        radial-gradient(circle at 25% 25%, rgba(255, 255, 255, 0.85) 0 0.5px, transparent 0.7px),
+        radial-gradient(circle at 75% 75%, rgba(255, 255, 255, 0.7) 0 0.4px, transparent 0.6px);
+      background-size: 11px 11px, 17px 17px;
+      mix-blend-mode: soft-light;
+    }
+
+    .grid {
+      background-image:
+        linear-gradient(rgba(105, 229, 255, 0.06) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(105, 229, 255, 0.06) 1px, transparent 1px);
+      background-size: 72px 72px;
+      mask-image: radial-gradient(circle at center, rgba(0, 0, 0, 1) 50%, transparent 92%);
+    }
+
+    .shell {
+      position: relative;
+      height: 100%;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      z-index: 1;
+    }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 24px 10px;
+      gap: 16px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .brand-mark {
+      width: 44px;
+      height: 44px;
+      border-radius: 14px;
+      background:
+        linear-gradient(145deg, rgba(105, 229, 255, 0.95), rgba(128, 247, 196, 0.92));
+      box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.28),
+        0 14px 30px rgba(105, 229, 255, 0.2);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .brand-mark::before,
+    .brand-mark::after {
+      content: "";
+      position: absolute;
+      border-radius: 999px;
+      background: rgba(5, 16, 24, 0.9);
+    }
+
+    .brand-mark::before {
+      width: 18px;
+      height: 18px;
+      left: 8px;
+      top: 8px;
+    }
+
+    .brand-mark::after {
+      width: 12px;
+      height: 12px;
+      right: 8px;
+      bottom: 8px;
+      box-shadow: -10px -10px 0 2px rgba(5, 16, 24, 0.75);
+    }
+
+    .brand-copy h1 {
+      font-size: 1.05rem;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+
+    .brand-copy p,
+    .status-line,
+    .metric-label,
+    .micro,
+    .commit-meta,
+    .chip,
+    .detail-meta,
+    .symbol-signature,
+    .empty-copy {
+      font-family: "IBM Plex Mono", monospace;
+    }
+
+    .brand-copy p {
+      color: var(--muted);
+      font-size: 0.78rem;
+      margin-top: 2px;
+    }
+
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(8, 17, 29, 0.58);
+      backdrop-filter: blur(12px);
+      color: var(--muted);
+      font-size: 0.78rem;
+    }
+
+    .pill strong {
+      color: var(--text);
+      font-weight: 500;
+    }
+
+    .layout {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 330px minmax(0, 1fr) 320px;
+      gap: 16px;
+      padding: 0 20px 20px;
+    }
+
+    .panel,
+    .stage {
+      min-height: 0;
+      border-radius: var(--radius);
+      border: 1px solid var(--line);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(22px);
+      overflow: hidden;
+    }
+
+    .panel {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .panel-head {
+      padding: 18px 18px 12px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent);
+    }
+
+    .panel-head h2 {
+      font-size: 0.98rem;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+
+    .panel-body {
+      padding: 16px 18px 18px;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .metric {
+      padding: 14px;
+      border-radius: 18px;
+      border: 1px solid rgba(129, 161, 193, 0.14);
+      background:
+        linear-gradient(145deg, rgba(255, 255, 255, 0.04), rgba(105, 229, 255, 0.04));
+    }
+
+    .metric-value {
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: -0.04em;
+    }
+
+    .metric-label {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .status-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .status-card {
+      padding: 14px;
+      border-radius: 18px;
+      border: 1px solid rgba(129, 161, 193, 0.12);
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .status-line {
+      font-size: 0.74rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .status-value {
+      margin-top: 8px;
+      font-size: 0.9rem;
+      line-height: 1.5;
+      word-break: break-word;
+    }
+
+    .controls {
+      display: grid;
+      gap: 12px;
+    }
+
+    .control-row {
+      display: grid;
+      gap: 6px;
+    }
+
+    .control-row label {
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
+
+    .field,
+    .select {
+      width: 100%;
+      border-radius: 14px;
+      border: 1px solid rgba(129, 161, 193, 0.22);
+      background: rgba(3, 9, 15, 0.6);
+      padding: 12px 14px;
+      color: var(--text);
+      outline: none;
+    }
+
+    .field:focus,
+    .select:focus {
+      border-color: rgba(105, 229, 255, 0.55);
+      box-shadow: 0 0 0 3px rgba(105, 229, 255, 0.12);
+    }
+
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .toggle-row span {
+      color: var(--muted);
+      font-size: 0.82rem;
+    }
+
+    .toggle {
+      position: relative;
+      width: 52px;
+      height: 30px;
+      border-radius: 999px;
+      border: 1px solid rgba(129, 161, 193, 0.24);
+      background: rgba(255, 255, 255, 0.06);
+      transition: background 0.2s ease;
+    }
+
+    .toggle::after {
+      content: "";
+      position: absolute;
+      top: 3px;
+      left: 3px;
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: #f4fbff;
+      transition: transform 0.2s ease;
+    }
+
+    .toggle.active {
+      background: rgba(128, 247, 196, 0.24);
+    }
+
+    .toggle.active::after {
+      transform: translateX(22px);
+    }
+
+    .control-actions {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+    }
+
+    .button {
+      padding: 12px 14px;
+      border-radius: 14px;
+      border: 1px solid rgba(129, 161, 193, 0.22);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text);
+      transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+    }
+
+    .button:hover {
+      transform: translateY(-1px);
+      border-color: rgba(105, 229, 255, 0.46);
+      background: rgba(105, 229, 255, 0.08);
+    }
+
+    .button.primary {
+      background: linear-gradient(135deg, rgba(105, 229, 255, 0.24), rgba(128, 247, 196, 0.18));
+      border-color: rgba(105, 229, 255, 0.46);
+    }
+
+    .filter-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .filter-chip {
+      padding: 8px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(129, 161, 193, 0.16);
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.03);
+      font-size: 0.76rem;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+    }
+
+    .filter-chip.active {
+      color: var(--bg-deep);
+      background: linear-gradient(135deg, rgba(105, 229, 255, 0.96), rgba(128, 247, 196, 0.92));
+      border-color: transparent;
+    }
+
+    .stage {
+      position: relative;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 50% 18%, rgba(105, 229, 255, 0.12), transparent 34%),
+        radial-gradient(circle at 50% 120%, rgba(255, 197, 107, 0.08), transparent 28%),
+        rgba(3, 10, 17, 0.88);
+    }
+
+    #graph {
+      width: 100%;
+      height: 100%;
+    }
+
+    .stage-chrome {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 18px;
+    }
+
+    .scene-header,
+    .scene-footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+    }
+
+    .scene-badge {
+      max-width: 520px;
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: rgba(6, 15, 25, 0.66);
+      border: 1px solid rgba(129, 161, 193, 0.16);
+      backdrop-filter: blur(10px);
+    }
+
+    .scene-badge h2 {
+      font-size: 1.45rem;
+      letter-spacing: -0.04em;
+      margin-bottom: 6px;
+    }
+
+    .scene-badge p {
+      color: var(--muted);
+      font-size: 0.86rem;
+      max-width: 50ch;
+      line-height: 1.6;
+    }
+
+    .scene-stack {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .scene-chip {
+      padding: 10px 12px;
+      border-radius: 14px;
+      border: 1px solid rgba(129, 161, 193, 0.16);
+      background: rgba(6, 15, 25, 0.66);
+      color: var(--muted);
+      font-size: 0.76rem;
+    }
+
+    .scene-chip strong {
+      color: var(--text);
+    }
+
+    .timeline {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .commit {
+      padding: 14px;
+      border-radius: 18px;
+      border: 1px solid rgba(129, 161, 193, 0.14);
+      background: rgba(255, 255, 255, 0.02);
+      text-align: left;
+      transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease;
+    }
+
+    .commit:hover {
+      transform: translateY(-1px);
+      border-color: rgba(105, 229, 255, 0.36);
+      background: rgba(105, 229, 255, 0.06);
+    }
+
+    .commit.active {
+      border-color: rgba(255, 197, 107, 0.5);
+      background: rgba(255, 197, 107, 0.1);
+    }
+
+    .commit-title {
+      font-size: 0.88rem;
+      line-height: 1.5;
+    }
+
+    .commit-meta {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 0.72rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .commit-files {
+      margin-top: 10px;
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .chip {
+      padding: 5px 8px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--muted);
+      font-size: 0.7rem;
+    }
+
+    .chip.merge {
+      color: var(--amber);
+      background: rgba(255, 197, 107, 0.12);
+    }
+
+    .detail-card {
+      padding: 16px;
+      border-radius: 18px;
+      border: 1px solid rgba(129, 161, 193, 0.14);
+      background: rgba(255, 255, 255, 0.02);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .detail-title {
+      font-size: 1rem;
+      line-height: 1.4;
+      word-break: break-word;
+    }
+
+    .detail-meta {
+      color: var(--muted);
+      font-size: 0.74rem;
+      display: grid;
+      gap: 6px;
+    }
+
+    .symbol-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .symbol {
+      padding: 12px;
+      border-radius: 14px;
+      border: 1px solid rgba(129, 161, 193, 0.12);
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .symbol-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 5px;
+    }
+
+    .symbol-head strong {
+      font-size: 0.88rem;
+    }
+
+    .symbol-kind {
+      color: var(--cyan);
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .symbol-signature {
+      color: var(--muted);
+      font-size: 0.72rem;
+      line-height: 1.45;
+      word-break: break-word;
+    }
+
+    .event-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .event {
+      padding: 12px 14px;
+      border-radius: 16px;
+      border: 1px solid rgba(129, 161, 193, 0.12);
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .event strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .event p {
+      color: var(--muted);
+      font-size: 0.78rem;
+      line-height: 1.5;
+    }
+
+    .empty-copy {
+      color: var(--muted);
+      font-size: 0.74rem;
+      line-height: 1.6;
+    }
+
+    .toast {
+      position: absolute;
+      left: 50%;
+      bottom: 22px;
+      transform: translateX(-50%);
+      padding: 10px 14px;
+      border-radius: 999px;
+      background: rgba(6, 15, 25, 0.88);
+      border: 1px solid rgba(129, 161, 193, 0.18);
+      color: var(--muted);
+      font-size: 0.78rem;
+      backdrop-filter: blur(12px);
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.18s ease, transform 0.18s ease;
+    }
+
+    .toast.visible {
+      opacity: 1;
+      transform: translateX(-50%) translateY(-4px);
+    }
+
+    @media (max-width: 1180px) {
+      html,
+      body {
+        overflow: auto;
+      }
+
+      .layout {
+        height: auto;
+        grid-template-columns: 1fr;
+      }
+
+      .panel,
+      .stage {
+        min-height: 420px;
+      }
+
+      .stage {
+        order: -1;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="noise"></div>
+  <div class="grid"></div>
+
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark"></div>
+        <div class="brand-copy">
+          <h1>Graph Atlas</h1>
+          <p>3D code topology with live sync and commit-driven history</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <div class="pill"><span class="micro">branch</span><strong id="branch-pill">-</strong></div>
+        <div class="pill"><span class="micro">head</span><strong id="head-pill">-</strong></div>
+        <div class="pill"><span class="micro">live</span><strong id="live-pill">sync</strong></div>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="panel">
+        <div class="panel-head">
+          <h2>Atlas State</h2>
+        </div>
+        <div class="panel-body">
+          <section class="metrics" id="metrics"></section>
+
+          <section class="status-stack">
+            <div class="status-card">
+              <div class="status-line">workspace</div>
+              <div class="status-value" id="root-value">Loading...</div>
+            </div>
+            <div class="status-card">
+              <div class="status-line">refresh result</div>
+              <div class="status-value" id="refresh-value">Waiting for first snapshot</div>
+            </div>
+          </section>
+
+          <section class="controls">
+            <div class="control-row">
+              <label for="refresh-mode">Refresh mode</label>
+              <select class="select" id="refresh-mode">
+                <option value="sync">Filesystem sync</option>
+                <option value="git">Git commits only</option>
+                <option value="none">Manual snapshots</option>
+              </select>
+            </div>
+
+            <div class="toggle-row">
+              <span>Include external libraries</span>
+              <button class="toggle active" id="external-toggle" aria-pressed="true"></button>
+            </div>
+
+            <div class="toggle-row">
+              <span>Polling</span>
+              <button class="toggle active" id="polling-toggle" aria-pressed="true"></button>
+            </div>
+
+            <div class="control-actions">
+              <input class="field" id="search-input" placeholder="Search path or symbol" />
+              <button class="button primary" id="search-button">Find</button>
+            </div>
+
+            <div class="filter-row">
+              <button class="filter-chip active" data-filter="all">All</button>
+              <button class="filter-chip" data-filter="import">Imports</button>
+              <button class="filter-chip" data-filter="call">Calls</button>
+              <button class="filter-chip" data-filter="external">External</button>
+            </div>
+
+            <button class="button" id="refresh-button">Refresh now</button>
+          </section>
+
+          <section>
+            <div class="panel-head" style="padding: 0 0 12px; border: 0; background: none;">
+              <h2>Commit Flow</h2>
+            </div>
+            <div class="timeline" id="commit-list"></div>
+          </section>
+        </div>
+      </aside>
+
+      <section class="stage">
+        <div id="graph"></div>
+        <div class="stage-chrome">
+          <div class="scene-header">
+            <div class="scene-badge">
+              <h2>Code Relationships In Motion</h2>
+              <p>
+                Imports, call edges, and commit history are fused into one space.
+                Use <code>sync</code> to follow active edits or <code>git</code> to rebuild the scene on commit boundaries.
+              </p>
+            </div>
+            <div class="scene-stack">
+              <div class="scene-chip"><span class="micro">visible nodes</span> <strong id="visible-nodes">0</strong></div>
+              <div class="scene-chip"><span class="micro">visible edges</span> <strong id="visible-edges">0</strong></div>
+              <div class="scene-chip"><span class="micro">selection</span> <strong id="selection-pill">none</strong></div>
+            </div>
+          </div>
+          <div class="scene-footer">
+            <div class="scene-chip"><span class="micro">tip</span> click a commit to light up touched files</div>
+            <div class="scene-chip"><span class="micro">camera</span> drag to orbit, scroll to dive</div>
+          </div>
+        </div>
+        <div class="toast" id="toast"></div>
+      </section>
+
+      <aside class="panel">
+        <div class="panel-head">
+          <h2>Selection</h2>
+        </div>
+        <div class="panel-body">
+          <section id="node-detail"></section>
+          <section>
+            <div class="panel-head" style="padding: 0 0 12px; border: 0; background: none;">
+              <h2>Events</h2>
+            </div>
+            <div class="event-list" id="event-list"></div>
+          </section>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/3d-force-graph"></script>
+  <script>
+    const state = {
+      snapshot: null,
+      history: null,
+      refreshMode: "sync",
+      includeExternal: true,
+      polling: true,
+      pollMs: 5000,
+      edgeFilter: "all",
+      selectedNodeId: null,
+      selectedCommitId: null,
+      freshNodeIds: new Set(),
+      freshEdgeIds: new Set(),
+      graphNodes: [],
+      graphLinks: [],
+      adjacency: new Map(),
+      timer: null,
+    };
+
+    const el = {
+      metrics: document.getElementById("metrics"),
+      branch: document.getElementById("branch-pill"),
+      head: document.getElementById("head-pill"),
+      live: document.getElementById("live-pill"),
+      root: document.getElementById("root-value"),
+      refreshValue: document.getElementById("refresh-value"),
+      visibleNodes: document.getElementById("visible-nodes"),
+      visibleEdges: document.getElementById("visible-edges"),
+      selection: document.getElementById("selection-pill"),
+      commitList: document.getElementById("commit-list"),
+      nodeDetail: document.getElementById("node-detail"),
+      eventList: document.getElementById("event-list"),
+      refreshMode: document.getElementById("refresh-mode"),
+      externalToggle: document.getElementById("external-toggle"),
+      pollingToggle: document.getElementById("polling-toggle"),
+      refreshButton: document.getElementById("refresh-button"),
+      searchInput: document.getElementById("search-input"),
+      searchButton: document.getElementById("search-button"),
+      toast: document.getElementById("toast"),
+    };
+
+    const paletteCache = new Map();
+    function hashColor(key) {
+      if (paletteCache.has(key)) return paletteCache.get(key);
+      let hash = 0;
+      for (let i = 0; i < key.length; i += 1) {
+        hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+      }
+      const hue = hash % 360;
+      const color = `hsl(${hue} 78% 66%)`;
+      paletteCache.set(key, color);
+      return color;
+    }
+
+    function edgeId(link) {
+      return `${link.source}|${link.target}|${link.kind}`;
+    }
+
+    function showToast(message) {
+      el.toast.textContent = message;
+      el.toast.classList.add("visible");
+      window.clearTimeout(showToast.timer);
+      showToast.timer = window.setTimeout(() => {
+        el.toast.classList.remove("visible");
+      }, 1800);
+    }
+
+    function nodeSize(node) {
+      return node.external
+        ? 3
+        : Math.max(3.4, Math.min(10.5, 3.8 + node.pagerank * 260));
+    }
+
+    function nodeColor(node) {
+      if (node.active) return "#ffc56b";
+      if (node.fresh) return "#69e5ff";
+      if (node.dimmed) return "rgba(112, 135, 156, 0.2)";
+      if (node.external) return "rgba(255, 197, 107, 0.9)";
+      return hashColor(node.cluster);
+    }
+
+    const Graph = ForceGraph3D()(document.getElementById("graph"))
+      .backgroundColor("#030913")
+      .showNavInfo(false)
+      .enableNodeDrag(false)
+      .nodeOpacity(0.96)
+      .nodeResolution(18)
+      .nodeVal((node) => nodeSize(node))
+      .nodeColor((node) => nodeColor(node))
+      .linkDirectionalArrowLength(2.3)
+      .linkDirectionalArrowRelPos(1)
+      .linkDirectionalParticles((link) => {
+        if (link.kind === "call") return link.active ? 5 : 2;
+        if (link.active) return 2;
+        return 0;
+      })
+      .linkDirectionalParticleSpeed((link) => (link.kind === "call" ? 0.012 : 0.004))
+      .linkDirectionalParticleWidth((link) => (link.active ? 3.4 : 1.3))
+      .linkCurvature((link) => (link.kind === "call" ? 0.12 : 0))
+      .onNodeClick((node) => selectNode(node.id, true))
+      .onBackgroundClick(() => selectNode(null, false));
+
+    Graph.d3Force("charge").strength(-160);
+    Graph.d3Force("link").distance((link) => {
+      if (link.external) return 90;
+      if (link.kind === "call") return 58;
+      return 46;
+    });
+    Graph.d3VelocityDecay(0.28);
+    Graph.cameraPosition({ x: 0, y: 0, z: 220 });
+
+    function activePaths() {
+      const set = new Set();
+      if (state.selectedCommitId && state.history && Array.isArray(state.history.commits)) {
+        const commit = state.history.commits.find((entry) => entry.id === state.selectedCommitId);
+        if (commit) {
+          commit.files.forEach((file) => {
+            set.add(file.path);
+            if (file.previous_path) set.add(file.previous_path);
+          });
+        }
+      }
+      if (state.selectedNodeId) {
+        set.add(state.selectedNodeId);
+        const neighbors = state.adjacency.get(state.selectedNodeId);
+        if (neighbors) {
+          neighbors.forEach((path) => set.add(path));
+        }
+      }
+      return set;
+    }
+
+    Graph
+      .linkWidth((link) => {
+        if (link.active) return 2.8;
+        if (link.fresh) return 2.1;
+        if (link.kind === "call") return 1.1;
+        return link.external ? 0.7 : 0.85;
+      })
+      .linkColor((link) => {
+        if (link.active) return "rgba(255, 197, 107, 0.95)";
+        if (link.kind === "call") return "rgba(105, 229, 255, 0.55)";
+        if (link.external) return "rgba(255, 197, 107, 0.28)";
+        return "rgba(191, 223, 255, 0.18)";
+      })
+      .nodeLabel((node) => {
+        const symbols = node.symbols && node.symbols.length
+          ? `<br/><em>${node.symbols.map((symbol) => symbol.name).join(", ")}</em>`
+          : "";
+        return `<strong>${node.path}</strong><br/>${node.language}${symbols}`;
+      });
+
+    function buildAdjacency(nodes, links) {
+      const adjacency = new Map();
+      nodes.forEach((node) => adjacency.set(node.id, new Set()));
+      links.forEach((link) => {
+        if (!adjacency.has(link.source)) adjacency.set(link.source, new Set());
+        if (!adjacency.has(link.target)) adjacency.set(link.target, new Set());
+        adjacency.get(link.source).add(link.target);
+        adjacency.get(link.target).add(link.source);
+      });
+      state.adjacency = adjacency;
+    }
+
+    function applyGraph(snapshot) {
+      const previousNodeIds = state.snapshot ? new Set(state.snapshot.nodes.map((node) => node.id)) : new Set();
+      const previousEdgeIds = state.snapshot ? new Set(state.snapshot.edges.map((link) => edgeId(link))) : new Set();
+      const commitActive = activePaths();
+
+      const links = snapshot.edges
+        .filter((link) => state.edgeFilter === "all" || link.kind === state.edgeFilter)
+        .map((link) => {
+          const id = edgeId(link);
+          const active = commitActive.has(link.source) && commitActive.has(link.target);
+          return {
+            ...link,
+            id,
+            fresh: !previousEdgeIds.has(id),
+            active,
+          };
+        });
+
+      const linkedNodeIds = new Set();
+      links.forEach((link) => {
+        linkedNodeIds.add(link.source);
+        linkedNodeIds.add(link.target);
+      });
+
+      const nodes = snapshot.nodes
+        .filter((node) => linkedNodeIds.has(node.id) || node.id === state.selectedNodeId)
+        .map((node) => {
+          const fresh = !previousNodeIds.has(node.id);
+          const active = commitActive.has(node.id);
+          const dimmed = commitActive.size > 0 && !active;
+          return {
+            ...node,
+            fresh,
+            active,
+            dimmed,
+          };
+        });
+
+      state.freshNodeIds = new Set(nodes.filter((node) => node.fresh).map((node) => node.id));
+      state.freshEdgeIds = new Set(links.filter((link) => link.fresh).map((link) => link.id));
+      state.graphNodes = nodes;
+      state.graphLinks = links;
+      buildAdjacency(nodes, links);
+      Graph.graphData({ nodes, links });
+      Graph.numDimensions(3);
+      updateNodeDetail();
+      updateEvents();
+      el.visibleNodes.textContent = `${nodes.length}`;
+      el.visibleEdges.textContent = `${links.length}`;
+    }
+
+    function renderMetrics(snapshot, history) {
+      const metrics = [
+        { label: "nodes", value: snapshot.visible_node_count ?? 0 },
+        { label: "edges", value: snapshot.visible_edge_count ?? 0 },
+        { label: "call edges", value: snapshot.graph.call_edges ?? 0 },
+        { label: "commits", value: history && history.commits ? history.commits.length : 0 },
+      ];
+      el.metrics.innerHTML = metrics
+        .map(
+          (metric) => `
+            <div class="metric">
+              <div class="metric-value">${metric.value}</div>
+              <div class="metric-label">${metric.label}</div>
+            </div>
+          `
+        )
+        .join("");
+    }
+
+    function renderHistory(history) {
+      const commits = history && Array.isArray(history.commits) ? history.commits : [];
+      if (!commits.length) {
+        el.commitList.innerHTML = '<p class="empty-copy">No git history was available for this workspace.</p>';
+        return;
+      }
+
+      if (state.selectedCommitId && !commits.some((entry) => entry.id === state.selectedCommitId)) {
+        state.selectedCommitId = null;
+      }
+
+      el.commitList.innerHTML = commits
+        .map((commit) => {
+          const active = commit.id === state.selectedCommitId ? "active" : "";
+          const fileChips = commit.files.slice(0, 4).map((file) => {
+            const name = file.path.split("/").slice(-2).join("/");
+            return `<span class="chip">${name}</span>`;
+          }).join("");
+          return `
+            <button class="commit ${active}" data-commit-id="${commit.id}">
+              <div class="commit-title">${commit.summary}</div>
+              <div class="commit-meta">
+                <span>${commit.short_id}</span>
+                <span>${commit.author}</span>
+                <span>${commit.indexed_files_changed} indexed files</span>
+                ${commit.is_merge ? '<span class="chip merge">merge</span>' : ""}
+              </div>
+              <div class="commit-files">${fileChips}</div>
+            </button>
+          `;
+        })
+        .join("");
+
+      Array.from(el.commitList.querySelectorAll("[data-commit-id]")).forEach((button) => {
+        button.addEventListener("click", () => {
+          const commitId = button.getAttribute("data-commit-id");
+          state.selectedCommitId = state.selectedCommitId === commitId ? null : commitId;
+          applyGraph(state.snapshot);
+          renderHistory(state.history);
+          el.selection.textContent = state.selectedCommitId ? "commit" : state.selectedNodeId ? "node" : "none";
+        });
+      });
+    }
+
+    function updateNodeDetail() {
+      const node = state.graphNodes.find((entry) => entry.id === state.selectedNodeId);
+      if (!node) {
+        el.nodeDetail.innerHTML = `
+          <div class="detail-card">
+            <div class="detail-title">No node selected</div>
+            <div class="detail-meta">
+              <span>Pick a node in the scene or search for a path/symbol.</span>
+              <span>Commit selections highlight touched files without locking the camera.</span>
+            </div>
+          </div>
+        `;
+        return;
+      }
+
+      const neighbors = Array.from(state.adjacency.get(node.id) || []);
+      const symbols = node.symbols && node.symbols.length
+        ? `
+          <div class="symbol-list">
+            ${node.symbols.map((symbol) => `
+              <div class="symbol">
+                <div class="symbol-head">
+                  <strong>${symbol.name}</strong>
+                  <span class="symbol-kind">${symbol.kind}</span>
+                </div>
+                <div class="symbol-signature">${symbol.signature || `line ${symbol.line}`}</div>
+              </div>
+            `).join("")}
+          </div>
+        `
+        : '<p class="empty-copy">No indexed symbol previews were available for this node.</p>';
+
+      el.nodeDetail.innerHTML = `
+        <div class="detail-card">
+          <div class="detail-title">${node.path}</div>
+          <div class="detail-meta">
+            <span>${node.language} · ${node.cluster}</span>
+            <span>PageRank ${node.pagerank.toFixed(4)} · in ${node.in_degree} · out ${node.out_degree}</span>
+            <span>${neighbors.length} neighboring nodes · ${node.symbol_count} indexed symbols</span>
+          </div>
+          ${symbols}
+        </div>
+      `;
+    }
+
+    function updateEvents() {
+      const events = [];
+      if (state.snapshot) {
+        const refresh = state.snapshot.refresh || {};
+        events.push({
+          title: "Refresh",
+          body: refresh.mode === "none"
+            ? "Manual snapshot. The scene is showing the last exported graph state."
+            : `${refresh.mode} mode checked for changes: ${refresh.added || 0} added, ${refresh.modified || 0} modified, ${refresh.removed || 0} removed.`,
+        });
+        events.push({
+          title: "Graph",
+          body: `${state.snapshot.graph.node_count} total nodes, ${state.snapshot.graph.edge_count} total edges, ${state.snapshot.graph.call_edges} call edges.`,
+        });
+      }
+      if (state.freshNodeIds.size || state.freshEdgeIds.size) {
+        events.push({
+          title: "New topology",
+          body: `${state.freshNodeIds.size} new nodes and ${state.freshEdgeIds.size} new edges entered the visible scene.`,
+        });
+      }
+      if (state.selectedCommitId && state.history) {
+        const commit = state.history.commits.find((entry) => entry.id === state.selectedCommitId);
+        if (commit) {
+          events.push({
+            title: "Commit highlight",
+            body: `${commit.short_id} touches ${commit.indexed_files_changed} indexed files. Visible nodes connected to those files are emphasized.`,
+          });
+        }
+      }
+      if (!events.length) {
+        events.push({
+          title: "Atlas",
+          body: "Waiting for graph data from /graph/export.",
+        });
+      }
+
+      el.eventList.innerHTML = events
+        .map(
+          (event) => `
+            <div class="event">
+              <strong>${event.title}</strong>
+              <p>${event.body}</p>
+            </div>
+          `
+        )
+        .join("");
+    }
+
+    function focusNode(node) {
+      if (!node) return;
+      const distance = node.external ? 90 : 130;
+      const x = node.x || 0;
+      const y = node.y || 0;
+      const z = node.z || 0;
+      const magnitude = Math.hypot(x, y, z) || 1;
+      Graph.cameraPosition(
+        {
+          x: x + (x / magnitude) * distance,
+          y: y + (y / magnitude) * distance,
+          z: z + (z / magnitude) * distance,
+        },
+        { x, y, z },
+        1000
+      );
+    }
+
+    function selectNode(nodeId, moveCamera) {
+      state.selectedNodeId = nodeId;
+      el.selection.textContent = nodeId ? "node" : state.selectedCommitId ? "commit" : "none";
+      applyGraph(state.snapshot);
+      if (moveCamera && nodeId) {
+        const node = state.graphNodes.find((entry) => entry.id === nodeId);
+        focusNode(node);
+      }
+    }
+
+    function findNode() {
+      const query = el.searchInput.value.trim().toLowerCase();
+      if (!query || !state.snapshot) return;
+      const node = state.graphNodes.find((entry) => {
+        if (entry.path.toLowerCase().includes(query)) return true;
+        return Array.isArray(entry.symbols) && entry.symbols.some((symbol) => symbol.name.toLowerCase().includes(query));
+      });
+      if (!node) {
+        showToast("No matching node");
+        return;
+      }
+      state.selectedCommitId = null;
+      selectNode(node.id, true);
+      showToast(`Focused ${node.label}`);
+    }
+
+    async function fetchJson(url) {
+      const response = await fetch(url);
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(text || `Request failed with ${response.status}`);
+      }
+      return response.json();
+    }
+
+    async function refreshAll() {
+      const snapshotUrl = `/graph/export?refresh=${encodeURIComponent(state.refreshMode)}&include_external=${state.includeExternal}&symbol_limit=4`;
+      const [snapshot, history] = await Promise.all([
+        fetchJson(snapshotUrl),
+        fetchJson("/graph/history?limit=18&include_files=true"),
+      ]);
+
+      state.snapshot = snapshot;
+      state.history = history;
+      el.root.textContent = snapshot.root || history.root || "-";
+      el.branch.textContent = snapshot.branch || history.branch || "detached";
+      el.head.textContent = (snapshot.head_commit || history.head_commit || "-").slice(0, 10);
+      el.live.textContent = state.refreshMode;
+      el.refreshValue.textContent = snapshot.refresh.mode === "none"
+        ? "Manual snapshot"
+        : `${snapshot.refresh.mode}: ${snapshot.refresh.added} added, ${snapshot.refresh.modified} modified, ${snapshot.refresh.removed} removed`;
+
+      if (!snapshot.available) {
+        Graph.graphData({ nodes: [], links: [] });
+        el.nodeDetail.innerHTML = `
+          <div class="detail-card">
+            <div class="detail-title">No graph available</div>
+            <div class="detail-meta">
+              <span>Build an index with graph support first, then reload this view.</span>
+            </div>
+          </div>
+        `;
+        updateEvents();
+        renderHistory(history);
+        renderMetrics(snapshot, history);
+        return;
+      }
+
+      renderMetrics(snapshot, history);
+      applyGraph(snapshot);
+      renderHistory(history);
+    }
+
+    function resetPolling() {
+      if (state.timer) {
+        window.clearInterval(state.timer);
+        state.timer = null;
+      }
+      if (!state.polling) return;
+      state.timer = window.setInterval(() => {
+        refreshAll().catch((error) => {
+          console.error(error);
+          el.refreshValue.textContent = "Refresh failed";
+        });
+      }, state.pollMs);
+    }
+
+    el.refreshMode.addEventListener("change", () => {
+      state.refreshMode = el.refreshMode.value;
+      el.live.textContent = state.refreshMode;
+      refreshAll().catch(console.error);
+    });
+
+    el.externalToggle.addEventListener("click", () => {
+      state.includeExternal = !state.includeExternal;
+      el.externalToggle.classList.toggle("active", state.includeExternal);
+      el.externalToggle.setAttribute("aria-pressed", String(state.includeExternal));
+      refreshAll().catch(console.error);
+    });
+
+    el.pollingToggle.addEventListener("click", () => {
+      state.polling = !state.polling;
+      el.pollingToggle.classList.toggle("active", state.polling);
+      el.pollingToggle.setAttribute("aria-pressed", String(state.polling));
+      resetPolling();
+    });
+
+    el.refreshButton.addEventListener("click", () => {
+      refreshAll().catch(console.error);
+    });
+
+    el.searchButton.addEventListener("click", findNode);
+    el.searchInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") findNode();
+    });
+
+    Array.from(document.querySelectorAll("[data-filter]")).forEach((button) => {
+      button.addEventListener("click", () => {
+        state.edgeFilter = button.getAttribute("data-filter");
+        Array.from(document.querySelectorAll("[data-filter]")).forEach((chip) => {
+          chip.classList.toggle("active", chip === button);
+        });
+        if (state.snapshot) applyGraph(state.snapshot);
+      });
+    });
+
+    refreshAll()
+      .then(() => {
+        resetPolling();
+      })
+      .catch((error) => {
+        console.error(error);
+        el.refreshValue.textContent = "Initial load failed";
+        updateEvents();
+      });
+  </script>
+</body>
+</html>

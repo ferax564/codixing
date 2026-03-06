@@ -1,5 +1,7 @@
 //! MCP tool definitions and engine dispatch helpers.
 
+use std::path::PathBuf;
+
 use serde_json::{Value, json};
 
 use codixing_core::{Engine, GrepMatch, RepoMapOptions, SearchQuery, Strategy};
@@ -182,6 +184,60 @@ pub fn tool_definitions() -> Value {
             }
         },
         {
+            "name": "write_file",
+            "description": "Write content to a file inside the indexed project and immediately re-index it so the change is searchable. Creates the file (and any missing parent directories) if it does not exist; overwrites it if it does. Use this instead of a plain file-write so the Codixing index stays in sync.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "description": "Relative file path within the project root (e.g. 'src/utils.rs', 'lib/helpers.py')"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Full text content to write to the file"
+                    }
+                },
+                "required": ["file", "content"]
+            }
+        },
+        {
+            "name": "edit_file",
+            "description": "Apply an exact find-and-replace to a file inside the indexed project and immediately re-index it. The old_string must match exactly once in the file; if it appears zero or multiple times the edit is rejected to avoid ambiguity. Use this instead of a plain file-edit so the Codixing index stays in sync.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "description": "Relative file path within the project root (e.g. 'src/engine.rs')"
+                    },
+                    "old_string": {
+                        "type": "string",
+                        "description": "The exact text to find in the file. Must appear exactly once."
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "The text to replace old_string with."
+                    }
+                },
+                "required": ["file", "old_string", "new_string"]
+            }
+        },
+        {
+            "name": "delete_file",
+            "description": "Delete a file from the project filesystem and remove it from the Codixing index. Use this instead of a plain file-delete so the index stays in sync.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "description": "Relative file path within the project root (e.g. 'src/old_module.rs')"
+                    }
+                },
+                "required": ["file"]
+            }
+        },
+        {
             "name": "read_symbol",
             "description": "Read the complete source definition of a named symbol (function, struct, class, method, etc.) resolved from the symbol table. More precise than code_search for fetching a known definition — returns exact source lines with language-tagged fenced code.",
             "inputSchema": {
@@ -204,8 +260,11 @@ pub fn tool_definitions() -> Value {
 
 /// Dispatch a `tools/call` invocation to the appropriate engine method.
 ///
+/// Takes `&mut Engine` so that write tools (write_file, edit_file, delete_file)
+/// can mutate the index inline. Read-only tools use the engine immutably.
+///
 /// Returns `(text_output, is_error)`.
-pub fn dispatch_tool(engine: &Engine, name: &str, args: &Value) -> (String, bool) {
+pub fn dispatch_tool(engine: &mut Engine, name: &str, args: &Value) -> (String, bool) {
     match name {
         "code_search" => call_code_search(engine, args),
         "find_symbol" => call_find_symbol(engine, args),
@@ -217,11 +276,14 @@ pub fn dispatch_tool(engine: &Engine, name: &str, args: &Value) -> (String, bool
         "read_file" => call_read_file(engine, args),
         "read_symbol" => call_read_symbol(engine, args),
         "grep_code" => call_grep_code(engine, args),
+        "write_file" => call_write_file(engine, args),
+        "edit_file" => call_edit_file(engine, args),
+        "delete_file" => call_delete_file(engine, args),
         _ => (format!("Unknown tool: {name}"), true),
     }
 }
 
-fn call_search_usages(engine: &Engine, args: &Value) -> (String, bool) {
+fn call_search_usages(engine: &mut Engine, args: &Value) -> (String, bool) {
     let symbol = match args.get("symbol").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => return ("Missing required argument: symbol".to_string(), true),
@@ -255,7 +317,7 @@ fn call_search_usages(engine: &Engine, args: &Value) -> (String, bool) {
     }
 }
 
-fn call_get_transitive_deps(engine: &Engine, args: &Value) -> (String, bool) {
+fn call_get_transitive_deps(engine: &mut Engine, args: &Value) -> (String, bool) {
     let file = match args.get("file").and_then(|v| v.as_str()) {
         Some(f) => f.to_string(),
         None => return ("Missing required argument: file".to_string(), true),
@@ -284,7 +346,7 @@ fn call_get_transitive_deps(engine: &Engine, args: &Value) -> (String, bool) {
     (out, false)
 }
 
-fn call_index_status(engine: &Engine) -> (String, bool) {
+fn call_index_status(engine: &mut Engine) -> (String, bool) {
     let stats = engine.stats();
     let config = engine.config();
 
@@ -338,7 +400,7 @@ fn call_index_status(engine: &Engine) -> (String, bool) {
     (out, false)
 }
 
-fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) {
+fn call_code_search(engine: &mut Engine, args: &Value) -> (String, bool) {
     let query_str = match args.get("query").and_then(|v| v.as_str()) {
         Some(q) => q.to_string(),
         None => return ("Missing required argument: query".to_string(), true),
@@ -369,7 +431,7 @@ fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) {
     }
 }
 
-fn call_find_symbol(engine: &Engine, args: &Value) -> (String, bool) {
+fn call_find_symbol(engine: &mut Engine, args: &Value) -> (String, bool) {
     let name = match args.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
         None => return ("Missing required argument: name".to_string(), true),
@@ -400,7 +462,7 @@ fn call_find_symbol(engine: &Engine, args: &Value) -> (String, bool) {
     }
 }
 
-fn call_get_references(engine: &Engine, args: &Value) -> (String, bool) {
+fn call_get_references(engine: &mut Engine, args: &Value) -> (String, bool) {
     let file = match args.get("file").and_then(|v| v.as_str()) {
         Some(f) => f.to_string(),
         None => return ("Missing required argument: file".to_string(), true),
@@ -432,7 +494,7 @@ fn call_get_references(engine: &Engine, args: &Value) -> (String, bool) {
     (out, false)
 }
 
-fn call_get_repo_map(engine: &Engine, args: &Value) -> (String, bool) {
+fn call_get_repo_map(engine: &mut Engine, args: &Value) -> (String, bool) {
     let token_budget = args
         .get("token_budget")
         .and_then(|v| v.as_u64())
@@ -456,7 +518,7 @@ fn call_get_repo_map(engine: &Engine, args: &Value) -> (String, bool) {
     }
 }
 
-fn call_read_file(engine: &Engine, args: &Value) -> (String, bool) {
+fn call_read_file(engine: &mut Engine, args: &Value) -> (String, bool) {
     let file = match args.get("file").and_then(|v| v.as_str()) {
         Some(f) => f,
         None => return ("Missing required argument: file".to_string(), true),
@@ -506,7 +568,7 @@ fn call_read_file(engine: &Engine, args: &Value) -> (String, bool) {
     }
 }
 
-fn call_grep_code(engine: &Engine, args: &Value) -> (String, bool) {
+fn call_grep_code(engine: &mut Engine, args: &Value) -> (String, bool) {
     let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
         Some(p) => p,
         None => return ("Missing required argument: pattern".to_string(), true),
@@ -558,7 +620,7 @@ fn format_grep_matches(pattern: &str, matches: &[GrepMatch]) -> String {
     out
 }
 
-fn call_read_symbol(engine: &Engine, args: &Value) -> (String, bool) {
+fn call_read_symbol(engine: &mut Engine, args: &Value) -> (String, bool) {
     let name = match args.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
         None => return ("Missing required argument: name".to_string(), true),
@@ -618,5 +680,219 @@ fn call_read_symbol(engine: &Engine, args: &Value) -> (String, bool) {
             (out, false)
         }
         Err(e) => (format!("Read error: {e}"), true),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Write tools — mutate the filesystem and immediately re-index
+// ---------------------------------------------------------------------------
+
+/// Resolve a relative path to an absolute path inside the project root,
+/// rejecting any path that escapes the root (path traversal guard).
+fn resolve_safe_path(engine: &Engine, rel: &str) -> Result<PathBuf, String> {
+    let root = engine.config().root.clone();
+    // Build the candidate absolute path without canonicalizing the full path
+    // (the file may not exist yet for write_file). We canonicalize only the
+    // parent directory, which must already exist (or we create it).
+    let candidate = root.join(rel);
+
+    // Normalize without symlink resolution so new files are accepted.
+    // Walk components and collapse `.` / `..` manually.
+    let mut normalized = PathBuf::new();
+    for part in candidate.components() {
+        match part {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            c => normalized.push(c),
+        }
+    }
+
+    // Security: the resolved path must be inside root.
+    if !normalized.starts_with(&root) {
+        return Err(format!(
+            "Path '{rel}' escapes the project root — operation denied."
+        ));
+    }
+
+    Ok(normalized)
+}
+
+fn call_write_file(engine: &mut Engine, args: &Value) -> (String, bool) {
+    let file = match args.get("file").and_then(|v| v.as_str()) {
+        Some(f) => f,
+        None => return ("Missing required argument: file".to_string(), true),
+    };
+    let content = match args.get("content").and_then(|v| v.as_str()) {
+        Some(c) => c,
+        None => return ("Missing required argument: content".to_string(), true),
+    };
+
+    let abs_path = match resolve_safe_path(engine, file) {
+        Ok(p) => p,
+        Err(e) => return (e, true),
+    };
+
+    // Create parent directories if needed.
+    if let Some(parent) = abs_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return (
+                format!("Failed to create directories for '{file}': {e}"),
+                true,
+            );
+        }
+    }
+
+    if let Err(e) = std::fs::write(&abs_path, content) {
+        return (format!("Failed to write '{file}': {e}"), true);
+    }
+
+    let line_count = content.lines().count();
+    let byte_count = content.len();
+
+    match engine
+        .reindex_file(&abs_path)
+        .and_then(|()| engine.persist_incremental())
+    {
+        Ok(()) => (
+            format!(
+                "Written and indexed: {file} ({line_count} lines, {byte_count} bytes).\n\
+                 The file is now searchable via code_search and find_symbol."
+            ),
+            false,
+        ),
+        Err(e) => (
+            format!(
+                "File written to disk but re-index failed: {e}\n\
+                 Run `codixing sync .` to recover."
+            ),
+            true,
+        ),
+    }
+}
+
+fn call_edit_file(engine: &mut Engine, args: &Value) -> (String, bool) {
+    let file = match args.get("file").and_then(|v| v.as_str()) {
+        Some(f) => f,
+        None => return ("Missing required argument: file".to_string(), true),
+    };
+    let old_string = match args.get("old_string").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return ("Missing required argument: old_string".to_string(), true),
+    };
+    let new_string = match args.get("new_string").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return ("Missing required argument: new_string".to_string(), true),
+    };
+
+    let abs_path = match resolve_safe_path(engine, file) {
+        Ok(p) => p,
+        Err(e) => return (e, true),
+    };
+
+    let original = match std::fs::read_to_string(&abs_path) {
+        Ok(s) => s,
+        Err(e) => return (format!("Failed to read '{file}': {e}"), true),
+    };
+
+    // Count occurrences to catch ambiguity.
+    let count = original.matches(old_string).count();
+    match count {
+        0 => {
+            return (
+                format!(
+                    "old_string not found in '{file}'.\n\
+                     Use read_file or grep_code to confirm the exact text first."
+                ),
+                true,
+            );
+        }
+        n if n > 1 => {
+            return (
+                format!(
+                    "old_string appears {n} times in '{file}' — edit is ambiguous.\n\
+                     Provide more surrounding context in old_string to make it unique."
+                ),
+                true,
+            );
+        }
+        _ => {}
+    }
+
+    let updated = original.replacen(old_string, new_string, 1);
+
+    if let Err(e) = std::fs::write(&abs_path, &updated) {
+        return (format!("Failed to write '{file}': {e}"), true);
+    }
+
+    // Build a compact summary: first changed line numbers.
+    let old_lines: Vec<&str> = old_string.lines().collect();
+    let new_lines: Vec<&str> = new_string.lines().collect();
+
+    match engine
+        .reindex_file(&abs_path)
+        .and_then(|()| engine.persist_incremental())
+    {
+        Ok(()) => (
+            format!(
+                "Edited and re-indexed: {file}\n\
+                 Replaced {} line(s) with {} line(s). \
+                 The change is now searchable via code_search and find_symbol.",
+                old_lines.len().max(1),
+                new_lines.len().max(1),
+            ),
+            false,
+        ),
+        Err(e) => (
+            format!(
+                "File edited on disk but re-index failed: {e}\n\
+                 Run `codixing sync .` to recover."
+            ),
+            true,
+        ),
+    }
+}
+
+fn call_delete_file(engine: &mut Engine, args: &Value) -> (String, bool) {
+    let file = match args.get("file").and_then(|v| v.as_str()) {
+        Some(f) => f,
+        None => return ("Missing required argument: file".to_string(), true),
+    };
+
+    let abs_path = match resolve_safe_path(engine, file) {
+        Ok(p) => p,
+        Err(e) => return (e, true),
+    };
+
+    if !abs_path.exists() {
+        return (
+            format!("File '{file}' does not exist — nothing to delete."),
+            true,
+        );
+    }
+
+    if let Err(e) = std::fs::remove_file(&abs_path) {
+        return (format!("Failed to delete '{file}': {e}"), true);
+    }
+
+    match engine
+        .remove_file(&abs_path)
+        .and_then(|()| engine.persist_incremental())
+    {
+        Ok(()) => (
+            format!(
+                "Deleted and de-indexed: {file}.\n\
+                 The file has been removed from the filesystem and the Codixing index."
+            ),
+            false,
+        ),
+        Err(e) => (
+            format!(
+                "File deleted from disk but de-index failed: {e}\n\
+                 Run `codixing sync .` to recover."
+            ),
+            true,
+        ),
     }
 }

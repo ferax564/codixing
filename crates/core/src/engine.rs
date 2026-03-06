@@ -17,8 +17,8 @@ use crate::error::{CodixingError, Result};
 use crate::formatter;
 use crate::graph::extractor::RawImport;
 use crate::graph::{
-    CallExtractor, CodeGraph, GraphStats, ImportExtractor, ImportResolver, RepoMapOptions,
-    compute_pagerank, generate_repo_map,
+    CallExtractor, CodeGraph, GraphData, GraphStats, ImportExtractor, ImportResolver,
+    RepoMapOptions, compute_pagerank, generate_repo_map,
 };
 use crate::index::TantivyIndex;
 use crate::language::{Language, SemanticEntity, detect_language};
@@ -1377,6 +1377,59 @@ impl Engine {
         Ok(())
     }
 
+    /// Persist symbols, chunk_meta, vectors, and graph — but **not** tree
+    /// hashes.
+    ///
+    /// Use this after `reindex_file()` / `remove_file()` when the Tantivy
+    /// index has already been committed: the symbol table, chunk metadata, and
+    /// graph are updated in memory and need to be written to disk so that
+    /// subsequent engine opens (e.g. a new MCP invocation) see the changes.
+    ///
+    /// Unlike [`Self::save`], this method does not touch the stored file-hash
+    /// table, so a subsequent [`Self::sync`] will correctly detect the changed
+    /// file rather than re-indexing the entire repo.
+    pub fn persist_incremental(&self) -> Result<()> {
+        let sym_bytes = serialize_symbols(&self.symbols)?;
+        self.store.save_symbols_bytes(&sym_bytes)?;
+
+        let meta_pairs: Vec<(u64, ChunkMeta)> = self
+            .chunk_meta
+            .iter()
+            .map(|e| (*e.key(), e.value().clone()))
+            .collect();
+        let meta_bytes = bitcode::serialize(&meta_pairs).map_err(|e| {
+            CodixingError::Serialization(format!("failed to serialize chunk_meta: {e}"))
+        })?;
+        self.store.save_chunk_meta_bytes(&meta_bytes)?;
+
+        if let Some(ref vec_idx) = self.vector {
+            vec_idx.save(
+                &self.store.vector_index_path(),
+                &self.store.file_chunks_path(),
+            )?;
+        }
+
+        if let Some(ref g) = self.graph {
+            let flat = g.to_flat();
+            if let Err(e) = self.store.save_graph(&flat) {
+                warn!(error = %e, "failed to persist graph in persist_incremental()");
+            }
+        }
+
+        let stats = self.stats();
+        let git_commit = git_head_commit(&self.config.root);
+        let meta = IndexMeta {
+            version: "0.3.0".to_string(),
+            file_count: stats.file_count,
+            chunk_count: stats.chunk_count,
+            symbol_count: stats.symbol_count,
+            last_indexed: unix_timestamp_string(),
+            git_commit,
+        };
+        self.store.save_meta(&meta)?;
+        Ok(())
+    }
+
     // -------------------------------------------------------------------------
     // Graph public API
     // -------------------------------------------------------------------------
@@ -1428,6 +1481,11 @@ impl Engine {
     /// Return graph statistics, or `None` if the graph has not been built.
     pub fn graph_stats(&self) -> Option<GraphStats> {
         self.graph.as_ref().map(|g| g.stats())
+    }
+
+    /// Return the current dependency graph as a flat snapshot.
+    pub fn graph_data(&self) -> Option<GraphData> {
+        self.graph.as_ref().map(|g| g.to_flat())
     }
 
     /// Two-stage reranked search: hybrid first-pass then cross-encoder scoring.

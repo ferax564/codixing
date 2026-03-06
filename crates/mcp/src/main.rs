@@ -396,11 +396,11 @@ async fn handle_tools_call(engine: &Arc<Mutex<Engine>>, id: Value, params: Optio
     let tool_name_clone = tool_name.clone();
 
     let call_result = tokio::task::spawn_blocking(move || {
-        let engine = match engine_arc.lock() {
+        let mut engine = match engine_arc.lock() {
             Ok(e) => e,
             Err(e) => return (format!("Engine lock poisoned: {e}"), true),
         };
-        tools::dispatch_tool(&engine, &tool_name_clone, &args)
+        tools::dispatch_tool(&mut *engine, &tool_name_clone, &args)
     })
     .await;
 

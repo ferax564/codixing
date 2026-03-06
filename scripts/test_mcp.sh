@@ -135,7 +135,7 @@ assert_contains     "read_file returns source"  "Engine"      "$RESP"
 # ── 6. grep_code ──────────────────────────────────────────────────────────────
 info "6. grep_code"
 
-RESP=$(mcp_call '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"grep_code","arguments":{"pattern":"pub fn","glob":"**/*.rs","context":1}}}')
+RESP=$(mcp_call '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"grep_code","arguments":{"pattern":"pub fn","file_glob":"**/*.rs","context_lines":1}}}')
 assert_no_error     "grep_code no error"          "$RESP"
 assert_contains     "grep_code finds pub fn" "pub fn"     "$RESP"
 
@@ -155,6 +155,34 @@ assert_contains "unknown tool returns isError" "isError" "$RESP"
 # Must not crash on missing required param
 RESP=$(mcp_call '{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"code_search","arguments":{}}}' || true)
 ok "missing required param doesn't crash"
+
+# ── 9. write_file / edit_file / delete_file ───────────────────────────────────
+info "9. write_file / edit_file / delete_file"
+
+RESP=$(mcp_call '{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"write_file","arguments":{"file":"src/mcp_write_test.rs","content":"pub struct McpTest { pub value: u64 }"}}}')
+assert_no_error     "write_file no error"                  "$RESP"
+assert_contains     "write_file reports indexed"   "indexed" "$RESP"
+
+RESP=$(mcp_call '{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"find_symbol","arguments":{"name":"McpTest"}}}')
+assert_contains     "write_file symbol persisted"  "McpTest" "$RESP"
+
+RESP=$(mcp_call '{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"edit_file","arguments":{"file":"src/mcp_write_test.rs","old_string":"pub value: u64","new_string":"pub value: u64,\n    pub label: String"}}}')
+assert_no_error     "edit_file no error"                   "$RESP"
+assert_contains     "edit_file reports re-indexed" "indexed" "$RESP"
+
+RESP=$(mcp_call '{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"edit_file","arguments":{"file":"src/mcp_write_test.rs","old_string":"NONEXISTENT_TEXT_XYZ","new_string":"replacement"}}}')
+assert_contains     "edit_file rejects missing old_string"  "isError" "$RESP"
+
+RESP=$(mcp_call '{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"write_file","arguments":{"file":"../../etc/passwd","content":"evil"}}}')
+assert_contains     "write_file blocks path traversal"      "isError" "$RESP"
+
+RESP=$(mcp_call '{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"delete_file","arguments":{"file":"src/mcp_write_test.rs"}}}')
+assert_no_error     "delete_file no error"                 "$RESP"
+assert_contains     "delete_file reports removed"  "removed" "$RESP"
+
+RESP=$(mcp_call '{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"find_symbol","arguments":{"name":"McpTest"}}}')
+# After deletion the symbol should be gone; result should say "No symbols"
+assert_contains     "delete_file symbol de-indexed" "No symbols" "$RESP"
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 printf "\n${BOLD}Results: ${GREEN}$PASS passed${RESET}, "
