@@ -1138,11 +1138,18 @@ impl Engine {
         let mut changes: Vec<FileChange> = Vec::new();
         let mut seen: HashSet<PathBuf> = HashSet::new();
         let mut unchanged = 0usize;
+        // Collect all current hashes so we can persist the complete set after a
+        // partial sync.  save() only writes hashes for files parsed in the current
+        // session (via parser.cache()), so after a 1-file add the next sync would
+        // treat all pre-existing files as new.  We fix this by overriding the saved
+        // tree hashes with the full current set computed here.
+        let mut current_hashes: Vec<(PathBuf, u64)> = Vec::new();
 
         for abs_path in &current_files {
             seen.insert(abs_path.clone());
             let content = fs::read(abs_path)?;
             let hash = xxhash_rust::xxh3::xxh3_64(&content);
+            current_hashes.push((abs_path.clone(), hash));
             match old_hashes.get(abs_path) {
                 Some(&old) if old == hash => unchanged += 1,
                 _ => changes.push(FileChange {
@@ -1180,6 +1187,9 @@ impl Engine {
         if !changes.is_empty() {
             self.apply_changes(&changes)?;
             self.save()?;
+            // Override the hashes written by save() (which only covers files parsed
+            // this session) with the complete current-file set computed above.
+            self.store.save_tree_hashes(&current_hashes)?;
         } else {
             info!("index already up-to-date");
         }
