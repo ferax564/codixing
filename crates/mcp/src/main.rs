@@ -400,7 +400,7 @@ async fn handle_tools_call(engine: &Arc<Mutex<Engine>>, id: Value, params: Optio
             Ok(e) => e,
             Err(e) => return (format!("Engine lock poisoned: {e}"), true),
         };
-        tools::dispatch_tool(&mut *engine, &tool_name_clone, &args)
+        tools::dispatch_tool(&mut engine, &tool_name_clone, &args)
     })
     .await;
 

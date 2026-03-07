@@ -414,6 +414,19 @@ impl CodeGraph {
         }
     }
 
+    /// Iterate over all call edges as `(caller_file, callee_name)` tuples.
+    pub fn call_edges(&self) -> Vec<(String, String)> {
+        self.graph
+            .edge_references()
+            .filter(|e| e.weight().kind == EdgeKind::Calls)
+            .map(|e| {
+                let caller = self.graph[e.source()].file_path.clone();
+                let callee_name = e.weight().raw_import.clone();
+                (caller, callee_name)
+            })
+            .collect()
+    }
+
     /// Iterate over all real (non-external) nodes sorted by PageRank descending.
     pub fn nodes_by_pagerank(&self) -> Vec<&CodeNode> {
         let mut nodes: Vec<&CodeNode> = self

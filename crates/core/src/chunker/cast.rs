@@ -287,6 +287,8 @@ fn extract_entity_names_from_content(content: &str, language: Language) -> Vec<S
         Language::Swift => &["func ", "class ", "struct ", "protocol ", "extension "],
         Language::Kotlin => &["fun ", "class ", "object ", "interface "],
         Language::Scala => &["def ", "class ", "object ", "trait ", "val "],
+        Language::Zig => &["fn ", "const ", "var ", "pub "],
+        Language::Php => &["function ", "class "],
     };
 
     for line in content.lines() {
@@ -324,6 +326,13 @@ fn extract_signatures_from_content(content: &str, language: Language) -> Vec<Str
         Language::Swift => &["func ", "public func ", "private func ", "internal func "],
         Language::Kotlin => &["fun ", "public fun ", "private fun ", "internal fun "],
         Language::Scala => &["def "],
+        Language::Zig => &["fn ", "pub fn "],
+        Language::Php => &[
+            "function ",
+            "public function ",
+            "private function ",
+            "protected function ",
+        ],
     };
 
     let mut sigs = Vec::new();

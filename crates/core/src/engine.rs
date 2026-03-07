@@ -1488,6 +1488,27 @@ impl Engine {
         self.graph.as_ref().map(|g| g.to_flat())
     }
 
+    /// Return all symbol-level call edges as `(caller_file, callee_name)` tuples.
+    pub fn call_graph_edges(&self) -> Vec<(String, String, String)> {
+        self.graph
+            .as_ref()
+            .map(|g| {
+                g.call_edges()
+                    .into_iter()
+                    .map(|(caller, callee)| (caller.clone(), caller, callee))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Return true if the graph contains any symbol-level call edges.
+    pub fn has_call_graph(&self) -> bool {
+        self.graph
+            .as_ref()
+            .map(|g| !g.call_edges().is_empty())
+            .unwrap_or(false)
+    }
+
     /// Two-stage reranked search: hybrid first-pass then cross-encoder scoring.
     ///
     /// Phase 1: collect up to `max(limit × 3, 30)` candidates via the `Fast`
