@@ -1294,7 +1294,10 @@ fn call_list_files(engine: &mut Engine, args: &Value) -> (String, bool) {
     filtered.truncate(limit);
 
     if filtered.is_empty() {
-        return ("No indexed files found matching the filter.".to_string(), false);
+        return (
+            "No indexed files found matching the filter.".to_string(),
+            false,
+        );
     }
 
     let mut out = format!(
@@ -1320,7 +1323,12 @@ fn call_outline_file(engine: &mut Engine, args: &Value) -> (String, bool) {
     };
 
     if syms.is_empty() {
-        return (format!("No symbols found in '{file}'. File may not be indexed or contain no extractable symbols."), false);
+        return (
+            format!(
+                "No symbols found in '{file}'. File may not be indexed or contain no extractable symbols."
+            ),
+            false,
+        );
     }
 
     let mut sorted = syms;
@@ -1335,7 +1343,11 @@ fn call_outline_file(engine: &mut Engine, args: &Value) -> (String, bool) {
         };
         out.push_str(&format!(
             "  L{:>4}–{:<4}  {:12}  {}{}\n",
-            s.line_start, s.line_end, format!("{:?}", s.kind), s.name, scope
+            s.line_start,
+            s.line_end,
+            format!("{:?}", s.kind),
+            s.name,
+            scope
         ));
     }
     out.push_str(&format!("\n{} symbols total.\n", sorted.len()));
@@ -1633,10 +1645,7 @@ fn call_explain(engine: &mut Engine, args: &Value) -> (String, bool) {
     if !usages.is_empty() {
         out.push_str(&format!("### Top {} usage sites\n", usages.len()));
         for u in &usages {
-            out.push_str(&format!(
-                "  - `{}` L{}\n",
-                u.file_path, u.line_start
-            ));
+            out.push_str(&format!("  - `{}` L{}\n", u.file_path, u.line_start));
         }
     }
 
@@ -1658,15 +1667,14 @@ fn call_symbol_callers(engine: &mut Engine, args: &Value) -> (String, bool) {
 
     if usages.is_empty() {
         return (
-            format!("No callers found for `{symbol}`. The symbol may not be called directly, or the call graph may not be available."),
+            format!(
+                "No callers found for `{symbol}`. The symbol may not be called directly, or the call graph may not be available."
+            ),
             false,
         );
     }
 
-    let mut out = format!(
-        "## Callers of `{symbol}` ({} found)\n\n",
-        usages.len()
-    );
+    let mut out = format!("## Callers of `{symbol}` ({} found)\n\n", usages.len());
     for u in &usages {
         out.push_str(&format!("  `{}` L{}", u.file_path, u.line_start));
         if !u.signature.is_empty() {
@@ -1690,20 +1698,15 @@ fn call_symbol_callees(engine: &mut Engine, args: &Value) -> (String, bool) {
     // Read the symbol source and search for function calls within it.
     let src = match engine.read_symbol_source(&symbol, None) {
         Ok(Some(s)) => s,
-        Ok(None) => {
-            return (
-                format!("Symbol `{symbol}` not found in the index."),
-                false,
-            )
-        }
+        Ok(None) => return (format!("Symbol `{symbol}` not found in the index."), false),
         Err(e) => return (format!("Error: {e}"), true),
     };
 
     // Extract call-like patterns from the source text.
     let call_pattern = regex::Regex::new(r"\b([a-z_][a-zA-Z0-9_]*)\s*\(").unwrap();
     let keywords: std::collections::HashSet<&str> = [
-        "if", "while", "for", "loop", "match", "return", "let", "use",
-        "fn", "pub", "mod", "struct", "enum", "impl", "trait", "type",
+        "if", "while", "for", "loop", "match", "return", "let", "use", "fn", "pub", "mod",
+        "struct", "enum", "impl", "trait", "type",
     ]
     .iter()
     .copied()
@@ -1729,7 +1732,9 @@ fn call_symbol_callees(engine: &mut Engine, args: &Value) -> (String, bool) {
 
     if callees.is_empty() {
         return (
-            format!("No callees detected in `{symbol}`. May be a data type or the call graph was built without call extraction."),
+            format!(
+                "No callees detected in `{symbol}`. May be a data type or the call graph was built without call extraction."
+            ),
             false,
         );
     }
@@ -1757,7 +1762,10 @@ fn call_predict_impact(engine: &mut Engine, args: &Value) -> (String, bool) {
     }
 
     if changed_files.is_empty() {
-        return ("No file changes detected in the patch. Ensure it is a valid unified diff.".to_string(), false);
+        return (
+            "No file changes detected in the patch. Ensure it is a valid unified diff.".to_string(),
+            false,
+        );
     }
 
     // For each changed file, find its callers (files that import it).
@@ -1795,7 +1803,10 @@ fn call_predict_impact(engine: &mut Engine, args: &Value) -> (String, bool) {
     if ranked.is_empty() {
         out.push_str("\n### Impact\nNo dependent files detected in the import graph.\n");
     } else {
-        out.push_str(&format!("\n### Most likely impacted files (top {})\n", ranked.len()));
+        out.push_str(&format!(
+            "\n### Most likely impacted files (top {})\n",
+            ranked.len()
+        ));
         for (file, score) in &ranked {
             out.push_str(&format!("  - {file}  (dependency depth score: {score})\n"));
         }
@@ -1831,16 +1842,21 @@ fn call_stitch_context(engine: &mut Engine, args: &Value) -> (String, bool) {
     stitched.push_str("### Primary results\n\n");
 
     for r in &results {
-        stitched.push_str(&format!("**{}** L{}-{}\n```\n{}\n```\n\n",
-            r.file_path, r.line_start, r.line_end, r.content.trim()));
+        stitched.push_str(&format!(
+            "**{}** L{}-{}\n```\n{}\n```\n\n",
+            r.file_path,
+            r.line_start,
+            r.line_end,
+            r.content.trim()
+        ));
 
         // Collect callee candidates.
         for cap in call_pattern.captures_iter(&r.content) {
             if let Some(name) = cap.get(1) {
                 let n = name.as_str().to_string();
-                if !callee_sources.contains_key(&n) {
-                    if let Ok(Some(src)) = engine.read_symbol_source(&n, None) {
-                        callee_sources.insert(n, src);
+                if let std::collections::hash_map::Entry::Vacant(e) = callee_sources.entry(n) {
+                    if let Ok(Some(src)) = engine.read_symbol_source(e.key(), None) {
+                        e.insert(src);
                     }
                 }
             }
@@ -1880,10 +1896,7 @@ fn call_enrich_docs(engine: &mut Engine, args: &Value) -> (String, bool) {
     // Return cached if available and not forced.
     if !force {
         if let Some(cached) = docs.get(&symbol) {
-            return (
-                format!("## Doc for `{symbol}` (cached)\n\n{cached}"),
-                false,
-            );
+            return (format!("## Doc for `{symbol}` (cached)\n\n{cached}"), false);
         }
     }
 
@@ -1921,7 +1934,10 @@ fn call_enrich_docs(engine: &mut Engine, args: &Value) -> (String, bool) {
     if let Some(parent) = docs_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(&docs_path, serde_json::to_string_pretty(&docs).unwrap_or_default());
+    let _ = std::fs::write(
+        &docs_path,
+        serde_json::to_string_pretty(&docs).unwrap_or_default(),
+    );
 
     (format!("## Doc for `{symbol}`\n\n{doc}"), false)
 }
@@ -1951,8 +1967,11 @@ fn save_memory(engine: &Engine, memory: &HashMap<String, serde_json::Value>) -> 
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create .codixing dir: {e}"))?;
     }
-    std::fs::write(&path, serde_json::to_string_pretty(memory).unwrap_or_default())
-        .map_err(|e| format!("Failed to write memory.json: {e}"))
+    std::fs::write(
+        &path,
+        serde_json::to_string_pretty(memory).unwrap_or_default(),
+    )
+    .map_err(|e| format!("Failed to write memory.json: {e}"))
 }
 
 fn call_remember(engine: &mut Engine, args: &Value) -> (String, bool) {
@@ -1975,10 +1994,7 @@ fn call_remember(engine: &mut Engine, args: &Value) -> (String, bool) {
         .unwrap_or_default();
 
     let mut memory = load_memory(engine);
-    memory.insert(
-        key.clone(),
-        json!({ "value": value, "tags": tags }),
-    );
+    memory.insert(key.clone(), json!({ "value": value, "tags": tags }));
 
     match save_memory(engine, &memory) {
         Ok(()) => (
@@ -1990,7 +2006,11 @@ fn call_remember(engine: &mut Engine, args: &Value) -> (String, bool) {
 }
 
 fn call_recall(engine: &mut Engine, args: &Value) -> (String, bool) {
-    let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+    let query = args
+        .get("query")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase();
     let tags: Vec<String> = args
         .get("tags")
         .and_then(|v| v.as_array())
@@ -2004,13 +2024,20 @@ fn call_recall(engine: &mut Engine, args: &Value) -> (String, bool) {
     let memory = load_memory(engine);
 
     if memory.is_empty() {
-        return ("No memories stored yet. Use `remember` to store project knowledge.".to_string(), false);
+        return (
+            "No memories stored yet. Use `remember` to store project knowledge.".to_string(),
+            false,
+        );
     }
 
     let mut results: Vec<(String, String, Vec<String>)> = Vec::new();
 
     for (key, entry) in &memory {
-        let value = entry.get("value").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let value = entry
+            .get("value")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let entry_tags: Vec<String> = entry
             .get("tags")
             .and_then(|v| v.as_array())
@@ -2030,8 +2057,7 @@ fn call_recall(engine: &mut Engine, args: &Value) -> (String, bool) {
         }
 
         // Filter by tags (AND).
-        let tags_match = tags.is_empty()
-            || tags.iter().all(|t| entry_tags.contains(t));
+        let tags_match = tags.is_empty() || tags.iter().all(|t| entry_tags.contains(t));
         if !tags_match {
             continue;
         }
@@ -2065,15 +2091,15 @@ fn call_forget(engine: &mut Engine, args: &Value) -> (String, bool) {
 
     let mut memory = load_memory(engine);
     if memory.remove(&key).is_none() {
-        return (
-            format!("No memory entry found with key '{key}'."),
-            false,
-        );
+        return (format!("No memory entry found with key '{key}'."), false);
     }
 
     match save_memory(engine, &memory) {
         Ok(()) => (
-            format!("Removed memory entry '{key}'. Remaining entries: {}.", memory.len()),
+            format!(
+                "Removed memory entry '{key}'. Remaining entries: {}.",
+                memory.len()
+            ),
             false,
         ),
         Err(e) => (e, true),
@@ -2084,7 +2110,14 @@ fn call_find_tests(engine: &mut Engine, args: &Value) -> (String, bool) {
     let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
     let file_filter = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
 
-    let syms = match engine.symbols("", if file_filter.is_empty() { None } else { Some(file_filter) }) {
+    let syms = match engine.symbols(
+        "",
+        if file_filter.is_empty() {
+            None
+        } else {
+            Some(file_filter)
+        },
+    ) {
         Ok(s) => s,
         Err(e) => return (format!("Symbol lookup error: {e}"), true),
     };
@@ -2118,8 +2151,16 @@ fn call_find_tests(engine: &mut Engine, args: &Value) -> (String, bool) {
         return (
             format!(
                 "No test functions found{}{}.",
-                if !pattern.is_empty() { format!(" matching '{pattern}'") } else { String::new() },
-                if !file_filter.is_empty() { format!(" in '{file_filter}'") } else { String::new() }
+                if !pattern.is_empty() {
+                    format!(" matching '{pattern}'")
+                } else {
+                    String::new()
+                },
+                if !file_filter.is_empty() {
+                    format!(" in '{file_filter}'")
+                } else {
+                    String::new()
+                }
             ),
             false,
         );
@@ -2139,7 +2180,10 @@ fn call_find_tests(engine: &mut Engine, args: &Value) -> (String, bool) {
             let mut sorted = file_tests.to_vec();
             sorted.sort_by_key(|t| t.line_start);
             for t in sorted {
-                out.push_str(&format!("  L{:>4}  {:?}  {}\n", t.line_start, t.kind, t.name));
+                out.push_str(&format!(
+                    "  L{:>4}  {:?}  {}\n",
+                    t.line_start, t.kind, t.name
+                ));
             }
         }
         out.push('\n');
@@ -2193,12 +2237,17 @@ fn call_find_similar(engine: &mut Engine, args: &Value) -> (String, bool) {
 
     if similar.is_empty() {
         return (
-            format!("No code similar to `{symbol}` found. The symbol may be unique in this codebase."),
+            format!(
+                "No code similar to `{symbol}` found. The symbol may be unique in this codebase."
+            ),
             false,
         );
     }
 
-    let mut out = format!("## Code similar to `{symbol}` ({} results)\n\n", similar.len());
+    let mut out = format!(
+        "## Code similar to `{symbol}` ({} results)\n\n",
+        similar.len()
+    );
     for r in &similar {
         out.push_str(&format!(
             "**{}** L{}-{}  (score: {:.3})\n```\n{}\n```\n\n",
@@ -2217,7 +2266,10 @@ fn call_get_complexity(engine: &mut Engine, args: &Value) -> (String, bool) {
         Some(f) => f.to_string(),
         None => return ("Missing required argument: file".to_string(), true),
     };
-    let min_cc = args.get("min_complexity").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+    let min_cc = args
+        .get("min_complexity")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1) as usize;
 
     let root = engine.config().root.clone();
     let abs_path = root.join(&file);
@@ -2231,18 +2283,15 @@ fn call_get_complexity(engine: &mut Engine, args: &Value) -> (String, bool) {
     let syms = engine.symbols("", Some(&file)).unwrap_or_default();
     let mut fns: Vec<_> = syms
         .iter()
-        .filter(|s| {
-            matches!(
-                s.kind,
-                EntityKind::Function | EntityKind::Method
-            )
-        })
+        .filter(|s| matches!(s.kind, EntityKind::Function | EntityKind::Method))
         .collect();
     fns.sort_by_key(|s| s.line_start);
 
     if fns.is_empty() {
         return (
-            format!("No functions found in '{file}'. File may not be indexed or contain no functions."),
+            format!(
+                "No functions found in '{file}'. File may not be indexed or contain no functions."
+            ),
             false,
         );
     }
@@ -2252,14 +2301,22 @@ fn call_get_complexity(engine: &mut Engine, args: &Value) -> (String, bool) {
     // Count decision points: if, else if, for, while, loop, match arm (=>), case, catch, &&, ||
     let count_cc = |start: usize, end: usize| -> usize {
         let mut cc = 1; // base complexity
-        for line in lines.iter().skip(start.saturating_sub(1)).take(end.saturating_sub(start) + 1) {
+        for line in lines
+            .iter()
+            .skip(start.saturating_sub(1))
+            .take(end.saturating_sub(start) + 1)
+        {
             let trimmed = line.trim();
             // Count keywords and logical operators.
             cc += trimmed.matches("if ").count();
             cc += trimmed.matches("else if").count();
             cc += trimmed.matches("for ").count();
             cc += trimmed.matches("while ").count();
-            cc += if trimmed.contains("loop {") || trimmed == "loop" { 1 } else { 0 };
+            cc += if trimmed.contains("loop {") || trimmed == "loop" {
+                1
+            } else {
+                0
+            };
             cc += trimmed.matches("match ").count();
             // Match arms (=>).
             cc += trimmed.matches("=>").count();
@@ -2303,8 +2360,7 @@ fn call_get_complexity(engine: &mut Engine, args: &Value) -> (String, bool) {
         "## Cyclomatic complexity: {file}\n\n\
          {:>6}  {:>10}  {:>8}  {}\n\
          {:-<6}  {:-<10}  {:-<8}  {:-<30}\n",
-        "CC", "Risk", "Lines", "Function",
-        "", "", "", ""
+        "CC", "Risk", "Lines", "Function", "", "", "", ""
     );
 
     for (name, cc, band, start, end) in &rows {
@@ -2369,10 +2425,7 @@ fn call_review_context(engine: &mut Engine, args: &Value) -> (String, bool) {
     let mut overlapping_symbols: Vec<(String, String)> = Vec::new(); // (file, name)
     for file in &changed_files {
         let syms = engine.symbols("", Some(file)).unwrap_or_default();
-        let file_hunks: Vec<_> = hunk_ranges
-            .iter()
-            .filter(|(f, _, _)| f == file)
-            .collect();
+        let file_hunks: Vec<_> = hunk_ranges.iter().filter(|(f, _, _)| f == file).collect();
         for sym in &syms {
             for (_, hunk_s, hunk_e) in &file_hunks {
                 if sym.line_start <= *hunk_e && sym.line_end >= *hunk_s {
@@ -2627,36 +2680,57 @@ func TestHandleRequest(t *testing.T) {
     fn tool_definitions_returns_32_tools() {
         let defs = tool_definitions();
         let arr = defs.as_array().expect("tool_definitions returns array");
-        assert_eq!(arr.len(), 32, "expected exactly 32 tool definitions, got {}", arr.len());
+        assert_eq!(
+            arr.len(),
+            32,
+            "expected exactly 32 tool definitions, got {}",
+            arr.len()
+        );
     }
 
     #[test]
     fn tool_definitions_all_have_name_and_schema() {
         let defs = tool_definitions();
         for (i, tool) in defs.as_array().unwrap().iter().enumerate() {
-            let name = tool.get("name").and_then(|v| v.as_str())
+            let name = tool
+                .get("name")
+                .and_then(|v| v.as_str())
                 .unwrap_or_else(|| panic!("tool[{i}] missing 'name'"));
             assert!(!name.is_empty(), "tool[{i}] has empty name");
-            assert!(tool.get("description").and_then(|v| v.as_str()).is_some(),
-                "tool '{name}' missing 'description'");
-            assert!(tool.get("inputSchema").is_some(),
-                "tool '{name}' missing 'inputSchema'");
+            assert!(
+                tool.get("description").and_then(|v| v.as_str()).is_some(),
+                "tool '{name}' missing 'description'"
+            );
+            assert!(
+                tool.get("inputSchema").is_some(),
+                "tool '{name}' missing 'inputSchema'"
+            );
         }
     }
 
     #[test]
     fn tool_definitions_phase10_tools_present() {
         let defs = tool_definitions();
-        let names: Vec<&str> = defs.as_array().unwrap()
+        let names: Vec<&str> = defs
+            .as_array()
+            .unwrap()
             .iter()
             .filter_map(|t| t.get("name").and_then(|v| v.as_str()))
             .collect();
         for expected in &[
-            "remember", "recall", "forget",
-            "find_tests", "find_similar", "get_complexity",
-            "review_context", "generate_onboarding",
+            "remember",
+            "recall",
+            "forget",
+            "find_tests",
+            "find_similar",
+            "get_complexity",
+            "review_context",
+            "generate_onboarding",
         ] {
-            assert!(names.contains(expected), "Phase 10 tool '{expected}' not in tool_definitions");
+            assert!(
+                names.contains(expected),
+                "Phase 10 tool '{expected}' not in tool_definitions"
+            );
         }
     }
 
@@ -2683,8 +2757,10 @@ func TestHandleRequest(t *testing.T) {
         let mut engine = make_engine(dir.path());
         let (out, err) = dispatch_tool(&mut engine, "list_files", &json!({}));
         assert!(!err, "list_files returned error: {out}");
-        assert!(out.contains("main.rs") || out.contains("utils.py") || out.contains("Indexed"),
-            "Expected file listing, got: {out}");
+        assert!(
+            out.contains("main.rs") || out.contains("utils.py") || out.contains("Indexed"),
+            "Expected file listing, got: {out}"
+        );
     }
 
     #[test]
@@ -2694,7 +2770,10 @@ func TestHandleRequest(t *testing.T) {
         let (out, err) = dispatch_tool(&mut engine, "list_files", &json!({"pattern": "**/*.rs"}));
         assert!(!err, "list_files with *.rs pattern returned error: {out}");
         // Python file should be absent
-        assert!(!out.contains("utils.py"), "Unexpected utils.py in *.rs filter: {out}");
+        assert!(
+            !out.contains("utils.py"),
+            "Unexpected utils.py in *.rs filter: {out}"
+        );
     }
 
     #[test]
@@ -2704,8 +2783,14 @@ func TestHandleRequest(t *testing.T) {
         let (out, err) = dispatch_tool(&mut engine, "list_files", &json!({"limit": 1}));
         assert!(!err, "list_files with limit=1 returned error: {out}");
         // Should show at most 1 file
-        let file_lines = out.lines().filter(|l| l.trim_start().starts_with("src/") || l.trim_start().starts_with("tests/")).count();
-        assert!(file_lines <= 1, "Expected at most 1 file, got {file_lines}: {out}");
+        let file_lines = out
+            .lines()
+            .filter(|l| l.trim_start().starts_with("src/") || l.trim_start().starts_with("tests/"))
+            .count();
+        assert!(
+            file_lines <= 1,
+            "Expected at most 1 file, got {file_lines}: {out}"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -2725,15 +2810,14 @@ func TestHandleRequest(t *testing.T) {
     fn outline_file_returns_symbols() {
         let dir = tempdir().unwrap();
         let mut engine = make_engine(dir.path());
-        let (out, err) = dispatch_tool(
-            &mut engine,
-            "outline_file",
-            &json!({"file": "src/main.rs"}),
-        );
+        let (out, err) =
+            dispatch_tool(&mut engine, "outline_file", &json!({"file": "src/main.rs"}));
         assert!(!err, "outline_file returned error: {out}");
         // Should mention functions or symbols
-        assert!(out.contains("compute") || out.contains("main") || out.contains("Symbol"),
-            "Expected symbol outline, got: {out}");
+        assert!(
+            out.contains("compute") || out.contains("main") || out.contains("Symbol"),
+            "Expected symbol outline, got: {out}"
+        );
     }
 
     #[test]
@@ -2769,8 +2853,10 @@ func TestHandleRequest(t *testing.T) {
         let patch = "not a real unified diff\n";
         let (out, err) = dispatch_tool(&mut engine, "apply_patch", &json!({"patch": patch}));
         assert!(!err, "apply_patch returned unexpected error: {out}");
-        assert!(out.contains("No files") || out.contains("apply"),
-            "unexpected output: {out}");
+        assert!(
+            out.contains("No files") || out.contains("apply"),
+            "unexpected output: {out}"
+        );
     }
 
     #[test]
@@ -2786,8 +2872,10 @@ func TestHandleRequest(t *testing.T) {
                       fn main() {\n";
         let (out, _err) = dispatch_tool(&mut engine, "apply_patch", &json!({"patch": patch}));
         // The patch parsing identifies src/main.rs even if not applied.
-        assert!(out.contains("main.rs") || out.contains("file") || out.contains("reindexed"),
-            "unexpected output: {out}");
+        assert!(
+            out.contains("main.rs") || out.contains("file") || out.contains("reindexed"),
+            "unexpected output: {out}"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -2821,14 +2909,12 @@ func TestHandleRequest(t *testing.T) {
     fn run_tests_failing_command() {
         let dir = tempdir().unwrap();
         let mut engine = make_engine(dir.path());
-        let (out, err) = dispatch_tool(
-            &mut engine,
-            "run_tests",
-            &json!({"command": "exit 1"}),
-        );
+        let (out, err) = dispatch_tool(&mut engine, "run_tests", &json!({"command": "exit 1"}));
         assert!(err, "failing command should set is_error=true: {out}");
-        assert!(out.contains("FAILED") || out.contains("Exit code"),
-            "expected failure indication: {out}");
+        assert!(
+            out.contains("FAILED") || out.contains("Exit code"),
+            "expected failure indication: {out}"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -2856,13 +2942,21 @@ func TestHandleRequest(t *testing.T) {
             &json!({"old_name": "compute", "new_name": "calculate"}),
         );
         assert!(!err, "rename_symbol returned error: {out}");
-        assert!(out.contains("calculate") || out.contains("Renamed"),
-            "unexpected output: {out}");
+        assert!(
+            out.contains("calculate") || out.contains("Renamed"),
+            "unexpected output: {out}"
+        );
 
         // Verify the file was actually modified.
         let content = fs::read_to_string(root.join("src/main.rs")).unwrap();
-        assert!(content.contains("calculate"), "File should contain 'calculate' after rename: {content}");
-        assert!(!content.contains("compute"), "File should not contain 'compute' after rename: {content}");
+        assert!(
+            content.contains("calculate"),
+            "File should contain 'calculate' after rename: {content}"
+        );
+        assert!(
+            !content.contains("compute"),
+            "File should not contain 'compute' after rename: {content}"
+        );
     }
 
     #[test]
@@ -2880,7 +2974,10 @@ func TestHandleRequest(t *testing.T) {
         assert!(!err, "rename_symbol returned error: {out}");
 
         let rs_content = fs::read_to_string(root.join("src/main.rs")).unwrap();
-        assert!(rs_content.contains("compute"), "main.rs should be untouched by .py filter");
+        assert!(
+            rs_content.contains("compute"),
+            "main.rs should be untouched by .py filter"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -2905,23 +3002,26 @@ func TestHandleRequest(t *testing.T) {
             "explain",
             &json!({"symbol": "totally_unknown_xyz"}),
         );
-        assert!(!err, "explain for unknown symbol should not be an error flag");
-        assert!(out.contains("Explanation") || out.contains("not found"),
-            "unexpected output: {out}");
+        assert!(
+            !err,
+            "explain for unknown symbol should not be an error flag"
+        );
+        assert!(
+            out.contains("Explanation") || out.contains("not found"),
+            "unexpected output: {out}"
+        );
     }
 
     #[test]
     fn explain_known_symbol() {
         let dir = tempdir().unwrap();
         let mut engine = make_engine(dir.path());
-        let (out, err) = dispatch_tool(
-            &mut engine,
-            "explain",
-            &json!({"symbol": "compute"}),
-        );
+        let (out, err) = dispatch_tool(&mut engine, "explain", &json!({"symbol": "compute"}));
         assert!(!err, "explain for known symbol returned error: {out}");
-        assert!(out.contains("Explanation") && out.contains("compute"),
-            "unexpected output: {out}");
+        assert!(
+            out.contains("Explanation") && out.contains("compute"),
+            "unexpected output: {out}"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -2941,11 +3041,8 @@ func TestHandleRequest(t *testing.T) {
     fn symbol_callers_returns_output() {
         let dir = tempdir().unwrap();
         let mut engine = make_engine(dir.path());
-        let (out, err) = dispatch_tool(
-            &mut engine,
-            "symbol_callers",
-            &json!({"symbol": "compute"}),
-        );
+        let (out, err) =
+            dispatch_tool(&mut engine, "symbol_callers", &json!({"symbol": "compute"}));
         // May return callers or a "no callers" message — neither should be an error
         assert!(!err, "symbol_callers returned error: {out}");
         assert!(!out.is_empty(), "output should not be empty");
@@ -2968,15 +3065,13 @@ func TestHandleRequest(t *testing.T) {
     fn symbol_callees_detects_calls() {
         let dir = tempdir().unwrap();
         let mut engine = make_engine(dir.path());
-        let (out, err) = dispatch_tool(
-            &mut engine,
-            "symbol_callees",
-            &json!({"symbol": "main"}),
-        );
+        let (out, err) = dispatch_tool(&mut engine, "symbol_callees", &json!({"symbol": "main"}));
         assert!(!err, "symbol_callees returned error: {out}");
         // main() calls compute() — should detect it or return a message
-        assert!(out.contains("compute") || out.contains("Callees") || out.contains("No callees"),
-            "unexpected output: {out}");
+        assert!(
+            out.contains("compute") || out.contains("Callees") || out.contains("No callees"),
+            "unexpected output: {out}"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -3010,14 +3105,12 @@ func TestHandleRequest(t *testing.T) {
         let dir = tempdir().unwrap();
         let mut engine = make_engine(dir.path());
         let patch = "+++ b/src/main.rs\n@@ -1,1 +1,2 @@\n+// new line\n fn main() {}\n";
-        let (out, err) = dispatch_tool(
-            &mut engine,
-            "predict_impact",
-            &json!({"patch": patch}),
-        );
+        let (out, err) = dispatch_tool(&mut engine, "predict_impact", &json!({"patch": patch}));
         assert!(!err, "predict_impact returned error: {out}");
-        assert!(out.contains("Impact Prediction") || out.contains("changed file"),
-            "unexpected output: {out}");
+        assert!(
+            out.contains("Impact Prediction") || out.contains("changed file"),
+            "unexpected output: {out}"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -3037,14 +3130,14 @@ func TestHandleRequest(t *testing.T) {
     fn stitch_context_returns_results() {
         let dir = tempdir().unwrap();
         let mut engine = make_engine(dir.path());
-        let (out, err) = dispatch_tool(
-            &mut engine,
-            "stitch_context",
-            &json!({"query": "compute"}),
-        );
+        let (out, err) = dispatch_tool(&mut engine, "stitch_context", &json!({"query": "compute"}));
         assert!(!err, "stitch_context returned error: {out}");
-        assert!(out.contains("Stitched context") || out.contains("compute") || out.contains("No results"),
-            "unexpected output: {out}");
+        assert!(
+            out.contains("Stitched context")
+                || out.contains("compute")
+                || out.contains("No results"),
+            "unexpected output: {out}"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -3083,22 +3176,19 @@ func TestHandleRequest(t *testing.T) {
             std::env::remove_var("ANTHROPIC_API_KEY");
             std::env::remove_var("OLLAMA_HOST");
         }
-        let (out, err) = dispatch_tool(
-            &mut engine,
-            "enrich_docs",
-            &json!({"symbol": "compute"}),
-        );
+        let (out, err) = dispatch_tool(&mut engine, "enrich_docs", &json!({"symbol": "compute"}));
         assert!(!err, "enrich_docs returned error: {out}");
-        assert!(out.contains("compute"), "expected symbol name in output: {out}");
-        // Second call should return cached version.
-        let (out2, err2) = dispatch_tool(
-            &mut engine,
-            "enrich_docs",
-            &json!({"symbol": "compute"}),
+        assert!(
+            out.contains("compute"),
+            "expected symbol name in output: {out}"
         );
+        // Second call should return cached version.
+        let (out2, err2) = dispatch_tool(&mut engine, "enrich_docs", &json!({"symbol": "compute"}));
         assert!(!err2, "cached enrich_docs returned error: {out2}");
-        assert!(out2.contains("cached") || out2.contains("compute"),
-            "unexpected cached output: {out2}");
+        assert!(
+            out2.contains("cached") || out2.contains("compute"),
+            "unexpected cached output: {out2}"
+        );
     }
 
     #[test]
@@ -3133,8 +3223,10 @@ func TestHandleRequest(t *testing.T) {
         assert!(err);
         let (msg2, err2) = dispatch_tool(&mut engine, "remember", &json!({"value": "v"}));
         assert!(err2);
-        assert!(msg.contains("Missing") && msg2.contains("Missing"),
-            "got: {msg}, {msg2}");
+        assert!(
+            msg.contains("Missing") && msg2.contains("Missing"),
+            "got: {msg}, {msg2}"
+        );
     }
 
     #[test]
@@ -3153,8 +3245,14 @@ func TestHandleRequest(t *testing.T) {
         // Recall all
         let (out2, err2) = dispatch_tool(&mut engine, "recall", &json!({}));
         assert!(!err2, "recall returned error: {out2}");
-        assert!(out2.contains("auth_flow"), "recall should return stored entry: {out2}");
-        assert!(out2.contains("JWT-based"), "recall should return value: {out2}");
+        assert!(
+            out2.contains("auth_flow"),
+            "recall should return stored entry: {out2}"
+        );
+        assert!(
+            out2.contains("JWT-based"),
+            "recall should return value: {out2}"
+        );
     }
 
     #[test]
@@ -3162,13 +3260,27 @@ func TestHandleRequest(t *testing.T) {
         let dir = tempdir().unwrap();
         let mut engine = make_engine(dir.path());
 
-        dispatch_tool(&mut engine, "remember", &json!({"key": "db_schema", "value": "PostgreSQL tables"}));
-        dispatch_tool(&mut engine, "remember", &json!({"key": "auth_flow", "value": "JWT tokens"}));
+        dispatch_tool(
+            &mut engine,
+            "remember",
+            &json!({"key": "db_schema", "value": "PostgreSQL tables"}),
+        );
+        dispatch_tool(
+            &mut engine,
+            "remember",
+            &json!({"key": "auth_flow", "value": "JWT tokens"}),
+        );
 
         let (out, err) = dispatch_tool(&mut engine, "recall", &json!({"query": "postgres"}));
         assert!(!err, "recall query returned error: {out}");
-        assert!(out.contains("db_schema"), "expected db_schema in query result: {out}");
-        assert!(!out.contains("auth_flow"), "auth_flow should not appear in postgres query: {out}");
+        assert!(
+            out.contains("db_schema"),
+            "expected db_schema in query result: {out}"
+        );
+        assert!(
+            !out.contains("auth_flow"),
+            "auth_flow should not appear in postgres query: {out}"
+        );
     }
 
     #[test]
@@ -3176,19 +3288,27 @@ func TestHandleRequest(t *testing.T) {
         let dir = tempdir().unwrap();
         let mut engine = make_engine(dir.path());
 
-        dispatch_tool(&mut engine, "remember",
-            &json!({"key": "auth_flow", "value": "JWT", "tags": ["auth"]}));
-        dispatch_tool(&mut engine, "remember",
-            &json!({"key": "db_schema", "value": "Postgres", "tags": ["database"]}));
-
-        let (out, err) = dispatch_tool(
+        dispatch_tool(
             &mut engine,
-            "recall",
-            &json!({"tags": ["auth"]}),
+            "remember",
+            &json!({"key": "auth_flow", "value": "JWT", "tags": ["auth"]}),
         );
+        dispatch_tool(
+            &mut engine,
+            "remember",
+            &json!({"key": "db_schema", "value": "Postgres", "tags": ["database"]}),
+        );
+
+        let (out, err) = dispatch_tool(&mut engine, "recall", &json!({"tags": ["auth"]}));
         assert!(!err, "recall with tag filter returned error: {out}");
-        assert!(out.contains("auth_flow"), "expected auth_flow in tag result: {out}");
-        assert!(!out.contains("db_schema"), "db_schema should be excluded by tag filter: {out}");
+        assert!(
+            out.contains("auth_flow"),
+            "expected auth_flow in tag result: {out}"
+        );
+        assert!(
+            !out.contains("db_schema"),
+            "db_schema should be excluded by tag filter: {out}"
+        );
     }
 
     #[test]
@@ -3197,8 +3317,10 @@ func TestHandleRequest(t *testing.T) {
         let mut engine = make_engine(dir.path());
         let (out, err) = dispatch_tool(&mut engine, "recall", &json!({}));
         assert!(!err, "recall on empty store returned error: {out}");
-        assert!(out.contains("No memories") || out.contains("No matching"),
-            "unexpected: {out}");
+        assert!(
+            out.contains("No memories") || out.contains("No matching"),
+            "unexpected: {out}"
+        );
     }
 
     #[test]
@@ -3206,26 +3328,32 @@ func TestHandleRequest(t *testing.T) {
         let dir = tempdir().unwrap();
         let mut engine = make_engine(dir.path());
 
-        dispatch_tool(&mut engine, "remember", &json!({"key": "to_delete", "value": "temp"}));
+        dispatch_tool(
+            &mut engine,
+            "remember",
+            &json!({"key": "to_delete", "value": "temp"}),
+        );
         let (out, err) = dispatch_tool(&mut engine, "forget", &json!({"key": "to_delete"}));
         assert!(!err, "forget returned error: {out}");
         assert!(out.contains("to_delete"), "unexpected: {out}");
 
         // Should not be in recall any more.
         let (out2, _) = dispatch_tool(&mut engine, "recall", &json!({}));
-        assert!(!out2.contains("to_delete"), "entry should be removed: {out2}");
+        assert!(
+            !out2.contains("to_delete"),
+            "entry should be removed: {out2}"
+        );
     }
 
     #[test]
     fn forget_missing_key_graceful() {
         let dir = tempdir().unwrap();
         let mut engine = make_engine(dir.path());
-        let (out, err) = dispatch_tool(
-            &mut engine,
-            "forget",
-            &json!({"key": "nonexistent_key"}),
+        let (out, err) = dispatch_tool(&mut engine, "forget", &json!({"key": "nonexistent_key"}));
+        assert!(
+            !err,
+            "forget of missing key should not be an error flag: {out}"
         );
-        assert!(!err, "forget of missing key should not be an error flag: {out}");
         assert!(out.contains("No memory entry"), "unexpected: {out}");
     }
 
@@ -3250,7 +3378,9 @@ func TestHandleRequest(t *testing.T) {
         assert!(!err, "find_tests returned error: {out}");
         // Our project has test_compute_positive, test_compute_zero, TestHandleRequest
         assert!(
-            out.contains("test_compute") || out.contains("TestHandleRequest") || out.contains("Test functions"),
+            out.contains("test_compute")
+                || out.contains("TestHandleRequest")
+                || out.contains("Test functions"),
             "expected test function discovery: {out}"
         );
     }
@@ -3259,15 +3389,14 @@ func TestHandleRequest(t *testing.T) {
     fn find_tests_pattern_filter() {
         let dir = tempdir().unwrap();
         let mut engine = make_engine(dir.path());
-        let (out, err) = dispatch_tool(
-            &mut engine,
-            "find_tests",
-            &json!({"pattern": "zero"}),
-        );
+        let (out, err) = dispatch_tool(&mut engine, "find_tests", &json!({"pattern": "zero"}));
         assert!(!err, "find_tests pattern returned error: {out}");
         // Only test_compute_zero should match
         if out.contains("Test functions") {
-            assert!(out.contains("zero"), "filter 'zero' should include test_compute_zero: {out}");
+            assert!(
+                out.contains("zero"),
+                "filter 'zero' should include test_compute_zero: {out}"
+            );
         }
     }
 
@@ -3275,11 +3404,7 @@ func TestHandleRequest(t *testing.T) {
     fn find_tests_file_filter() {
         let dir = tempdir().unwrap();
         let mut engine = make_engine(dir.path());
-        let (out, err) = dispatch_tool(
-            &mut engine,
-            "find_tests",
-            &json!({"file": "tests/"}),
-        );
+        let (out, err) = dispatch_tool(&mut engine, "find_tests", &json!({"file": "tests/"}));
         assert!(!err, "find_tests file filter returned error: {out}");
         // Only Go test file — TestHandleRequest should appear if Go file was indexed
         // (may be empty if Go symbols aren't extracted in BM25-only mode)
@@ -3336,8 +3461,10 @@ func TestHandleRequest(t *testing.T) {
         );
         // May find results or report "unique" — should not be an error
         assert!(!err, "find_similar returned error: {out}");
-        assert!(out.contains("similar") || out.contains("unique") || out.contains("No code"),
-            "unexpected output: {out}");
+        assert!(
+            out.contains("similar") || out.contains("unique") || out.contains("No code"),
+            "unexpected output: {out}"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -3377,8 +3504,10 @@ func TestHandleRequest(t *testing.T) {
         );
         assert!(!err, "get_complexity returned error: {out}");
         // compute() has if/else if/else = CC of 3, main() = 1
-        assert!(out.contains("CC") || out.contains("complexity") || out.contains("No functions"),
-            "unexpected output: {out}");
+        assert!(
+            out.contains("CC") || out.contains("complexity") || out.contains("No functions"),
+            "unexpected output: {out}"
+        );
         if out.contains("compute") {
             // compute has at least 2 decision points (if + else if)
             assert!(out.contains("compute"), "compute should be listed: {out}");
@@ -3395,8 +3524,10 @@ func TestHandleRequest(t *testing.T) {
             &json!({"file": "src/main.rs", "min_complexity": 100}),
         );
         assert!(!err, "get_complexity min filter returned error: {out}");
-        assert!(out.contains("No functions") || out.contains("complexity"),
-            "unexpected: {out}");
+        assert!(
+            out.contains("No functions") || out.contains("complexity"),
+            "unexpected: {out}"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -3420,15 +3551,16 @@ func TestHandleRequest(t *testing.T) {
                      @@ -8,6 +8,8 @@\n\
                      +/// Compute the sum.\n\
                       pub fn compute(a: i32, b: i32) -> i32 {\n";
-        let (out, err) = dispatch_tool(
-            &mut engine,
-            "review_context",
-            &json!({"patch": patch}),
-        );
+        let (out, err) = dispatch_tool(&mut engine, "review_context", &json!({"patch": patch}));
         assert!(!err, "review_context returned error: {out}");
-        assert!(out.contains("Code Review Context") || out.contains("Changed files"),
-            "unexpected output: {out}");
-        assert!(out.contains("main.rs"), "should mention the changed file: {out}");
+        assert!(
+            out.contains("Code Review Context") || out.contains("Changed files"),
+            "unexpected output: {out}"
+        );
+        assert!(
+            out.contains("main.rs"),
+            "should mention the changed file: {out}"
+        );
     }
 
     #[test]
@@ -3442,8 +3574,10 @@ func TestHandleRequest(t *testing.T) {
         );
         assert!(!err, "review_context returned error: {out}");
         // No +++ b/ lines → 0 changed files
-        assert!(out.contains("0 total") || out.contains("Changed files"),
-            "unexpected: {out}");
+        assert!(
+            out.contains("0 total") || out.contains("Changed files"),
+            "unexpected: {out}"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -3462,10 +3596,18 @@ func TestHandleRequest(t *testing.T) {
         assert!(onboarding_path.exists(), "ONBOARDING.md should be created");
 
         let content = fs::read_to_string(&onboarding_path).unwrap();
-        assert!(content.contains("# Project Onboarding"), "should have heading: {content}");
-        assert!(content.contains("Index Statistics"), "should have stats table: {content}");
-        assert!(content.contains("Language Breakdown") || content.contains("Repository Map"),
-            "should have language or repo map section: {content}");
+        assert!(
+            content.contains("# Project Onboarding"),
+            "should have heading: {content}"
+        );
+        assert!(
+            content.contains("Index Statistics"),
+            "should have stats table: {content}"
+        );
+        assert!(
+            content.contains("Language Breakdown") || content.contains("Repository Map"),
+            "should have language or repo map section: {content}"
+        );
     }
 
     #[test]
@@ -3475,9 +3617,14 @@ func TestHandleRequest(t *testing.T) {
         let (out, err) = dispatch_tool(&mut engine, "generate_onboarding", &json!({}));
         assert!(!err, "generate_onboarding returned error: {out}");
         // The tool returns a preview of the doc in the output string.
-        assert!(out.contains("ONBOARDING.md"), "should mention output file: {out}");
-        assert!(out.contains("Project Onboarding") || out.contains("bytes"),
-            "should include doc preview: {out}");
+        assert!(
+            out.contains("ONBOARDING.md"),
+            "should mention output file: {out}"
+        );
+        assert!(
+            out.contains("Project Onboarding") || out.contains("bytes"),
+            "should include doc preview: {out}"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -3490,14 +3637,27 @@ func TestHandleRequest(t *testing.T) {
         let root = dir.path();
         let mut engine = make_engine(root);
 
-        dispatch_tool(&mut engine, "remember", &json!({"key": "persistent_key", "value": "disk_value"}));
+        dispatch_tool(
+            &mut engine,
+            "remember",
+            &json!({"key": "persistent_key", "value": "disk_value"}),
+        );
 
         // Verify it was written to disk.
         let memory_file = root.join(".codixing/memory.json");
-        assert!(memory_file.exists(), "memory.json should be created on disk");
+        assert!(
+            memory_file.exists(),
+            "memory.json should be created on disk"
+        );
         let raw = fs::read_to_string(&memory_file).unwrap();
-        assert!(raw.contains("persistent_key"), "disk memory should contain the key");
-        assert!(raw.contains("disk_value"), "disk memory should contain the value");
+        assert!(
+            raw.contains("persistent_key"),
+            "disk memory should contain the key"
+        );
+        assert!(
+            raw.contains("disk_value"),
+            "disk memory should contain the value"
+        );
     }
 
     #[test]
@@ -3505,9 +3665,21 @@ func TestHandleRequest(t *testing.T) {
         let dir = tempdir().unwrap();
         let mut engine = make_engine(dir.path());
 
-        dispatch_tool(&mut engine, "remember", &json!({"key": "z_last", "value": "last"}));
-        dispatch_tool(&mut engine, "remember", &json!({"key": "a_first", "value": "first"}));
-        dispatch_tool(&mut engine, "remember", &json!({"key": "m_middle", "value": "middle"}));
+        dispatch_tool(
+            &mut engine,
+            "remember",
+            &json!({"key": "z_last", "value": "last"}),
+        );
+        dispatch_tool(
+            &mut engine,
+            "remember",
+            &json!({"key": "a_first", "value": "first"}),
+        );
+        dispatch_tool(
+            &mut engine,
+            "remember",
+            &json!({"key": "m_middle", "value": "middle"}),
+        );
 
         let (out, err) = dispatch_tool(&mut engine, "recall", &json!({}));
         assert!(!err, "recall returned error: {out}");
@@ -3515,7 +3687,9 @@ func TestHandleRequest(t *testing.T) {
         let a_pos = out.find("a_first").unwrap_or(usize::MAX);
         let m_pos = out.find("m_middle").unwrap_or(usize::MAX);
         let z_pos = out.find("z_last").unwrap_or(usize::MAX);
-        assert!(a_pos < m_pos && m_pos < z_pos,
-            "recall should be sorted alphabetically by key: {out}");
+        assert!(
+            a_pos < m_pos && m_pos < z_pos,
+            "recall should be sorted alphabetically by key: {out}"
+        );
     }
 }

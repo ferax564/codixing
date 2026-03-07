@@ -43,7 +43,11 @@ impl LanguageSupport for ZigLanguage {
     fn extract_signature(&self, node: &Node, source: &[u8]) -> Option<String> {
         let text = node_text(node, source);
         let first = text.lines().next()?.trim();
-        if first.is_empty() { None } else { Some(first.to_string()) }
+        if first.is_empty() {
+            None
+        } else {
+            Some(first.to_string())
+        }
     }
 
     fn extract_doc_comment(&self, node: &Node, source: &[u8]) -> Option<String> {

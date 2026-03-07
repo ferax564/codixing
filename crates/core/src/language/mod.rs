@@ -129,19 +129,19 @@ pub enum EntityKind {
 impl std::fmt::Display for EntityKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::Function  => "function",
-            Self::Method    => "method",
-            Self::Class     => "class",
-            Self::Struct    => "struct",
-            Self::Enum      => "enum",
+            Self::Function => "function",
+            Self::Method => "method",
+            Self::Class => "class",
+            Self::Struct => "struct",
+            Self::Enum => "enum",
             Self::Interface => "interface",
-            Self::Trait     => "trait",
+            Self::Trait => "trait",
             Self::TypeAlias => "type",
-            Self::Constant  => "const",
-            Self::Static    => "static",
-            Self::Module    => "module",
-            Self::Import    => "import",
-            Self::Impl      => "impl",
+            Self::Constant => "const",
+            Self::Static => "static",
+            Self::Module => "module",
+            Self::Import => "import",
+            Self::Impl => "impl",
             Self::Namespace => "namespace",
         })
     }

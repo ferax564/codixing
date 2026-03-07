@@ -327,7 +327,12 @@ fn extract_signatures_from_content(content: &str, language: Language) -> Vec<Str
         Language::Kotlin => &["fun ", "public fun ", "private fun ", "internal fun "],
         Language::Scala => &["def "],
         Language::Zig => &["fn ", "pub fn "],
-        Language::Php => &["function ", "public function ", "private function ", "protected function "],
+        Language::Php => &[
+            "function ",
+            "public function ",
+            "private function ",
+            "protected function ",
+        ],
     };
 
     let mut sigs = Vec::new();
