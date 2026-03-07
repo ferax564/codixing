@@ -6,7 +6,8 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use codixing_core::{
-    Engine, GitSyncStats, IndexConfig, RepoMapOptions, SearchQuery, Strategy, SyncStats,
+    EmbeddingModel, Engine, GitSyncStats, IndexConfig, RepoMapOptions, SearchQuery, Strategy,
+    SyncStats,
 };
 
 #[derive(Parser)]
@@ -38,6 +39,13 @@ enum Command {
         /// Disable vector embeddings (BM25-only mode, faster init).
         #[arg(long)]
         no_embeddings: bool,
+
+        /// Embedding model to use [default: bge-base-en].
+        /// Options: bge-small-en, bge-base-en, bge-large-en,
+        ///          jina-embed-code, nomic-embed-code,
+        ///          snowflake-arctic-l, qwen3
+        #[arg(long, value_name = "MODEL")]
+        model: Option<String>,
 
         /// Load the BGE-Reranker-Base cross-encoder model (~270 MB) to enable
         /// the `deep` strategy. Increases startup time by ~2 s.
@@ -245,8 +253,9 @@ async fn main() -> Result<()> {
             also,
             languages,
             no_embeddings,
+            model,
             reranker,
-        } => cmd_init(path, also, languages, no_embeddings, reranker),
+        } => cmd_init(path, also, languages, no_embeddings, model, reranker),
         Command::Search {
             query,
             limit,
@@ -289,6 +298,7 @@ fn cmd_init(
     also: Vec<PathBuf>,
     languages: Vec<String>,
     no_embeddings: bool,
+    model: Option<String>,
     reranker: bool,
 ) -> Result<()> {
     let root = path
@@ -310,6 +320,9 @@ fn cmd_init(
     }
     if no_embeddings {
         config.embedding.enabled = false;
+    }
+    if let Some(m) = model {
+        config.embedding.model = parse_embedding_model(&m)?;
     }
     if reranker {
         config.embedding.reranker_enabled = true;
@@ -344,6 +357,27 @@ fn cmd_init(
     );
 
     Ok(())
+}
+
+fn parse_embedding_model(s: &str) -> Result<EmbeddingModel> {
+    match s.to_lowercase().as_str() {
+        "bge-small-en" | "bge-small" | "small" => Ok(EmbeddingModel::BgeSmallEn),
+        "bge-base-en" | "bge-base" | "base" => Ok(EmbeddingModel::BgeBaseEn),
+        "bge-large-en" | "bge-large" | "large" => Ok(EmbeddingModel::BgeLargeEn),
+        "jina" | "jina-embed-code" => Ok(EmbeddingModel::JinaEmbedCode),
+        "nomic-embed-code" | "nomic" => Ok(EmbeddingModel::NomicEmbedCode),
+        "snowflake-arctic-l" | "arctic-l" | "arctic" => Ok(EmbeddingModel::SnowflakeArcticEmbedL),
+        "qwen3" | "qwen" => {
+            #[cfg(feature = "qwen3")]
+            return Ok(EmbeddingModel::Qwen3SmallEmbedding);
+            #[cfg(not(feature = "qwen3"))]
+            anyhow::bail!("qwen3 model requires building with --features codixing-core/qwen3")
+        }
+        other => anyhow::bail!(
+            "unknown model '{}'. Valid: bge-small-en, bge-base-en, bge-large-en, jina-embed-code, nomic-embed-code, snowflake-arctic-l, qwen3",
+            other
+        ),
+    }
 }
 
 fn cmd_search(

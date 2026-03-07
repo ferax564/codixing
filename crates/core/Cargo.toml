@@ -11,25 +11,27 @@ description = "Core engine for Codixing — AST parsing, indexing, and retrieval
 ## Requires a running Qdrant instance; connection URL via `QDRANT_URL` env var.
 qdrant = ["dep:qdrant-client", "dep:tokio"]
 
-## Enable the Qwen3 embedding model (candle backend, CPU-only by default).
+## Enable the Qwen3 embedding model (ONNX Runtime backend — same speed as BGE).
 ##
-## Adds `EmbeddingModel::Qwen3SmallEmbedding` (Qwen/Qwen3-Embedding-0.6B, 1024 dims).
-## On first use the model weights (~1.2 GB) are downloaded from Hugging Face and
-## cached in the fastembed cache directory (~/.cache/huggingface/).
+## Adds `EmbeddingModel::Qwen3SmallEmbedding` (1024 dims, int8-quantized).
+## Uses `onnx-community/Qwen3-Embedding-0.6B-ONNX` (model_int8.onnx, ~380 MB)
+## downloaded from Hugging Face on first use and cached by hf-hub.
 ##
 ## Build with:
 ##   cargo build --features codixing-core/qwen3
-## Run comparison benchmark (requires model download):
-##   cargo test --test model_comparison_test --features codixing-core/qwen3 -- --ignored --nocapture
-qwen3 = ["fastembed/qwen3", "dep:candle-core"]
+qwen3 = ["dep:ort-qwen3", "dep:tokenizers-qwen3", "dep:ndarray-qwen3"]
 
 [dependencies]
 # Optional Qdrant backend
 qdrant-client = { workspace = true, optional = true }
 # Tokio runtime — only pulled in when the qdrant feature is enabled
 tokio = { workspace = true, optional = true }
-# candle-core — only pulled in when the qwen3 feature is enabled
-candle-core = { workspace = true, optional = true }
+# Qwen3 ONNX backend — only pulled in when the qwen3 feature is enabled
+ort-qwen3      = { package = "ort",        version = "=2.0.0-rc.11", optional = true, features = ["load-dynamic", "ndarray"] }
+tokenizers-qwen3 = { package = "tokenizers", version = "0.22",         optional = true, default-features = false, features = ["onig"] }
+ndarray-qwen3  = { package = "ndarray",    version = "0.17",          optional = true }
+
+hf-hub = { workspace = true }
 
 tree-sitter.workspace = true
 tree-sitter-rust.workspace = true

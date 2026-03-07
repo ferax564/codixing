@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/cli", "crates/server", "crates/mcp"]
+members = ["crates/core", "crates/cli", "crates/server", "crates/mcp", "crates/lsp"]
 resolver = "3"
 
 [workspace.package]
@@ -29,12 +29,13 @@ tree-sitter-scala = "0.24"
 tantivy = "0.22"
 
 # Embeddings + vector index
-# Pin to 5.12 which introduced the `qwen3` candle feature (5.12.0+).
 fastembed = { version = "5.12", default-features = false, features = ["ort-load-dynamic", "hf-hub-native-tls"] }
-# candle-core is an optional dep pulled in transitively when fastembed's `qwen3`
-# feature is enabled.  We declare it in the workspace so crates can add it as
-# optional and re-export its Device/DType types without repeating the version.
-candle-core = { version = "0.9.1" }
+# ort / tokenizers / hf-hub / ndarray — direct deps for the Qwen3 ONNX backend.
+# Pin ort to the same exact version as fastembed to avoid duplicate runtimes.
+ort = { version = "=2.0.0-rc.11", features = ["load-dynamic", "ndarray"] }
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+hf-hub = { version = "0.4", features = ["native-tls"] }
+ndarray = "0.17"
 usearch = "2"
 
 # Async runtime & HTTP server
@@ -82,6 +83,9 @@ glob = "0.3"
 
 # .gitignore-aware directory walking
 ignore = "0.4"
+
+# LSP protocol
+tower-lsp = "0.20"
 
 # Optional Qdrant vector backend (enable with --features qdrant)
 qdrant-client = { version = "1", default-features = false, features = ["serde"] }

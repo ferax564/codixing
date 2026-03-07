@@ -14,6 +14,11 @@ import * as cp from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import {
+    LanguageClient,
+    LanguageClientOptions,
+    ServerOptions,
+} from 'vscode-languageclient/node';
 
 // ---------------------------------------------------------------------------
 // State
@@ -22,6 +27,7 @@ import * as path from 'path';
 let statusBarItem: vscode.StatusBarItem;
 let outputChannel: vscode.OutputChannel;
 let daemonProcess: cp.ChildProcess | null = null;
+let lspClient: LanguageClient | null = null;
 
 // ---------------------------------------------------------------------------
 // Activation
@@ -73,9 +79,18 @@ export function activate(context: vscode.ExtensionContext): void {
     if (cfg.get<boolean>('autoStartDaemon', false)) {
         cmdStartDaemon();
     }
+
+    // Start LSP client if configured and an index exists
+    if (cfg.get<boolean>('lspEnabled', true)) {
+        startLspClient(context);
+    }
 }
 
-export function deactivate(): void {
+export async function deactivate(): Promise<void> {
+    if (lspClient) {
+        await lspClient.stop();
+        lspClient = null;
+    }
     if (daemonProcess && !daemonProcess.killed) {
         daemonProcess.kill();
     }
@@ -439,6 +454,77 @@ async function registerMcpServer(mcpBin: string, root: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// LSP Client
+// ---------------------------------------------------------------------------
+
+async function startLspClient(
+    context: vscode.ExtensionContext,
+): Promise<void> {
+    const root = getWorkspaceRoot();
+    if (!root) {
+        return;
+    }
+
+    // Only start if an index exists
+    if (!fs.existsSync(path.join(root, '.codixing'))) {
+        return;
+    }
+
+    const lspBin = await findBinary('codixing-lsp', false);
+    if (!lspBin) {
+        return;
+    }
+
+    const cfg = vscode.workspace.getConfiguration('codixing');
+    const threshold = cfg.get<number>('complexityThreshold', 6);
+
+    const serverOptions: ServerOptions = {
+        run: {
+            command: lspBin,
+            args: ['--root', root, '--complexity-threshold', String(threshold)],
+        },
+        debug: {
+            command: lspBin,
+            args: ['--root', root, '--complexity-threshold', String(threshold)],
+        },
+    };
+
+    const clientOptions: LanguageClientOptions = {
+        documentSelector: [
+            { scheme: 'file', language: 'rust' },
+            { scheme: 'file', language: 'python' },
+            { scheme: 'file', language: 'typescript' },
+            { scheme: 'file', language: 'typescriptreact' },
+            { scheme: 'file', language: 'javascript' },
+            { scheme: 'file', language: 'javascriptreact' },
+            { scheme: 'file', language: 'go' },
+            { scheme: 'file', language: 'java' },
+            { scheme: 'file', language: 'c' },
+            { scheme: 'file', language: 'cpp' },
+            { scheme: 'file', language: 'csharp' },
+            { scheme: 'file', language: 'ruby' },
+            { scheme: 'file', language: 'swift' },
+            { scheme: 'file', language: 'kotlin' },
+            { scheme: 'file', language: 'scala' },
+            { scheme: 'file', language: 'php' },
+            { scheme: 'file', language: 'zig' },
+        ],
+        outputChannel,
+    };
+
+    lspClient = new LanguageClient(
+        'codixing',
+        'Codixing LSP',
+        serverOptions,
+        clientOptions,
+    );
+
+    context.subscriptions.push(lspClient);
+    await lspClient.start();
+    outputChannel.appendLine('[Codixing] LSP client started');
+}
+
+// ---------------------------------------------------------------------------
 // Binary discovery
 // ---------------------------------------------------------------------------
 
@@ -452,11 +538,16 @@ async function registerMcpServer(mcpBin: string, root: string): Promise<void> {
  * When `showError` is true (default) a user-facing error message is shown.
  */
 async function findBinary(
-    name: 'codixing' | 'codixing-mcp' | 'codixing-server',
+    name: 'codixing' | 'codixing-mcp' | 'codixing-server' | 'codixing-lsp',
     showError = true,
 ): Promise<string | null> {
     const cfg = vscode.workspace.getConfiguration('codixing');
-    const settingKey = name === 'codixing' ? 'binaryPath' : 'mcpBinaryPath';
+    const settingKey =
+        name === 'codixing'
+            ? 'binaryPath'
+            : name === 'codixing-lsp'
+              ? 'lspBinaryPath'
+              : 'mcpBinaryPath';
     const configured = cfg.get<string>(settingKey, '').trim();
 
     if (configured && fs.existsSync(configured)) {
