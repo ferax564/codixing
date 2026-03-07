@@ -20,6 +20,7 @@ pub use config::{EmbeddingConfig, EmbeddingModel, GraphConfig, IndexConfig};
 pub use engine::{Engine, GitSyncStats, GrepMatch, IndexStats, SyncStats};
 pub use error::{CodixingError, Result};
 pub use graph::{CodeEdge, CodeGraph, CodeNode, EdgeKind, GraphStats, RepoMapOptions};
+pub use language::EntityKind;
 pub use retriever::{ChunkMeta, SearchQuery, SearchResult, Strategy};
 pub use symbols::Symbol;
 pub use vector::VectorBackend;

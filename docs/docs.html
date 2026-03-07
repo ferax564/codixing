@@ -1090,8 +1090,8 @@ Sync complete in 0.12s</span></code></pre>
             <p>Returns all source files currently tracked in the Codixing index, sorted lexicographically, with chunk counts per file (a proxy for size). Use before bulk edits or to explore project structure without consuming tokens on a full repo map.</p>
             <div class="pre-label">parameters</div>
             <pre><code>{
-  <span class="tok-key">"glob"</span>:  <span class="tok-str">"src/**/*.rs"</span>,  <span class="tok-comment">// optional — omit to list all</span>
-  <span class="tok-key">"limit"</span>: <span class="tok-num">200</span>            <span class="tok-comment">// default: 200</span>
+  <span class="tok-key">"pattern"</span>: <span class="tok-str">"src/**/*.rs"</span>,  <span class="tok-comment">// optional glob — omit to list all</span>
+  <span class="tok-key">"limit"</span>:   <span class="tok-num">200</span>              <span class="tok-comment">// default: 200</span>
 }</code></pre>
           </div>
         </div>
@@ -1105,9 +1105,9 @@ Sync complete in 0.12s</span></code></pre>
             <p>Finds all exact occurrences of <code>old_name</code> via literal grep, replaces them with <code>new_name</code> in every matching file, re-indexes each modified file, and returns a per-file summary. Optional <code>file_glob</code> restricts the rename to a subset of files. Run <code>search_usages</code> first to understand the blast radius.</p>
             <div class="pre-label">parameters</div>
             <pre><code>{
-  <span class="tok-key">"old_name"</span>:  <span class="tok-str">"compute_pagerank"</span>,
-  <span class="tok-key">"new_name"</span>:  <span class="tok-str">"rank_nodes"</span>,
-  <span class="tok-key">"file_glob"</span>: <span class="tok-str">"crates/core/**"</span>  <span class="tok-comment">// optional</span>
+  <span class="tok-key">"old_name"</span>:    <span class="tok-str">"compute_pagerank"</span>,
+  <span class="tok-key">"new_name"</span>:    <span class="tok-str">"rank_nodes"</span>,
+  <span class="tok-key">"file_filter"</span>: <span class="tok-str">"crates/core"</span>  <span class="tok-comment">// optional path substring filter</span>
 }</code></pre>
           </div>
         </div>
@@ -1121,12 +1121,11 @@ Sync complete in 0.12s</span></code></pre>
             <p>Produces a single LLM-ready context block combining: the symbol's full source definition, the dependency graph for its containing file (what imports it, what it imports), and the top call sites from the index. Ideal as a first step before modifying any significant function or class.</p>
             <div class="pre-label">parameters</div>
             <pre><code>{
-  <span class="tok-key">"name"</span>: <span class="tok-str">"compute_pagerank"</span>,
-  <span class="tok-key">"file"</span>: <span class="tok-str">"graph/mod.rs"</span>  <span class="tok-comment">// optional disambiguator</span>
+  <span class="tok-key">"symbol"</span>: <span class="tok-str">"compute_pagerank"</span>,
+  <span class="tok-key">"file"</span>:   <span class="tok-str">"graph/mod.rs"</span>  <span class="tok-comment">// optional disambiguator</span>
 }</code></pre>
           </div>
         </div>
-      </section>
 
         <div class="tool-card">
           <div class="tool-header">
@@ -1162,11 +1161,11 @@ Sync complete in 0.12s</span></code></pre>
             <span class="tool-desc">Execute a test command and return the output</span>
           </div>
           <div class="tool-body">
-            <p>Runs a command array directly (no shell injection risk) inside the project root, captures stdout + stderr, and returns the combined output with exit code. Use after <code>write_file</code>, <code>edit_file</code>, or <code>apply_patch</code> to close the write→test→read loop without leaving the MCP session. Default timeout: 60s (max 300s).</p>
+            <p>Runs a shell command string via <code>sh -c</code> inside the project root, captures stdout + stderr, and returns the combined output with exit code. Use after <code>write_file</code>, <code>edit_file</code>, or <code>apply_patch</code> to close the write→test→read loop without leaving the MCP session. Output truncated to the last 8 000 characters. Default timeout: 120s.</p>
             <div class="pre-label">parameters</div>
             <pre><code>{
-  <span class="tok-key">"command"</span>:     [<span class="tok-str">"cargo"</span>, <span class="tok-str">"test"</span>, <span class="tok-str">"--"</span>, <span class="tok-str">"my_test"</span>],
-  <span class="tok-key">"timeout_secs"</span>: <span class="tok-num">60</span>
+  <span class="tok-key">"command"</span>:      <span class="tok-str">"cargo test my_test"</span>,
+  <span class="tok-key">"timeout_secs"</span>: <span class="tok-num">120</span>  <span class="tok-comment">// default</span>
 }</code></pre>
           </div>
         </div>
@@ -1234,12 +1233,11 @@ Sync complete in 0.12s</span></code></pre>
             <span class="tool-desc">LLM-generated symbol documentation</span>
           </div>
           <div class="tool-body">
-            <p>Fetches a symbol's source, sends it to an LLM (Anthropic API or a local Ollama model), and stores the generated documentation in <code>.codixing/symbol_docs.json</code>. Subsequent calls return the cached doc. Useful for building an always-up-to-date symbol knowledge base.</p>
+            <p>Fetches a symbol's source and stores documentation in <code>.codixing/symbol_docs.json</code>. When <code>ANTHROPIC_API_KEY</code> or <code>OLLAMA_HOST</code> is set, full LLM-generated docs are produced; otherwise a structured stub is written. Subsequent calls return the cached doc. Pass <code>"force": true</code> to bypass the cache.</p>
             <div class="pre-label">parameters</div>
             <pre><code>{
-  <span class="tok-key">"symbol"</span>:   <span class="tok-str">"Engine::init"</span>,
-  <span class="tok-key">"model"</span>:    <span class="tok-str">"claude-opus-4-6"</span>,
-  <span class="tok-key">"provider"</span>: <span class="tok-str">"anthropic"</span>
+  <span class="tok-key">"symbol"</span>: <span class="tok-str">"Engine::init"</span>,
+  <span class="tok-key">"force"</span>:  <span class="tok-str">false</span>          <span class="tok-comment">// true to skip cache and regenerate</span>
 }</code></pre>
           </div>
         </div>
@@ -1359,7 +1357,7 @@ Sync complete in 0.12s</span></code></pre>
           </div>
         </div>
 
-      </section>
+      </section> <!-- end #mcp-tools -->
 
       <!-- LSP -->
       <section class="doc-section" id="lsp">
@@ -1573,7 +1571,7 @@ QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=codixing codixing init .</cod
 
         <div class="callout callout-info">
           <span class="callout-icon">ℹ</span>
-          <span>Zig and PHP are planned for the next roadmap phase. The <code>.gitignore</code>-aware walker (via the <code>ignore</code> crate, same as ripgrep) automatically skips build artefacts, vendor directories, and binary files.</span>
+          <span>Zig and PHP are supported as Tier 3 languages using the C grammar as a structural fallback. They appear in BM25 results and the symbol table; full tree-sitter-zig/php support will arrive once those crates are published on crates.io. The <code>.gitignore</code>-aware walker (via the <code>ignore</code> crate, same as ripgrep) automatically skips build artefacts, vendor directories, and binary files.</span>
         </div>
       </section>
 
