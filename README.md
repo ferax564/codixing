@@ -86,6 +86,38 @@ codixing init . --also ../shared-lib --also ../api-server
 codixing sync
 ```
 
+### Graph Atlas Viewer
+
+Start the HTTP server to inspect the live graph atlas in a browser:
+
+```bash
+# Serve the atlas UI and graph endpoints
+codixing-server --host 127.0.0.1 --port 3000 /path/to/project
+
+# Then open:
+# http://127.0.0.1:3000/graph/view
+```
+
+The atlas opens at subsystem scale (cluster nodes) and lets you drill into individual files via the `Topology Groups` panel. Recent git commits are overlaid on the same graph. Controls in the left panel:
+
+| Control | Description |
+|---|---|
+| **Refresh mode** | `sync` (filesystem), `git` (commits only), or `manual` |
+| **Include external** | Toggle external library nodes on/off |
+| **Polling** | Auto-refresh every N seconds |
+| **Poll interval** | 5 s / 15 s / 60 s |
+| **3D mode** | Toggle between 3D orbit and flat 2D layout |
+| **Call Graph Layer** | Overlay symbol-level call edges (cyan) on the import graph |
+| **Search** | Jump to a file or symbol by name |
+| **Edge filter** | Show all / imports only / calls only / external only |
+
+The viewer reads from:
+
+- `GET /graph/view` — browser UI
+- `GET /graph/export?refresh=none|sync|git&include_external=true&symbol_limit=4` — graph snapshot with clusters, edges, and symbol previews (auto-raises to `symbol_limit=12` when the Call Graph Layer is active)
+- `GET /graph/history?limit=18&include_files=true` — recent commits and touched indexed files
+- `GET /graph/call-graph` — symbol-level call edges (requires graph support at index time)
+
 ---
 
 ## Claude Code Integration (MCP)
@@ -126,20 +158,55 @@ codixing-mcp --root /path/to/project --daemon &
 
 The daemon runs a background file watcher. When you save a file, the index updates within ~100ms. Claude Code always queries a fresh index.
 
-### Available MCP tools (10)
+### Available MCP tools (19)
 
 | Tool | What it does |
 |------|-------------|
-| `code_search` | BM25 + graph-boosted search; `instant`/`fast`/`thorough`/`explore` strategies |
+| `code_search` | BM25 + graph-boosted search; `instant`/`fast`/`thorough`/`explore` strategies (results cached 60s) |
 | `grep_code` | Regex or literal search across indexed files; bounded output, glob filter, context lines |
 | `find_symbol` | Structured symbol lookup — returns definition location + signature |
 | `read_symbol` | Full source of a named symbol |
 | `read_file` | Token-budgeted file reader with line range |
+| `outline_file` | Per-file symbol tree sorted by line number — token-efficient alternative to `read_file` |
 | `get_repo_map` | PageRank-ranked architecture overview within a token budget |
 | `get_references` | Who imports a file (callers) + what it imports (callees) |
 | `get_transitive_deps` | Multi-hop dependency chain to arbitrary depth |
 | `search_usages` | All usage sites of a symbol across the codebase |
 | `index_status` | Current index statistics (files, chunks, symbols, graph) |
+| `list_files` | List all indexed files with optional glob filter and chunk counts |
+| `write_file` | Write a file and immediately reindex it |
+| `edit_file` | Exact find-and-replace in a file with immediate reindex |
+| `delete_file` | Delete a file and remove it from the index |
+| `apply_patch` | Apply a unified git diff across one or more files with auto-reindex |
+| `run_tests` | Execute a test command in the project root and return stdout + exit code |
+| `rename_symbol` | Project-wide identifier rename with auto-reindex of all affected files |
+| `explain` | Assembled context package: definition + file deps + usage sites for any symbol |
+| `symbol_callers` | Symbol-level call graph: which functions directly call a given symbol |
+| `symbol_callees` | Symbol-level call graph: which functions a given symbol directly calls |
+| `predict_impact` | Given a unified diff, rank files most likely to need changes (call graph + import graph) |
+| `stitch_context` | Search + automatically attach callee definitions for cross-file context in one call |
+| `enrich_docs` | LLM-generated doc summaries per symbol, stored in `.codixing/symbol_docs.json` (Anthropic or Ollama) |
+
+---
+
+## LSP Server
+
+`codixing-lsp` implements the Language Server Protocol, bringing Codixing's symbol search to **any LSP-capable editor** — Neovim, Emacs, Sublime Text, JetBrains, and more.
+
+**Capabilities**: `workspace/symbol` (global search) · `textDocument/documentSymbol` (per-file outline)
+
+```bash
+# Neovim (lspconfig / lazy.nvim)
+{
+  cmd = { "codixing-lsp", "--root", vim.fn.getcwd() },
+  filetypes = { "rust", "python", "typescript", "go", "java", "php", "zig" },
+  root_dir = require("lspconfig.util").root_pattern(".codixing"),
+}
+
+# Emacs (eglot)
+(add-to-list 'eglot-server-programs
+  '((rust-mode python-mode) . ("codixing-lsp" "--root" "/your/project")))
+```
 
 ---
 
@@ -183,7 +250,7 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 | **File watcher latency** | ≤100ms from save to queryable |
 | **Daemon IPC overhead** | ~6ms per call (Unix socket round-trip) |
 | **BM25 search** | <10ms p99 |
-| **Test suite** | 249 tests (including retrieval quality regression suite) |
+| **Test suite** | 260 tests (including retrieval quality regression suite) |
 
 ### Init speed breakdown (0.87s on 246K LoC)
 
@@ -209,7 +276,7 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 - **Live index freshness** — Daemon file watcher updates the in-memory engine within 100ms of any file save; no restart needed
 - **`.gitignore`-aware indexing** — File walker respects `.gitignore`, `.ignore`, and global gitignore (same as ripgrep); no manual exclude lists needed
 - **Hash-based incremental sync** — `codixing sync` diffs xxh3 content hashes and re-indexes only changed files; no git required
-- **MCP server** — 10 tools exposed via JSON-RPC 2.0; Claude Code registers with one command
+- **MCP server** — 24 tools exposed via JSON-RPC 2.0; Claude Code registers with one command
 - **Concurrent symbol table** — DashMap-backed with exact, prefix, and substring matching
 - **Single binary, zero runtime deps** — No JVM, no Docker, no external databases
 
@@ -221,6 +288,7 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 |------|-----------|
 | **Tier 1** (full AST + graph) | Rust, Python, TypeScript, TSX, JavaScript, Go, Java, C, C++, C# |
 | **Tier 2** (full AST + graph) | Ruby, Swift, Kotlin, Scala |
+| **Tier 3** (full AST + graph) | Zig, PHP |
 
 ---
 
@@ -295,10 +363,11 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 | **Phase 1: Foundation** | ✅ Complete | AST parsing, BM25, CLI, file watcher — 111 tests |
 | **Phase 2: Semantic Search** | ✅ Complete | BGE-Base embeddings, hybrid RRF+MMR, REST API |
 | **Phase 3: Graph Intelligence** | ✅ Complete | Import graph, PageRank, repo map — 165 tests |
-| **Phase 4: Agent Integration** | ✅ Complete | MCP (10 tools), daemon mode, 2.6× faster init, live watcher — 222 tests |
+| **Phase 4: Agent Integration** | ✅ Complete | MCP (24 tools), daemon mode, 2.6× faster init, live watcher — 222 tests |
 | **Phase 5: Production Hardening** | ✅ Complete | Field boosts, band merging, asymmetric RRF, call graph edges, sync, .gitignore walker — 232 tests |
 | **Phase 6: Ecosystem Expansion** | ✅ Complete | Tier 2 languages (Ruby/Swift/Kotlin/Scala), multi-repo, VS Code extension, CI matrix, Qdrant backend — 244 tests |
-| **Phase 7: Git Sync + Qwen3 + Eval** | ✅ Complete | Git-aware incremental sync, Qwen3 candle backend, embedding eval harness — 249 tests |
+| **Phase 7: Git Sync + Qwen3 + Eval** | ✅ Complete | Git-aware incremental sync, Qwen3 candle backend, embedding eval harness — 260 tests |
+| **Phase 8: Productivity + Ecosystem** | ✅ Complete | 24 MCP tools (apply_patch, run_tests, outline_file, rename_symbol, explain, symbol_callers, symbol_callees, predict_impact, stitch_context, enrich_docs), LSP server, Zig+PHP, Docker, Homebrew, 60s search cache — 260 tests |
 
 ---
 
@@ -306,7 +375,7 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 249 tests
+cargo test --workspace        # 260 tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 ```

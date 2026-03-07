@@ -67,6 +67,10 @@ fn default_commit_limit() -> usize {
     18
 }
 
+fn default_include_files() -> bool {
+    true
+}
+
 fn now_unix_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -102,6 +106,10 @@ fn display_label(path: &str, external: bool) -> String {
     path.rsplit('/').next().unwrap_or(path).to_string()
 }
 
+/// Top-level directory names that are too generic to form meaningful cluster boundaries.
+/// When a path starts with one of these, the second segment is used instead.
+const TRANSPARENT_DIRS: &[&str] = &["src", "lib", "pkg", "source", "sources", "code"];
+
 fn cluster_for_path(path: &str, external: bool) -> String {
     if external {
         return "external".to_string();
@@ -112,6 +120,7 @@ fn cluster_for_path(path: &str, external: bool) -> String {
         (Some("crates"), Some(name)) => format!("crate:{name}"),
         (Some("packages"), Some(name)) => format!("package:{name}"),
         (Some("apps"), Some(name)) => format!("app:{name}"),
+        (Some(first), Some(second)) if TRANSPARENT_DIRS.contains(&first) => second.to_string(),
         (Some(first), _) => first.to_string(),
         _ => "root".to_string(),
     }
@@ -420,7 +429,7 @@ fn build_symbol_summaries(symbols: Vec<Symbol>, limit: usize) -> HashMap<String,
                     .take(limit)
                     .map(|symbol| GraphSymbolPreview {
                         name: symbol.name.clone(),
-                        kind: format!("{:?}", symbol.kind),
+                        kind: symbol.kind.to_string(),
                         line: symbol.line_start + 1,
                         signature: symbol.signature.clone(),
                     })
@@ -609,7 +618,7 @@ pub async fn export_handler(
 pub struct GraphHistoryQuery {
     #[serde(default = "default_commit_limit")]
     pub limit: usize,
-    #[serde(default = "default_include_imports")]
+    #[serde(default = "default_include_files")]
     pub include_files: bool,
 }
 
@@ -780,6 +789,48 @@ pub async fn history_handler(
         branch: git.branch,
         head_commit: git.head_commit,
         commits,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// GET /graph/call-graph
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct CallGraphEdge {
+    /// Relative path of the caller file.
+    pub caller_file: String,
+    /// Name of the calling symbol.
+    pub caller_name: String,
+    /// Name of the called symbol (unresolved — may appear in multiple files).
+    pub callee_name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CallGraphResponse {
+    pub available: bool,
+    pub edge_count: usize,
+    pub edges: Vec<CallGraphEdge>,
+}
+
+pub async fn call_graph_handler(
+    State(state): State<AppState>,
+) -> Result<Json<CallGraphResponse>, ApiError> {
+    let engine = state.read().await;
+    let edges: Vec<CallGraphEdge> = engine
+        .call_graph_edges()
+        .into_iter()
+        .map(|(caller_file, caller_name, callee_name)| CallGraphEdge {
+            caller_file,
+            caller_name,
+            callee_name,
+        })
+        .collect();
+    let edge_count = edges.len();
+    Ok(Json(CallGraphResponse {
+        available: engine.has_call_graph(),
+        edge_count,
+        edges,
     }))
 }
 
