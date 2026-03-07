@@ -35,6 +35,8 @@ impl ImportExtractor {
             Language::Swift => extract_swift(tree, source),
             Language::Kotlin => extract_kotlin(tree, source),
             Language::Scala => extract_scala(tree, source),
+            // Tier 3: Zig and PHP use C grammar; import extraction not yet supported.
+            Language::Zig | Language::Php => vec![],
         }
     }
 }

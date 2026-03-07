@@ -21,5 +21,6 @@ pub use engine::{Engine, GitSyncStats, GrepMatch, IndexStats, SyncStats};
 pub use error::{CodixingError, Result};
 pub use graph::{CodeEdge, CodeGraph, CodeNode, EdgeKind, GraphStats, RepoMapOptions};
 pub use retriever::{ChunkMeta, SearchQuery, SearchResult, Strategy};
+pub use language::EntityKind;
 pub use symbols::Symbol;
 pub use vector::VectorBackend;
