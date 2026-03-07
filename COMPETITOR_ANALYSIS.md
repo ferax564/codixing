@@ -206,7 +206,22 @@ These are not direct competitors — they are Codixing's **potential customers a
 | Key feature | Agentic Development Environment (ADE), multi-model, BYOK, SOC 2 |
 | Key weakness | Not IDE-native; credit-based pricing confusion |
 
-**vs. Codixing:** Warp is a terminal emulator evolving into an ADE. It indexed 120,000+ codebases — that's a measurable population of developers who need smart code retrieval. Warp's agent layer ("Oz") would benefit from Codixing's graph-intelligent context. MCP integration opportunity.
+**vs. Codixing:** Warp is a terminal emulator evolving into an ADE. It indexed 120,000+ codebases and serves 500,000+ engineers — a measurable population who need smart code retrieval. Warp's agent layer ("Oz") would benefit from Codixing's graph-intelligent context. MCP integration opportunity.
+
+---
+
+#### Zed AI
+
+| Attribute | Detail |
+|---|---|
+| Source model | **Open source** (GPL/AGPL) |
+| Pricing | Free (BYOK) · Pro: token-based with 10% markup (~$20 trial credit) · Enterprise: custom |
+| Funding | $32 M from Sequoia Capital |
+| Users | No public figures; strong endorsements (Elixir, React, D3.js creators) |
+| Key feature | Rust + GPU-accelerated editor (120 FPS), real-time CRDT collaboration, native AI, Agent Client Protocol |
+| Key weakness | Smaller ecosystem than VS Code; fewer extensions |
+
+**vs. Codixing:** Zed is a performance-first editor with native AI — a distinct niche from Codixing's retrieval layer. Its open-source model and Rust stack make it philosophically aligned. Zed's Agent Client Protocol (which integrates external agents like Claude Code) is a natural integration point for Codixing's MCP server.
 
 ---
 
@@ -223,7 +238,8 @@ These are not direct competitors — they are Codixing's **potential customers a
 | Claude Code | Agent | ❌ | Cloud | ❌ | ❌ | ❌ | ✅ | $20–$200/mo |
 | Aider | Agent | ✅ | Local (BYOK) | ❌ | ❌ | ❌ | ❌ | Free (BYOK) |
 | Cline | Agent | ✅ | Local (BYOK) | ❌ | ❌ | ❌ | ✅ | Free / $20 Teams |
-| Continue | Agent | ✅ | Local (BYOK) | ❌ | ❌ | ❌ | ✅ | Free |
+| Continue | Agent | ✅ | Local (BYOK) | ❌ | ❌ | ❌ | ✅ | Free / $10 Teams |
+| Zed AI | Editor | ✅ | Local (BYOK) | ❌ | ❌ | ❌ | ✅ | Free / token-based |
 | Warp | Terminal/ADE | ❌ | Cloud | ❌ | ❌ | ❌ | ✅ | $0–$50/mo |
 
 **Observation:** Codixing is the only tool with all four retrieval-layer capabilities simultaneously (bounded output + AST-awareness + code graph + local). No competitor at Layer 2 has this combination.
@@ -238,9 +254,12 @@ These are not direct competitors — they are Codixing's **potential customers a
 | AI coding tools market size (2027 projected) | ~$12–15 billion |
 | CAGR | 35–40% |
 | GitHub Copilot market share (paid tools) | ~42% |
-| Cursor ARR | $1 B+ (late 2025) |
-| Anthropic ARR | $3 B (mid-2025) |
-| Windsurf ARR at acquisition | $82 M |
+| Cursor ARR | $500 M+ (mid-2025 → $1 B+ late 2025); $29.3 B valuation |
+| Anthropic ARR | ~$5 B (end-2025); $380 B valuation (Feb 2026, $30 B raised) |
+| Windsurf ARR at acquisition | $82 M (acquired by Cognition AI, ~$250 M) |
+| mgrep GitHub stars | ~2,200 (very early stage, launched Nov 2025) |
+| Warp users | 500,000+ engineers |
+| Cline users | 5 M+ developers |
 
 **Key insight:** The primary value is concentrating at Layer 3 (agents/editors). Layer 2 (retrieval) is an emerging infrastructure layer with no dominant open-source player — Codixing's opportunity is to become the standard, the way ripgrep became the standard for text search.
 
