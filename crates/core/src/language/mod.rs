@@ -4,12 +4,14 @@ pub mod csharp;
 pub mod go;
 pub mod java;
 pub mod kotlin;
+pub mod php;
 pub mod python;
 pub mod ruby;
 pub mod rust;
 pub mod scala;
 pub mod swift;
 pub mod typescript;
+pub mod zig;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -34,6 +36,9 @@ pub enum Language {
     Swift,
     Kotlin,
     Scala,
+    // Tier 3
+    Zig,
+    Php,
 }
 
 impl Language {
@@ -54,6 +59,8 @@ impl Language {
             Self::Swift => "Swift",
             Self::Kotlin => "Kotlin",
             Self::Scala => "Scala",
+            Self::Zig => "Zig",
+            Self::Php => "PHP",
         }
     }
 
@@ -74,6 +81,8 @@ impl Language {
             Self::Swift => &["swift"],
             Self::Kotlin => &["kt", "kts"],
             Self::Scala => &["scala", "sc"],
+            Self::Zig => &["zig"],
+            Self::Php => &["php", "phtml", "php3", "php4", "php5", "phps"],
         }
     }
 }
@@ -94,6 +103,8 @@ pub const ALL_LANGUAGES: &[Language] = &[
     Language::Swift,
     Language::Kotlin,
     Language::Scala,
+    Language::Zig,
+    Language::Php,
 ];
 
 /// The kind of semantic entity extracted from an AST.
@@ -113,6 +124,27 @@ pub enum EntityKind {
     Import,
     Impl,
     Namespace,
+}
+
+impl std::fmt::Display for EntityKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Function  => "function",
+            Self::Method    => "method",
+            Self::Class     => "class",
+            Self::Struct    => "struct",
+            Self::Enum      => "enum",
+            Self::Interface => "interface",
+            Self::Trait     => "trait",
+            Self::TypeAlias => "type",
+            Self::Constant  => "const",
+            Self::Static    => "static",
+            Self::Module    => "module",
+            Self::Import    => "import",
+            Self::Impl      => "impl",
+            Self::Namespace => "namespace",
+        })
+    }
 }
 
 /// A semantic entity extracted from source code via tree-sitter.
@@ -172,6 +204,8 @@ impl LanguageRegistry {
             Arc::new(swift::SwiftLanguage),
             Arc::new(kotlin::KotlinLanguage),
             Arc::new(scala::ScalaLanguage),
+            Arc::new(zig::ZigLanguage),
+            Arc::new(php::PhpLanguage),
         ];
         Self { impls }
     }

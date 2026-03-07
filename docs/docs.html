@@ -454,6 +454,7 @@
         <a href="#cli-callers">callers / callees</a>
         <a href="#cli-usages">usages</a>
         <a href="#cli-sync">sync / git-sync</a>
+        <a href="#cli-analyze">analyze</a>
       </div>
       <div class="sidebar-group">
         <div class="sidebar-group-label">Search</div>
@@ -464,11 +465,13 @@
         <div class="sidebar-group-label">MCP Integration</div>
         <a href="#mcp-setup">Setup</a>
         <a href="#mcp-tools">Tools Reference</a>
+        <a href="#lsp">LSP Server</a>
       </div>
       <div class="sidebar-group">
         <div class="sidebar-group-label">REST API</div>
         <a href="#api-search">Search & Symbols</a>
         <a href="#api-graph">Graph</a>
+        <a href="#api-atlas">Graph Atlas</a>
         <a href="#api-index">Index</a>
       </div>
       <div class="sidebar-group">
@@ -744,6 +747,46 @@ Sync complete in 0.12s</span></code></pre>
         </div>
       </section>
 
+      <!-- Analyze -->
+      <section class="doc-section" id="cli-analyze">
+        <h2>CLI — <code>analyze</code></h2>
+        <p>One-click deep analysis of any local directory or GitHub repository. Indexes the code (reusing an existing index if present), then prints a rich report covering indexing speed, language breakdown, most-called functions, import hotspots, and an AI-style repo map.</p>
+
+        <div class="pre-label">usage</div>
+        <pre><code>codixing analyze &lt;PATH_OR_URL&gt; [OPTIONS]
+
+<span class="tok-out"># Local directory
+</span>codixing analyze /path/to/project
+
+<span class="tok-out"># GitHub shorthand (clones with --depth=1)
+</span>codixing analyze github.com/owner/repo
+
+<span class="tok-out"># Full URL
+</span>codixing analyze https://github.com/owner/repo
+
+<span class="tok-out"># Start the graph viewer after analysis
+</span>codixing analyze github.com/owner/repo --serve --port 8080
+
+<span class="tok-out"># Machine-readable output
+</span>codixing analyze /path/to/project --output json</code></pre>
+
+        <h3>Flags</h3>
+        <table class="params-table">
+          <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td><code>--serve</code></td><td>false</td><td>Launch the REST + graph viewer server after analysis</td></tr>
+            <tr><td><code>--port</code></td><td>8080</td><td>Port for the server when <code>--serve</code> is used</td></tr>
+            <tr><td><code>--no-embeddings</code></td><td>false</td><td>Skip vector embedding (faster, BM25+graph only)</td></tr>
+            <tr><td><code>--output</code></td><td>text</td><td><code>text</code> or <code>json</code> report format</td></tr>
+          </tbody>
+        </table>
+
+        <div class="callout callout-info">
+          <span class="callout-icon">ℹ</span>
+          <span>When a <code>.codixing/</code> index already exists in the target directory, <code>analyze</code> opens the existing index and skips re-indexing, making repeat runs instant.</span>
+        </div>
+      </section>
+
       <!-- Strategies -->
       <section class="doc-section" id="strategies">
         <h2>Search Strategies</h2>
@@ -835,8 +878,8 @@ Sync complete in 0.12s</span></code></pre>
 
       <!-- MCP Tools -->
       <section class="doc-section" id="mcp-tools">
-        <h2>MCP — Tools Reference</h2>
-        <p>All tools are called via JSON-RPC 2.0 <code>tools/call</code> with a <code>name</code> and <code>arguments</code> object.</p>
+        <h2>MCP — Tools Reference (32 tools)</h2>
+        <p>All tools are called via JSON-RPC 2.0 <code>tools/call</code> with a <code>name</code> and <code>arguments</code> object. Write tools (<code>write_file</code>, <code>edit_file</code>, <code>delete_file</code>) automatically reindex after every operation. Intelligence tools expose the call graph, impact analysis, context stitching, complexity metrics, persistent memory, test discovery, duplicate detection, PR review context, and project onboarding generation.</p>
 
         <div class="tool-card">
           <div class="tool-header">
@@ -992,6 +1035,357 @@ Sync complete in 0.12s</span></code></pre>
             <pre><code>{}  <span class="tok-comment">// no parameters required</span></code></pre>
           </div>
         </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#67e8f9">write_file</span>
+            <span class="tool-desc">Write a file and reindex it immediately</span>
+          </div>
+          <div class="tool-body">
+            <p>Creates or overwrites a file at the given path (relative to project root) with the provided content, then automatically reindexes it so the new symbols and content are immediately searchable. Path traversal outside the project root is blocked.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"file"</span>:    <span class="tok-str">"src/auth/middleware.rs"</span>,  <span class="tok-comment">// relative path</span>
+  <span class="tok-key">"content"</span>: <span class="tok-str">"pub fn verify_token(...) { ... }"</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#67e8f9">edit_file</span>
+            <span class="tool-desc">Replace a unique string in a file and reindex</span>
+          </div>
+          <div class="tool-body">
+            <p>Performs an exact string replacement in a file: finds <code>old_string</code>, replaces it with <code>new_string</code>, writes the result, and reindexes. Returns an error if <code>old_string</code> appears 0 times (not found) or more than once (ambiguous) — this guarantees surgical edits with no unintended side effects.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"file"</span>:       <span class="tok-str">"src/auth/middleware.rs"</span>,
+  <span class="tok-key">"old_string"</span>: <span class="tok-str">"pub fn verify_token(token: &amp;str)"</span>,
+  <span class="tok-key">"new_string"</span>: <span class="tok-str">"pub fn verify_token(token: &amp;str, strict: bool)"</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#67e8f9">delete_file</span>
+            <span class="tool-desc">Delete a file and remove it from the index</span>
+          </div>
+          <div class="tool-body">
+            <p>Deletes a file from disk and removes all associated chunks, symbols, vectors, and graph edges from the live index. The change is persisted immediately so subsequent searches will not return stale results from the deleted file.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"file"</span>: <span class="tok-str">"src/auth/old_handler.rs"</span>  <span class="tok-comment">// relative path</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#a78bfa">list_files</span>
+            <span class="tool-desc">List all indexed files with optional glob filtering</span>
+          </div>
+          <div class="tool-body">
+            <p>Returns all source files currently tracked in the Codixing index, sorted lexicographically, with chunk counts per file (a proxy for size). Use before bulk edits or to explore project structure without consuming tokens on a full repo map.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"glob"</span>:  <span class="tok-str">"src/**/*.rs"</span>,  <span class="tok-comment">// optional — omit to list all</span>
+  <span class="tok-key">"limit"</span>: <span class="tok-num">200</span>            <span class="tok-comment">// default: 200</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#a78bfa">rename_symbol</span>
+            <span class="tool-desc">Rename an identifier across every file in the project</span>
+          </div>
+          <div class="tool-body">
+            <p>Finds all exact occurrences of <code>old_name</code> via literal grep, replaces them with <code>new_name</code> in every matching file, re-indexes each modified file, and returns a per-file summary. Optional <code>file_glob</code> restricts the rename to a subset of files. Run <code>search_usages</code> first to understand the blast radius.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"old_name"</span>:  <span class="tok-str">"compute_pagerank"</span>,
+  <span class="tok-key">"new_name"</span>:  <span class="tok-str">"rank_nodes"</span>,
+  <span class="tok-key">"file_glob"</span>: <span class="tok-str">"crates/core/**"</span>  <span class="tok-comment">// optional</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#a78bfa">explain</span>
+            <span class="tool-desc">Assembled understanding package for a symbol</span>
+          </div>
+          <div class="tool-body">
+            <p>Produces a single LLM-ready context block combining: the symbol's full source definition, the dependency graph for its containing file (what imports it, what it imports), and the top call sites from the index. Ideal as a first step before modifying any significant function or class.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"name"</span>: <span class="tok-str">"compute_pagerank"</span>,
+  <span class="tok-key">"file"</span>: <span class="tok-str">"graph/mod.rs"</span>  <span class="tok-comment">// optional disambiguator</span>
+}</code></pre>
+          </div>
+        </div>
+      </section>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#a78bfa">outline_file</span>
+            <span class="tool-desc">Per-file symbol tree sorted by line number</span>
+          </div>
+          <div class="tool-body">
+            <p>Returns all symbols in a single file (functions, classes, structs, methods, etc.) sorted by line number. More token-efficient than <code>read_file</code> when you need to understand a file's structure before diving into a specific function. Includes line ranges, kinds, and signatures.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"file"</span>: <span class="tok-str">"src/engine.rs"</span>  <span class="tok-comment">// relative path</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#a78bfa">apply_patch</span>
+            <span class="tool-desc">Apply a unified git diff with auto-reindex</span>
+          </div>
+          <div class="tool-body">
+            <p>Accepts a unified diff in standard git format (<code>--- a/file</code> / <code>+++ b/file</code> / <code>@@ hunks @@</code>), applies it to the filesystem, and re-indexes every modified file atomically. Handles new files (<code>--- /dev/null</code>), deleted files (<code>+++ /dev/null</code>), and multi-file diffs in a single call. Prefer this over multiple <code>edit_file</code> calls for complex refactors.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"patch"</span>: <span class="tok-str">"--- a/src/foo.rs\n+++ b/src/foo.rs\n@@ -1,3 +1,4 @@\n context\n+new line\n more"</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#a78bfa">run_tests</span>
+            <span class="tool-desc">Execute a test command and return the output</span>
+          </div>
+          <div class="tool-body">
+            <p>Runs a command array directly (no shell injection risk) inside the project root, captures stdout + stderr, and returns the combined output with exit code. Use after <code>write_file</code>, <code>edit_file</code>, or <code>apply_patch</code> to close the write→test→read loop without leaving the MCP session. Default timeout: 60s (max 300s).</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"command"</span>:     [<span class="tok-str">"cargo"</span>, <span class="tok-str">"test"</span>, <span class="tok-str">"--"</span>, <span class="tok-str">"my_test"</span>],
+  <span class="tok-key">"timeout_secs"</span>: <span class="tok-num">60</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#ffc56b">symbol_callers</span>
+            <span class="tool-desc">All functions that call a given symbol</span>
+          </div>
+          <div class="tool-body">
+            <p>Returns every function that directly calls the named symbol, using the byte-range-accurate symbol-level call graph. Requires graph support to be enabled at index time.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"symbol"</span>: <span class="tok-str">"process_file"</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#ffc56b">symbol_callees</span>
+            <span class="tool-desc">All functions a given symbol calls</span>
+          </div>
+          <div class="tool-body">
+            <p>Returns every function the named symbol calls out to. Complements <code>symbol_callers</code> for full bidirectional traversal of the call graph.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"symbol"</span>: <span class="tok-str">"process_file"</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#ffc56b">predict_impact</span>
+            <span class="tool-desc">Rank files by blast-radius impact from a diff</span>
+          </div>
+          <div class="tool-body">
+            <p>Parses a unified diff patch, extracts touched files and symbols, then walks the call graph and import graph to score every reachable file by how likely it is to be affected. Returns a ranked list with scores.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"patch"</span>: <span class="tok-str">"--- a/src/engine.rs\n+++ b/src/engine.rs\n@@ ..."</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#ffc56b">stitch_context</span>
+            <span class="tool-desc">Search + auto-attach cross-file callee definitions</span>
+          </div>
+          <div class="tool-body">
+            <p>Runs a semantic search and then automatically fetches the definitions of every symbol called by the top results. Returns the primary hits plus stitched dependency context — giving the agent a complete, multi-file view without additional round trips.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"query"</span>: <span class="tok-str">"how is the index built"</span>,
+  <span class="tok-key">"limit"</span>: <span class="tok-num">5</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#ffc56b">enrich_docs</span>
+            <span class="tool-desc">LLM-generated symbol documentation</span>
+          </div>
+          <div class="tool-body">
+            <p>Fetches a symbol's source, sends it to an LLM (Anthropic API or a local Ollama model), and stores the generated documentation in <code>.codixing/symbol_docs.json</code>. Subsequent calls return the cached doc. Useful for building an always-up-to-date symbol knowledge base.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"symbol"</span>:   <span class="tok-str">"Engine::init"</span>,
+  <span class="tok-key">"model"</span>:    <span class="tok-str">"claude-opus-4-6"</span>,
+  <span class="tok-key">"provider"</span>: <span class="tok-str">"anthropic"</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#a78bfa">remember</span>
+            <span class="tool-desc">Store persistent project knowledge</span>
+          </div>
+          <div class="tool-body">
+            <p>Stores a key/value note in <code>.codixing/memory.json</code>. Notes survive engine restarts and MCP reconnects — useful for recording architectural decisions, module conventions, and context that should not be lost between sessions.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"key"</span>:   <span class="tok-str">"auth_flow"</span>,
+  <span class="tok-key">"value"</span>: <span class="tok-str">"JWT issued in routes/auth.rs, validated in middleware/jwt.rs"</span>,
+  <span class="tok-key">"tags"</span>:  [<span class="tok-str">"auth"</span>, <span class="tok-str">"security"</span>]
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#a78bfa">recall</span>
+            <span class="tool-desc">Retrieve stored memories</span>
+          </div>
+          <div class="tool-body">
+            <p>Returns all matching memory entries. Searches by keyword substring (matched against key + value) and/or filters by tags. Call with no arguments to list everything.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"query"</span>: <span class="tok-str">"jwt"</span>,           <span class="tok-comment">// optional substring filter</span>
+  <span class="tok-key">"tags"</span>:  [<span class="tok-str">"security"</span>]    <span class="tok-comment">// optional tag filter (AND)</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#a78bfa">forget</span>
+            <span class="tool-desc">Delete an outdated memory entry</span>
+          </div>
+          <div class="tool-body">
+            <p>Removes the memory entry with the given key. Returns a confirmation or a "not found" message.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{ <span class="tok-key">"key"</span>: <span class="tok-str">"auth_flow"</span> }</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#a78bfa">find_tests</span>
+            <span class="tool-desc">Discover test functions</span>
+          </div>
+          <div class="tool-body">
+            <p>Finds test functions by naming conventions (<code>test_*</code>, <code>*_test</code>, <code>TestXxx</code>) and test annotations (<code>#[test]</code>, <code>@Test</code>, <code>@pytest.mark.*</code>). Works across all supported languages.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"pattern"</span>: <span class="tok-str">"auth"</span>,       <span class="tok-comment">// optional name/file substring</span>
+  <span class="tok-key">"file"</span>:    <span class="tok-str">"tests/"</span>      <span class="tok-comment">// optional file path filter</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#a78bfa">find_similar</span>
+            <span class="tool-desc">Semantic duplicate / clone detection</span>
+          </div>
+          <div class="tool-body">
+            <p>Finds code chunks semantically similar to a named symbol. Uses vector embeddings (cosine similarity) when available, falls back to BM25. Useful for spotting copy-paste debt or finding parallel implementations that should be unified.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"symbol"</span>:    <span class="tok-str">"compute_pagerank"</span>,
+  <span class="tok-key">"threshold"</span>: <span class="tok-num">0.7</span>,   <span class="tok-comment">// minimum similarity [0–1]</span>
+  <span class="tok-key">"limit"</span>:     <span class="tok-num">10</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#a78bfa">get_complexity</span>
+            <span class="tool-desc">Cyclomatic complexity per symbol</span>
+          </div>
+          <div class="tool-body">
+            <p>Computes cyclomatic complexity (McCabe 1976) for every function/method in a file by counting decision points in the source text. Returns a risk-banded table (low / moderate / high / critical) sorted by complexity descending.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"file"</span>:           <span class="tok-str">"crates/core/src/engine.rs"</span>,
+  <span class="tok-key">"min_complexity"</span>: <span class="tok-num">5</span>   <span class="tok-comment">// only show CC ≥ 5</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#a78bfa">review_context</span>
+            <span class="tool-desc">Full PR review situational awareness</span>
+          </div>
+          <div class="tool-body">
+            <p>Given a git diff, returns: (1) changed files, (2) symbols whose definitions overlap the diff hunks, (3) impact prediction (which other files may need changes), and (4) cross-file context for the most-changed symbols. Call at the start of a code review.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"patch"</span>: <span class="tok-str">"--- a/src/engine.rs\n+++ b/src/engine.rs\n@@ ..."</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#a78bfa">generate_onboarding</span>
+            <span class="tool-desc">Auto-generate a getting-started guide</span>
+          </div>
+          <div class="tool-body">
+            <p>Assembles index statistics, language breakdown, top files by PageRank, and a token-budgeted repository map, then writes the result to <code>.codixing/ONBOARDING.md</code>. Run once after indexing a new project to produce a living reference document.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{}  <span class="tok-comment">// no parameters required</span></code></pre>
+          </div>
+        </div>
+
+      </section>
+
+      <!-- LSP -->
+      <section class="doc-section" id="lsp">
+        <h2>LSP Server</h2>
+        <p>The <code>codixing-lsp</code> binary implements the <a href="https://microsoft.github.io/language-server-protocol/">Language Server Protocol</a> over stdin/stdout, making Codixing's symbol table and search available in any LSP-capable editor.</p>
+
+        <h3>Capabilities</h3>
+        <ul>
+          <li><code>workspace/symbol</code> — global symbol search by query string (up to 200 results)</li>
+          <li><code>textDocument/documentSymbol</code> — per-file symbol outline</li>
+        </ul>
+
+        <h3>Neovim (lazy.nvim)</h3>
+        <div class="pre-label">~/.config/nvim/lua/plugins/codixing.lua</div>
+        <pre><code>{
+  cmd = { <span class="tok-str">"codixing-lsp"</span>, <span class="tok-str">"--root"</span>, vim.fn.getcwd() },
+  filetypes = { <span class="tok-str">"rust"</span>, <span class="tok-str">"python"</span>, <span class="tok-str">"typescript"</span>,
+                <span class="tok-str">"go"</span>, <span class="tok-str">"java"</span>, <span class="tok-str">"php"</span>, <span class="tok-str">"zig"</span> },
+  root_dir = require(<span class="tok-str">"lspconfig.util"</span>).root_pattern(<span class="tok-str">".codixing"</span>),
+}</code></pre>
+
+        <h3>Emacs (eglot)</h3>
+        <div class="pre-label">~/.emacs.d/init.el</div>
+        <pre><code>(add-to-list 'eglot-server-programs
+  '((rust-mode python-mode typescript-mode)
+    . (<span class="tok-str">"codixing-lsp"</span> <span class="tok-str">"--root"</span> <span class="tok-str">"/your/project"</span>)))</code></pre>
       </section>
 
       <!-- API: Search -->
@@ -1034,6 +1428,55 @@ Sync complete in 0.12s</span></code></pre>
         <h4>GET /graph/callees?file=&lt;PATH&gt;&amp;depth=&lt;N&gt;</h4>
         <h4>GET /graph/stats</h4>
         <p>Returns node count, edge count, and the top 10 files by PageRank score.</p>
+      </section>
+
+      <!-- API: Graph Atlas -->
+      <section class="doc-section" id="api-atlas">
+        <h2>REST API — Graph Atlas</h2>
+        <p>The server ships with a browser-based graph atlas for exploring crate-level clusters, file-level relationships, and recent git activity in one view. The atlas supports both a 3D orbit mode and a flat 2D layout, switchable at runtime.</p>
+
+        <h4>GET /graph/view</h4>
+        <p>Returns the atlas UI. The viewer renders a live force-directed graph with two levels of detail: a <strong>group atlas</strong> (one node per cluster) and a <strong>file lens</strong> (individual files, accessed by drilling into any group). Overlay controls, commit history, pan/frame buttons, and a file detail panel sit on top of the scene.</p>
+
+        <div class="pre-label">example</div>
+        <pre><code>codixing-server --host 127.0.0.1 --port 3000 /path/to/project
+
+# open in a browser
+http://127.0.0.1:3000/graph/view</code></pre>
+
+        <p>Left-panel controls:</p>
+        <ul>
+          <li><strong>Refresh mode</strong> — <code>sync</code> (full filesystem diff), <code>git</code> (commit-driven), or <code>none</code> (manual)</li>
+          <li><strong>Include external</strong> — show or hide external library dependency nodes</li>
+          <li><strong>Polling / Poll interval</strong> — auto-refresh every 5 s, 15 s, or 60 s</li>
+          <li><strong>3D mode</strong> — toggle between 3D orbit and flat 2D layout</li>
+          <li><strong>Call Graph Layer</strong> — overlay symbol-level call edges (cyan, curved) on the import graph; automatically raises <code>symbol_limit</code> to 12 for better call resolution</li>
+          <li><strong>Search</strong> — jump to any file or symbol by name</li>
+          <li><strong>Edge filter</strong> — all / imports / calls / external</li>
+        </ul>
+
+        <h4>GET /graph/export?refresh=&lt;MODE&gt;&amp;include_external=&lt;BOOL&gt;&amp;symbol_limit=&lt;N&gt;</h4>
+        <p>Returns the graph snapshot consumed by the atlas. Nodes include cluster labels, PageRank, degree counts, and symbol previews. The cluster assignment is path-aware: generic top-level directories (<code>src/</code>, <code>lib/</code>, <code>pkg/</code>) are treated as transparent and the second path segment is used instead, so flat repos get meaningful grouping.</p>
+
+        <div class="pre-label">example</div>
+        <pre><code>GET /graph/export?refresh=sync&amp;include_external=true&amp;symbol_limit=4</code></pre>
+
+        <ul>
+          <li><strong><code>refresh</code></strong> — <code>none</code>, <code>sync</code>, or <code>git</code></li>
+          <li><strong><code>include_external</code></strong> — include external library nodes and edges</li>
+          <li><strong><code>symbol_limit</code></strong> — symbol previews per node (default 4, capped at 12; the atlas raises this automatically when the Call Graph Layer is enabled)</li>
+        </ul>
+
+        <h4>GET /graph/history?limit=&lt;N&gt;&amp;include_files=&lt;BOOL&gt;</h4>
+        <p>Returns recent git commits for the atlas timeline, including touched files, rename metadata, and derived cluster labels so the viewer can highlight change hotspots directly on the graph.</p>
+
+        <div class="pre-label">example</div>
+        <pre><code>GET /graph/history?limit=18&amp;include_files=true</code></pre>
+
+        <h4>GET /graph/call-graph</h4>
+        <p>Returns symbol-level call edges (<code>caller_file</code>, <code>caller_name</code>, <code>callee_name</code>). Used by the Call Graph Layer overlay. Requires graph support to be enabled at index time; returns <code>available: false</code> otherwise.</p>
+
+        <p>The recommended atlas workflow: frame the full graph, pick a subsystem from <code>Topology Groups</code> to enter the file lens, then click individual files or commits to inspect symbols, PageRank, and cross-cluster edges. Use the 2D toggle for clearer import DAG layouts.</p>
       </section>
 
       <!-- API: Index -->

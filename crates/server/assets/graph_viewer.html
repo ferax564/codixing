@@ -8,6 +8,10 @@
     name="description"
     content="Live 3D graph atlas for code structure, git history, and evolving dependency links."
   />
+  <link
+    rel="icon"
+    href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect width='48' height='48' rx='14' fill='%2306111a'/%3E%3Ccircle cx='15' cy='15' r='7' fill='%2369e5ff'/%3E%3Ccircle cx='33' cy='33' r='5' fill='%2380f7c4'/%3E%3Cpath d='M20 18l8 8' stroke='%23ffc56b' stroke-width='4' stroke-linecap='round'/%3E%3C/svg%3E"
+  />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link
@@ -203,9 +207,9 @@
     .layout {
       min-height: 0;
       display: grid;
-      grid-template-columns: 330px minmax(0, 1fr) 320px;
-      gap: 16px;
-      padding: 0 20px 20px;
+      grid-template-columns: minmax(270px, 296px) minmax(0, 1fr) minmax(270px, 292px);
+      gap: 14px;
+      padding: 0 18px 18px;
     }
 
     .panel,
@@ -422,6 +426,79 @@
       border-color: transparent;
     }
 
+    .section-note {
+      color: var(--muted);
+      font-size: 0.74rem;
+      line-height: 1.6;
+      margin-bottom: 12px;
+      font-family: "IBM Plex Mono", monospace;
+    }
+
+    .cluster-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .cluster-card {
+      padding: 14px;
+      border-radius: 18px;
+      border: 1px solid rgba(129, 161, 193, 0.14);
+      background: rgba(255, 255, 255, 0.02);
+      text-align: left;
+      transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease;
+    }
+
+    .cluster-card:hover {
+      transform: translateY(-1px);
+      border-color: rgba(105, 229, 255, 0.36);
+      background: rgba(105, 229, 255, 0.05);
+    }
+
+    .cluster-card.active {
+      border-color: rgba(128, 247, 196, 0.48);
+      background:
+        linear-gradient(145deg, rgba(128, 247, 196, 0.12), rgba(105, 229, 255, 0.08));
+    }
+
+    .cluster-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .cluster-head strong {
+      font-size: 0.9rem;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .cluster-swatch {
+      width: 12px;
+      height: 12px;
+      border-radius: 999px;
+      box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.04);
+      flex: 0 0 auto;
+    }
+
+    .cluster-meta {
+      margin-top: 9px;
+      color: var(--muted);
+      font-size: 0.72rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      font-family: "IBM Plex Mono", monospace;
+    }
+
+    .cluster-preview {
+      margin-top: 10px;
+      color: var(--text);
+      font-size: 0.8rem;
+      line-height: 1.45;
+      word-break: break-word;
+      opacity: 0.88;
+    }
+
     .stage {
       position: relative;
       overflow: hidden;
@@ -454,13 +531,61 @@
       align-items: flex-start;
     }
 
+    .scene-hints {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: flex-start;
+    }
+
     .scene-badge {
-      max-width: 520px;
+      max-width: 360px;
       padding: 14px 16px;
       border-radius: 18px;
       background: rgba(6, 15, 25, 0.66);
       border: 1px solid rgba(129, 161, 193, 0.16);
       backdrop-filter: blur(10px);
+      pointer-events: auto;
+    }
+
+    .scene-breadcrumbs {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .crumb {
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid rgba(129, 161, 193, 0.16);
+      background: rgba(255, 255, 255, 0.03);
+      color: var(--muted);
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-family: "IBM Plex Mono", monospace;
+      transition: border-color 0.16s ease, color 0.16s ease, background 0.16s ease;
+      pointer-events: auto;
+    }
+
+    button.crumb:hover {
+      border-color: rgba(105, 229, 255, 0.42);
+      color: var(--text);
+      background: rgba(105, 229, 255, 0.08);
+    }
+
+    .crumb.active {
+      border-color: rgba(128, 247, 196, 0.34);
+      color: var(--text);
+      background: rgba(128, 247, 196, 0.1);
+    }
+
+    .crumb-sep {
+      color: rgba(129, 161, 193, 0.48);
+      font-size: 0.8rem;
+      font-family: "IBM Plex Mono", monospace;
     }
 
     .scene-badge h2 {
@@ -495,6 +620,53 @@
     .scene-chip strong {
       color: var(--text);
     }
+
+    .scene-pan {
+      pointer-events: auto;
+      display: grid;
+      grid-template-columns: repeat(3, 40px);
+      grid-template-areas:
+        ". up ."
+        "left center right"
+        ". down .";
+      gap: 8px;
+      align-items: center;
+      justify-items: center;
+      padding: 10px;
+      border-radius: 18px;
+      border: 1px solid rgba(129, 161, 193, 0.16);
+      background: rgba(6, 15, 25, 0.72);
+      backdrop-filter: blur(10px);
+    }
+
+    .pan-btn {
+      pointer-events: auto;
+      width: 40px;
+      height: 40px;
+      border-radius: 12px;
+      border: 1px solid rgba(129, 161, 193, 0.18);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text);
+      font-size: 0.95rem;
+      line-height: 1;
+      transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+    }
+
+    .pan-btn:hover {
+      transform: translateY(-1px);
+      border-color: rgba(105, 229, 255, 0.46);
+      background: rgba(105, 229, 255, 0.08);
+    }
+
+    .pan-btn:active {
+      transform: translateY(0);
+    }
+
+    .pan-btn.up { grid-area: up; }
+    .pan-btn.left { grid-area: left; }
+    .pan-btn.center { grid-area: center; }
+    .pan-btn.right { grid-area: right; }
+    .pan-btn.down { grid-area: down; }
 
     .timeline {
       display: flex;
@@ -749,6 +921,25 @@
               <button class="toggle active" id="polling-toggle" aria-pressed="true"></button>
             </div>
 
+            <div class="toggle-row">
+              <span>Call Graph Layer</span>
+              <button class="toggle" id="call-graph-toggle" aria-pressed="false"></button>
+            </div>
+
+            <div class="toggle-row">
+              <span>3D mode</span>
+              <button class="toggle active" id="dimension-toggle" aria-pressed="true"></button>
+            </div>
+
+            <div class="control-row">
+              <label for="poll-interval">Poll interval</label>
+              <select class="select" id="poll-interval">
+                <option value="5000" selected>5 s</option>
+                <option value="15000">15 s</option>
+                <option value="60000">60 s</option>
+              </select>
+            </div>
+
             <div class="control-actions">
               <input class="field" id="search-input" placeholder="Search path or symbol" />
               <button class="button primary" id="search-button">Find</button>
@@ -760,8 +951,22 @@
               <button class="filter-chip" data-filter="call">Calls</button>
               <button class="filter-chip" data-filter="external">External</button>
             </div>
+            <p class="section-note" style="margin-top: 8px;">
+              Enable <em>Call Graph Layer</em> above to overlay symbol-level call edges (cyan, curved) onto the import graph.
+            </p>
 
+            <button class="button" id="frame-button">Frame graph</button>
             <button class="button" id="refresh-button">Refresh now</button>
+          </section>
+
+          <section>
+            <div class="panel-head" style="padding: 0 0 12px; border: 0; background: none;">
+              <h2>Topology Groups</h2>
+            </div>
+            <p class="section-note">
+              Focus a larger subsystem first, then drill into individual files and symbols.
+            </p>
+            <div class="cluster-list" id="cluster-list"></div>
           </section>
 
           <section>
@@ -777,22 +982,34 @@
         <div id="graph"></div>
         <div class="stage-chrome">
           <div class="scene-header">
-            <div class="scene-badge">
-              <h2>Code Relationships In Motion</h2>
-              <p>
-                Imports, call edges, and commit history are fused into one space.
-                Use <code>sync</code> to follow active edits or <code>git</code> to rebuild the scene on commit boundaries.
+            <div class="scene-badge" id="scene-badge">
+              <div class="scene-breadcrumbs" id="scene-breadcrumbs"></div>
+              <h2 id="scene-title">Code Relationships In Motion</h2>
+              <p id="scene-copy">
+                Start with clusters to read the architecture, then click into files to inspect concrete imports, calls, and symbols.
               </p>
             </div>
-            <div class="scene-stack">
+            <div class="scene-stack" id="scene-stack">
+              <div class="scene-chip"><span class="micro">lens</span> <strong id="view-pill">group atlas</strong></div>
+              <div class="scene-chip"><span class="micro">scope</span> <strong id="scope-pill">workspace</strong></div>
+              <div class="scene-chip"><span class="micro" id="primary-count-label">groups</span> <strong id="cluster-count">0</strong></div>
               <div class="scene-chip"><span class="micro">visible nodes</span> <strong id="visible-nodes">0</strong></div>
               <div class="scene-chip"><span class="micro">visible edges</span> <strong id="visible-edges">0</strong></div>
               <div class="scene-chip"><span class="micro">selection</span> <strong id="selection-pill">none</strong></div>
             </div>
           </div>
           <div class="scene-footer">
-            <div class="scene-chip"><span class="micro">tip</span> click a commit to light up touched files</div>
-            <div class="scene-chip"><span class="micro">camera</span> drag to orbit, scroll to dive</div>
+            <div class="scene-hints" id="scene-hints">
+              <div class="scene-chip"><span class="micro">tip</span> <span id="hint-primary">click a group node or card to open its file lens</span></div>
+              <div class="scene-chip"><span class="micro">camera</span> <span id="hint-secondary">drag to orbit, scroll to dive, arrow keys or pad to pan</span></div>
+            </div>
+            <div class="scene-pan" id="scene-pan" aria-label="pan controls">
+              <button class="pan-btn up" id="pan-up" title="Pan up">↑</button>
+              <button class="pan-btn left" id="pan-left" title="Pan left">←</button>
+              <button class="pan-btn center" id="pan-center" title="Recenter">◎</button>
+              <button class="pan-btn right" id="pan-right" title="Pan right">→</button>
+              <button class="pan-btn down" id="pan-down" title="Pan down">↓</button>
+            </div>
           </div>
         </div>
         <div class="toast" id="toast"></div>
@@ -815,7 +1032,7 @@
     </main>
   </div>
 
-  <script src="https://unpkg.com/3d-force-graph"></script>
+  <script src="https://unpkg.com/3d-force-graph@1"></script>
   <script>
     const state = {
       snapshot: null,
@@ -824,7 +1041,12 @@
       includeExternal: true,
       polling: true,
       pollMs: 5000,
+      dimension: 3,
+      viewMode: "groups",
+      drillCluster: null,
       edgeFilter: "all",
+      callGraph: null,
+      showCallGraph: false,
       selectedNodeId: null,
       selectedCommitId: null,
       freshNodeIds: new Set(),
@@ -832,6 +1054,10 @@
       graphNodes: [],
       graphLinks: [],
       adjacency: new Map(),
+      clusterSummaries: [],
+      sceneStats: null,
+      sceneContext: null,
+      hasInitialFrame: false,
       timer: null,
     };
 
@@ -842,16 +1068,40 @@
       live: document.getElementById("live-pill"),
       root: document.getElementById("root-value"),
       refreshValue: document.getElementById("refresh-value"),
+      stage: document.querySelector(".stage"),
+      sceneBreadcrumbs: document.getElementById("scene-breadcrumbs"),
+      sceneTitle: document.getElementById("scene-title"),
+      sceneCopy: document.getElementById("scene-copy"),
+      sceneBadge: document.getElementById("scene-badge"),
+      sceneStack: document.getElementById("scene-stack"),
+      sceneHints: document.getElementById("scene-hints"),
+      scenePan: document.getElementById("scene-pan"),
+      viewPill: document.getElementById("view-pill"),
+      scopePill: document.getElementById("scope-pill"),
+      primaryCountLabel: document.getElementById("primary-count-label"),
+      hintPrimary: document.getElementById("hint-primary"),
+      hintSecondary: document.getElementById("hint-secondary"),
+      clusterCount: document.getElementById("cluster-count"),
       visibleNodes: document.getElementById("visible-nodes"),
       visibleEdges: document.getElementById("visible-edges"),
       selection: document.getElementById("selection-pill"),
       commitList: document.getElementById("commit-list"),
+      clusterList: document.getElementById("cluster-list"),
       nodeDetail: document.getElementById("node-detail"),
       eventList: document.getElementById("event-list"),
       refreshMode: document.getElementById("refresh-mode"),
       externalToggle: document.getElementById("external-toggle"),
       pollingToggle: document.getElementById("polling-toggle"),
+      callGraphToggle: document.getElementById("call-graph-toggle"),
+      dimensionToggle: document.getElementById("dimension-toggle"),
+      pollInterval: document.getElementById("poll-interval"),
+      frameButton: document.getElementById("frame-button"),
       refreshButton: document.getElementById("refresh-button"),
+      panUp: document.getElementById("pan-up"),
+      panLeft: document.getElementById("pan-left"),
+      panCenter: document.getElementById("pan-center"),
+      panRight: document.getElementById("pan-right"),
+      panDown: document.getElementById("pan-down"),
       searchInput: document.getElementById("search-input"),
       searchButton: document.getElementById("search-button"),
       toast: document.getElementById("toast"),
@@ -871,7 +1121,34 @@
     }
 
     function edgeId(link) {
-      return `${link.source}|${link.target}|${link.kind}`;
+      return link.edgeKind
+        ? `${link.source}|${link.target}|${link.kind}|${link.edgeKind}`
+        : `${link.source}|${link.target}|${link.kind}`;
+    }
+
+    function hashNumber(key) {
+      let hash = 2166136261;
+      for (let i = 0; i < key.length; i += 1) {
+        hash ^= key.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+      }
+      return hash >>> 0;
+    }
+
+    function formatCluster(cluster) {
+      if (!cluster) return "Unassigned";
+      if (cluster === "external") return "External libraries";
+      if (cluster.startsWith("crate:")) return `${cluster.slice(6)} crate`;
+      return cluster
+        .split(/[/:_-]+/)
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(" ");
+    }
+
+    function compactPath(path) {
+      const parts = String(path || "").split("/").filter(Boolean);
+      return parts.length <= 3 ? parts.join("/") : parts.slice(-3).join("/");
     }
 
     function showToast(message) {
@@ -884,15 +1161,26 @@
     }
 
     function nodeSize(node) {
+      if (node.nodeType === "cluster") {
+        return Math.max(5.4, Math.min(18, 5.6 + Math.sqrt(node.fileCount || 1) * 1.55));
+      }
+      if (node.nodeType === "cluster-proxy") {
+        return Math.max(3.4, Math.min(11.5, 3.6 + Math.sqrt(node.bridgeWeight || node.fileCount || 1) * 0.9));
+      }
       return node.external
-        ? 3
-        : Math.max(3.4, Math.min(10.5, 3.8 + node.pagerank * 260));
+        ? 0.9
+        : Math.max(1.2, Math.min(3.8, 1.4 + Math.sqrt((node.pagerank || 0) * 900)));
     }
 
     function nodeColor(node) {
       if (node.active) return "#ffc56b";
       if (node.fresh) return "#69e5ff";
       if (node.dimmed) return "rgba(112, 135, 156, 0.2)";
+      if (node.nodeType === "cluster" || node.nodeType === "cluster-proxy") {
+        return node.external
+          ? "rgba(255, 197, 107, 0.88)"
+          : hashColor(node.cluster);
+      }
       if (node.external) return "rgba(255, 197, 107, 0.9)";
       return hashColor(node.cluster);
     }
@@ -901,21 +1189,38 @@
       .backgroundColor("#030913")
       .showNavInfo(false)
       .enableNodeDrag(false)
+      .warmupTicks(80)
+      .cooldownTicks(140)
+      .cooldownTime(12000)
       .nodeOpacity(0.96)
-      .nodeResolution(18)
       .nodeVal((node) => nodeSize(node))
       .nodeColor((node) => nodeColor(node))
       .linkDirectionalArrowLength(2.3)
       .linkDirectionalArrowRelPos(1)
       .linkDirectionalParticles((link) => {
+        if (link.dimmed) return 0;
+        if (link.kind === "cluster") return link.active ? 3 : Math.min(2, Math.max(0, Math.round((link.weight || 0) / 6)));
         if (link.kind === "call") return link.active ? 5 : 2;
         if (link.active) return 2;
         return 0;
       })
       .linkDirectionalParticleSpeed((link) => (link.kind === "call" ? 0.012 : 0.004))
-      .linkDirectionalParticleWidth((link) => (link.active ? 3.4 : 1.3))
-      .linkCurvature((link) => (link.kind === "call" ? 0.12 : 0))
-      .onNodeClick((node) => selectNode(node.id, true))
+      .linkDirectionalParticleWidth((link) => (link.active ? 3.4 : link.dimmed ? 0 : 1.3))
+      .linkCurvature((link) => {
+        if (link.kind === "call") return 0.12;
+        if (link.kind === "cluster") {
+          const bend = ((hashNumber(`${link.source}|${link.target}`) % 7) - 3) * 0.035;
+          return bend;
+        }
+        return 0;
+      })
+      .onNodeClick((node) => {
+        if (node.nodeType === "cluster" || node.nodeType === "cluster-proxy") {
+          enterCluster(node.cluster, true);
+          return;
+        }
+        selectNode(node.id, true);
+      })
       .onBackgroundClick(() => selectNode(null, false));
 
     Graph.d3Force("charge").strength(-160);
@@ -924,8 +1229,368 @@
       if (link.kind === "call") return 58;
       return 46;
     });
-    Graph.d3VelocityDecay(0.28);
+    Graph.d3AlphaDecay(0.05);
+    Graph.d3VelocityDecay(0.55);
     Graph.cameraPosition({ x: 0, y: 0, z: 220 });
+    Graph.numDimensions(3);
+
+    const controls = Graph.controls();
+    if (controls) {
+      if ("noPan" in controls) controls.noPan = false;
+      if ("rotateSpeed" in controls) controls.rotateSpeed = 0.45;
+      if ("zoomSpeed" in controls) controls.zoomSpeed = 0.35;
+      if ("panSpeed" in controls) controls.panSpeed = 0.55;
+      if ("dynamicDampingFactor" in controls) controls.dynamicDampingFactor = 0.18;
+      if ("staticMoving" in controls) controls.staticMoving = false;
+      if ("minDistance" in controls) controls.minDistance = 80;
+      if ("maxDistance" in controls) controls.maxDistance = 3200;
+    }
+
+    function frameGraph(ms = 900) {
+      if (!state.graphNodes.length) return;
+      Graph.zoomToFit(ms, 90, (node) => !node.dimmed);
+      window.setTimeout(() => {
+        alignGraphToViewport(Math.max(220, Math.round(ms * 0.34)));
+      }, Math.max(40, Math.round(ms * 0.45)));
+    }
+
+    function cameraVectors() {
+      const camera = Graph.camera ? Graph.camera() : null;
+      const target = controls && controls.target ? controls.target : null;
+      if (!camera || !camera.position || !target || !target.clone) return null;
+
+      const distance = camera.position.distanceTo
+        ? camera.position.distanceTo(target)
+        : Math.hypot(
+            camera.position.x - target.x,
+            camera.position.y - target.y,
+            camera.position.z - target.z
+          );
+      const viewDir = target.clone().sub(camera.position).normalize();
+      const right = viewDir.clone().cross(camera.up).normalize();
+      const up = camera.up.clone().normalize();
+      return { camera, target, distance, right, up };
+    }
+
+    function shiftCameraByWorld(dx, dy, ms = 180) {
+      const vectors = cameraVectors();
+      if (!vectors) return;
+
+      const { camera, target, right, up } = vectors;
+      const offset = right.multiplyScalar(dx).add(up.multiplyScalar(dy));
+      const nextPos = camera.position.clone().add(offset);
+      const nextTarget = target.clone().add(offset);
+
+      Graph.cameraPosition(
+        { x: nextPos.x, y: nextPos.y, z: nextPos.z },
+        { x: nextTarget.x, y: nextTarget.y, z: nextTarget.z },
+        ms
+      );
+      if (controls && typeof controls.update === "function") {
+        window.setTimeout(() => controls.update(), ms + 16);
+      }
+    }
+
+    function panGraph(dx, dy, ms = 180) {
+      const vectors = cameraVectors();
+      if (!vectors) return;
+      const scale = Math.max(12, vectors.distance * 0.14);
+      shiftCameraByWorld(dx * scale, dy * scale, ms);
+    }
+
+    function viewportBiasWorld(distance) {
+      if (!el.stage) return null;
+      const stageRect = el.stage.getBoundingClientRect();
+      if (!stageRect.width || !stageRect.height) return null;
+
+      const leftWidth = Math.max(
+        el.sceneBadge ? el.sceneBadge.getBoundingClientRect().width : 0,
+        el.sceneHints ? el.sceneHints.getBoundingClientRect().width : 0
+      );
+      const rightWidth = Math.max(
+        el.sceneStack ? el.sceneStack.getBoundingClientRect().width : 0,
+        el.scenePan ? el.scenePan.getBoundingClientRect().width : 0
+      );
+      const topHeight = Math.max(
+        el.sceneBadge ? el.sceneBadge.getBoundingClientRect().height : 0,
+        el.sceneStack ? el.sceneStack.getBoundingClientRect().height : 0
+      );
+      const bottomHeight = Math.max(
+        el.sceneHints ? el.sceneHints.getBoundingClientRect().height : 0,
+        el.scenePan ? el.scenePan.getBoundingClientRect().height : 0
+      );
+
+      const pad = 26;
+      const safeWidth = Math.max(140, stageRect.width - leftWidth - rightWidth - pad * 2);
+      const safeHeight = Math.max(140, stageRect.height - topHeight - bottomHeight - pad * 2);
+      const safeCenterX = leftWidth + pad + safeWidth / 2;
+      const safeCenterY = topHeight + pad + safeHeight / 2;
+      const pixelDx = safeCenterX - stageRect.width / 2;
+      const pixelDy = stageRect.height / 2 - safeCenterY;
+
+      const camera = Graph.camera ? Graph.camera() : null;
+      const fov = camera && camera.fov ? (camera.fov * Math.PI) / 180 : Math.PI / 4;
+      const worldHeight = 2 * Math.tan(fov / 2) * distance;
+      const worldWidth = worldHeight * (stageRect.width / stageRect.height);
+
+      const biasScale = 0.65;
+      return {
+        x: ((pixelDx / stageRect.width) * worldWidth) * biasScale,
+        y: ((pixelDy / stageRect.height) * worldHeight) * biasScale,
+      };
+    }
+
+    function alignGraphToViewport(ms = 260) {
+      const vectors = cameraVectors();
+      if (!vectors) return;
+      const bias = viewportBiasWorld(vectors.distance);
+      if (!bias) return;
+      shiftCameraByWorld(-bias.x, -bias.y, ms);
+    }
+
+    function seedNodePositions(nodes, previousPositions) {
+      const byCluster = new Map();
+      nodes.forEach((node) => {
+        if (!byCluster.has(node.cluster)) byCluster.set(node.cluster, []);
+        byCluster.get(node.cluster).push(node);
+      });
+
+      const orderedClusters = Array.from(byCluster.entries())
+        .sort((a, b) => {
+          const pagerankA = a[1].reduce((sum, node) => sum + (node.pagerank || 0), 0);
+          const pagerankB = b[1].reduce((sum, node) => sum + (node.pagerank || 0), 0);
+          return b[1].length - a[1].length || pagerankB - pagerankA || a[0].localeCompare(b[0]);
+        });
+
+      const radius = orderedClusters.length <= 1
+        ? 0
+        : Math.max(95, Math.min(280, 96 + orderedClusters.length * 24));
+      const clusterCenters = new Map();
+      orderedClusters.forEach(([cluster], index) => {
+        if (cluster === "external") {
+          clusterCenters.set(cluster, { x: radius * 1.1, y: -radius * 0.16, z: -42 });
+          return;
+        }
+        const angle = (index / Math.max(1, orderedClusters.length)) * Math.PI * 2 - Math.PI / 2;
+        clusterCenters.set(cluster, {
+          x: Math.cos(angle) * radius,
+          y: Math.sin(angle) * radius * 0.72,
+          z: ((index % 3) - 1) * 58,
+        });
+      });
+
+      let weightedX = 0;
+      let weightedY = 0;
+      let weightedZ = 0;
+      let totalWeight = 0;
+      orderedClusters.forEach(([cluster, members]) => {
+        const center = clusterCenters.get(cluster);
+        if (!center) return;
+        const weight = members.length;
+        totalWeight += weight;
+        weightedX += center.x * weight;
+        weightedY += center.y * weight;
+        weightedZ += center.z * weight;
+      });
+      if (totalWeight > 0) {
+        const centerX = weightedX / totalWeight;
+        const centerY = weightedY / totalWeight;
+        const centerZ = weightedZ / totalWeight;
+        clusterCenters.forEach((center, cluster) => {
+          clusterCenters.set(cluster, {
+            x: center.x - centerX,
+            y: center.y - centerY,
+            z: center.z - centerZ,
+          });
+        });
+      }
+
+      byCluster.forEach((members, cluster) => {
+        members.sort((a, b) => b.pagerank - a.pagerank || a.path.localeCompare(b.path));
+        const center = clusterCenters.get(cluster) || { x: 0, y: 0, z: 0 };
+        members.forEach((node, index) => {
+          const previous = previousPositions.get(node.id);
+          if (
+            previous
+            && Number.isFinite(previous.x)
+            && Number.isFinite(previous.y)
+            && Number.isFinite(previous.z)
+          ) {
+            node.x = previous.x;
+            node.y = previous.y;
+            node.z = previous.z;
+            node.fx = previous.x;
+            node.fy = previous.y;
+            node.fz = previous.z;
+            return;
+          }
+
+          const seed = hashNumber(node.id);
+          const angle = ((index / Math.max(1, members.length)) * Math.PI * 2) + ((seed % 360) * Math.PI / 180);
+          const spread = 16 + Math.sqrt(members.length) * 6;
+          node.x = center.x + Math.cos(angle) * spread + ((seed % 17) - 8) * 0.8;
+          node.y = center.y + Math.sin(angle) * spread * 0.74 + (((seed >> 5) % 13) - 6) * 0.8;
+          node.z = center.z + (((seed >> 9) % 11) - 5) * 6;
+          // Leave fx/fy/fz unset so the force simulation can settle new nodes.
+        });
+      });
+    }
+
+    function summarizeClusters(nodes, links) {
+      const nodesById = new Map(nodes.map((node) => [node.id, node]));
+      const byCluster = new Map();
+
+      nodes.forEach((node) => {
+        if (!byCluster.has(node.cluster)) {
+          byCluster.set(node.cluster, {
+            id: node.cluster,
+            label: formatCluster(node.cluster),
+            count: 0,
+            pagerank: 0,
+            symbolCount: 0,
+            externalCount: 0,
+            internalEdges: 0,
+            bridgeEdges: 0,
+            languages: new Set(),
+            samplePath: node.path,
+            sampleRank: -1,
+          });
+        }
+        const entry = byCluster.get(node.cluster);
+        entry.count += 1;
+        entry.pagerank += node.pagerank || 0;
+        entry.symbolCount += node.symbol_count || 0;
+        if (node.external) entry.externalCount += 1;
+        entry.languages.add(node.language);
+        if ((node.pagerank || 0) >= entry.sampleRank) {
+          entry.sampleRank = node.pagerank || 0;
+          entry.samplePath = node.path;
+        }
+      });
+
+      links.forEach((link) => {
+        const source = nodesById.get(link.source);
+        const target = nodesById.get(link.target);
+        if (!source || !target) return;
+        const sourceEntry = byCluster.get(source.cluster);
+        const targetEntry = byCluster.get(target.cluster);
+        if (!sourceEntry || !targetEntry) return;
+        if (source.cluster === target.cluster) {
+          sourceEntry.internalEdges += 1;
+        } else {
+          sourceEntry.bridgeEdges += 1;
+          targetEntry.bridgeEdges += 1;
+        }
+      });
+
+      return Array.from(byCluster.values())
+        .map((entry) => ({
+          ...entry,
+          languages: Array.from(entry.languages).sort(),
+          samplePath: compactPath(entry.samplePath),
+        }))
+        .sort((a, b) => b.count - a.count || b.pagerank - a.pagerank || a.label.localeCompare(b.label));
+    }
+
+    function renderSceneChrome() {
+      const stats = state.sceneStats || {};
+      const inFileLens = state.viewMode === "files" && state.drillCluster;
+      const focusLabel = inFileLens ? formatCluster(state.drillCluster) : "workspace";
+
+      el.viewPill.textContent = inFileLens ? "file lens" : "group atlas";
+      el.scopePill.textContent = focusLabel;
+      el.primaryCountLabel.textContent = inFileLens ? "files" : "groups";
+      el.clusterCount.textContent = `${stats.primaryCount || 0}`;
+      el.visibleNodes.textContent = `${state.graphNodes.length}`;
+      el.visibleEdges.textContent = `${state.graphLinks.length}`;
+
+      if (inFileLens) {
+        const bridgeCount = stats.bridgeClusters || 0;
+        el.sceneTitle.textContent = `${focusLabel} File Lens`;
+        el.sceneCopy.textContent = "Focused files stay expanded in the center while neighboring subsystems collapse into bridge nodes, so cross-crate traffic stays readable.";
+        el.hintPrimary.textContent = "click a file to inspect symbols, or a bridge node to jump into that subsystem";
+        el.hintSecondary.textContent = "drag to orbit, scroll to zoom, arrow keys or pad to pan, frame graph to recenter";
+      } else {
+        const groupCount = stats.primaryCount || 0;
+        el.sceneTitle.textContent = "Code Relationships In Motion";
+        el.sceneCopy.textContent = `The atlas opens at subsystem scale first. ${groupCount} grouped regions are visible; open one to replace the cloud with a local file lens.`;
+        el.hintPrimary.textContent = "click a group node or card to open its file lens";
+        el.hintSecondary.textContent = "drag to orbit, scroll to zoom, arrow keys or pad to pan";
+      }
+
+      el.sceneBreadcrumbs.innerHTML = inFileLens
+        ? `
+          <button class="crumb" data-scene-nav="groups">workspace</button>
+          <span class="crumb-sep">/</span>
+          <span class="crumb active">${focusLabel}</span>
+        `
+        : '<span class="crumb active">workspace</span>';
+
+      Array.from(el.sceneBreadcrumbs.querySelectorAll("[data-scene-nav]")).forEach((button) => {
+        button.addEventListener("click", () => exitToGroups(true));
+      });
+    }
+
+    function renderClusterList() {
+      const summaries = state.clusterSummaries || [];
+      if (!summaries.length) {
+        el.clusterList.innerHTML = '<p class="empty-copy">No topology groups are available yet. Refresh or widen the active filters.</p>';
+        return;
+      }
+
+      const allFiles = summaries.reduce((sum, entry) => sum + entry.count, 0);
+      const allSymbols = summaries.reduce((sum, entry) => sum + entry.symbolCount, 0);
+      const groupAtlasActive = state.viewMode === "groups";
+
+      el.clusterList.innerHTML = [
+        `
+          <button class="cluster-card ${groupAtlasActive ? "active" : ""}" data-cluster="">
+            <div class="cluster-head">
+              <span class="cluster-swatch" style="background: linear-gradient(135deg, var(--cyan), var(--mint));"></span>
+              <strong>All groups</strong>
+              <span class="chip">${summaries.length} regions</span>
+            </div>
+            <div class="cluster-meta">
+              <span>${allFiles} indexed files</span>
+              <span>${allSymbols} indexed symbols</span>
+            </div>
+            <div class="cluster-preview">Return to the grouped atlas and compare subsystem boundaries.</div>
+          </button>
+        `,
+        ...summaries.map((entry) => {
+          const active = state.drillCluster === entry.id;
+          const preview = active
+            ? `File lens open · ${entry.samplePath}`
+            : `Open file lens · ${entry.samplePath}`;
+          return `
+            <button class="cluster-card ${active ? "active" : ""}" data-cluster="${entry.id}">
+              <div class="cluster-head">
+                <span class="cluster-swatch" style="background:${hashColor(entry.id)};"></span>
+                <strong>${entry.label}</strong>
+                <span class="chip">${entry.count} files</span>
+              </div>
+              <div class="cluster-meta">
+                <span>${entry.languages.slice(0, 2).join(" / ") || "Unknown"}</span>
+                <span>${entry.bridgeEdges} bridge edges</span>
+                <span>${entry.internalEdges} internal edges</span>
+              </div>
+              <div class="cluster-preview">${preview}</div>
+            </button>
+          `;
+        }),
+      ].join("");
+
+      Array.from(el.clusterList.querySelectorAll("[data-cluster]")).forEach((button) => {
+        button.addEventListener("click", () => {
+          const cluster = button.getAttribute("data-cluster") || null;
+          if (!cluster) {
+            exitToGroups(true);
+            return;
+          }
+          enterCluster(cluster, true);
+        });
+      });
+    }
 
     function activePaths() {
       const set = new Set();
@@ -950,22 +1615,38 @@
 
     Graph
       .linkWidth((link) => {
+        if (link.dimmed) return 0.16;
+        if (link.kind === "cluster") {
+          const base = 1.1 + Math.min(6, Math.sqrt(link.weight || 1) * 0.6);
+          return link.active ? base + 0.8 : base;
+        }
         if (link.active) return 2.8;
         if (link.fresh) return 2.1;
         if (link.kind === "call") return 1.1;
         return link.external ? 0.7 : 0.85;
       })
       .linkColor((link) => {
+        if (link.dimmed) return "rgba(112, 135, 156, 0.08)";
+        if (link.kind === "cluster") {
+          if (link.active) return "rgba(255, 197, 107, 0.88)";
+          if (link.edgeKind === "call") return "rgba(105, 229, 255, 0.42)";
+          if (link.external) return "rgba(255, 197, 107, 0.24)";
+          return "rgba(191, 223, 255, 0.26)";
+        }
         if (link.active) return "rgba(255, 197, 107, 0.95)";
         if (link.kind === "call") return "rgba(105, 229, 255, 0.55)";
         if (link.external) return "rgba(255, 197, 107, 0.28)";
         return "rgba(191, 223, 255, 0.18)";
       })
       .nodeLabel((node) => {
+        if (node.nodeType === "cluster" || node.nodeType === "cluster-proxy") {
+          const bridge = node.bridgeWeight || node.bridgeEdges || 0;
+          return `<strong>${node.label}</strong><br/>${node.fileCount} files · ${bridge} bridge edges<br/>${node.path || "No representative file"}`;
+        }
         const symbols = node.symbols && node.symbols.length
           ? `<br/><em>${node.symbols.map((symbol) => symbol.name).join(", ")}</em>`
           : "";
-        return `<strong>${node.path}</strong><br/>${node.language}${symbols}`;
+        return `<strong>${compactPath(node.path)}</strong><br/>${node.language}${symbols}`;
       });
 
     function buildAdjacency(nodes, links) {
@@ -980,62 +1661,397 @@
       state.adjacency = adjacency;
     }
 
-    function applyGraph(snapshot) {
-      const previousNodeIds = state.snapshot ? new Set(state.snapshot.nodes.map((node) => node.id)) : new Set();
-      const previousEdgeIds = state.snapshot ? new Set(state.snapshot.edges.map((link) => edgeId(link))) : new Set();
-      const commitActive = activePaths();
+    function seedFileLensPositions(nodes, previousPositions) {
+      const fileNodes = nodes.filter((node) => node.nodeType === "file");
+      const bridgeNodes = nodes.filter((node) => node.nodeType === "cluster-proxy");
 
-      const links = snapshot.edges
-        .filter((link) => state.edgeFilter === "all" || link.kind === state.edgeFilter)
-        .map((link) => {
+      fileNodes.sort((a, b) => b.pagerank - a.pagerank || a.path.localeCompare(b.path));
+      fileNodes.forEach((node, index) => {
+        const previous = previousPositions.get(node.id);
+        if (
+          previous
+          && Number.isFinite(previous.x)
+          && Number.isFinite(previous.y)
+          && Number.isFinite(previous.z)
+        ) {
+          node.x = previous.x;
+          node.y = previous.y;
+          node.z = previous.z;
+          node.fx = previous.x;
+          node.fy = previous.y;
+          node.fz = previous.z;
+          return;
+        }
+
+        const seed = hashNumber(node.id);
+        const band = Math.floor(Math.sqrt(index));
+        const orbit = 18 + band * 18 + (seed % 9);
+        const angle = ((seed % 360) * Math.PI / 180) + index * 0.72;
+        node.x = Math.cos(angle) * orbit;
+        node.y = Math.sin(angle) * orbit * 0.76;
+        node.z = (((seed >> 8) % 11) - 5) * 4;
+        // Leave fx/fy/fz unset so the force simulation can settle new nodes.
+      });
+
+      const bridgeRadius = Math.max(132, 86 + Math.sqrt(fileNodes.length + 1) * 28 + bridgeNodes.length * 10);
+      bridgeNodes
+        .sort((a, b) => (b.bridgeWeight || 0) - (a.bridgeWeight || 0) || a.label.localeCompare(b.label))
+        .forEach((node, index) => {
+          const previous = previousPositions.get(node.id);
+          if (
+            previous
+            && Number.isFinite(previous.x)
+            && Number.isFinite(previous.y)
+            && Number.isFinite(previous.z)
+          ) {
+            node.x = previous.x;
+            node.y = previous.y;
+            node.z = previous.z;
+            node.fx = previous.x;
+            node.fy = previous.y;
+            node.fz = previous.z;
+            return;
+          }
+
+          const seed = hashNumber(node.id);
+          const angle = ((index / Math.max(1, bridgeNodes.length)) * Math.PI * 2) - Math.PI / 2 + ((seed % 27) * 0.01);
+          node.x = Math.cos(angle) * bridgeRadius;
+          node.y = Math.sin(angle) * bridgeRadius * 0.72;
+          node.z = (((seed >> 5) % 9) - 4) * 11;
+          // Leave fx/fy/fz unset so the force simulation can settle new bridge nodes.
+        });
+    }
+
+    function buildGroupAtlasScene(snapshot, filteredEdges, previousNodeIds, previousEdgeIds, previousPositions, activeSet, summaries) {
+      const nodesById = new Map((snapshot.nodes || []).map((node) => [node.id, node]));
+      const activeClusters = new Set();
+      activeSet.forEach((id) => {
+        const node = nodesById.get(id);
+        if (node) activeClusters.add(node.cluster);
+      });
+
+      const nodes = summaries.map((entry) => {
+        const id = `cluster:${entry.id}`;
+        const active = activeClusters.has(entry.id);
+        return {
+          id,
+          nodeType: "cluster",
+          cluster: entry.id,
+          label: entry.label,
+          path: entry.samplePath,
+          fileCount: entry.count,
+          symbolCount: entry.symbolCount,
+          bridgeEdges: entry.bridgeEdges,
+          internalEdges: entry.internalEdges,
+          pagerank: entry.pagerank,
+          external: entry.id === "external",
+          languages: entry.languages,
+          fresh: !previousNodeIds.has(id),
+          active,
+          dimmed: activeClusters.size > 0 && !active,
+        };
+      });
+
+      const linksById = new Map();
+      filteredEdges.forEach((link) => {
+        const source = nodesById.get(link.source);
+        const target = nodesById.get(link.target);
+        if (!source || !target || source.cluster === target.cluster) return;
+        const sourceId = `cluster:${source.cluster}`;
+        const targetId = `cluster:${target.cluster}`;
+        const id = `${sourceId}|${targetId}|cluster|${link.kind}`;
+        if (!linksById.has(id)) {
+          linksById.set(id, {
+            id,
+            source: sourceId,
+            target: targetId,
+            kind: "cluster",
+            edgeKind: link.kind,
+            weight: 0,
+            external: source.external || target.external,
+            active: false,
+            dimmed: false,
+          });
+        }
+        const entry = linksById.get(id);
+        entry.weight += 1;
+        if (activeSet.has(source.id) || activeSet.has(target.id)) {
+          entry.active = true;
+        }
+      });
+
+      const links = Array.from(linksById.values()).map((link) => ({
+        ...link,
+        fresh: !previousEdgeIds.has(link.id),
+        dimmed: activeClusters.size > 0 && !link.active,
+      }));
+
+      const neighborCounts = new Map();
+      links.forEach((link) => {
+        if (!neighborCounts.has(link.source)) neighborCounts.set(link.source, new Set());
+        if (!neighborCounts.has(link.target)) neighborCounts.set(link.target, new Set());
+        neighborCounts.get(link.source).add(link.target);
+        neighborCounts.get(link.target).add(link.source);
+      });
+      nodes.forEach((node) => {
+        node.neighborCount = (neighborCounts.get(node.id) || new Set()).size;
+      });
+
+      seedNodePositions(nodes, previousPositions);
+
+      return {
+        nodes,
+        links,
+        stats: {
+          primaryCount: summaries.length,
+          bridgeClusters: summaries.filter((entry) => entry.bridgeEdges > 0).length,
+        },
+        context: {
+          topClusters: summaries.slice(0, 5),
+        },
+      };
+    }
+
+    function buildFileLensScene(snapshot, filteredEdges, previousNodeIds, previousEdgeIds, previousPositions, activeSet, summaries, summaryById) {
+      const allNodes = snapshot.nodes || [];
+      const nodesById = new Map(allNodes.map((node) => [node.id, node]));
+      const focalFiles = allNodes.filter((node) => node.cluster === state.drillCluster);
+      if (!focalFiles.length) {
+        return null;
+      }
+
+      const localIds = new Set(focalFiles.map((node) => node.id));
+      const activeClusters = new Set();
+      activeSet.forEach((id) => {
+        const node = nodesById.get(id);
+        if (node) activeClusters.add(node.cluster);
+      });
+
+      const nodes = focalFiles.map((node) => {
+        const active = activeSet.has(node.id);
+        return {
+          ...node,
+          nodeType: "file",
+          fresh: !previousNodeIds.has(node.id),
+          active,
+          dimmed: activeSet.size > 0 && !active,
+        };
+      });
+
+      const bridgeNodesByCluster = new Map();
+      const bridgeLinksById = new Map();
+      const localLinks = [];
+
+      filteredEdges.forEach((link) => {
+        const source = nodesById.get(link.source);
+        const target = nodesById.get(link.target);
+        if (!source || !target) return;
+
+        const sourceLocal = localIds.has(source.id);
+        const targetLocal = localIds.has(target.id);
+
+        if (sourceLocal && targetLocal) {
           const id = edgeId(link);
-          const active = commitActive.has(link.source) && commitActive.has(link.target);
-          return {
+          localLinks.push({
             ...link,
             id,
             fresh: !previousEdgeIds.has(id),
-            active,
-          };
-        });
+            active: activeSet.has(source.id) || activeSet.has(target.id),
+            dimmed: activeSet.size > 0 && !(activeSet.has(source.id) || activeSet.has(target.id)),
+          });
+          return;
+        }
 
-      const linkedNodeIds = new Set();
-      links.forEach((link) => {
-        linkedNodeIds.add(link.source);
-        linkedNodeIds.add(link.target);
+        if (sourceLocal === targetLocal) return;
+
+        const localNode = sourceLocal ? source : target;
+        const remoteNode = sourceLocal ? target : source;
+        const remoteCluster = remoteNode.cluster;
+        const summary = summaryById.get(remoteCluster) || {
+          id: remoteCluster,
+          label: formatCluster(remoteCluster),
+          count: 1,
+          symbolCount: remoteNode.symbol_count || 0,
+          bridgeEdges: 0,
+          internalEdges: 0,
+          pagerank: remoteNode.pagerank || 0,
+          samplePath: compactPath(remoteNode.path),
+          languages: [remoteNode.language],
+        };
+        const proxyId = `cluster:${remoteCluster}`;
+        if (!bridgeNodesByCluster.has(remoteCluster)) {
+          bridgeNodesByCluster.set(remoteCluster, {
+            id: proxyId,
+            nodeType: "cluster-proxy",
+            cluster: remoteCluster,
+            label: summary.label,
+            path: summary.samplePath,
+            fileCount: summary.count,
+            symbolCount: summary.symbolCount,
+            bridgeEdges: summary.bridgeEdges,
+            internalEdges: summary.internalEdges,
+            pagerank: summary.pagerank,
+            bridgeWeight: 0,
+            external: remoteCluster === "external" || remoteNode.external,
+            languages: summary.languages,
+            fresh: !previousNodeIds.has(proxyId),
+            active: activeClusters.has(remoteCluster),
+            dimmed: false,
+          });
+        }
+
+        const proxyNode = bridgeNodesByCluster.get(remoteCluster);
+        proxyNode.bridgeWeight += 1;
+        if (activeSet.has(localNode.id) || activeSet.has(remoteNode.id)) {
+          proxyNode.active = true;
+        }
+
+        const edgeSource = sourceLocal ? localNode.id : proxyId;
+        const edgeTarget = sourceLocal ? proxyId : localNode.id;
+        const edgeIdValue = `${edgeSource}|${edgeTarget}|bridge|${link.kind}`;
+        if (!bridgeLinksById.has(edgeIdValue)) {
+          bridgeLinksById.set(edgeIdValue, {
+            id: edgeIdValue,
+            source: edgeSource,
+            target: edgeTarget,
+            kind: link.kind,
+            edgeKind: link.kind,
+            weight: 0,
+            external: remoteNode.external,
+            active: false,
+            dimmed: false,
+          });
+        }
+        const edgeEntry = bridgeLinksById.get(edgeIdValue);
+        edgeEntry.weight += 1;
+        if (activeSet.has(localNode.id) || activeSet.has(remoteNode.id)) {
+          edgeEntry.active = true;
+        }
       });
 
-      const nodes = snapshot.nodes
-        .filter((node) => linkedNodeIds.has(node.id) || node.id === state.selectedNodeId)
-        .map((node) => {
-          const fresh = !previousNodeIds.has(node.id);
-          const active = commitActive.has(node.id);
-          const dimmed = commitActive.size > 0 && !active;
-          return {
-            ...node,
-            fresh,
-            active,
-            dimmed,
-          };
-        });
+      const bridgeNodes = Array.from(bridgeNodesByCluster.values())
+        .sort((a, b) => b.bridgeWeight - a.bridgeWeight || a.label.localeCompare(b.label))
+        .map((node) => ({
+          ...node,
+          dimmed: activeSet.size > 0 && !node.active,
+        }));
 
-      state.freshNodeIds = new Set(nodes.filter((node) => node.fresh).map((node) => node.id));
-      state.freshEdgeIds = new Set(links.filter((link) => link.fresh).map((link) => link.id));
-      state.graphNodes = nodes;
-      state.graphLinks = links;
-      buildAdjacency(nodes, links);
-      Graph.graphData({ nodes, links });
-      Graph.numDimensions(3);
+      const links = [
+        ...localLinks,
+        ...Array.from(bridgeLinksById.values()).map((link) => ({
+          ...link,
+          fresh: !previousEdgeIds.has(link.id),
+          dimmed: activeSet.size > 0 && !link.active,
+        })),
+      ];
+
+      const sceneNodes = [...nodes, ...bridgeNodes];
+      seedFileLensPositions(sceneNodes, previousPositions);
+
+      return {
+        nodes: sceneNodes,
+        links,
+        stats: {
+          primaryCount: nodes.length,
+          bridgeClusters: bridgeNodes.length,
+        },
+        context: {
+          bridgeClusters: bridgeNodes.slice(0, 6),
+          cluster: summaryById.get(state.drillCluster) || null,
+        },
+      };
+    }
+
+    function applyGraph(snapshot) {
+      if (!snapshot) return;
+
+      const rawNodes = snapshot.nodes || [];
+      const rawNodeById = new Map(rawNodes.map((node) => [node.id, node]));
+
+      if (state.viewMode === "groups") {
+        state.selectedNodeId = null;
+      }
+      if (state.drillCluster && !rawNodes.some((node) => node.cluster === state.drillCluster)) {
+        state.drillCluster = null;
+        state.viewMode = "groups";
+        state.selectedNodeId = null;
+      }
+      if (state.selectedNodeId) {
+        const selected = rawNodeById.get(state.selectedNodeId);
+        if (!selected || state.viewMode !== "files" || selected.cluster !== state.drillCluster) {
+          state.selectedNodeId = null;
+        }
+      }
+
+      const previousNodeIds = new Set(state.graphNodes.map((node) => node.id));
+      const previousEdgeIds = new Set(state.graphLinks.map((link) => link.id));
+      const previousPositions = new Map(
+        state.graphNodes.map((node) => [node.id, { x: node.x, y: node.y, z: node.z }])
+      );
+      const activeSet = activePaths();
+      const callEdges = state.showCallGraph ? buildCallEdges(state.callGraph, rawNodes) : [];
+      const allEdges = [...snapshot.edges, ...callEdges];
+      const filteredEdges = allEdges.filter((link) => state.edgeFilter === "all" || link.kind === state.edgeFilter);
+
+      state.clusterSummaries = summarizeClusters(rawNodes, filteredEdges);
+      const summaryById = new Map(state.clusterSummaries.map((entry) => [entry.id, entry]));
+
+      let scene = null;
+      if (state.viewMode === "files" && state.drillCluster) {
+        scene = buildFileLensScene(
+          snapshot,
+          filteredEdges,
+          previousNodeIds,
+          previousEdgeIds,
+          previousPositions,
+          activeSet,
+          state.clusterSummaries,
+          summaryById
+        );
+      }
+      if (!scene) {
+        state.viewMode = "groups";
+        state.drillCluster = null;
+        state.selectedNodeId = null;
+        scene = buildGroupAtlasScene(
+          snapshot,
+          filteredEdges,
+          previousNodeIds,
+          previousEdgeIds,
+          previousPositions,
+          activeSet,
+          state.clusterSummaries
+        );
+      }
+
+      state.freshNodeIds = new Set(scene.nodes.filter((node) => node.fresh).map((node) => node.id));
+      state.freshEdgeIds = new Set(scene.links.filter((link) => link.fresh).map((link) => link.id));
+      state.graphNodes = scene.nodes;
+      state.graphLinks = scene.links;
+      state.sceneStats = scene.stats;
+      state.sceneContext = scene.context;
+      buildAdjacency(scene.nodes, scene.links);
+      const resolution = scene.nodes.length > 300 ? 8 : scene.nodes.length > 100 ? 12 : 18;
+      Graph.nodeResolution(resolution);
+      Graph.graphData({ nodes: scene.nodes, links: scene.links });
+      renderSceneChrome();
+      renderClusterList();
       updateNodeDetail();
       updateEvents();
-      el.visibleNodes.textContent = `${nodes.length}`;
-      el.visibleEdges.textContent = `${links.length}`;
+      el.selection.textContent = state.selectedNodeId ? "node" : state.selectedCommitId ? "commit" : "none";
+      if (!state.hasInitialFrame && !state.selectedNodeId) {
+        state.hasInitialFrame = true;
+        window.setTimeout(() => frameGraph(1100), 250);
+      }
     }
 
     function renderMetrics(snapshot, history) {
+      const rawNodeCount = (snapshot.nodes || []).length;
+      const lensLabel = state.viewMode === "files" ? "lens files" : "atlas groups";
       const metrics = [
-        { label: "nodes", value: snapshot.visible_node_count ?? 0 },
-        { label: "edges", value: snapshot.visible_edge_count ?? 0 },
-        { label: "call edges", value: snapshot.graph.call_edges ?? 0 },
+        { label: "clusters", value: state.clusterSummaries.length },
+        { label: "indexed files", value: rawNodeCount },
+        { label: lensLabel, value: state.sceneStats ? state.sceneStats.primaryCount : 0 },
         { label: "commits", value: history && history.commits ? history.commits.length : 0 },
       ];
       el.metrics.innerHTML = metrics
@@ -1088,53 +2104,121 @@
           const commitId = button.getAttribute("data-commit-id");
           state.selectedCommitId = state.selectedCommitId === commitId ? null : commitId;
           applyGraph(state.snapshot);
+          renderMetrics(state.snapshot, state.history);
           renderHistory(state.history);
           el.selection.textContent = state.selectedCommitId ? "commit" : state.selectedNodeId ? "node" : "none";
+          if (!state.selectedNodeId) {
+            window.setTimeout(() => frameGraph(900), 150);
+          }
         });
       });
     }
 
     function updateNodeDetail() {
       const node = state.graphNodes.find((entry) => entry.id === state.selectedNodeId);
-      if (!node) {
+      if (node) {
+        const neighbors = Array.from(state.adjacency.get(node.id) || []);
+        const symbols = node.symbols && node.symbols.length
+          ? `
+            <div class="symbol-list">
+              ${node.symbols.map((symbol) => `
+                <div class="symbol">
+                  <div class="symbol-head">
+                    <strong>${symbol.name}</strong>
+                    <span class="symbol-kind">${symbol.kind}</span>
+                  </div>
+                  <div class="symbol-signature">${symbol.signature || `line ${symbol.line}`}</div>
+                </div>
+              `).join("")}
+            </div>
+          `
+          : '<p class="empty-copy">No indexed symbol previews were available for this node.</p>';
+
         el.nodeDetail.innerHTML = `
           <div class="detail-card">
-            <div class="detail-title">No node selected</div>
+            <div class="detail-title">${node.path}</div>
             <div class="detail-meta">
-              <span>Pick a node in the scene or search for a path/symbol.</span>
-              <span>Commit selections highlight touched files without locking the camera.</span>
+              <span>${node.language} · ${formatCluster(node.cluster)}</span>
+              <span>PageRank ${node.pagerank.toFixed(4)} · in ${node.in_degree} · out ${node.out_degree}</span>
+              <span>${neighbors.length} neighboring nodes · ${node.symbol_count} indexed symbols</span>
             </div>
+            ${symbols}
           </div>
         `;
         return;
       }
 
-      const neighbors = Array.from(state.adjacency.get(node.id) || []);
-      const symbols = node.symbols && node.symbols.length
-        ? `
-          <div class="symbol-list">
-            ${node.symbols.map((symbol) => `
+      if (state.viewMode === "files" && state.drillCluster) {
+        const cluster = state.clusterSummaries.find((entry) => entry.id === state.drillCluster);
+        const bridgeClusters = state.sceneContext && Array.isArray(state.sceneContext.bridgeClusters)
+          ? state.sceneContext.bridgeClusters
+          : [];
+        const bridgeMarkup = bridgeClusters.length
+          ? `
+            <div class="symbol-list">
+              ${bridgeClusters.map((entry) => `
+                <div class="symbol">
+                  <div class="symbol-head">
+                    <strong>${entry.label}</strong>
+                    <span class="symbol-kind">bridge</span>
+                  </div>
+                  <div class="symbol-signature">${entry.bridgeWeight} cross-cluster edges · ${entry.fileCount} files in that subsystem</div>
+                </div>
+              `).join("")}
+            </div>
+          `
+          : '<p class="empty-copy">No bridge clusters are visible from this file lens with the active filters.</p>';
+
+        if (cluster) {
+          el.nodeDetail.innerHTML = `
+            <div class="detail-card">
+              <div class="detail-title">${cluster.label} file lens</div>
+              <div class="detail-meta">
+                <span>${cluster.count} files · ${cluster.symbolCount} indexed symbols</span>
+                <span>${cluster.bridgeEdges} bridge edges · ${cluster.internalEdges} internal edges</span>
+                <span>${cluster.languages.slice(0, 3).join(" / ") || "Unknown language mix"}</span>
+              </div>
               <div class="symbol">
                 <div class="symbol-head">
-                  <strong>${symbol.name}</strong>
-                  <span class="symbol-kind">${symbol.kind}</span>
+                  <strong>Representative file</strong>
+                  <span class="symbol-kind">cluster</span>
                 </div>
-                <div class="symbol-signature">${symbol.signature || `line ${symbol.line}`}</div>
+                <div class="symbol-signature">${cluster.samplePath}</div>
+              </div>
+              ${bridgeMarkup}
+            </div>
+          `;
+          return;
+        }
+      }
+
+      const topClusters = state.sceneContext && Array.isArray(state.sceneContext.topClusters)
+        ? state.sceneContext.topClusters
+        : state.clusterSummaries.slice(0, 5);
+      const topMarkup = topClusters.length
+        ? `
+          <div class="symbol-list">
+            ${topClusters.map((entry) => `
+              <div class="symbol">
+                <div class="symbol-head">
+                  <strong>${entry.label}</strong>
+                  <span class="symbol-kind">group</span>
+                </div>
+                <div class="symbol-signature">${entry.count} files · ${entry.bridgeEdges} bridge edges · ${entry.samplePath}</div>
               </div>
             `).join("")}
           </div>
         `
-        : '<p class="empty-copy">No indexed symbol previews were available for this node.</p>';
+        : '<p class="empty-copy">No topology groups are visible with the active filters.</p>';
 
       el.nodeDetail.innerHTML = `
         <div class="detail-card">
-          <div class="detail-title">${node.path}</div>
+          <div class="detail-title">Workspace atlas</div>
           <div class="detail-meta">
-            <span>${node.language} · ${node.cluster}</span>
-            <span>PageRank ${node.pagerank.toFixed(4)} · in ${node.in_degree} · out ${node.out_degree}</span>
-            <span>${neighbors.length} neighboring nodes · ${node.symbol_count} indexed symbols</span>
+            <span>${state.clusterSummaries.length} grouped regions are visible in the current graph lens.</span>
+            <span>Open a subsystem to replace the cloud with its local file graph.</span>
           </div>
-          ${symbols}
+          ${topMarkup}
         </div>
       `;
     }
@@ -1150,14 +2234,20 @@
             : `${refresh.mode} mode checked for changes: ${refresh.added || 0} added, ${refresh.modified || 0} modified, ${refresh.removed || 0} removed.`,
         });
         events.push({
+          title: "Lens",
+          body: state.viewMode === "files" && state.drillCluster
+            ? `${formatCluster(state.drillCluster)} is expanded into ${state.sceneStats ? state.sceneStats.primaryCount : 0} files with ${state.sceneStats ? state.sceneStats.bridgeClusters : 0} bridge groups still visible.`
+            : `${state.clusterSummaries.length} grouped regions are visible. Click one to switch from subsystem mode into a local file lens.`,
+        });
+        events.push({
           title: "Graph",
-          body: `${state.snapshot.graph.node_count} total nodes, ${state.snapshot.graph.edge_count} total edges, ${state.snapshot.graph.call_edges} call edges.`,
+          body: `Rendering ${state.graphNodes.length} scene nodes and ${state.graphLinks.length} scene edges from a raw graph of ${state.snapshot.graph.node_count} files, ${state.snapshot.graph.edge_count} edges, and ${state.snapshot.graph.external_edges} external edges.`,
         });
       }
       if (state.freshNodeIds.size || state.freshEdgeIds.size) {
         events.push({
           title: "New topology",
-          body: `${state.freshNodeIds.size} new nodes and ${state.freshEdgeIds.size} new edges entered the visible scene.`,
+          body: `${state.freshNodeIds.size} new scene nodes and ${state.freshEdgeIds.size} new scene edges entered the current lens.`,
         });
       }
       if (state.selectedCommitId && state.history) {
@@ -1165,7 +2255,16 @@
         if (commit) {
           events.push({
             title: "Commit highlight",
-            body: `${commit.short_id} touches ${commit.indexed_files_changed} indexed files. Visible nodes connected to those files are emphasized.`,
+            body: `${commit.short_id} touches ${commit.indexed_files_changed} indexed files. Related groups and files are emphasized in the current lens.`,
+          });
+        }
+      }
+      if (state.selectedNodeId) {
+        const node = state.graphNodes.find((entry) => entry.id === state.selectedNodeId);
+        if (node) {
+          events.push({
+            title: "File focus",
+            body: `${compactPath(node.path)} is selected. Its neighboring nodes stay bright so import and call paths remain legible.`,
           });
         }
       }
@@ -1190,7 +2289,7 @@
 
     function focusNode(node) {
       if (!node) return;
-      const distance = node.external ? 90 : 130;
+      const distance = node.external ? 90 : node.nodeType === "cluster-proxy" ? 190 : 130;
       const x = node.x || 0;
       const y = node.y || 0;
       const z = node.z || 0;
@@ -1204,13 +2303,67 @@
         { x, y, z },
         1000
       );
+      window.setTimeout(() => alignGraphToViewport(240), 520);
+    }
+
+    function exitToGroups(moveCamera) {
+      state.viewMode = "groups";
+      state.drillCluster = null;
+      state.selectedNodeId = null;
+      if (!state.snapshot) return;
+      applyGraph(state.snapshot);
+      renderMetrics(state.snapshot, state.history);
+      if (moveCamera) {
+        window.setTimeout(() => frameGraph(900), 120);
+      }
+    }
+
+    function enterCluster(cluster, moveCamera) {
+      if (!cluster) {
+        exitToGroups(moveCamera);
+        return;
+      }
+      state.viewMode = "files";
+      state.drillCluster = cluster;
+      if (state.selectedNodeId) {
+        const selected = state.snapshot && state.snapshot.nodes
+          ? state.snapshot.nodes.find((node) => node.id === state.selectedNodeId)
+          : null;
+        if (!selected || selected.cluster !== cluster) {
+          state.selectedNodeId = null;
+        }
+      }
+      if (!state.snapshot) return;
+      applyGraph(state.snapshot);
+      renderMetrics(state.snapshot, state.history);
+      if (moveCamera) {
+        window.setTimeout(() => frameGraph(900), 120);
+      }
     }
 
     function selectNode(nodeId, moveCamera) {
+      if (!nodeId) {
+        state.selectedNodeId = null;
+        if (state.snapshot) {
+          applyGraph(state.snapshot);
+          renderMetrics(state.snapshot, state.history);
+        }
+        return;
+      }
+
+      const selected = state.snapshot && state.snapshot.nodes
+        ? state.snapshot.nodes.find((entry) => entry.id === nodeId)
+        : null;
+      if (!selected) return;
+
+      state.viewMode = "files";
+      state.drillCluster = selected.cluster;
       state.selectedNodeId = nodeId;
-      el.selection.textContent = nodeId ? "node" : state.selectedCommitId ? "commit" : "none";
-      applyGraph(state.snapshot);
-      if (moveCamera && nodeId) {
+      if (state.snapshot) {
+        applyGraph(state.snapshot);
+        renderMetrics(state.snapshot, state.history);
+      }
+      if (moveCamera) {
         const node = state.graphNodes.find((entry) => entry.id === nodeId);
         focusNode(node);
       }
@@ -1219,17 +2372,69 @@
     function findNode() {
       const query = el.searchInput.value.trim().toLowerCase();
       if (!query || !state.snapshot) return;
-      const node = state.graphNodes.find((entry) => {
+
+      const cluster = state.clusterSummaries.find((entry) => (
+        entry.label.toLowerCase().includes(query) || entry.id.toLowerCase().includes(query)
+      ));
+      const node = state.snapshot.nodes.find((entry) => {
         if (entry.path.toLowerCase().includes(query)) return true;
         return Array.isArray(entry.symbols) && entry.symbols.some((symbol) => symbol.name.toLowerCase().includes(query));
       });
+
+      if (!node && cluster) {
+        state.selectedCommitId = null;
+        enterCluster(cluster.id, true);
+        showToast(`Opened ${cluster.label}`);
+        return;
+      }
+
       if (!node) {
         showToast("No matching node");
         return;
       }
+
       state.selectedCommitId = null;
       selectNode(node.id, true);
-      showToast(`Focused ${node.label}`);
+      showToast(`Focused ${compactPath(node.path)}`);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Call graph overlay helpers
+    // ---------------------------------------------------------------------------
+
+    function buildSymbolToFileMap(nodes) {
+      const map = new Map();
+      nodes.forEach((node) => {
+        if (!Array.isArray(node.symbols)) return;
+        node.symbols.forEach((sym) => {
+          if (!map.has(sym.name)) map.set(sym.name, []);
+          map.get(sym.name).push(node.id);
+        });
+      });
+      return map;
+    }
+
+    function buildCallEdges(callGraph, nodes) {
+      if (!callGraph || !callGraph.available || !callGraph.edges.length) return [];
+      const symbolToFile = buildSymbolToFileMap(nodes);
+      const seen = new Set();
+      const result = [];
+      callGraph.edges.forEach((edge) => {
+        const targets = symbolToFile.get(edge.callee_name) || [];
+        targets.forEach((targetFile) => {
+          if (edge.caller_file === targetFile) return;
+          const id = `call:${edge.caller_file}→${targetFile}`;
+          if (seen.has(id)) return;
+          seen.add(id);
+          result.push({
+            source: edge.caller_file,
+            target: targetFile,
+            kind: "call",
+            label: edge.callee_name,
+          });
+        });
+      });
+      return result;
     }
 
     async function fetchJson(url) {
@@ -1242,7 +2447,8 @@
     }
 
     async function refreshAll() {
-      const snapshotUrl = `/graph/export?refresh=${encodeURIComponent(state.refreshMode)}&include_external=${state.includeExternal}&symbol_limit=4`;
+      const symbolLimit = state.showCallGraph ? 12 : 4;
+      const snapshotUrl = `/graph/export?refresh=${encodeURIComponent(state.refreshMode)}&include_external=${state.includeExternal}&symbol_limit=${symbolLimit}`;
       const [snapshot, history] = await Promise.all([
         fetchJson(snapshotUrl),
         fetchJson("/graph/history?limit=18&include_files=true"),
@@ -1259,7 +2465,18 @@
         : `${snapshot.refresh.mode}: ${snapshot.refresh.added} added, ${snapshot.refresh.modified} modified, ${snapshot.refresh.removed} removed`;
 
       if (!snapshot.available) {
+        state.graphNodes = [];
+        state.graphLinks = [];
+        state.clusterSummaries = [];
+        state.sceneStats = null;
+        state.sceneContext = null;
+        state.viewMode = "groups";
+        state.drillCluster = null;
+        state.selectedNodeId = null;
         Graph.graphData({ nodes: [], links: [] });
+        renderSceneChrome();
+        el.clusterCount.textContent = "0";
+        el.clusterList.innerHTML = '<p class="empty-copy">No graph groups available yet.</p>';
         el.nodeDetail.innerHTML = `
           <div class="detail-card">
             <div class="detail-title">No graph available</div>
@@ -1274,8 +2491,8 @@
         return;
       }
 
-      renderMetrics(snapshot, history);
       applyGraph(snapshot);
+      renderMetrics(snapshot, history);
       renderHistory(history);
     }
 
@@ -1316,10 +2533,36 @@
     el.refreshButton.addEventListener("click", () => {
       refreshAll().catch(console.error);
     });
+    el.frameButton.addEventListener("click", () => {
+      frameGraph(900);
+    });
+    el.panUp.addEventListener("click", () => panGraph(0, 1));
+    el.panLeft.addEventListener("click", () => panGraph(-1, 0));
+    el.panCenter.addEventListener("click", () => frameGraph(900));
+    el.panRight.addEventListener("click", () => panGraph(1, 0));
+    el.panDown.addEventListener("click", () => panGraph(0, -1));
 
     el.searchButton.addEventListener("click", findNode);
     el.searchInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") findNode();
+    });
+
+    window.addEventListener("keydown", (event) => {
+      const tag = document.activeElement && document.activeElement.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        panGraph(-1, 0);
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        panGraph(1, 0);
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        panGraph(0, 1);
+      } else if (event.key === "ArrowDown") {
+        event.preventDefault();
+        panGraph(0, -1);
+      }
     });
 
     Array.from(document.querySelectorAll("[data-filter]")).forEach((button) => {
@@ -1329,7 +2572,56 @@
           chip.classList.toggle("active", chip === button);
         });
         if (state.snapshot) applyGraph(state.snapshot);
+        window.setTimeout(() => frameGraph(800), 120);
       });
+    });
+
+    el.dimensionToggle.addEventListener("click", () => {
+      state.dimension = state.dimension === 3 ? 2 : 3;
+      const is3d = state.dimension === 3;
+      el.dimensionToggle.classList.toggle("active", is3d);
+      el.dimensionToggle.setAttribute("aria-pressed", String(is3d));
+      Graph.numDimensions(state.dimension);
+      if (state.snapshot) {
+        applyGraph(state.snapshot);
+        window.setTimeout(() => frameGraph(800), 120);
+      }
+    });
+
+    el.pollInterval.addEventListener("change", () => {
+      state.pollMs = Number(el.pollInterval.value) || 5000;
+      resetPolling();
+    });
+
+    el.callGraphToggle.addEventListener("click", async () => {
+      state.showCallGraph = !state.showCallGraph;
+      el.callGraphToggle.classList.toggle("active", state.showCallGraph);
+      el.callGraphToggle.setAttribute("aria-pressed", String(state.showCallGraph));
+
+      if (state.showCallGraph && !state.callGraph) {
+        try {
+          state.callGraph = await fetchJson("/graph/call-graph");
+          const count = state.callGraph.edge_count;
+          showToast(state.callGraph.available
+            ? `Call graph: ${count} symbol edge${count === 1 ? "" : "s"}`
+            : "Call graph not yet available — re-index with graph support");
+          if (!state.callGraph.available) {
+            state.showCallGraph = false;
+            el.callGraphToggle.classList.remove("active");
+            el.callGraphToggle.setAttribute("aria-pressed", "false");
+            return;
+          }
+        } catch (err) {
+          console.error(err);
+          showToast("Failed to load call graph");
+          state.showCallGraph = false;
+          el.callGraphToggle.classList.remove("active");
+          el.callGraphToggle.setAttribute("aria-pressed", "false");
+          return;
+        }
+      }
+
+      if (state.snapshot) applyGraph(state.snapshot);
     });
 
     refreshAll()
