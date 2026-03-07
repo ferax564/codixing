@@ -94,14 +94,30 @@ pub enum EmbeddingModel {
     /// Jina Embeddings v2 Base Code — 768 dimensions, optimised for code/text retrieval.
     /// Trained on code-specific corpora; recommended for pure-code repositories.
     JinaEmbedCode,
-    /// Qwen3-Embedding-0.6B — 1024 dimensions, candle (pure-Rust) backend.
+    /// BGE Large English v1.5 — 1024 dimensions.
     ///
-    /// Uses the `Qwen/Qwen3-Embedding-0.6B` checkpoint from Hugging Face.
-    /// Weights (~1.2 GB) are downloaded on first use and cached by hf-hub.
+    /// Larger variant of the BGE family; useful for comparing quality at the 1024d tier
+    /// against Snowflake Arctic L.
+    BgeLargeEn,
+    /// Nomic Embed Code — 768 dimensions, code-specific model.
+    ///
+    /// Uses `nomic-ai/nomic-embed-code` downloaded from Hugging Face on first use.
+    /// **Note:** requires an ONNX export of the model to be available on HuggingFace.
+    /// Currently the official repo only ships safetensors; falls back to BM25-only if
+    /// the ONNX file is not found.
+    NomicEmbedCode,
+    /// Snowflake Arctic Embed L — 1024 dimensions, SOTA retrieval at ~335M params.
+    ///
+    /// Top MTEB score at this size class. Recommended when retrieval quality
+    /// matters more than init speed (~3–4× slower than BgeSmallEn).
+    SnowflakeArcticEmbedL,
+    /// Qwen3-Embedding-0.6B — 1024 dimensions, ONNX Runtime backend.
+    ///
+    /// Uses `onnx-community/Qwen3-Embedding-0.6B-ONNX` (int8-quantized, ~380 MB)
+    /// downloaded from Hugging Face on first use and cached by hf-hub.
     ///
     /// **Requires the `qwen3` Cargo feature** (`--features codixing-core/qwen3`).
-    /// Unlike the ONNX-backed models above this variant runs the full Transformer
-    /// in Rust via the candle ML framework rather than ONNX Runtime.
+    /// Runs via the same ONNX Runtime shared library as the BGE models.
     #[cfg(feature = "qwen3")]
     Qwen3SmallEmbedding,
 }
@@ -168,7 +184,7 @@ impl Default for EmbeddingConfig {
 }
 
 fn default_embedding_enabled() -> bool {
-    true
+    false
 }
 
 fn default_rrf_k() -> f32 {

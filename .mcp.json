@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "codixing": {
+      "type": "stdio",
+      "command": "/home/andrea/code/codixing/target/release/codixing-mcp",
+      "args": [
+        "--root",
+        "/home/andrea/code/codixing",
+      ],
+      "env": {
+        "ORT_DYLIB_PATH": "/home/andrea/.local/lib/libonnxruntime.so",
+        "LD_LIBRARY_PATH": "/home/andrea/.local/lib"
+      }
+    }
+  }
+}

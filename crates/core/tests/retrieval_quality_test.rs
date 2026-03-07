@@ -311,3 +311,296 @@ fn field_boost_ranks_signature_match_high() {
         "signature field boost should rank tokenizer.rs first; got {top}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Tier 2 language retrieval quality
+// ---------------------------------------------------------------------------
+
+/// Build a BM25-only index with representative Tier 2 language files.
+fn build_tier2_index() -> (Engine, TempDir) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+
+    let files: &[(&str, &str)] = &[
+        (
+            "lib/authenticator.rb",
+            r#"
+# Validates JWT tokens and manages user sessions.
+class Authenticator
+  def initialize(secret, session_ttl)
+    @secret = secret
+    @session_ttl = session_ttl
+  end
+
+  # Validate a JWT token and return the subject claim.
+  def validate_token(token)
+    JWT.decode(token, @secret)
+  end
+
+  # Create a signed JWT for the given subject.
+  def create_token(subject)
+    JWT.encode({ sub: subject, exp: Time.now.to_i + @session_ttl }, @secret)
+  end
+end
+"#,
+        ),
+        (
+            "lib/cache.rb",
+            r#"
+# Thread-safe LRU cache with configurable capacity.
+class LruCache
+  def initialize(capacity)
+    @capacity = capacity
+    @store = {}
+    @mutex = Mutex.new
+  end
+
+  def get(key)
+    @mutex.synchronize { @store[key] }
+  end
+
+  def insert(key, value)
+    @mutex.synchronize do
+      @store.delete(key) if @store.size >= @capacity
+      @store[key] = value
+    end
+  end
+end
+"#,
+        ),
+        (
+            "Sources/Renderer.swift",
+            r#"
+import Foundation
+
+/// Renders scene objects to a Metal framebuffer.
+protocol Drawable {
+    func draw(in context: RenderContext)
+}
+
+/// 2D sprite with position and texture atlas.
+struct Sprite: Drawable {
+    var position: CGPoint
+    var texture: String
+
+    func draw(in context: RenderContext) {
+        context.blit(texture, at: position)
+    }
+}
+
+/// Metal-backed render context.
+class RenderContext {
+    func blit(_ texture: String, at point: CGPoint) {}
+}
+"#,
+        ),
+        (
+            "Sources/EventBus.swift",
+            r#"
+/// Publish-subscribe event bus for decoupled component communication.
+class EventBus<T> {
+    private var subscribers: [(T) -> Void] = []
+
+    /// Subscribe to events of type T.
+    func subscribe(_ handler: @escaping (T) -> Void) {
+        subscribers.append(handler)
+    }
+
+    /// Publish an event to all subscribers.
+    func publish(_ event: T) {
+        subscribers.forEach { $0(event) }
+    }
+}
+"#,
+        ),
+        (
+            "src/main/kotlin/Repository.kt",
+            r#"
+/**
+ * Generic repository interface for CRUD operations on domain entities.
+ */
+interface Repository<T, ID> {
+    fun findById(id: ID): T?
+    fun save(entity: T): T
+    fun delete(id: ID)
+    fun findAll(): List<T>
+}
+
+/**
+ * In-memory implementation backed by a HashMap.
+ */
+class InMemoryRepository<T, ID> : Repository<T, ID> {
+    private val store = HashMap<ID, T>()
+
+    override fun findById(id: ID): T? = store[id]
+    override fun save(entity: T): T { store[entity.hashCode() as ID] = entity; return entity }
+    override fun delete(id: ID) { store.remove(id) }
+    override fun findAll(): List<T> = store.values.toList()
+}
+"#,
+        ),
+        (
+            "src/main/kotlin/Logger.kt",
+            r#"
+/** Structured logger with configurable log levels. */
+enum class LogLevel { DEBUG, INFO, WARN, ERROR }
+
+class StructuredLogger(private val level: LogLevel) {
+    fun info(msg: String) = log(LogLevel.INFO, msg)
+    fun warn(msg: String) = log(LogLevel.WARN, msg)
+    fun error(msg: String) = log(LogLevel.ERROR, msg)
+
+    private fun log(l: LogLevel, msg: String) {
+        if (l >= level) println("[$l] $msg")
+    }
+}
+"#,
+        ),
+        (
+            "src/main/scala/MetricsCollector.scala",
+            r#"
+/**
+ * Collects named counters and histograms for observability.
+ */
+class MetricsCollector {
+  private val counters  = scala.collection.mutable.Map[String, Long]()
+  private val histograms = scala.collection.mutable.Map[String, List[Double]]()
+
+  /** Increment a counter by delta. */
+  def increment(name: String, delta: Long = 1): Unit =
+    counters(name) = counters.getOrElse(name, 0L) + delta
+
+  /** Record an observation into a histogram. */
+  def observe(name: String, value: Double): Unit =
+    histograms(name) = value :: histograms.getOrElse(name, Nil)
+}
+"#,
+        ),
+        (
+            "src/main/scala/EventSourcing.scala",
+            r#"
+/** Append-only event store for event-sourced aggregates. */
+trait EventStore[E] {
+  def append(aggregateId: String, events: Seq[E]): Unit
+  def load(aggregateId: String): Seq[E]
+}
+
+/** In-memory event store implementation. */
+class InMemoryEventStore[E] extends EventStore[E] {
+  private val log = scala.collection.mutable.Map[String, List[E]]()
+
+  def append(id: String, events: Seq[E]): Unit =
+    log(id) = log.getOrElse(id, Nil) ++ events
+
+  def load(id: String): Seq[E] = log.getOrElse(id, Nil)
+}
+"#,
+        ),
+    ];
+
+    for (rel_path, content) in files {
+        let abs = root.join(rel_path);
+        std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+        std::fs::write(&abs, content).unwrap();
+    }
+
+    let mut config = IndexConfig::new(root);
+    config.embedding = EmbeddingConfig {
+        enabled: false,
+        ..Default::default()
+    };
+
+    let engine = Engine::init(root, config).expect("tier2 index build failed");
+    (engine, tmp)
+}
+
+// Ruby -----------------------------------------------------------------------
+
+#[test]
+fn recall_ruby_jwt_authenticator() {
+    let (engine, _tmp) = build_tier2_index();
+    assert_recall(
+        &engine,
+        "JWT token validate session",
+        "lib/authenticator.rb",
+        3,
+    );
+}
+
+#[test]
+fn recall_ruby_lru_cache_mutex() {
+    let (engine, _tmp) = build_tier2_index();
+    assert_recall(&engine, "LRU cache thread-safe capacity", "lib/cache.rb", 3);
+}
+
+// Swift ----------------------------------------------------------------------
+
+#[test]
+fn recall_swift_drawable_sprite() {
+    let (engine, _tmp) = build_tier2_index();
+    assert_recall(
+        &engine,
+        "Drawable protocol sprite texture",
+        "Sources/Renderer.swift",
+        3,
+    );
+}
+
+#[test]
+fn recall_swift_event_bus_publish_subscribe() {
+    let (engine, _tmp) = build_tier2_index();
+    assert_recall(
+        &engine,
+        "publish subscribe event handler",
+        "Sources/EventBus.swift",
+        3,
+    );
+}
+
+// Kotlin ---------------------------------------------------------------------
+
+#[test]
+fn recall_kotlin_repository_interface() {
+    let (engine, _tmp) = build_tier2_index();
+    assert_recall(
+        &engine,
+        "Repository CRUD findById save",
+        "src/main/kotlin/Repository.kt",
+        3,
+    );
+}
+
+#[test]
+fn recall_kotlin_structured_logger() {
+    let (engine, _tmp) = build_tier2_index();
+    assert_recall(
+        &engine,
+        "StructuredLogger log level warn error",
+        "src/main/kotlin/Logger.kt",
+        3,
+    );
+}
+
+// Scala ----------------------------------------------------------------------
+
+#[test]
+fn recall_scala_metrics_counter_histogram() {
+    let (engine, _tmp) = build_tier2_index();
+    assert_recall(
+        &engine,
+        "MetricsCollector counter histogram increment",
+        "src/main/scala/MetricsCollector.scala",
+        3,
+    );
+}
+
+#[test]
+fn recall_scala_event_sourcing_store() {
+    let (engine, _tmp) = build_tier2_index();
+    assert_recall(
+        &engine,
+        "EventStore append load aggregate",
+        "src/main/scala/EventSourcing.scala",
+        3,
+    );
+}

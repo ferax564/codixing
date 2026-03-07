@@ -72,6 +72,22 @@
           "type": "boolean",
           "default": false,
           "description": "Enable vector embeddings when initializing a new index (slower init, better search quality)."
+        },
+        "codixing.lspBinaryPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the codixing-lsp binary. Leave empty to auto-detect."
+        },
+        "codixing.lspEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Start the Codixing LSP server for hover, go-to-definition, references, and complexity diagnostics."
+        },
+        "codixing.complexityThreshold": {
+          "type": "number",
+          "default": 6,
+          "minimum": 1,
+          "description": "Minimum cyclomatic complexity to show as a diagnostic (6 = moderate+, 11 = high+, 26 = critical only)."
         }
       }
     }
@@ -80,6 +96,9 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "package": "vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.0"
   },
   "devDependencies": {
     "@types/vscode": "^1.85.0",

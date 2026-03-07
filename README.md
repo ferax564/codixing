@@ -265,6 +265,42 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 
 ---
 
+## Embedding Model Selection
+
+Numbers measured on this repository (86 files, 667 chunks, AMD Rembrandt CPU).
+
+| Model | Dims | Init time | Cold query | MRR@10 | Recall@4 | Notes |
+|-------|------|-----------|------------|--------|----------|-------|
+| **BM25-only** | — | **<1s** | **12ms** | **0.750** | **100%** | Default; no ONNX required |
+| BgeSmall-EN-v1.5 | 384 | 73s | 376ms¹ | 0.592 | 90% | Daemon query ~1ms |
+| BgeBase-EN-v1.5 | 768 | 186s | 7ms | 0.592 | 90% | 2.5× slower init, same quality |
+| BgeLarge-EN-v1.5 | 1024 | 418s | 44ms | 0.767 | 100% | Quality matches Arctic/Qwen3 |
+| Snowflake-Arctic-L | 1024 | 428s | 44ms | 0.767 | 100% | SOTA MTEB at 335M params |
+| Qwen3-0.6B | 1024 | 580s | 8ms | 0.767 | 100% | Best quality; needs `--features qwen3` |
+
+¹ First cold process loads the ONNX model; daemon mode reduces this to ~1ms.
+
+### How to choose
+
+| Situation | Recommendation |
+|-----------|----------------|
+| Good identifiers and docstrings | **BM25-only** (default) — fast, no GPU/ONNX, retrieval quality matches or beats small embedders |
+| Natural-language queries matter | **BgeLarge** or **Snowflake-Arctic-L** — 0.767 MRR, 100% recall; 7-minute one-time init |
+| Fast init + some semantic search | **BgeSmall** — 73s init, run as daemon to eliminate cold-start |
+| Maximum quality, no init budget | **Qwen3** — same MRR as BgeLarge but smaller binary; requires `qwen3` Cargo feature |
+
+```bash
+# BM25-only (default — recommended for most codebases)
+codixing init .
+
+# Enable embeddings
+codixing init . --model bge-small-en
+codixing init . --model bge-large-en
+codixing init . --model snowflake-arctic-l
+```
+
+---
+
 ## Key Features
 
 - **AST-aware chunking** — Tree-sitter parsing across 10 language families; never splits a function in half
@@ -369,6 +405,7 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 | **Phase 7: Git Sync + Qwen3 + Eval** | ✅ Complete | Git-aware incremental sync, Qwen3 candle backend, embedding eval harness — 260 tests |
 | **Phase 8: Productivity + Ecosystem** | ✅ Complete | 24 MCP tools (apply_patch, run_tests, outline_file, rename_symbol, explain, symbol_callers, symbol_callees, predict_impact, stitch_context, enrich_docs), LSP server, Zig+PHP, Docker, Homebrew, 60s search cache — 260 tests |
 | **Phase 10: Developer Intelligence** | ✅ Complete | 32 MCP tools (remember, recall, forget, find_tests, find_similar, get_complexity, review_context, generate_onboarding), persistent memory store, cyclomatic complexity, onboarding doc generation — 210 tests |
+| **Phase 11: IDE Integration** | ✅ Complete | LSP server (`codixing-lsp`) with hover, go-to-def, references, symbols, document sync, live reindex, cyclomatic complexity diagnostics; VS Code LSP client; BM25-only default; Tier 2 retrieval quality regression suite — 334 tests |
 
 ---
 
@@ -376,7 +413,7 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 260 tests
+cargo test --workspace        # 334 tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 ```
