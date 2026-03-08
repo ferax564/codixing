@@ -34,7 +34,7 @@ For broad codebase exploration, always try a Codixing tool first. Fall back to B
 - `crates/core/` — engine: AST parsing, BM25, graph, embeddings
 - `crates/cli/` — `codixing` CLI binary
 - `crates/mcp/` — MCP server (`codixing-mcp`), tools in `src/tools.rs`
-- `crates/lsp/` — LSP server (`codixing-lsp`), hover/def/refs/symbols/diagnostics
+- `crates/lsp/` — LSP server (`codixing-lsp`), hover/go-to-def/refs/symbols/complexity diagnostics, file-local symbol ranking
 - `crates/server/` — REST API server (`codixing-server`)
 - `.codixing/` — index data (do not edit manually)
 
