@@ -4,8 +4,12 @@
 # Cargo.lock is intentionally committed — this workspace produces binaries,
 # so lock files ensure reproducible builds for end users.
 
-# CodeForge index (generated at runtime)
+# Codixing index (generated at runtime)
+.codixing/
 .codeforge/
+
+# Benchmark output (generated, not committed)
+.benchmark_results/
 
 # Embedding model cache (downloaded at runtime, not committed)
 .fastembed_cache/

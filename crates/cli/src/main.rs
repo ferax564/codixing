@@ -323,6 +323,10 @@ fn cmd_init(
     }
     if let Some(m) = model {
         config.embedding.model = parse_embedding_model(&m)?;
+        // Specifying a model implies embeddings should be enabled.
+        if !no_embeddings {
+            config.embedding.enabled = true;
+        }
     }
     if reranker {
         config.embedding.reranker_enabled = true;

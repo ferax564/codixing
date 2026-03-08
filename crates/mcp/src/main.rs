@@ -441,3 +441,358 @@ where
     writer.flush().await.context("failed to flush")?;
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use serde_json::json;
+    use tokio::io::{AsyncReadExt, BufReader};
+
+    /// Create a BM25-only engine in a temp directory.
+    fn make_test_engine(dir: &Path) -> Engine {
+        // Write a small Rust file so the index has something to search.
+        let src = dir.join("lib.rs");
+        std::fs::write(&src, "pub fn hello() -> &'static str { \"world\" }\n").unwrap();
+
+        let mut config = IndexConfig::new(dir);
+        config.embedding = EmbeddingConfig {
+            enabled: false,
+            ..EmbeddingConfig::default()
+        };
+        Engine::init(dir, config).expect("engine init should succeed")
+    }
+
+    /// Send JSON-RPC request lines into the loop and collect all response lines.
+    async fn run_requests(engine: Engine, requests: &[Value]) -> Vec<Value> {
+        // Build the request payload (one JSON line per request).
+        let mut input = Vec::new();
+        for req in requests {
+            serde_json::to_writer(&mut input, req).unwrap();
+            input.push(b'\n');
+        }
+
+        let engine = Arc::new(Mutex::new(engine));
+
+        // Use a duplex channel as the transport.
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+        let (server_read, server_write) = tokio::io::split(server_stream);
+        let (mut client_read, mut client_write) = tokio::io::split(client_stream);
+
+        // Write all requests then close the write side so the loop sees EOF.
+        tokio::spawn(async move {
+            client_write.write_all(&input).await.unwrap();
+            client_write.shutdown().await.unwrap();
+        });
+
+        // Run the JSON-RPC loop on the server side.
+        let loop_handle = tokio::spawn(async move {
+            run_jsonrpc_loop(
+                engine,
+                BufReader::new(server_read).lines(),
+                BufWriter::new(server_write),
+            )
+            .await
+            .unwrap();
+        });
+
+        // Read all responses from the server side.
+        let mut output = Vec::new();
+        client_read.read_to_end(&mut output).await.unwrap();
+        loop_handle.await.unwrap();
+
+        // Parse each line as a JSON value.
+        output
+            .split(|&b| b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).expect("response should be valid JSON"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn initialize_returns_server_info() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_test_engine(dir.path());
+
+        let responses = run_requests(
+            engine,
+            &[json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": { "capabilities": {} }
+            })],
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        let result = &responses[0]["result"];
+        assert_eq!(result["protocolVersion"], "2024-11-05");
+        assert_eq!(result["serverInfo"]["name"], "codixing");
+    }
+
+    #[tokio::test]
+    async fn tools_list_returns_tool_definitions() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_test_engine(dir.path());
+
+        let responses = run_requests(
+            engine,
+            &[json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list"
+            })],
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        let tools = responses[0]["result"]["tools"].as_array().unwrap();
+        assert!(
+            tools.len() >= 10,
+            "should have many tools, got {}",
+            tools.len()
+        );
+
+        // Check that well-known tools exist.
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"code_search"), "missing code_search tool");
+        assert!(names.contains(&"find_symbol"), "missing find_symbol tool");
+        assert!(names.contains(&"get_repo_map"), "missing get_repo_map tool");
+    }
+
+    #[tokio::test]
+    async fn tools_call_code_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_test_engine(dir.path());
+
+        let responses = run_requests(
+            engine,
+            &[json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "code_search",
+                    "arguments": { "query": "hello", "limit": 5 }
+                }
+            })],
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        let result = &responses[0]["result"];
+        assert_eq!(result["isError"], false);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("hello"),
+            "search result should contain 'hello', got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tools_call_find_symbol() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_test_engine(dir.path());
+
+        let responses = run_requests(
+            engine,
+            &[json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "find_symbol",
+                    "arguments": { "name": "hello" }
+                }
+            })],
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        let result = &responses[0]["result"];
+        assert_eq!(result["isError"], false);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("hello"),
+            "find_symbol should locate 'hello', got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_method_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_test_engine(dir.path());
+
+        let responses = run_requests(
+            engine,
+            &[json!({
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "nonexistent/method"
+            })],
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        let err = &responses[0]["error"];
+        assert_eq!(err["code"], -32601);
+        assert!(err["message"].as_str().unwrap().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn notification_produces_no_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_test_engine(dir.path());
+
+        let responses = run_requests(
+            engine,
+            &[
+                // Notification (no id) — should not produce a response.
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "initialized"
+                }),
+                // Normal request to verify the loop still works.
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 6,
+                    "method": "initialize",
+                    "params": {}
+                }),
+            ],
+        )
+        .await;
+
+        // Only one response (for the request with id=6).
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0]["id"], 6);
+    }
+
+    #[tokio::test]
+    async fn tools_call_missing_params_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_test_engine(dir.path());
+
+        let responses = run_requests(
+            engine,
+            &[json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call"
+            })],
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        let err = &responses[0]["error"];
+        assert_eq!(err["code"], -32602);
+    }
+
+    #[tokio::test]
+    async fn multi_request_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_test_engine(dir.path());
+
+        let responses = run_requests(
+            engine,
+            &[
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": { "capabilities": {} }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "initialized"
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/list"
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "code_search",
+                        "arguments": { "query": "hello" }
+                    }
+                }),
+            ],
+        )
+        .await;
+
+        // 3 responses (initialize, tools/list, tools/call — no response for notification)
+        assert_eq!(responses.len(), 3);
+        assert_eq!(responses[0]["id"], 1);
+        assert_eq!(responses[1]["id"], 2);
+        assert_eq!(responses[2]["id"], 3);
+    }
+
+    #[tokio::test]
+    async fn daemon_socket_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_test_engine(dir.path());
+        let engine = Arc::new(Mutex::new(engine));
+
+        let socket_path = dir.path().join("test_daemon.sock");
+
+        // Start the daemon listener in a background task.
+        let engine_clone = Arc::clone(&engine);
+        let socket_clone = socket_path.clone();
+        let daemon_handle = tokio::spawn(async move {
+            let listener = UnixListener::bind(&socket_clone).unwrap();
+            // Accept exactly one connection.
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_socket_connection(stream, engine_clone)
+                .await
+                .unwrap();
+        });
+
+        // Give the listener a moment to bind.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Connect as a client.
+        let stream = UnixStream::connect(&socket_path).await.unwrap();
+        let (read_half, mut write_half) = stream.into_split();
+
+        // Send requests.
+        let requests = vec![
+            json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+            json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
+        ];
+        for req in &requests {
+            let mut line = serde_json::to_string(req).unwrap();
+            line.push('\n');
+            write_half.write_all(line.as_bytes()).await.unwrap();
+        }
+        // Signal EOF so the daemon's loop exits.
+        write_half.shutdown().await.unwrap();
+
+        // Read responses.
+        let mut output = Vec::new();
+        let mut reader = BufReader::new(read_half);
+        reader.read_to_end(&mut output).await.unwrap();
+
+        let responses: Vec<Value> = output
+            .split(|&b| b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["result"]["serverInfo"]["name"], "codixing");
+
+        let tools = responses[1]["result"]["tools"].as_array().unwrap();
+        assert!(tools.len() >= 10);
+
+        daemon_handle.await.unwrap();
+    }
+}
