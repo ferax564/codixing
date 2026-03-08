@@ -1,0 +1,348 @@
+use std::sync::Arc;
+
+use tracing::debug;
+
+use crate::error::Result;
+use crate::retriever::bm25::BM25Retriever;
+use crate::retriever::hybrid::HybridRetriever;
+use crate::retriever::mmr::mmr_select;
+use crate::retriever::{Retriever, SearchQuery, SearchResult, Strategy};
+
+use super::Engine;
+
+impl Engine {
+    /// Search the index using the strategy specified in `query`.
+    ///
+    /// - `Instant` → BM25 only
+    /// - `Fast`    → BM25 + vector + RRF fusion (falls back to BM25 if no embedder)
+    /// - `Thorough` → hybrid + MMR deduplication
+    pub fn search(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
+        match query.strategy {
+            Strategy::Instant => {
+                let retriever = BM25Retriever::new(&self.tantivy);
+                let mut results = retriever.search(&query)?;
+                // Apply definition boost even on the BM25-only path: it's pure
+                // HashMap lookups and fixes the definition-vs-usage ranking issue.
+                self.apply_definition_boost(&mut results, &query.query);
+                Ok(results)
+            }
+            Strategy::Fast => {
+                let mut results = if let (Some(emb), Some(vec_idx)) = (&self.embedder, &self.vector)
+                {
+                    let retriever = HybridRetriever::new(
+                        &self.tantivy,
+                        Arc::clone(emb),
+                        vec_idx,
+                        &self.chunk_meta,
+                        self.config.embedding.rrf_k,
+                    );
+                    retriever.search(&query)?
+                } else {
+                    debug!("no embedder available; falling back to BM25 for Fast strategy");
+                    BM25Retriever::new(&self.tantivy).search(&query)?
+                };
+                self.apply_graph_boost(&mut results, self.config.graph.boost_weight);
+                self.apply_definition_boost(&mut results, &query.query);
+                Ok(results)
+            }
+            Strategy::Explore => self.search_explore(query),
+            Strategy::Thorough => {
+                let mut results = if let (Some(emb), Some(vec_idx)) = (&self.embedder, &self.vector)
+                {
+                    let hybrid = HybridRetriever::new(
+                        &self.tantivy,
+                        Arc::clone(emb),
+                        vec_idx,
+                        &self.chunk_meta,
+                        self.config.embedding.rrf_k,
+                    );
+                    let fetch_query = SearchQuery {
+                        limit: query.limit * 3,
+                        ..query.clone()
+                    };
+                    let candidates = hybrid.search(&fetch_query)?;
+
+                    if candidates.is_empty() {
+                        return Ok(Vec::new());
+                    }
+
+                    let (results_with_meta, embeddings): (Vec<SearchResult>, Vec<Vec<f32>>) =
+                        candidates
+                            .into_iter()
+                            .filter_map(|r| {
+                                let emb_vec = emb.embed_one(&r.content).ok()?;
+                                Some((r, emb_vec))
+                            })
+                            .unzip();
+
+                    let query_vec = emb.embed_one(&query.query)?;
+                    mmr_select(
+                        results_with_meta,
+                        &query_vec,
+                        &embeddings,
+                        self.config.embedding.mmr_lambda,
+                        query.limit,
+                    )
+                } else {
+                    debug!("no embedder available; falling back to BM25 for Thorough strategy");
+                    BM25Retriever::new(&self.tantivy).search(&query)?
+                };
+                self.apply_graph_boost(&mut results, self.config.graph.boost_weight);
+                self.apply_definition_boost(&mut results, &query.query);
+                Ok(results)
+            }
+            Strategy::Deep => self.search_deep(query),
+        }
+    }
+
+    /// Graph-expanded search (RepoHyper "Search-then-Expand" pattern).
+    ///
+    /// Phase 1: broad BM25 retrieval identifies anchor files.
+    /// Phase 2: import graph expands anchor set to direct callers/callees.
+    /// Phase 3: each newly-discovered neighbour file contributes its best
+    ///          BM25 chunk, scored by PageRank to penalise low-importance files.
+    ///
+    /// This surfaces transitively-relevant code that a single BM25 pass misses
+    /// — especially useful on 3 M+ LoC codebases where related logic is spread
+    /// across many files connected only via import chains.
+    fn search_explore(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
+        use std::collections::HashSet;
+
+        let bm25 = BM25Retriever::new(&self.tantivy);
+
+        // Phase 1 — broad BM25 over-fetch.
+        let wide_q = SearchQuery {
+            limit: query.limit * 3,
+            strategy: Strategy::Instant,
+            ..query.clone()
+        };
+        let mut results = bm25.search(&wide_q)?;
+        self.apply_graph_boost(&mut results, self.config.graph.boost_weight);
+
+        // Phase 2 — expand via import graph.
+        if let Some(ref graph) = self.graph {
+            // Anchor = files in the top-limit initial results.
+            let anchor_files: HashSet<String> = results
+                .iter()
+                .take(query.limit)
+                .map(|r| r.file_path.clone())
+                .collect();
+
+            // Already-covered = all files in the full result set.
+            let covered_files: HashSet<String> =
+                results.iter().map(|r| r.file_path.clone()).collect();
+
+            // Collect graph neighbours not already in the anchor set.
+            let mut neighbour_files: HashSet<String> = HashSet::new();
+            for file in &anchor_files {
+                for n in graph.callers(file) {
+                    if !anchor_files.contains(&n) {
+                        neighbour_files.insert(n);
+                    }
+                }
+                for n in graph.callees(file) {
+                    if !anchor_files.contains(&n) {
+                        neighbour_files.insert(n);
+                    }
+                }
+            }
+
+            // Phase 3 — for each uncovered neighbour, fetch its best BM25 chunk.
+            // Cap at 8 neighbours to keep latency predictable.
+            let mut expansion: Vec<SearchResult> = Vec::new();
+            for neighbour in neighbour_files.iter().take(8) {
+                if covered_files.contains(neighbour) {
+                    continue;
+                }
+                let nq = SearchQuery {
+                    query: query.query.clone(),
+                    limit: 1,
+                    file_filter: Some(neighbour.clone()),
+                    strategy: Strategy::Instant,
+                    token_budget: None,
+                };
+                if let Ok(mut exp) = bm25.search(&nq) {
+                    for r in exp.iter_mut() {
+                        // Scale by PageRank: neighbour files must be architecturally
+                        // important to surface above the direct BM25 hits.
+                        let pr = graph.node(&r.file_path).map(|n| n.pagerank).unwrap_or(0.0);
+                        r.score *= 0.6 + 0.6 * pr;
+                    }
+                    expansion.extend(exp);
+                }
+            }
+            results.extend(expansion);
+            results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+
+        results.truncate(query.limit);
+        Ok(results)
+    }
+
+    /// Multiply each result's score by `1 + weight * pagerank` then re-sort descending.
+    pub(super) fn apply_graph_boost(&self, results: &mut [SearchResult], weight: f32) {
+        if let Some(ref graph) = self.graph {
+            for r in results.iter_mut() {
+                let pr = graph.node(&r.file_path).map(|n| n.pagerank).unwrap_or(0.0);
+                r.score *= 1.0 + weight * pr;
+            }
+            results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+    }
+
+    /// Boost results that *define* a symbol matching any identifier token in `query`.
+    ///
+    /// BM25 TF-IDF over-ranks files that *heavily use* a symbol (e.g. `engine.rs`
+    /// mentions `IndexConfig` 40+ times) above the file that *defines* it
+    /// (e.g. `config.rs`).  This method corrects that by applying a 1.5× score
+    /// multiplier to any result whose `file_path` appears in the symbol table as
+    /// a defining location for a query term.
+    ///
+    /// Works for all strategies — even `Instant` — since it is pure in-memory
+    /// DashMap lookups with no I/O.
+    pub(super) fn apply_definition_boost(&self, results: &mut [SearchResult], query: &str) {
+        use std::collections::HashSet;
+
+        // Collect files that define any identifier-like token in the query.
+        let mut defining_files: HashSet<String> = HashSet::new();
+        for term in query.split_whitespace() {
+            // Skip short or punctuation-heavy tokens.
+            if term.len() < 3 || !term.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                continue;
+            }
+            // Exact-name lookup (covers CamelCase identifiers like `IndexConfig`).
+            let exact = self.symbols.lookup(term);
+            if !exact.is_empty() {
+                for sym in exact {
+                    defining_files.insert(sym.file_path);
+                }
+            } else {
+                // Case-insensitive substring fallback (e.g. "indexconfig" → IndexConfig).
+                for sym in self.symbols.filter(term, None) {
+                    defining_files.insert(sym.file_path);
+                }
+            }
+        }
+
+        if defining_files.is_empty() {
+            return;
+        }
+
+        const DEFINITION_BOOST: f32 = 1.5;
+        let mut boosted = false;
+        for r in results.iter_mut() {
+            if defining_files.contains(&r.file_path) {
+                r.score *= DEFINITION_BOOST;
+                boosted = true;
+            }
+        }
+        if boosted {
+            results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+    }
+
+    /// Format search results as an LLM-friendly context block.
+    pub fn format_results(&self, results: &[SearchResult], token_budget: Option<usize>) -> String {
+        crate::formatter::format_context(results, token_budget)
+    }
+
+    /// Find all code chunks that reference `symbol` (BM25 full-text search).
+    ///
+    /// This is the "find usages" operation: given an identifier name, it returns
+    /// ranked chunks where that identifier appears — including call sites,
+    /// imports, and variable usages, not just the definition.
+    pub fn search_usages(&self, symbol: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        let query = SearchQuery::new(symbol).with_limit(limit);
+        let mut results = BM25Retriever::new(&self.tantivy).search(&query)?;
+        // Apply PageRank boost so architecturally central files rank first.
+        self.apply_graph_boost(&mut results, self.config.graph.boost_weight);
+        Ok(results)
+    }
+
+    /// Two-stage reranked search: hybrid first-pass then cross-encoder scoring.
+    ///
+    /// Phase 1: collect up to `max(limit × 3, 30)` candidates via the `Fast`
+    ///          hybrid pipeline (BM25 + vector + graph boost).
+    /// Phase 2: BGE-Reranker-Base scores each `(query, chunk)` pair jointly.
+    ///          Results are re-sorted by reranker score and truncated.
+    ///
+    /// Falls back to `Thorough` if the reranker is not loaded.
+    fn search_deep(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
+        let reranker = match self.reranker.as_ref() {
+            Some(r) => Arc::clone(r),
+            None => {
+                tracing::warn!(
+                    "deep strategy requested but reranker not loaded \
+                     (set reranker_enabled = true in config and re-open the engine)"
+                );
+                // Graceful degradation: run Thorough instead.
+                return self.search(SearchQuery {
+                    strategy: Strategy::Thorough,
+                    ..query
+                });
+            }
+        };
+
+        // Phase 1: over-fetch candidates.
+        let candidate_limit = (query.limit * 3).max(30);
+        let candidate_query = SearchQuery {
+            limit: candidate_limit,
+            strategy: Strategy::Fast,
+            ..query.clone()
+        };
+
+        let mut candidates = if let (Some(emb), Some(vec_idx)) = (&self.embedder, &self.vector) {
+            let retriever = HybridRetriever::new(
+                &self.tantivy,
+                Arc::clone(emb),
+                vec_idx,
+                &self.chunk_meta,
+                self.config.embedding.rrf_k,
+            );
+            retriever.search(&candidate_query)?
+        } else {
+            BM25Retriever::new(&self.tantivy).search(&candidate_query)?
+        };
+        self.apply_graph_boost(&mut candidates, self.config.graph.boost_weight);
+
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Phase 2: rerank with cross-encoder.
+        let docs: Vec<String> = candidates.iter().map(|r| r.content.clone()).collect();
+        let ranked = reranker.rerank(&query.query, &docs)?;
+
+        // Apply reranker scores — map (original_index, score) back onto candidates.
+        for (orig_idx, score) in &ranked {
+            candidates[*orig_idx].score = *score;
+        }
+
+        // Re-sort descending by the new scores.
+        candidates.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Apply file filter and truncate to requested limit.
+        if let Some(ref filter) = query.file_filter {
+            candidates.retain(|r| r.file_path.contains(filter.as_str()));
+        }
+        candidates.truncate(query.limit);
+
+        Ok(candidates)
+    }
+}
