@@ -130,9 +130,7 @@ impl LanguageServer for CodixingBackend {
         };
 
         let engine = self.engine.read().unwrap();
-        let symbols = engine.symbols(&word, None).unwrap_or_default();
-
-        let sym = match symbols.first() {
+        let sym = match self.best_symbol(&engine, &word, &pos.text_document.uri) {
             Some(s) => s,
             None => return Ok(None),
         };
@@ -166,9 +164,7 @@ impl LanguageServer for CodixingBackend {
         };
 
         let engine = self.engine.read().unwrap();
-        let symbols = engine.symbols(&word, None).unwrap_or_default();
-
-        let sym = match symbols.first() {
+        let sym = match self.best_symbol(&engine, &word, &pos.text_document.uri) {
             Some(s) => s,
             None => return Ok(None),
         };
@@ -309,6 +305,47 @@ impl LanguageServer for CodixingBackend {
 // ---------------------------------------------------------------------------
 
 impl CodixingBackend {
+    /// Find the best-matching symbol for `word`, preferring exact name matches
+    /// in the current file, then exact matches globally, then substring matches.
+    fn best_symbol(&self, engine: &Engine, word: &str, uri: &Url) -> Option<codixing_core::Symbol> {
+        let current_file = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| engine.config().normalize_path(&p));
+
+        let all = engine.symbols(word, None).unwrap_or_default();
+        if all.is_empty() {
+            return None;
+        }
+
+        // Prefer exact name match in the current file.
+        if let Some(ref rel) = current_file {
+            if let Some(s) = all.iter().find(|s| s.name == word && s.file_path == *rel) {
+                return Some(s.clone());
+            }
+        }
+
+        // Exact name match globally (definition-like kinds first).
+        let mut exact: Vec<_> = all.iter().filter(|s| s.name == word).collect();
+        exact.sort_by_key(|s| match s.kind {
+            EntityKind::Function
+            | EntityKind::Method
+            | EntityKind::Struct
+            | EntityKind::Class
+            | EntityKind::Enum
+            | EntityKind::Trait
+            | EntityKind::Interface
+            | EntityKind::TypeAlias => 0,
+            _ => 1,
+        });
+        if let Some(s) = exact.first() {
+            return Some((*s).clone());
+        }
+
+        // Fall back to first substring match.
+        all.into_iter().next()
+    }
+
     /// Extract the word under the cursor from either the tracked open document
     /// or by reading the file from disk.
     fn word_at(&self, pos: &TextDocumentPositionParams) -> Option<String> {

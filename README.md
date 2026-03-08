@@ -191,9 +191,29 @@ The daemon runs a background file watcher. When you save a file, the index updat
 
 ## LSP Server
 
-`codixing-lsp` implements the Language Server Protocol, bringing Codixing's symbol search to **any LSP-capable editor** — Neovim, Emacs, Sublime Text, JetBrains, and more.
+`codixing-lsp` implements the Language Server Protocol, bringing Codixing's code intelligence to **any LSP-capable editor** — VS Code, Neovim, Emacs, Sublime Text, JetBrains, and more.
 
-**Capabilities**: `workspace/symbol` (global search) · `textDocument/documentSymbol` (per-file outline)
+**Capabilities:**
+
+| Feature | Description |
+|---------|-------------|
+| **Hover** | Symbol signature + kind + file location; prefers same-file matches |
+| **Go-to-definition** | Jump to any symbol's definition across the codebase |
+| **References** | Find all usage sites of the symbol under cursor |
+| **Workspace symbol** | Global fuzzy symbol search (`Ctrl+T` / `Cmd+T`) |
+| **Document symbol** | Per-file outline sorted by line number |
+| **Document sync** | Tracks open documents; live reindex on save |
+| **Complexity diagnostics** | Cyclomatic complexity warnings on functions (configurable threshold) |
+
+```bash
+# Start the LSP server
+codixing-lsp --root /path/to/project
+
+# With custom complexity threshold (default: 6 = moderate+)
+codixing-lsp --root /path/to/project --complexity-threshold 11
+```
+
+**Editor configuration:**
 
 ```bash
 # Neovim (lspconfig / lazy.nvim)
@@ -250,7 +270,7 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 | **File watcher latency** | ≤100ms from save to queryable |
 | **Daemon IPC overhead** | ~6ms per call (Unix socket round-trip) |
 | **BM25 search** | <10ms p99 |
-| **Test suite** | 260 tests (including retrieval quality regression suite) |
+| **Test suite** | 334 tests (including retrieval quality regression suite) |
 
 ### Init speed breakdown (0.87s on 246K LoC)
 
@@ -262,6 +282,27 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 | Persist to `.codixing/` | ~50ms | bitcode + Tantivy flush |
 
 > **Why it's fast:** `build_graph()` reuses the import lists extracted during the parallel parse phase — no second file read, no second tree-sitter parse. Files are parsed exactly once.
+
+### Claude Session Benchmark: grep vs Codixing
+
+Simulates a 5-task coding investigation (find a struct, trace callers, architecture overview, semantic search, impact analysis) on the Codixing codebase (86 Rust files).
+
+| Task | grep/cat/find | Codixing | grep output | cdx output | Savings |
+|------|-------------|----------|------------|------------|---------|
+| Find Engine struct | 7ms | 12ms | 85.6 KB | 470 B | **99%** |
+| Find callers of reindex_file | 3ms | 10ms | 2.0 KB | 799 B | 60% |
+| Architecture overview | 12ms | 295ms | 11.9 KB | 11.5 KB | 3% |
+| Find BM25 scoring code | 13ms | 11ms | 38.0 KB | 3.0 KB | **92%** |
+| Impact analysis (chunker) | 7ms | 22ms | 5.7 KB | 327 B | **94%** |
+| **TOTAL** | **42ms** | **350ms** | **143 KB** | **16 KB** | **88%** |
+
+**Token impact**: ~36,655 tokens (grep) → ~4,103 tokens (codixing) = **~32,500 fewer tokens per 5-task session (88%)**.
+
+**Tool calls**: grep needs 12 calls → codixing needs 6 calls (50% fewer round-trips).
+
+> The decisive case: `grep + cat` returns the **entire 85KB engine.rs** to find one struct definition. Codixing returns the struct name + signature in 470 bytes. Fewer wasted tokens = more room for reasoning.
+
+Run `python3 benchmark_claude_session.py` to reproduce on your machine.
 
 ---
 
