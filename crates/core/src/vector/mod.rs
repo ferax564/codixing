@@ -297,4 +297,86 @@ mod tests {
         let results = loaded.search(&unit_vec(4, 0), 1).unwrap();
         assert_eq!(results[0].0, 42);
     }
+
+    /// Verify 384d vectors (BgeSmallEn) work with and without quantization.
+    #[test]
+    fn dims_384_f32_and_quantized() {
+        for quantize in [false, true] {
+            let mut idx = VectorIndex::new(384, quantize).unwrap();
+            let a = unit_vec(384, 0);
+            let b = unit_vec(384, 100);
+            idx.add_mut(1, &a, "a.rs").unwrap();
+            idx.add_mut(2, &b, "b.rs").unwrap();
+            assert_eq!(idx.len(), 2, "quantize={quantize}: expected 2 vectors");
+            let results = idx.search(&a, 2).unwrap();
+            assert_eq!(
+                results[0].0, 1,
+                "quantize={quantize}: nearest should be chunk 1"
+            );
+        }
+    }
+
+    /// Verify 768d vectors (BgeBaseEn) work with and without quantization.
+    #[test]
+    fn dims_768_f32_and_quantized() {
+        for quantize in [false, true] {
+            let mut idx = VectorIndex::new(768, quantize).unwrap();
+            let a = unit_vec(768, 0);
+            let b = unit_vec(768, 500);
+            idx.add_mut(1, &a, "a.rs").unwrap();
+            idx.add_mut(2, &b, "b.rs").unwrap();
+            assert_eq!(idx.len(), 2, "quantize={quantize}: expected 2 vectors");
+            let results = idx.search(&a, 2).unwrap();
+            assert_eq!(
+                results[0].0, 1,
+                "quantize={quantize}: nearest should be chunk 1"
+            );
+        }
+    }
+
+    /// Verify 1024d vectors (BgeLargeEn / SnowflakeArctic / Qwen3) work.
+    ///
+    /// This is a regression test for the 1024d vector index bug where adds
+    /// silently failed for high-dimension vectors.
+    #[test]
+    fn dims_1024_f32_and_quantized() {
+        for quantize in [false, true] {
+            let mut idx = VectorIndex::new(1024, quantize).unwrap();
+            let a = unit_vec(1024, 0);
+            let b = unit_vec(1024, 512);
+            let c = unit_vec(1024, 1023);
+            idx.add_mut(1, &a, "a.rs").unwrap();
+            idx.add_mut(2, &b, "b.rs").unwrap();
+            idx.add_mut(3, &c, "c.rs").unwrap();
+            assert_eq!(idx.len(), 3, "quantize={quantize}: expected 3 vectors");
+            let results = idx.search(&a, 3).unwrap();
+            assert_eq!(
+                results[0].0, 1,
+                "quantize={quantize}: nearest should be chunk 1"
+            );
+        }
+    }
+
+    /// Verify 1024d save/load round-trip works correctly.
+    #[test]
+    fn dims_1024_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx_path = dir.path().join("test_1024.usearch");
+        let fc_path = dir.path().join("fc_1024.bin");
+
+        let mut idx = VectorIndex::new(1024, true).unwrap();
+        for i in 0..50u64 {
+            let mut v = vec![0.01f32; 1024];
+            v[(i as usize) % 1024] = 1.0;
+            idx.add_mut(i, &v, &format!("file_{i}.rs")).unwrap();
+        }
+        assert_eq!(idx.len(), 50);
+        idx.save(&idx_path, &fc_path).unwrap();
+
+        let loaded = VectorIndex::load(&idx_path, &fc_path, 1024, true).unwrap();
+        assert_eq!(loaded.len(), 50);
+        let results = loaded.search(&unit_vec(1024, 0), 5).unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].0, 0); // chunk 0 has dominant dim 0
+    }
 }
