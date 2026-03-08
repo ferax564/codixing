@@ -85,6 +85,13 @@ impl Retriever for BM25Retriever<'_> {
             });
         }
 
+        // Deduplicate by chunk_id — keep the first (highest-scoring) occurrence.
+        // Tantivy returns results sorted by score, so first-seen is best.
+        {
+            let mut seen = std::collections::HashSet::new();
+            results.retain(|r| seen.insert(r.chunk_id.clone()));
+        }
+
         // Apply file filter if present.
         if let Some(ref filter) = query.file_filter {
             results.retain(|r| r.file_path.contains(filter));
@@ -182,5 +189,28 @@ mod tests {
 
         assert!(!results.is_empty());
         assert_eq!(results[0].scope_chain, vec!["MyModule", "MyClass"]);
+    }
+
+    #[test]
+    fn bm25_deduplicates_by_chunk_id() {
+        let idx = TantivyIndex::create_in_ram().unwrap();
+        // Add the same chunk twice (simulates re-indexing without full cleanup).
+        let chunk = make_chunk(
+            42,
+            "src/main.rs",
+            "fn hello_world() { println!(\"hello\"); }",
+        );
+        idx.add_chunk(&chunk).unwrap();
+        idx.add_chunk(&chunk).unwrap();
+        idx.commit().unwrap();
+
+        let retriever = BM25Retriever::new(&idx);
+        let results = retriever
+            .search(&SearchQuery::new("hello_world").with_limit(10))
+            .unwrap();
+
+        // Should return only 1 result despite 2 matching documents.
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].chunk_id, "42");
     }
 }

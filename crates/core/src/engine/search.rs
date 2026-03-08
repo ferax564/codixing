@@ -24,6 +24,7 @@ impl Engine {
                 // Apply definition boost even on the BM25-only path: it's pure
                 // HashMap lookups and fixes the definition-vs-usage ranking issue.
                 self.apply_definition_boost(&mut results, &query.query);
+                self.apply_test_demotion(&mut results);
                 Ok(results)
             }
             Strategy::Fast => {
@@ -43,6 +44,7 @@ impl Engine {
                 };
                 self.apply_graph_boost(&mut results, self.config.graph.boost_weight);
                 self.apply_definition_boost(&mut results, &query.query);
+                self.apply_test_demotion(&mut results);
                 Ok(results)
             }
             Strategy::Explore => self.search_explore(query),
@@ -89,6 +91,7 @@ impl Engine {
                 };
                 self.apply_graph_boost(&mut results, self.config.graph.boost_weight);
                 self.apply_definition_boost(&mut results, &query.query);
+                self.apply_test_demotion(&mut results);
                 Ok(results)
             }
             Strategy::Deep => self.search_deep(query),
@@ -179,6 +182,7 @@ impl Engine {
             });
         }
 
+        self.apply_test_demotion(&mut results);
         results.truncate(query.limit);
         Ok(results)
     }
@@ -245,6 +249,33 @@ impl Engine {
             }
         }
         if boosted {
+            results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+    }
+
+    /// Demote results from test files so implementation code ranks higher.
+    ///
+    /// Test files naturally have high BM25 keyword density for implementation
+    /// terms (they mention all the keywords in assertions and comments), which
+    /// causes BM25 to over-rank them above the actual implementation.
+    ///
+    /// A 0.7× score multiplier pushes tests below equally-relevant impl code.
+    /// Applied to concept/search queries, **not** to `search_usages` (where
+    /// test call-sites are legitimate results).
+    pub(super) fn apply_test_demotion(&self, results: &mut [SearchResult]) {
+        const TEST_DEMOTION: f32 = 0.7;
+        let mut demoted = false;
+        for r in results.iter_mut() {
+            if is_test_file(&r.file_path) || is_test_chunk(r) {
+                r.score *= TEST_DEMOTION;
+                demoted = true;
+            }
+        }
+        if demoted {
             results.sort_by(|a, b| {
                 b.score
                     .partial_cmp(&a.score)
@@ -337,12 +368,114 @@ impl Engine {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        // Apply file filter and truncate to requested limit.
+        // Apply file filter, test demotion, and truncate to requested limit.
         if let Some(ref filter) = query.file_filter {
             candidates.retain(|r| r.file_path.contains(filter.as_str()));
         }
+        self.apply_test_demotion(&mut candidates);
         candidates.truncate(query.limit);
 
         Ok(candidates)
+    }
+}
+
+/// Detect inline test chunks by scope chain (e.g. Rust `#[cfg(test)] mod tests { }`).
+fn is_test_chunk(result: &SearchResult) -> bool {
+    result
+        .scope_chain
+        .iter()
+        .any(|s| s == "tests" || s == "test")
+}
+
+/// Detect test files by common path patterns across languages.
+fn is_test_file(path: &str) -> bool {
+    // Directory patterns: tests/, test/, __tests__/
+    if path.contains("/tests/") || path.contains("/test/") || path.contains("/__tests__/") {
+        return true;
+    }
+    // Rust: *_test.rs
+    if path.ends_with("_test.rs") {
+        return true;
+    }
+    // File-name patterns (case-insensitive basename check)
+    let basename = path.rsplit('/').next().unwrap_or(path);
+    let lower = basename.to_ascii_lowercase();
+    // Python: test_*.py, *_test.py
+    if (lower.starts_with("test_") || lower.ends_with("_test.py")) && lower.ends_with(".py") {
+        return true;
+    }
+    // JS/TS: *.test.ts, *.spec.ts, *.test.js, *.spec.js
+    if lower.ends_with(".test.ts")
+        || lower.ends_with(".test.js")
+        || lower.ends_with(".test.tsx")
+        || lower.ends_with(".test.jsx")
+        || lower.ends_with(".spec.ts")
+        || lower.ends_with(".spec.js")
+    {
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_rust_test_files() {
+        assert!(is_test_file("crates/core/tests/retrieval_quality_test.rs"));
+        assert!(is_test_file("crates/core/tests/graph_test.rs"));
+        assert!(is_test_file("src/engine_test.rs"));
+    }
+
+    #[test]
+    fn detects_test_directories() {
+        assert!(is_test_file("crates/core/tests/common/mod.rs"));
+        assert!(is_test_file("src/test/helpers.py"));
+        assert!(is_test_file("src/__tests__/App.test.tsx"));
+    }
+
+    #[test]
+    fn detects_python_test_files() {
+        assert!(is_test_file("tests/test_engine.py"));
+        assert!(is_test_file("src/engine_test.py"));
+    }
+
+    #[test]
+    fn detects_js_ts_test_files() {
+        assert!(is_test_file("src/App.test.tsx"));
+        assert!(is_test_file("src/utils.spec.ts"));
+        assert!(is_test_file("src/App.test.js"));
+        assert!(is_test_file("src/utils.spec.js"));
+    }
+
+    #[test]
+    fn non_test_files_not_detected() {
+        assert!(!is_test_file("src/main.rs"));
+        assert!(!is_test_file("crates/core/src/engine/mod.rs"));
+        assert!(!is_test_file("src/retriever/bm25.rs"));
+        assert!(!is_test_file("src/config.rs"));
+        assert!(!is_test_file("src/App.tsx"));
+    }
+
+    #[test]
+    fn detects_inline_test_chunks() {
+        let test_result = SearchResult {
+            chunk_id: "1".into(),
+            file_path: "src/engine/mod.rs".into(),
+            language: "Rust".into(),
+            score: 100.0,
+            line_start: 500,
+            line_end: 550,
+            signature: "fn my_test()".into(),
+            scope_chain: vec!["Engine".into(), "tests".into()],
+            content: "fn my_test() {}".into(),
+        };
+        let non_test_result = SearchResult {
+            scope_chain: vec!["Engine".into(), "search".into()],
+            ..test_result.clone()
+        };
+        assert!(is_test_chunk(&test_result));
+        assert!(!is_test_chunk(&non_test_result));
     }
 }
