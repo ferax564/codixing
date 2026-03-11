@@ -1255,6 +1255,142 @@
           </p>
         </div>
       </div>
+      <!-- Real-world benchmark grid -->
+      <div class="reveal" style="margin-top:64px">
+        <h3 style="font-size:1.5rem;font-weight:600;margin-bottom:8px">Tested on 6 real-world repos</h3>
+        <p class="section-sub" style="margin-bottom:32px">tokio, ripgrep, axum, django, fastapi, react &mdash; 9,493 files, 55,869 symbols, 3 languages. All indexed in under 9 seconds.</p>
+      </div>
+      <div class="bench-grid reveal" style="transition-delay:0.1s">
+        <div class="bench-card">
+          <h3>26 tasks, 6 repos</h3>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">
+            <div>
+              <div style="font-size:2.5rem;font-weight:700;color:var(--cyan)">73%</div>
+              <div style="color:var(--text-muted);font-size:0.85rem">fewer tokens consumed</div>
+            </div>
+            <div>
+              <div style="font-size:2.5rem;font-weight:700;color:var(--cyan)">55%</div>
+              <div style="color:var(--text-muted);font-size:0.85rem">fewer tool calls</div>
+            </div>
+          </div>
+          <div class="bar-chart" style="margin-top:20px">
+            <div class="bar-row">
+              <span class="bar-label">grep</span>
+              <div class="bar-track"><div class="bar-fill bad" style="--w:1" data-width="1"></div></div>
+              <span class="bar-val">338 KB</span>
+            </div>
+            <div class="bar-row">
+              <span class="bar-label">codixing</span>
+              <div class="bar-track"><div class="bar-fill good" style="--w:0.27" data-width="0.27"></div></div>
+              <span class="bar-val">92 KB</span>
+            </div>
+          </div>
+        </div>
+        <div class="bench-card" style="transition-delay:0.15s">
+          <h3>By category</h3>
+          <div style="margin-top:16px;display:flex;flex-direction:column;gap:10px">
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <span style="color:var(--text-muted);font-size:0.9rem">Symbol lookup</span>
+              <span style="color:var(--green);font-weight:600">93% saved</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <span style="color:var(--text-muted);font-size:0.9rem">Impact analysis</span>
+              <span style="color:var(--green);font-weight:600">90% saved</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <span style="color:var(--text-muted);font-size:0.9rem">Code understanding</span>
+              <span style="color:var(--green);font-weight:600">84% saved</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <span style="color:var(--text-muted);font-size:0.9rem">Bug localization</span>
+              <span style="color:var(--green);font-weight:600">83% saved</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <span style="color:var(--text-muted);font-size:0.9rem">Call graph</span>
+              <span style="color:var(--green);font-weight:600">72% saved</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- SWE-bench results -->
+      <div class="bench-grid reveal" style="margin-top:24px;transition-delay:0.2s">
+        <div class="insight-card">
+          <h3>SWE-bench Lite file localization</h3>
+          <p style="margin-top:8px">300 real bug reports across 12 Python repos:</p>
+          <div style="margin-top:16px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px">
+            <div>
+              <div style="font-size:2rem;font-weight:700;color:var(--cyan)">48.0%</div>
+              <div style="color:var(--text-muted);font-size:0.85rem">Recall@1<br><span style="font-size:0.8em">vs grep 14.7%</span></div>
+            </div>
+            <div>
+              <div style="font-size:2rem;font-weight:700;color:var(--cyan)">71.0%</div>
+              <div style="color:var(--text-muted);font-size:0.85rem">Recall@5<br><span style="font-size:0.8em">vs grep 41.3%</span></div>
+            </div>
+            <div>
+              <div style="font-size:2rem;font-weight:700;color:var(--cyan)">74.3%</div>
+              <div style="color:var(--text-muted);font-size:0.85rem">Recall@10<br><span style="font-size:0.8em">vs grep 54.7%</span></div>
+            </div>
+          </div>
+          <p style="margin-top:16px;color:var(--text-muted);font-size:0.85rem">BM25 multi-query + SweRankEmbed outline reranking. 137M param model, no LLM required. Beats grep on every recall metric.</p>
+        </div>
+        <div class="insight-card">
+          <h3>Multi-language search quality</h3>
+          <p style="margin-top:8px">Symbol localization across 5 languages, 50 queries (BM25-only, no GPU):</p>
+          <div style="margin-top:16px;display:grid;grid-template-columns:repeat(5,1fr);gap:12px;text-align:center">
+            <div>
+              <div style="font-size:1.5rem;font-weight:700;color:var(--cyan)">80%</div>
+              <div style="color:var(--text-muted);font-size:0.82rem">Rust<br><span style="font-size:0.8em">Hit@5</span></div>
+            </div>
+            <div>
+              <div style="font-size:1.5rem;font-weight:700;color:var(--cyan)">90%</div>
+              <div style="color:var(--text-muted);font-size:0.82rem">Python<br><span style="font-size:0.8em">Hit@5</span></div>
+            </div>
+            <div>
+              <div style="font-size:1.5rem;font-weight:700;color:var(--cyan)">90%</div>
+              <div style="color:var(--text-muted);font-size:0.82rem">Go<br><span style="font-size:0.8em">Hit@5</span></div>
+            </div>
+            <div>
+              <div style="font-size:1.5rem;font-weight:700;color:var(--cyan)">70%</div>
+              <div style="color:var(--text-muted);font-size:0.82rem">C++<br><span style="font-size:0.8em">Hit@5</span></div>
+            </div>
+            <div>
+              <div style="font-size:1.5rem;font-weight:700;color:var(--cyan)">50%</div>
+              <div style="color:var(--text-muted);font-size:0.82rem">JavaScript<br><span style="font-size:0.8em">Hit@5</span></div>
+            </div>
+          </div>
+          <p style="margin-top:16px;color:var(--text-muted);font-size:0.85rem">14 languages supported via tree-sitter AST: Rust, Python, TypeScript, Go, Java, C, C++, C#, Ruby, Swift, Kotlin, Scala, Zig, PHP.</p>
+        </div>
+        <div class="bench-card">
+          <h3>Indexing speed</h3>
+          <div style="margin-top:16px;display:flex;flex-direction:column;gap:8px;font-size:0.9rem">
+            <div style="display:flex;justify-content:space-between">
+              <span style="color:var(--text-muted)">axum (291 files)</span>
+              <span style="color:var(--cyan);font-weight:500">227ms</span>
+            </div>
+            <div style="display:flex;justify-content:space-between">
+              <span style="color:var(--text-muted)">ripgrep (100 files)</span>
+              <span style="color:var(--cyan);font-weight:500">251ms</span>
+            </div>
+            <div style="display:flex;justify-content:space-between">
+              <span style="color:var(--text-muted)">tokio (765 files)</span>
+              <span style="color:var(--cyan);font-weight:500">777ms</span>
+            </div>
+            <div style="display:flex;justify-content:space-between">
+              <span style="color:var(--text-muted)">fastapi (1,118 files)</span>
+              <span style="color:var(--cyan);font-weight:500">873ms</span>
+            </div>
+            <div style="display:flex;justify-content:space-between">
+              <span style="color:var(--text-muted)">django (2,894 files)</span>
+              <span style="color:var(--cyan);font-weight:500">2.4s</span>
+            </div>
+            <div style="display:flex;justify-content:space-between">
+              <span style="color:var(--text-muted)">react (4,325 files)</span>
+              <span style="color:var(--cyan);font-weight:500">4.3s</span>
+            </div>
+          </div>
+          <p style="margin-top:12px;color:var(--text-muted);font-size:0.8rem">BM25-only, no embeddings. ~1,060 files/second average.</p>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -1304,8 +1440,8 @@
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#3fb950" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 17h6M17 14v6"/><path d="M7 10v4M10 7h4M17 10v4"/></svg>
           </div>
           <h3>MCP-ready</h3>
-          <p>10 JSON-RPC 2.0 tools exposed for Claude Code and any MCP-capable client. Auto-registers in <code style="color:var(--cyan);font-size:0.85em">~/.claude.json</code> via VS Code extension.</p>
-          <span class="feature-tag">10 tools &bull; stdin/stdout &bull; Unix socket</span>
+          <p>33 JSON-RPC 2.0 tools exposed for Claude Code and any MCP-capable client. Auto-registers in <code style="color:var(--cyan);font-size:0.85em">~/.claude.json</code> via VS Code extension.</p>
+          <span class="feature-tag">33 tools &bull; stdin/stdout &bull; Unix socket</span>
         </div>
         <div class="feature-card" style="--delay:0.35s">
           <div class="feature-icon pink">
@@ -1325,7 +1461,7 @@
       <div class="mcp-layout">
         <div>
           <div class="section-label reveal">MCP Integration</div>
-          <h2 class="section-title reveal">10 tools for<br>your AI agent</h2>
+          <h2 class="section-title reveal">33 tools for<br>your AI agent</h2>
           <p class="section-sub reveal">Codixing exposes retrieval, symbols, graph traversal, file reading, and diagnostics over the Model Context Protocol.</p>
           <div class="tools-grid reveal">
             <div class="tool-card">
