@@ -1,0 +1,653 @@
+# Benchmark tasks for each repository
+# Categories mirror SWE-bench evaluation dimensions:
+#   1. Symbol lookup (find definitions)
+#   2. Code understanding (explain how X works)
+#   3. Call graph navigation (who calls X, what does X call)
+#   4. Bug localization (find code related to a bug report)
+#   5. Impact analysis (what changes if we modify X)
+#   6. Architecture overview (understand project structure)
+
+# ═══════════════════════════════════════════════════════════════════════
+# TOKIO
+# ═══════════════════════════════════════════════════════════════════════
+
+[[task]]
+repo = "tokio"
+id = "tokio-1"
+category = "symbol_lookup"
+description = "Find where Runtime struct is defined and its fields"
+query = "Runtime"
+baseline_commands = [
+    "grep -rn 'pub struct Runtime' --include='*.rs'",
+    "cat tokio/src/runtime/runtime.rs",
+]
+codixing_commands = [
+    "find_symbol Runtime",
+]
+expected_file = "tokio/src/runtime/runtime.rs"
+
+[[task]]
+repo = "tokio"
+id = "tokio-2"
+category = "code_understanding"
+description = "Understand how task spawning works"
+query = "how does task spawning work in tokio"
+baseline_commands = [
+    "grep -rn 'pub fn spawn' --include='*.rs'",
+    "grep -rn 'fn spawn_inner' --include='*.rs'",
+    "cat tokio/src/runtime/handle.rs",
+]
+codixing_commands = [
+    "search 'task spawning mechanism'",
+]
+
+[[task]]
+repo = "tokio"
+id = "tokio-3"
+category = "call_graph"
+description = "Find all callers of JoinHandle::abort"
+query = "JoinHandle::abort callers"
+baseline_commands = [
+    "grep -rn 'abort()' --include='*.rs'",
+    "grep -rn 'JoinHandle' --include='*.rs' | grep abort",
+]
+codixing_commands = [
+    "symbol_callers abort --file join.rs",
+]
+
+[[task]]
+repo = "tokio"
+id = "tokio-4"
+category = "impact_analysis"
+description = "What depends on the io module?"
+query = "io module dependencies"
+baseline_commands = [
+    "grep -rn 'use tokio::io' --include='*.rs'",
+    "grep -rn 'mod io' --include='*.rs'",
+]
+codixing_commands = [
+    "callers tokio/src/io/mod.rs",
+]
+
+[[task]]
+repo = "tokio"
+id = "tokio-5"
+category = "architecture"
+description = "Get tokio project structure overview"
+query = "project structure"
+baseline_commands = [
+    "find . -name '*.rs' -exec wc -l {} + | sort -rn | head -30",
+    "head -50 tokio/src/lib.rs",
+    "head -50 tokio/src/runtime/mod.rs",
+]
+codixing_commands = [
+    "graph --map --token-budget 2000",
+]
+
+[[task]]
+repo = "tokio"
+id = "tokio-6"
+category = "bug_localization"
+description = "Find code related to 'timer resolution' or 'sleep accuracy'"
+query = "timer resolution sleep accuracy"
+baseline_commands = [
+    "grep -rn 'timer' --include='*.rs' | head -50",
+    "grep -rn 'sleep' --include='*.rs' | head -50",
+    "grep -rn 'resolution' --include='*.rs'",
+]
+codixing_commands = [
+    "search 'timer resolution sleep accuracy'",
+]
+
+# ═══════════════════════════════════════════════════════════════════════
+# RIPGREP
+# ═══════════════════════════════════════════════════════════════════════
+
+[[task]]
+repo = "ripgrep"
+id = "rg-1"
+category = "symbol_lookup"
+description = "Find where Searcher struct is defined"
+query = "Searcher"
+baseline_commands = [
+    "grep -rn 'pub struct Searcher' --include='*.rs'",
+    "cat crates/searcher/src/searcher/mod.rs",
+]
+codixing_commands = [
+    "find_symbol Searcher",
+]
+
+[[task]]
+repo = "ripgrep"
+id = "rg-2"
+category = "code_understanding"
+description = "Understand how pattern matching with PCRE2 works"
+query = "PCRE2 pattern matching"
+baseline_commands = [
+    "grep -rn 'pcre2' --include='*.rs'",
+    "grep -rn 'RegexMatcher' --include='*.rs'",
+    "cat crates/regex/src/matcher.rs",
+]
+codixing_commands = [
+    "search 'PCRE2 regex pattern matching'",
+]
+
+[[task]]
+repo = "ripgrep"
+id = "rg-3"
+category = "call_graph"
+description = "What functions call search_line?"
+query = "search_line callers"
+baseline_commands = [
+    "grep -rn 'search_line' --include='*.rs'",
+]
+codixing_commands = [
+    "symbol_callers search_line",
+]
+
+[[task]]
+repo = "ripgrep"
+id = "rg-4"
+category = "architecture"
+description = "Get ripgrep project structure"
+query = "project architecture"
+baseline_commands = [
+    "find . -name '*.rs' -exec wc -l {} + | sort -rn | head -20",
+    "cat crates/core/main.rs | head -80",
+]
+codixing_commands = [
+    "graph --map --token-budget 2000",
+]
+
+# ═══════════════════════════════════════════════════════════════════════
+# AXUM
+# ═══════════════════════════════════════════════════════════════════════
+
+[[task]]
+repo = "axum"
+id = "axum-1"
+category = "symbol_lookup"
+description = "Find Router struct definition"
+query = "Router"
+baseline_commands = [
+    "grep -rn 'pub struct Router' --include='*.rs'",
+    "cat axum/src/routing/mod.rs",
+]
+codixing_commands = [
+    "find_symbol Router",
+]
+
+[[task]]
+repo = "axum"
+id = "axum-2"
+category = "code_understanding"
+description = "Understand how middleware layers work"
+query = "middleware layer tower service"
+baseline_commands = [
+    "grep -rn 'middleware' --include='*.rs' | head -40",
+    "grep -rn 'Layer' --include='*.rs' | head -40",
+    "cat axum/src/middleware/mod.rs",
+]
+codixing_commands = [
+    "search 'middleware layer tower service integration'",
+]
+
+[[task]]
+repo = "axum"
+id = "axum-3"
+category = "call_graph"
+description = "What calls into_response?"
+query = "into_response callers"
+baseline_commands = [
+    "grep -rn 'into_response' --include='*.rs' | head -60",
+]
+codixing_commands = [
+    "symbol_callers into_response",
+]
+
+[[task]]
+repo = "axum"
+id = "axum-4"
+category = "impact_analysis"
+description = "Impact of changing the extract module"
+query = "extract module impact"
+baseline_commands = [
+    "grep -rn 'use axum::extract' --include='*.rs'",
+    "grep -rn 'mod extract' --include='*.rs'",
+]
+codixing_commands = [
+    "predict_impact axum/src/extract/mod.rs",
+]
+
+# ═══════════════════════════════════════════════════════════════════════
+# DJANGO
+# ═══════════════════════════════════════════════════════════════════════
+
+[[task]]
+repo = "django"
+id = "django-1"
+category = "symbol_lookup"
+description = "Find QuerySet class definition"
+query = "QuerySet"
+baseline_commands = [
+    "grep -rn 'class QuerySet' --include='*.py'",
+    "cat django/db/models/query.py | head -200",
+]
+codixing_commands = [
+    "find_symbol QuerySet",
+]
+
+[[task]]
+repo = "django"
+id = "django-2"
+category = "code_understanding"
+description = "Understand how Django ORM query compilation works"
+query = "ORM query compilation SQL generation"
+baseline_commands = [
+    "grep -rn 'class SQLCompiler' --include='*.py'",
+    "grep -rn 'as_sql' --include='*.py' | head -40",
+    "cat django/db/models/sql/compiler.py | head -200",
+]
+codixing_commands = [
+    "search 'ORM query compilation SQL generation'",
+]
+
+[[task]]
+repo = "django"
+id = "django-3"
+category = "call_graph"
+description = "What calls authenticate() in auth?"
+query = "authenticate callers"
+baseline_commands = [
+    "grep -rn 'authenticate(' --include='*.py' | head -40",
+]
+codixing_commands = [
+    "symbol_callers authenticate",
+]
+
+[[task]]
+repo = "django"
+id = "django-4"
+category = "bug_localization"
+description = "Find code related to CSRF token validation"
+query = "CSRF token validation middleware"
+baseline_commands = [
+    "grep -rn 'csrf' --include='*.py' | head -60",
+    "grep -rn 'CsrfViewMiddleware' --include='*.py'",
+    "cat django/middleware/csrf.py | head -150",
+]
+codixing_commands = [
+    "search 'CSRF token validation middleware'",
+]
+
+[[task]]
+repo = "django"
+id = "django-5"
+category = "architecture"
+description = "Django project structure overview"
+query = "project structure"
+baseline_commands = [
+    "find django -name '*.py' -exec wc -l {} + | sort -rn | head -30",
+    "head -80 django/__init__.py",
+    "ls django/",
+]
+codixing_commands = [
+    "graph --map --token-budget 2000",
+]
+
+# ═══════════════════════════════════════════════════════════════════════
+# FASTAPI
+# ═══════════════════════════════════════════════════════════════════════
+
+[[task]]
+repo = "fastapi"
+id = "fastapi-1"
+category = "symbol_lookup"
+description = "Find FastAPI class definition"
+query = "FastAPI"
+baseline_commands = [
+    "grep -rn 'class FastAPI' --include='*.py'",
+    "cat fastapi/applications.py | head -200",
+]
+codixing_commands = [
+    "find_symbol FastAPI",
+]
+
+[[task]]
+repo = "fastapi"
+id = "fastapi-2"
+category = "code_understanding"
+description = "Understand dependency injection system"
+query = "dependency injection Depends resolver"
+baseline_commands = [
+    "grep -rn 'class Depends' --include='*.py'",
+    "grep -rn 'resolve_dependencies' --include='*.py'",
+    "cat fastapi/dependencies/utils.py | head -200",
+]
+codixing_commands = [
+    "search 'dependency injection Depends resolver'",
+]
+
+[[task]]
+repo = "fastapi"
+id = "fastapi-3"
+category = "call_graph"
+description = "What uses the APIRouter class?"
+query = "APIRouter usage"
+baseline_commands = [
+    "grep -rn 'APIRouter' --include='*.py' | head -40",
+]
+codixing_commands = [
+    "symbol_callers APIRouter",
+]
+
+# ═══════════════════════════════════════════════════════════════════════
+# REACT
+# ═══════════════════════════════════════════════════════════════════════
+
+[[task]]
+repo = "react"
+id = "react-1"
+category = "symbol_lookup"
+description = "Find FiberNode definition"
+query = "FiberNode"
+baseline_commands = [
+    "grep -rn 'FiberNode' --include='*.js' | head -20",
+    "cat packages/react-reconciler/src/ReactFiber.js | head -200",
+]
+codixing_commands = [
+    "find_symbol FiberNode",
+]
+
+[[task]]
+repo = "react"
+id = "react-2"
+category = "code_understanding"
+description = "Understand the reconciliation algorithm"
+query = "reconciliation algorithm diff fiber"
+baseline_commands = [
+    "grep -rn 'reconcileChildren' --include='*.js' | head -30",
+    "grep -rn 'beginWork' --include='*.js' | head -30",
+    "cat packages/react-reconciler/src/ReactFiberBeginWork.js | head -200",
+]
+codixing_commands = [
+    "search 'reconciliation algorithm fiber diffing'",
+]
+
+[[task]]
+repo = "react"
+id = "react-3"
+category = "call_graph"
+description = "What calls useState hook?"
+query = "useState callers"
+baseline_commands = [
+    "grep -rn 'useState' --include='*.js' | head -50",
+]
+codixing_commands = [
+    "symbol_callers useState",
+]
+
+[[task]]
+repo = "react"
+id = "react-4"
+category = "architecture"
+description = "React project structure overview"
+query = "project structure"
+baseline_commands = [
+    "find packages -name '*.js' -exec wc -l {} + | sort -rn | head -30",
+    "ls packages/",
+    "head -50 packages/react/src/React.js",
+]
+codixing_commands = [
+    "graph --map --token-budget 2000",
+]
+
+# ═══════════════════════════════════════════════════════════════════════
+# GIN (Go)
+# ═══════════════════════════════════════════════════════════════════════
+
+[[task]]
+repo = "gin"
+id = "gin-1"
+category = "symbol_lookup"
+description = "Find Engine struct definition"
+query = "Engine"
+baseline_commands = [
+    "grep -rn 'type Engine struct' --include='*.go'",
+    "cat gin.go | head -200",
+]
+codixing_commands = [
+    "find_symbol Engine",
+]
+expected_file = "gin.go"
+
+[[task]]
+repo = "gin"
+id = "gin-2"
+category = "code_understanding"
+description = "Understand how middleware chaining works"
+query = "middleware chaining handler chain"
+baseline_commands = [
+    "grep -rn 'HandlersChain' --include='*.go'",
+    "grep -rn 'func.*Use' --include='*.go' | head -20",
+    "cat routergroup.go | head -200",
+]
+codixing_commands = [
+    "search 'middleware chaining handler pipeline'",
+]
+
+[[task]]
+repo = "gin"
+id = "gin-3"
+category = "call_graph"
+description = "What calls Context.JSON?"
+query = "Context.JSON callers"
+baseline_commands = [
+    "grep -rn '\\.JSON(' --include='*.go' | head -40",
+]
+codixing_commands = [
+    "symbol_callers JSON --file context.go",
+]
+
+[[task]]
+repo = "gin"
+id = "gin-4"
+category = "architecture"
+description = "Gin project structure overview"
+query = "project structure"
+baseline_commands = [
+    "find . -name '*.go' -exec wc -l {} + | sort -rn | head -30",
+    "head -80 gin.go",
+    "ls *.go",
+]
+codixing_commands = [
+    "graph --map --token-budget 2000",
+]
+
+# ═══════════════════════════════════════════════════════════════════════
+# SPRING-BOOT (Java)
+# ═══════════════════════════════════════════════════════════════════════
+
+[[task]]
+repo = "spring-boot"
+id = "spring-boot-1"
+category = "symbol_lookup"
+description = "Find SpringApplication class definition"
+query = "SpringApplication"
+baseline_commands = [
+    "grep -rn 'public class SpringApplication' --include='*.java'",
+    "cat spring-boot-project/spring-boot/src/main/java/org/springframework/boot/SpringApplication.java | head -200",
+]
+codixing_commands = [
+    "find_symbol SpringApplication",
+]
+expected_file = "SpringApplication.java"
+
+[[task]]
+repo = "spring-boot"
+id = "spring-boot-2"
+category = "code_understanding"
+description = "Understand how auto-configuration works"
+query = "auto-configuration conditional bean loading"
+baseline_commands = [
+    "grep -rn 'AutoConfiguration' --include='*.java' | head -40",
+    "grep -rn '@Conditional' --include='*.java' | head -40",
+    "grep -rn 'class AutoConfigurationImportSelector' --include='*.java'",
+]
+codixing_commands = [
+    "search 'auto-configuration conditional bean loading mechanism'",
+]
+
+[[task]]
+repo = "spring-boot"
+id = "spring-boot-3"
+category = "call_graph"
+description = "What calls SpringApplication.run?"
+query = "SpringApplication.run callers"
+baseline_commands = [
+    "grep -rn 'SpringApplication.run' --include='*.java' | head -50",
+    "grep -rn '\\.run(' --include='*.java' | grep -i spring | head -40",
+]
+codixing_commands = [
+    "symbol_callers run --file SpringApplication.java",
+]
+
+[[task]]
+repo = "spring-boot"
+id = "spring-boot-4"
+category = "architecture"
+description = "Spring Boot project structure overview"
+query = "project structure"
+baseline_commands = [
+    "find . -name '*.java' -exec wc -l {} + | sort -rn | head -30",
+    "ls spring-boot-project/",
+    "ls spring-boot-project/spring-boot/src/main/java/org/springframework/boot/",
+]
+codixing_commands = [
+    "graph --map --token-budget 2000",
+]
+
+# ═══════════════════════════════════════════════════════════════════════
+# NEXT.JS (TypeScript)
+# ═══════════════════════════════════════════════════════════════════════
+
+[[task]]
+repo = "next.js"
+id = "nextjs-1"
+category = "symbol_lookup"
+description = "Find NextServer class definition"
+query = "NextServer"
+baseline_commands = [
+    "grep -rn 'class NextServer' --include='*.ts' --include='*.tsx'",
+    "cat packages/next/src/server/next.ts | head -200",
+]
+codixing_commands = [
+    "find_symbol NextServer",
+]
+expected_file = "next.ts"
+
+[[task]]
+repo = "next.js"
+id = "nextjs-2"
+category = "code_understanding"
+description = "Understand how server-side rendering works"
+query = "server-side rendering SSR getServerSideProps"
+baseline_commands = [
+    "grep -rn 'getServerSideProps' --include='*.ts' --include='*.tsx' | head -40",
+    "grep -rn 'renderToHTML' --include='*.ts' | head -20",
+    "grep -rn 'server.*render' --include='*.ts' | head -30",
+]
+codixing_commands = [
+    "search 'server-side rendering SSR getServerSideProps pipeline'",
+]
+
+[[task]]
+repo = "next.js"
+id = "nextjs-3"
+category = "call_graph"
+description = "What references getServerSideProps?"
+query = "getServerSideProps references"
+baseline_commands = [
+    "grep -rn 'getServerSideProps' --include='*.ts' --include='*.tsx' | head -50",
+]
+codixing_commands = [
+    "search_usages getServerSideProps",
+]
+
+[[task]]
+repo = "next.js"
+id = "nextjs-4"
+category = "architecture"
+description = "Next.js project structure overview"
+query = "project structure"
+baseline_commands = [
+    "find packages/next/src -name '*.ts' -exec wc -l {} + | sort -rn | head -30",
+    "ls packages/next/src/",
+    "ls packages/",
+]
+codixing_commands = [
+    "graph --map --token-budget 2000",
+]
+
+# ═══════════════════════════════════════════════════════════════════════
+# LEVELDB (C++)
+# ═══════════════════════════════════════════════════════════════════════
+
+[[task]]
+repo = "leveldb"
+id = "leveldb-1"
+category = "symbol_lookup"
+description = "Find DB::Open implementation"
+query = "DB::Open"
+baseline_commands = [
+    "grep -rn 'DB::Open' --include='*.cc' --include='*.h'",
+    "cat db/db_impl.cc | head -200",
+]
+codixing_commands = [
+    "find_symbol Open",
+]
+expected_file = "db_impl.cc"
+
+[[task]]
+repo = "leveldb"
+id = "leveldb-2"
+category = "code_understanding"
+description = "Understand LSM tree compaction process"
+query = "LSM tree compaction merge levels"
+baseline_commands = [
+    "grep -rn 'Compaction' --include='*.cc' --include='*.h' | head -40",
+    "grep -rn 'DoCompactionWork' --include='*.cc'",
+    "cat db/db_impl.cc | head -400",
+]
+codixing_commands = [
+    "search 'LSM tree compaction merge sorted run levels'",
+]
+
+[[task]]
+repo = "leveldb"
+id = "leveldb-3"
+category = "call_graph"
+description = "What calls DBImpl::Get?"
+query = "DBImpl::Get callers"
+baseline_commands = [
+    "grep -rn 'Get(' --include='*.cc' --include='*.h' | head -40",
+    "grep -rn 'DBImpl::Get' --include='*.cc'",
+]
+codixing_commands = [
+    "symbol_callers Get --file db_impl.cc",
+]
+
+[[task]]
+repo = "leveldb"
+id = "leveldb-4"
+category = "architecture"
+description = "LevelDB project structure overview"
+query = "project structure"
+baseline_commands = [
+    "find . -name '*.cc' -o -name '*.h' | xargs wc -l | sort -rn | head -30",
+    "ls db/",
+    "ls include/leveldb/",
+]
+codixing_commands = [
+    "graph --map --token-budget 2000",
+]
