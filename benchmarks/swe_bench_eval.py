@@ -82,14 +82,9 @@ def checkout_commit(repo_path: Path, commit: str) -> bool:
     return result.returncode == 0
 
 
-USE_RERANKER = False  # Set via --reranker CLI flag
 SEARCH_STRATEGY = None  # Set via --strategy CLI flag (None = default/auto)
-RERANKER = None  # Initialized lazily if --py-rerank is set
-RERANKER_MODEL = None  # Model name for Python reranker
 EMBED_MODEL = None  # SweRankEmbed or other embedding model for reranking
 EMBED_MODEL_NAME = None  # Model name string
-CE_RERANKER_MODEL = None  # Cross-encoder model for top-5 reranking
-CE_RERANKER_MODEL_NAME = None  # Cross-encoder model name string
 
 
 def index_repo(repo_path: Path) -> tuple[int, bool]:
@@ -100,8 +95,6 @@ def index_repo(repo_path: Path) -> tuple[int, bool]:
         subprocess.run(["rm", "-rf", str(codixing_dir)], capture_output=True)
 
     cmd = [str(CODIXING), "init", "."]
-    if USE_RERANKER:
-        cmd.append("--reranker")
 
     start = time.perf_counter_ns()
     result = subprocess.run(
@@ -320,54 +313,6 @@ def search_codixing_usages(repo_path: Path, symbol: str, limit: int = 10) -> lis
     return files
 
 
-def get_reranker():
-    """Lazily initialize the cross-encoder reranker."""
-    global RERANKER
-    if RERANKER is None and RERANKER_MODEL:
-        from fastembed.rerank.cross_encoder.text_cross_encoder import TextCrossEncoder
-        print(f"  [reranker] Loading {RERANKER_MODEL}...", flush=True)
-        RERANKER = TextCrossEncoder(model_name=RERANKER_MODEL)
-        print(f"  [reranker] Ready.", flush=True)
-    return RERANKER
-
-
-def rerank_chunks(
-    query: str, chunks: list[tuple[str, float, str]], top_k: int = 30
-) -> list[tuple[str, float, str]]:
-    """Re-rank chunks using cross-encoder on their content."""
-    reranker = get_reranker()
-    if not reranker or not chunks:
-        return chunks
-
-    # Filter to chunks with content
-    with_content = [(fp, s, c) for fp, s, c in chunks[:top_k] if c]
-    if not with_content:
-        return chunks
-
-    passages = [c[:3000] for _, _, c in with_content]
-
-    # Cross-encoder reranking — returns list of floats in document order
-    scores = list(reranker.rerank(query, passages, top_k=len(passages)))
-    # Normalize cross-encoder scores to match BM25 scale (~0-100)
-    max_score = max(scores) if scores else 1.0
-    min_score = min(scores) if scores else 0.0
-    score_range = max_score - min_score if max_score != min_score else 1.0
-    # Get max BM25 score for calibration
-    max_bm25 = max((s for _, s, _ in with_content), default=50.0)
-    reranked = [
-        (fp, ((ce_score - min_score) / score_range) * max_bm25, c)
-        for (fp, _, c), ce_score in zip(with_content, scores)
-    ]
-    reranked.sort(key=lambda x: -x[1])
-
-    # Append any chunks we didn't rerank
-    seen_idx = set(range(min(top_k, len(chunks))))
-    for i, chunk in enumerate(chunks):
-        if i not in seen_idx:
-            reranked.append(chunk)
-    return reranked
-
-
 def get_embed_model():
     """Lazily initialize the embedding model for reranking."""
     global EMBED_MODEL
@@ -378,19 +323,6 @@ def get_embed_model():
         print(f"  [embed] Ready ({EMBED_MODEL.get_sentence_embedding_dimension()}d).", flush=True)
     return EMBED_MODEL
 
-
-def get_ce_reranker_model():
-    """Load cross-encoder reranker model (lazy singleton)."""
-    global CE_RERANKER_MODEL
-    if CE_RERANKER_MODEL is not None:
-        return CE_RERANKER_MODEL
-    model_name = CE_RERANKER_MODEL_NAME
-    if not model_name:
-        return None
-    from sentence_transformers import CrossEncoder
-    print(f"  Loading reranker: {model_name}...")
-    CE_RERANKER_MODEL = CrossEncoder(model_name)
-    return CE_RERANKER_MODEL
 
 
 def extract_functions_from_file(file_path: Path, rel_path: str) -> list[tuple[str, str]]:
@@ -491,31 +423,6 @@ def extract_file_outline(file_path: Path, rel_path: str) -> str:
     return "\n".join(parts)[:800]
 
 
-def extract_imports(repo_path: Path, filepath: str) -> list[str]:
-    """Extract imported module file paths from a Python file."""
-    import ast
-    full_path = repo_path / filepath
-    try:
-        source = full_path.read_text(errors="replace")
-        tree = ast.parse(source)
-    except (OSError, SyntaxError, UnicodeDecodeError):
-        return []
-
-    imported_files = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            parts = node.module.split(".")
-            for end in range(len(parts), 0, -1):
-                prefix = "/".join(parts[:end])
-                for suffix in (prefix + ".py", prefix + "/__init__.py"):
-                    if (repo_path / suffix).exists():
-                        imported_files.append(suffix)
-                        break
-                else:
-                    continue
-                break
-    return imported_files
-
 
 def embed_rerank_files(
     repo_path: Path, query: str, files: list[str], top_k: int = 20
@@ -557,45 +464,6 @@ def embed_rerank_files(
     return scored
 
 
-def cross_encoder_rerank(
-    repo_path: Path, query: str, files: list[str], top_k: int = 5
-) -> list[str]:
-    """Rerank top-k files using cross-encoder on (query, file_content) pairs.
-
-    Reads actual file content (first ~2000 chars) and scores with cross-encoder.
-    Returns files sorted by cross-encoder score.
-    """
-    model = get_ce_reranker_model()
-    if not model or not files:
-        return files
-
-    candidates = files[:top_k]
-    pairs = []
-    valid_files = []
-    for fp in candidates:
-        full_path = repo_path / fp
-        try:
-            content = full_path.read_text(errors="replace")[:2000]
-        except OSError:
-            continue
-        doc = f"{fp}\n{content}"
-        pairs.append((query[:1000], doc))
-        valid_files.append(fp)
-
-    if not pairs:
-        return files
-
-    scores = model.predict(pairs)
-    scored = sorted(zip(valid_files, scores), key=lambda x: -x[1])
-    reranked = [f for f, _ in scored]
-
-    seen = set(reranked)
-    for f in files:
-        if f not in seen:
-            reranked.append(f)
-            seen.add(f)
-    return reranked
-
 
 def search_codixing_multi(repo_path: Path, problem: str) -> list[str]:
     """Multi-strategy Codixing search combining chunk-level + file-level results.
@@ -613,10 +481,6 @@ def search_codixing_multi(repo_path: Path, problem: str) -> list[str]:
     for i, query in enumerate(queries):
         weight = weights[i] if i < len(weights) else 0.2
         results = search_codixing_single(repo_path, query, limit=30)
-
-        # Optional: rerank first query's chunks with cross-encoder
-        if RERANKER_MODEL and i == 0:
-            results = rerank_chunks(query, results, top_k=15)
 
         for rank, (fp, score, _content) in enumerate(results):
             # Score: BM25 score * weight * rank decay
@@ -735,56 +599,12 @@ def search_codixing_multi(repo_path: Path, problem: str) -> list[str]:
             # Symbol definition is a strong signal
             file_scores[fp] += 40.0
 
-    # ── Import-chain expansion ──
-    # For top-10 scored files, find what they import and boost those modules
-    top_scored = sorted(file_scores.items(), key=lambda x: -x[1])[:10]
-    for fp, score in top_scored:
-        if not fp.endswith(".py") or "/test" in fp:
-            continue
-        imported = extract_imports(repo_path, fp)
-        for imp_fp in imported[:5]:
-            if imp_fp not in file_scores:
-                file_scores[imp_fp] += score * 0.3
-
-    # ── __init__.py resolution for scored directories ──
-    # If we scored "django/db/models/fields/related.py", also check
-    # "django/db/models/fields/__init__.py" since that's often the fix location
-    init_candidates = set()
-    for fp in list(file_scores.keys()):
-        if not fp.endswith(".py"):
-            continue
-        parent_dir = "/".join(fp.split("/")[:-1])
-        init_path = parent_dir + "/__init__.py"
-        if init_path not in file_scores and (repo_path / init_path).exists():
-            init_candidates.add(init_path)
-        gparent_dir = "/".join(fp.split("/")[:-2])
-        if gparent_dir:
-            ginit_path = gparent_dir + "/__init__.py"
-            if ginit_path not in file_scores and (repo_path / ginit_path).exists():
-                init_candidates.add(ginit_path)
-
-    for init_fp in init_candidates:
-        file_scores[init_fp] += 25.0
-
-    # ── Migration file mentions ──
-    if re.search(r'\bmigrat', problem, re.IGNORECASE):
-        migration_context = re.findall(
-            r'(\w+)/migrations/|migrations.*?(\w+)|(\w+).*?migration',
-            problem[:2000]
-        )
-        for groups in migration_context[:3]:
-            app_name = next((g for g in groups if g), None)
-            if not app_name or len(app_name) < 3:
-                continue
-            find_r = subprocess.run(
-                ["find", ".", "-path", f"*/{app_name}/migrations/*.py",
-                 "-not", "-name", "__init__.py"],
-                capture_output=True, timeout=5, cwd=str(repo_path),
-            )
-            for line in find_r.stdout.decode(errors="replace").strip().split("\n"):
-                fp = line.strip().lstrip("./")
-                if fp and fp.endswith(".py"):
-                    file_scores[fp] += 15.0
+    # NOTE: Several approaches were tested here but all HURT R@1:
+    # - Import-chain expansion, __init__.py resolution, migration detection:
+    #   R@1 dropped from 48% to ~35% (floods file_scores with noise)
+    # - Cross-encoder reranking (ms-marco-MiniLM-L-6-v2, BAAI/bge-reranker):
+    #   R@1 dropped from 48% to 27-41% (web-search models pick wrong code files)
+    # See git history for the implementations.
 
     # ── File-level coverage via usages ──
     # Extract top 3 most distinctive code identifiers
@@ -848,16 +668,6 @@ def search_codixing_multi(repo_path: Path, problem: str) -> list[str]:
             if f not in seen:
                 final.append(f)
                 seen.add(f)
-
-    # ── Optional: cross-encoder reranking of top-5 ──
-    if CE_RERANKER_MODEL_NAME and final:
-        non_test_top5 = [f for f in final[:10]
-                         if "/test" not in f and not f.split("/")[-1].startswith("test_")][:5]
-        if non_test_top5:
-            reranked_top = cross_encoder_rerank(repo_path, problem, non_test_top5, top_k=5)
-            seen = set(reranked_top)
-            rest = [f for f in final if f not in seen]
-            final = reranked_top + rest
 
     return final[:20]
 
@@ -926,31 +736,17 @@ def main():
     parser.add_argument("--repo", help="Only evaluate tasks from this repo")
     parser.add_argument("--skip-clone", action="store_true")
     parser.add_argument("--skip-grep", action="store_true", help="Skip grep baseline")
-    parser.add_argument("--reranker", action="store_true", help="Enable BGE reranker (--reranker on init)")
     parser.add_argument("--strategy", help="Search strategy (e.g. 'deep' for reranker)")
-    parser.add_argument(
-        "--py-rerank",
-        metavar="MODEL",
-        help="Python-side reranking with fastembed (e.g. BAAI/bge-reranker-base)",
-    )
     parser.add_argument(
         "--embed-rerank",
         metavar="MODEL",
         help="Embedding model for file reranking (e.g. Salesforce/SweRankEmbed-Small)",
     )
-    parser.add_argument(
-        "--ce-rerank",
-        metavar="MODEL",
-        help="Cross-encoder model for reranking top-5 (e.g. cross-encoder/ms-marco-MiniLM-L-6-v2)",
-    )
     args = parser.parse_args()
 
-    global USE_RERANKER, SEARCH_STRATEGY, RERANKER_MODEL, EMBED_MODEL_NAME, CE_RERANKER_MODEL_NAME
-    USE_RERANKER = args.reranker
+    global SEARCH_STRATEGY, EMBED_MODEL_NAME
     SEARCH_STRATEGY = args.strategy
-    RERANKER_MODEL = args.py_rerank
     EMBED_MODEL_NAME = args.embed_rerank
-    CE_RERANKER_MODEL_NAME = args.ce_rerank
 
     if not CODIXING.exists():
         print(f"ERROR: codixing binary not found at {CODIXING}")
