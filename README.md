@@ -158,7 +158,7 @@ codixing-mcp --root /path/to/project --daemon &
 
 The daemon runs a background file watcher. When you save a file, the index updates within ~100ms. Claude Code always queries a fresh index.
 
-### Available MCP tools (19)
+### Available MCP tools (33)
 
 | Tool | What it does |
 |------|-------------|
@@ -180,12 +180,21 @@ The daemon runs a background file watcher. When you save a file, the index updat
 | `apply_patch` | Apply a unified git diff across one or more files with auto-reindex |
 | `run_tests` | Execute a test command in the project root and return stdout + exit code |
 | `rename_symbol` | Project-wide identifier rename with auto-reindex of all affected files |
-| `explain` | Assembled context package: definition + file deps + usage sites for any symbol |
+| `explain` | Assembled context package: definition + usage sites (callers) + callees for any symbol |
 | `symbol_callers` | Symbol-level call graph: which functions directly call a given symbol |
 | `symbol_callees` | Symbol-level call graph: which functions a given symbol directly calls |
 | `predict_impact` | Given a unified diff, rank files most likely to need changes (call graph + import graph) |
 | `stitch_context` | Search + automatically attach callee definitions for cross-file context in one call |
 | `enrich_docs` | LLM-generated doc summaries per symbol, stored in `.codixing/symbol_docs.json` (Anthropic or Ollama) |
+| `remember` | Store a key-value note in persistent project memory (`.codixing/memory.json`) |
+| `recall` | Retrieve notes from project memory by key or keyword search |
+| `forget` | Remove a note from project memory |
+| `find_tests` | Find test files and test functions related to a given source file or symbol |
+| `find_similar` | Find code chunks semantically similar to a given snippet or description |
+| `get_complexity` | Compute cyclomatic complexity for functions in a file |
+| `review_context` | Assemble context for reviewing a diff: changed symbols, callers, related tests |
+| `generate_onboarding` | Generate a structured onboarding document for the indexed project |
+| `git_diff` | Show `git diff` output for the working tree or between commits |
 
 ---
 
@@ -270,7 +279,7 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 | **File watcher latency** | ≤100ms from save to queryable |
 | **Daemon IPC overhead** | ~6ms per call (Unix socket round-trip) |
 | **BM25 search** | <10ms p99 |
-| **Test suite** | 334 tests (including retrieval quality regression suite) |
+| **Test suite** | 368 tests (including retrieval quality regression suite) |
 
 ### Init speed breakdown (0.87s on 246K LoC)
 
@@ -303,6 +312,42 @@ Simulates a 5-task coding investigation (find a struct, trace callers, architect
 > The decisive case: `grep + cat` returns the **entire 85KB engine.rs** to find one struct definition. Codixing returns the struct name + signature in 470 bytes. Fewer wasted tokens = more room for reasoning.
 
 Run `python3 benchmark_claude_session.py` to reproduce on your machine.
+
+### Real-World Benchmark: 6 Open-Source Projects
+
+Tested on tokio (765 Rust files), ripgrep (100 Rust files), axum (291 Rust files), django (2,894 Python files), fastapi (1,118 Python files), react (4,325 JS files) — total 9,493 files, 55,869 symbols.
+
+All repos indexed with BM25-only in under 9 seconds total.
+
+26 tasks across 6 categories:
+
+| Metric | grep/cat/find | Codixing | Improvement |
+|--------|---------------|----------|-------------|
+| Tool calls | 58 | 26 | **55% fewer** |
+| Output bytes | 338KB | 92KB | **73% fewer** |
+| Est. tokens | ~84,600 | ~22,900 | **73% fewer** |
+
+By category:
+| Category | Byte Savings |
+|----------|-------------|
+| Symbol lookup (6 tasks) | **93%** |
+| Impact analysis (2 tasks) | **90%** |
+| Code understanding (6 tasks) | **84%** |
+| Bug localization (2 tasks) | **83%** |
+| Call graph (6 tasks) | **72%** |
+
+### SWE-bench Lite Localization (300 tasks, 12 repos)
+
+| Metric | grep | Codixing | Improvement |
+|--------|------|----------|-------------|
+| Recall@1 | 14.7% | **48.0%** | **+227%** |
+| Recall@5 | 41.3% | **71.0%** | **+72%** |
+| Recall@10 | 54.7% | **74.3%** | **+36%** |
+| Contains GT | 64.7% | **75.3%** | **+16%** |
+
+Multi-strategy BM25 search with SweRankEmbed-Small outline reranking, query extraction, score-weighted ranking, and usage-based file coverage. No LLM needed — pure retrieval + lightweight embedding.
+
+Run `python3 benchmarks/swe_bench_eval.py --skip-clone` to reproduce (requires `datasets` package).
 
 ---
 
@@ -353,7 +398,7 @@ codixing init . --model snowflake-arctic-l
 - **Live index freshness** — Daemon file watcher updates the in-memory engine within 100ms of any file save; no restart needed
 - **`.gitignore`-aware indexing** — File walker respects `.gitignore`, `.ignore`, and global gitignore (same as ripgrep); no manual exclude lists needed
 - **Hash-based incremental sync** — `codixing sync` diffs xxh3 content hashes and re-indexes only changed files; no git required
-- **MCP server** — 24 tools exposed via JSON-RPC 2.0; Claude Code registers with one command
+- **MCP server** — 33 tools exposed via JSON-RPC 2.0; Claude Code registers with one command
 - **Concurrent symbol table** — DashMap-backed with exact, prefix, and substring matching
 - **Single binary, zero runtime deps** — No JVM, no Docker, no external databases
 
@@ -440,13 +485,13 @@ codixing init . --model snowflake-arctic-l
 | **Phase 1: Foundation** | ✅ Complete | AST parsing, BM25, CLI, file watcher — 111 tests |
 | **Phase 2: Semantic Search** | ✅ Complete | BGE-Base embeddings, hybrid RRF+MMR, REST API |
 | **Phase 3: Graph Intelligence** | ✅ Complete | Import graph, PageRank, repo map — 165 tests |
-| **Phase 4: Agent Integration** | ✅ Complete | MCP (24 tools), daemon mode, 2.6× faster init, live watcher — 222 tests |
+| **Phase 4: Agent Integration** | ✅ Complete | MCP (33 tools), daemon mode, 2.6× faster init, live watcher — 222 tests |
 | **Phase 5: Production Hardening** | ✅ Complete | Field boosts, band merging, asymmetric RRF, call graph edges, sync, .gitignore walker — 232 tests |
 | **Phase 6: Ecosystem Expansion** | ✅ Complete | Tier 2 languages (Ruby/Swift/Kotlin/Scala), multi-repo, VS Code extension, CI matrix, Qdrant backend — 244 tests |
 | **Phase 7: Git Sync + Qwen3 + Eval** | ✅ Complete | Git-aware incremental sync, Qwen3 candle backend, embedding eval harness — 260 tests |
-| **Phase 8: Productivity + Ecosystem** | ✅ Complete | 24 MCP tools (apply_patch, run_tests, outline_file, rename_symbol, explain, symbol_callers, symbol_callees, predict_impact, stitch_context, enrich_docs), LSP server, Zig+PHP, Docker, Homebrew, 60s search cache — 260 tests |
-| **Phase 10: Developer Intelligence** | ✅ Complete | 32 MCP tools (remember, recall, forget, find_tests, find_similar, get_complexity, review_context, generate_onboarding), persistent memory store, cyclomatic complexity, onboarding doc generation — 210 tests |
-| **Phase 11: IDE Integration** | ✅ Complete | LSP server (`codixing-lsp`) with hover, go-to-def, references, symbols, document sync, live reindex, cyclomatic complexity diagnostics; VS Code LSP client; BM25-only default; Tier 2 retrieval quality regression suite — 334 tests |
+| **Phase 8: Productivity + Ecosystem** | ✅ Complete | 33 MCP tools (apply_patch, run_tests, outline_file, rename_symbol, explain, symbol_callers, symbol_callees, predict_impact, stitch_context, enrich_docs), LSP server, Zig+PHP, Docker, Homebrew, 60s search cache — 260 tests |
+| **Phase 10: Developer Intelligence** | ✅ Complete | 33 MCP tools (remember, recall, forget, find_tests, find_similar, get_complexity, review_context, generate_onboarding), persistent memory store, cyclomatic complexity, onboarding doc generation — 210 tests |
+| **Phase 11: IDE Integration** | ✅ Complete | LSP server (`codixing-lsp`) with hover, go-to-def, references, symbols, document sync, live reindex, cyclomatic complexity diagnostics; VS Code LSP client; BM25-only default; Tier 2 retrieval quality regression suite — 368 tests |
 
 ---
 
@@ -454,7 +499,7 @@ codixing init . --model snowflake-arctic-l
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 334 tests
+cargo test --workspace        # 368 tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 ```
