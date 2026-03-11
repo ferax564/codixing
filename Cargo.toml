@@ -92,3 +92,7 @@ qdrant-client = { version = "1", default-features = false, features = ["serde"] 
 
 # Testing
 tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = true
