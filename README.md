@@ -349,31 +349,32 @@ Multi-strategy BM25 search with SweRankEmbed-Small outline reranking, query extr
 
 Run `python3 benchmarks/swe_bench_eval.py --skip-clone` to reproduce (requires `datasets` package).
 
+### Multi-Language Search Quality
+
+Symbol localization across 5 languages (BM25-only, no GPU needed):
+
+| Language | Repo | Tasks | Hit@1 | Hit@5 | Hit@10 |
+|----------|------|-------|-------|-------|--------|
+| Rust | tokio | 10 | 50% | 80% | 80% |
+| Python | django | 10 | 30% | 90% | 100% |
+| Go | gin | 10 | 50% | 90% | 90% |
+| C++ | leveldb | 10 | 50% | 70% | 100% |
+| JavaScript | react | 10 | 10% | 50% | 70% |
+| **Overall** | **5 repos** | **50** | **38%** | **76%** | **88%** |
+
+14 languages supported with full AST parsing via tree-sitter. Run `python3 benchmarks/multilang_eval.py` to reproduce.
+
 ---
 
 ## Embedding Model Selection
 
-Numbers measured on this repository (86 files, 667 chunks, AMD Rembrandt CPU).
-
-| Model | Dims | Init time | Cold query | MRR@10 | Recall@4 | Notes |
-|-------|------|-----------|------------|--------|----------|-------|
-| **BM25-only** | — | **<1s** | **12ms** | **0.750** | **100%** | Default; no ONNX required |
-| BgeSmall-EN-v1.5 | 384 | 73s | 376ms¹ | 0.592 | 90% | Daemon query ~1ms |
-| BgeBase-EN-v1.5 | 768 | 186s | 7ms | 0.592 | 90% | 2.5× slower init, same quality |
-| BgeLarge-EN-v1.5 | 1024 | 418s | 44ms | 0.767 | 100% | Quality matches Arctic/Qwen3 |
-| Snowflake-Arctic-L | 1024 | 428s | 44ms | 0.767 | 100% | SOTA MTEB at 335M params |
-| Qwen3-0.6B | 1024 | 580s | 8ms | 0.767 | 100% | Best quality; needs `--features qwen3` |
-
-¹ First cold process loads the ONNX model; daemon mode reduces this to ~1ms.
-
-### How to choose
+BM25-only is the default and works well for most codebases. To enable semantic search, pass `--model` at init time:
 
 | Situation | Recommendation |
 |-----------|----------------|
-| Good identifiers and docstrings | **BM25-only** (default) — fast, no GPU/ONNX, retrieval quality matches or beats small embedders |
-| Natural-language queries matter | **BgeLarge** or **Snowflake-Arctic-L** — 0.767 MRR, 100% recall; 7-minute one-time init |
+| Good identifiers and docstrings | **BM25-only** (default) — fast, no GPU/ONNX needed |
+| Natural-language queries matter | **BgeLarge** or **Snowflake-Arctic-L** — best quality; ~7 min one-time init |
 | Fast init + some semantic search | **BgeSmall** — 73s init, run as daemon to eliminate cold-start |
-| Maximum quality, no init budget | **Qwen3** — same MRR as BgeLarge but smaller binary; requires `qwen3` Cargo feature |
 
 ```bash
 # BM25-only (default — recommended for most codebases)
@@ -492,6 +493,7 @@ codixing init . --model snowflake-arctic-l
 | **Phase 8: Productivity + Ecosystem** | ✅ Complete | 33 MCP tools (apply_patch, run_tests, outline_file, rename_symbol, explain, symbol_callers, symbol_callees, predict_impact, stitch_context, enrich_docs), LSP server, Zig+PHP, Docker, Homebrew, 60s search cache — 260 tests |
 | **Phase 10: Developer Intelligence** | ✅ Complete | 33 MCP tools (remember, recall, forget, find_tests, find_similar, get_complexity, review_context, generate_onboarding), persistent memory store, cyclomatic complexity, onboarding doc generation — 210 tests |
 | **Phase 11: IDE Integration** | ✅ Complete | LSP server (`codixing-lsp`) with hover, go-to-def, references, symbols, document sync, live reindex, cyclomatic complexity diagnostics; VS Code LSP client; BM25-only default; Tier 2 retrieval quality regression suite — 368 tests |
+| **Phase 12: Launch Prep** | ✅ Complete | Multi-language benchmarks, code cleanup, binary optimization (thin LTO + strip), website update — 368 tests |
 
 ---
 
