@@ -491,6 +491,32 @@ def extract_file_outline(file_path: Path, rel_path: str) -> str:
     return "\n".join(parts)[:800]
 
 
+def extract_imports(repo_path: Path, filepath: str) -> list[str]:
+    """Extract imported module file paths from a Python file."""
+    import ast
+    full_path = repo_path / filepath
+    try:
+        source = full_path.read_text(errors="replace")
+        tree = ast.parse(source)
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return []
+
+    imported_files = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            parts = node.module.split(".")
+            for end in range(len(parts), 0, -1):
+                prefix = "/".join(parts[:end])
+                for suffix in (prefix + ".py", prefix + "/__init__.py"):
+                    if (repo_path / suffix).exists():
+                        imported_files.append(suffix)
+                        break
+                else:
+                    continue
+                break
+    return imported_files
+
+
 def embed_rerank_files(
     repo_path: Path, query: str, files: list[str], top_k: int = 20
 ) -> list[tuple[str, float]]:
@@ -708,6 +734,57 @@ def search_codixing_multi(repo_path: Path, problem: str) -> list[str]:
         if fp and fp.endswith(".py"):
             # Symbol definition is a strong signal
             file_scores[fp] += 40.0
+
+    # ── Import-chain expansion ──
+    # For top-10 scored files, find what they import and boost those modules
+    top_scored = sorted(file_scores.items(), key=lambda x: -x[1])[:10]
+    for fp, score in top_scored:
+        if not fp.endswith(".py") or "/test" in fp:
+            continue
+        imported = extract_imports(repo_path, fp)
+        for imp_fp in imported[:5]:
+            if imp_fp not in file_scores:
+                file_scores[imp_fp] += score * 0.3
+
+    # ── __init__.py resolution for scored directories ──
+    # If we scored "django/db/models/fields/related.py", also check
+    # "django/db/models/fields/__init__.py" since that's often the fix location
+    init_candidates = set()
+    for fp in list(file_scores.keys()):
+        if not fp.endswith(".py"):
+            continue
+        parent_dir = "/".join(fp.split("/")[:-1])
+        init_path = parent_dir + "/__init__.py"
+        if init_path not in file_scores and (repo_path / init_path).exists():
+            init_candidates.add(init_path)
+        gparent_dir = "/".join(fp.split("/")[:-2])
+        if gparent_dir:
+            ginit_path = gparent_dir + "/__init__.py"
+            if ginit_path not in file_scores and (repo_path / ginit_path).exists():
+                init_candidates.add(ginit_path)
+
+    for init_fp in init_candidates:
+        file_scores[init_fp] += 25.0
+
+    # ── Migration file mentions ──
+    if re.search(r'\bmigrat', problem, re.IGNORECASE):
+        migration_context = re.findall(
+            r'(\w+)/migrations/|migrations.*?(\w+)|(\w+).*?migration',
+            problem[:2000]
+        )
+        for groups in migration_context[:3]:
+            app_name = next((g for g in groups if g), None)
+            if not app_name or len(app_name) < 3:
+                continue
+            find_r = subprocess.run(
+                ["find", ".", "-path", f"*/{app_name}/migrations/*.py",
+                 "-not", "-name", "__init__.py"],
+                capture_output=True, timeout=5, cwd=str(repo_path),
+            )
+            for line in find_r.stdout.decode(errors="replace").strip().split("\n"):
+                fp = line.strip().lstrip("./")
+                if fp and fp.endswith(".py"):
+                    file_scores[fp] += 15.0
 
     # ── File-level coverage via usages ──
     # Extract top 3 most distinctive code identifiers
