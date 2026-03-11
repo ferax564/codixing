@@ -1,0 +1,41 @@
+Codixing Business Source License 1.0
+
+Copyright (c) 2026 Codixing
+
+Permission is hereby granted, free of charge, to any person or entity
+("You") obtaining a copy of this software and associated documentation
+files (the "Software"), to use the Software subject to the following
+conditions:
+
+1. PERMITTED USE
+
+   You may use, copy, and modify the Software for:
+
+   (a) Open-source projects (projects whose source code is publicly
+       available under an OSI-approved license);
+   (b) Personal and educational use;
+   (c) Internal evaluation and testing;
+   (d) Commercial use by teams of five (5) or fewer developers.
+
+2. COMMERCIAL LICENSE REQUIRED
+
+   Commercial use by teams of more than five (5) developers requires
+   a separate commercial license. Contact hello@codixing.com for
+   commercial licensing.
+
+3. RESTRICTIONS
+
+   You may NOT:
+   (a) Redistribute the Software as a standalone product;
+   (b) Offer the Software as a hosted service (SaaS) to third parties;
+   (c) Remove or alter this license notice from any copy of the Software.
+
+4. NO WARRANTY
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+   IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+   OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+   ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+   OTHER DEALINGS IN THE SOFTWARE.

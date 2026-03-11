@@ -527,4 +527,9 @@ cargo fmt --all
 
 ## License
 
-MIT
+Codixing Business Source License 1.0. Free for:
+- Open-source projects
+- Personal and educational use
+- Teams of 5 or fewer developers
+
+Commercial license required for larger teams. Contact [hello@codixing.com](mailto:hello@codixing.com).
