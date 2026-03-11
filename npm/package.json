@@ -1,0 +1,21 @@
+{
+  "name": "codixing-mcp",
+  "version": "0.12.0",
+  "description": "Code retrieval engine for AI agents — MCP server",
+  "bin": {
+    "codixing-mcp": "index.js"
+  },
+  "scripts": {
+    "postinstall": "node index.js --install"
+  },
+  "os": ["darwin", "linux"],
+  "cpu": ["x64", "arm64"],
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ferax564/codixing"
+  },
+  "keywords": ["mcp", "code-search", "ai", "claude", "cursor", "ast", "bm25"],
+  "homepage": "https://codixing.com",
+  "files": ["index.js", "package.json", "README.md"]
+}
