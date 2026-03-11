@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "codixing": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "codixing-mcp", "--root", "."]
+    }
+  }
+}
