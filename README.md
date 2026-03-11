@@ -120,18 +120,33 @@ The viewer reads from:
 
 ---
 
-## Claude Code Integration (MCP)
+## MCP Integration
 
-Codixing exposes all its tools via the [Model Context Protocol](https://modelcontextprotocol.io) — Claude Code picks them up automatically.
+Codixing exposes all its tools via the [Model Context Protocol](https://modelcontextprotocol.io) — any MCP-compatible client picks them up automatically.
 
-### Register once
+### Claude Code (one command)
 
 ```bash
-claude mcp add --scope user --transport stdio codixing \
-  -- /path/to/codixing-mcp --root /path/to/your/project
+claude mcp add codixing -- npx -y codixing-mcp --root .
 ```
 
-Or edit `~/.claude.json` directly:
+### Cursor / Windsurf / other MCP clients
+
+Add to your MCP configuration (`.mcp.json` or settings):
+
+```json
+{
+  "mcpServers": {
+    "codixing": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "codixing-mcp", "--root", "."]
+    }
+  }
+}
+```
+
+### From source (development)
 
 ```json
 {
@@ -144,6 +159,8 @@ Or edit `~/.claude.json` directly:
   }
 }
 ```
+
+See `mcp.json.example` for a template.
 
 ### Daemon mode (recommended)
 
