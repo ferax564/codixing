@@ -372,12 +372,12 @@ Symbol localization across 5 languages (BM25-only, no GPU needed):
 
 | Language | Repo | Tasks | Hit@1 | Hit@5 | Hit@10 |
 |----------|------|-------|-------|-------|--------|
-| Rust | tokio | 10 | 50% | 80% | 80% |
-| Python | django | 10 | 30% | 90% | 100% |
+| Rust | tokio | 10 | 50% | 80% | 90% |
+| Python | django | 10 | 80% | 100% | 100% |
 | Go | gin | 10 | 50% | 90% | 90% |
 | C++ | leveldb | 10 | 50% | 70% | 100% |
-| JavaScript | react | 10 | 10% | 50% | 70% |
-| **Overall** | **5 repos** | **50** | **38%** | **76%** | **88%** |
+| JavaScript | react | 10 | 70% | 90% | 100% |
+| **Overall** | **5 repos** | **50** | **60%** | **86%** | **96%** |
 
 14 languages supported with full AST parsing via tree-sitter. Run `python3 benchmarks/multilang_eval.py` to reproduce.
 
