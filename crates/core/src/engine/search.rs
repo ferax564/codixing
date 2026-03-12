@@ -17,6 +17,16 @@ impl Engine {
     /// - `Fast`    → BM25 + vector + RRF fusion (falls back to BM25 if no embedder)
     /// - `Thorough` → hybrid + MMR deduplication
     pub fn search(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
+        // Expand CamelCase/snake_case identifiers in the query for better BM25 matching
+        let query = if query.query != expand_query(&query.query) {
+            SearchQuery {
+                query: expand_query(&query.query),
+                ..query
+            }
+        } else {
+            query
+        };
+
         let mut results = match query.strategy {
             Strategy::Instant => {
                 let retriever = BM25Retriever::new(&self.tantivy);
@@ -497,6 +507,97 @@ fn is_identifier_like(s: &str) -> bool {
             .all(|c| c.is_alphanumeric() || c == '_' || c == ':' || c == '.')
 }
 
+/// Split a CamelCase or PascalCase identifier into lowercase words.
+/// E.g. "URLResolver" → ["url", "resolver"], "getServerSideProps" → ["get", "server", "side", "props"]
+fn split_identifier(s: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let chars: Vec<char> = s.chars().collect();
+
+    for i in 0..chars.len() {
+        let c = chars[i];
+        if c == '_' {
+            if !current.is_empty() {
+                parts.push(current.to_lowercase());
+                current.clear();
+            }
+            continue;
+        }
+        if c.is_uppercase() && i > 0 {
+            // Start new part if:
+            // - previous char was lowercase (e.g. "get|S" in getServerSideProps)
+            // - OR next char is lowercase and current accumulator has >1 char (e.g. "UR|L|Resolver" → "url" break before 'R')
+            let prev_lower = chars[i - 1].is_lowercase();
+            let next_lower = i + 1 < chars.len() && chars[i + 1].is_lowercase() && current.len() > 1;
+            if prev_lower || next_lower {
+                if !current.is_empty() {
+                    parts.push(current.to_lowercase());
+                    current.clear();
+                }
+            }
+        }
+        current.push(c);
+    }
+    if !current.is_empty() {
+        parts.push(current.to_lowercase());
+    }
+    parts
+}
+
+/// Expand a search query by splitting CamelCase/snake_case identifiers.
+/// Original terms are kept; split terms are appended as additional keywords.
+fn expand_query(query: &str) -> String {
+    let mut extra_terms: Vec<String> = Vec::new();
+    let existing_words: Vec<String> = query
+        .split_whitespace()
+        .map(|w| w.to_lowercase())
+        .collect();
+
+    for word in query.split_whitespace() {
+        // Only expand words that look like identifiers (>3 chars, alphanumeric+underscore)
+        if word.len() > 3 && word.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            let parts = split_identifier(word);
+            if parts.len() > 1 {
+                // Check if the word is CamelCase or snake_case and add the alternate form.
+                let has_uppercase = word.chars().any(|c| c.is_uppercase());
+                let has_underscore = word.contains('_');
+
+                if has_uppercase && !has_underscore {
+                    // CamelCase → add snake_case form (e.g. "URLResolver" → "url_resolver")
+                    let snake = parts.join("_");
+                    if !existing_words.contains(&snake) {
+                        extra_terms.push(snake);
+                    }
+                } else if has_underscore && !has_uppercase {
+                    // snake_case → add CamelCase form (e.g. "url_resolver" → "UrlResolver")
+                    let camel: String = parts
+                        .iter()
+                        .map(|p| {
+                            let mut c = p.chars();
+                            match c.next() {
+                                None => String::new(),
+                                Some(f) => f.to_uppercase().to_string() + c.as_str(),
+                            }
+                        })
+                        .collect();
+                    let camel_lower = camel.to_lowercase();
+                    if !existing_words.contains(&camel_lower) {
+                        extra_terms.push(camel);
+                    }
+                }
+
+            }
+        }
+    }
+
+    if extra_terms.is_empty() {
+        return query.to_string();
+    }
+
+    // Keep the original query prominent; append expansions
+    format!("{} {}", query, extra_terms.join(" "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -643,5 +744,45 @@ mod tests {
         assert!(!is_identifier_like("how does search work"));
         assert!(!is_identifier_like("find all callers"));
         assert!(!is_identifier_like(""));
+    }
+
+    #[test]
+    fn split_identifier_camel_case() {
+        assert_eq!(
+            split_identifier("getServerSideProps"),
+            vec!["get", "server", "side", "props"]
+        );
+        assert_eq!(split_identifier("URLResolver"), vec!["url", "resolver"]);
+        assert_eq!(
+            split_identifier("ReactFiberBeginWork"),
+            vec!["react", "fiber", "begin", "work"]
+        );
+        assert_eq!(split_identifier("simple"), vec!["simple"]);
+    }
+
+    #[test]
+    fn split_identifier_snake_case() {
+        assert_eq!(
+            split_identifier("get_server_side_props"),
+            vec!["get", "server", "side", "props"]
+        );
+        assert_eq!(split_identifier("url_resolver"), vec!["url", "resolver"]);
+    }
+
+    #[test]
+    fn expand_query_adds_split_terms() {
+        let expanded = expand_query("URLResolver match");
+        assert!(expanded.contains("URLResolver"));
+        assert!(expanded.contains("url_resolver")); // snake_case alternate
+    }
+
+    #[test]
+    fn expand_query_no_expansion_for_short_words() {
+        assert_eq!(expand_query("URL foo bar"), "URL foo bar");
+    }
+
+    #[test]
+    fn expand_query_preserves_plain_queries() {
+        assert_eq!(expand_query("simple query words"), "simple query words");
     }
 }
