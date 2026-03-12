@@ -17,7 +17,7 @@ impl Engine {
     /// - `Fast`    → BM25 + vector + RRF fusion (falls back to BM25 if no embedder)
     /// - `Thorough` → hybrid + MMR deduplication
     pub fn search(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
-        match query.strategy {
+        let mut results = match query.strategy {
             Strategy::Instant => {
                 let retriever = BM25Retriever::new(&self.tantivy);
                 let mut results = retriever.search(&query)?;
@@ -25,7 +25,7 @@ impl Engine {
                 // HashMap lookups and fixes the definition-vs-usage ranking issue.
                 self.apply_definition_boost(&mut results, &query.query);
                 self.apply_test_demotion(&mut results);
-                Ok(results)
+                results
             }
             Strategy::Fast => {
                 let mut results = if let (Some(emb), Some(vec_idx)) = (&self.embedder, &self.vector)
@@ -45,9 +45,9 @@ impl Engine {
                 self.apply_graph_boost(&mut results, self.config.graph.boost_weight);
                 self.apply_definition_boost(&mut results, &query.query);
                 self.apply_test_demotion(&mut results);
-                Ok(results)
+                results
             }
-            Strategy::Explore => self.search_explore(query),
+            Strategy::Explore => self.search_explore(query)?,
             Strategy::Thorough => {
                 let mut results = if let (Some(emb), Some(vec_idx)) = (&self.embedder, &self.vector)
                 {
@@ -92,10 +92,12 @@ impl Engine {
                 self.apply_graph_boost(&mut results, self.config.graph.boost_weight);
                 self.apply_definition_boost(&mut results, &query.query);
                 self.apply_test_demotion(&mut results);
-                Ok(results)
+                results
             }
-            Strategy::Deep => self.search_deep(query),
-        }
+            Strategy::Deep => self.search_deep(query)?,
+        };
+        dedup_overlapping(&mut results);
+        Ok(results)
     }
 
     /// Graph-expanded search (RepoHyper "Search-then-Expand" pattern).
@@ -240,7 +242,7 @@ impl Engine {
             return;
         }
 
-        const DEFINITION_BOOST: f32 = 1.5;
+        const DEFINITION_BOOST: f32 = 2.0;
         let mut boosted = false;
         for r in results.iter_mut() {
             if defining_files.contains(&r.file_path) {
@@ -267,7 +269,7 @@ impl Engine {
     /// Applied to concept/search queries, **not** to `search_usages` (where
     /// test call-sites are legitimate results).
     pub(super) fn apply_test_demotion(&self, results: &mut [SearchResult]) {
-        const TEST_DEMOTION: f32 = 0.7;
+        const TEST_DEMOTION: f32 = 0.5;
         let mut demoted = false;
         for r in results.iter_mut() {
             if is_test_file(&r.file_path) || is_test_chunk(r) {
@@ -281,6 +283,50 @@ impl Engine {
                     .partial_cmp(&a.score)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
+        }
+    }
+
+    /// Auto-detect the best search strategy based on query characteristics
+    /// and available engine capabilities (embedder, reranker).
+    ///
+    /// - Single identifier → `Instant` (BM25 is fastest for exact matches)
+    /// - Two identifiers → `Fast` (if embedder available) or `Instant`
+    /// - Natural language (3+ words) → `Thorough`/`Deep`/`Instant` depending on availability
+    pub fn detect_strategy(&self, query: &str) -> Strategy {
+        let trimmed = query.trim();
+        let words: Vec<&str> = trimmed.split_whitespace().collect();
+        let word_count = words.len();
+
+        // Single identifier → Instant (BM25)
+        if word_count == 1 && is_identifier_like(trimmed) {
+            return Strategy::Instant;
+        }
+
+        // Two identifiers (e.g. "IndexConfig new") → Fast or Instant
+        if word_count == 2 && words.iter().all(|w| is_identifier_like(w)) {
+            return if self.embedder.is_some() {
+                Strategy::Fast
+            } else {
+                Strategy::Instant
+            };
+        }
+
+        // Longer natural language queries → Thorough or Deep
+        if word_count >= 3 {
+            if self.reranker.is_some() {
+                return Strategy::Deep;
+            }
+            if self.embedder.is_some() {
+                return Strategy::Thorough;
+            }
+            return Strategy::Instant;
+        }
+
+        // Default fallback
+        if self.embedder.is_some() {
+            Strategy::Fast
+        } else {
+            Strategy::Instant
         }
     }
 
@@ -379,6 +425,27 @@ impl Engine {
     }
 }
 
+/// Remove results whose line ranges overlap with a higher-scored result from
+/// the same file.  Results arrive sorted by score descending, so the first
+/// result from an overlapping group is always the best.
+fn dedup_overlapping(results: &mut Vec<SearchResult>) {
+    if results.len() <= 1 {
+        return;
+    }
+    let mut deduped: Vec<SearchResult> = Vec::with_capacity(results.len());
+    for r in results.drain(..) {
+        let dominated = deduped.iter().any(|existing| {
+            existing.file_path == r.file_path
+                && existing.line_start < r.line_end
+                && r.line_start < existing.line_end
+        });
+        if !dominated {
+            deduped.push(r);
+        }
+    }
+    *results = deduped;
+}
+
 /// Detect inline test chunks by scope chain (e.g. Rust `#[cfg(test)] mod tests { }`).
 fn is_test_chunk(result: &SearchResult) -> bool {
     result
@@ -389,8 +456,13 @@ fn is_test_chunk(result: &SearchResult) -> bool {
 
 /// Detect test files by common path patterns across languages.
 fn is_test_file(path: &str) -> bool {
-    // Directory patterns: tests/, test/, __tests__/
-    if path.contains("/tests/") || path.contains("/test/") || path.contains("/__tests__/") {
+    // Directory patterns: tests/, test/, __tests__/, fixtures/, __fixtures__/
+    if path.contains("/tests/")
+        || path.contains("/test/")
+        || path.contains("/__tests__/")
+        || path.contains("/fixtures/")
+        || path.contains("/__fixtures__/")
+    {
         return true;
     }
     // Rust: *_test.rs
@@ -415,6 +487,14 @@ fn is_test_file(path: &str) -> bool {
         return true;
     }
     false
+}
+
+/// Check if a string looks like a code identifier (alphanumeric + underscores/colons/dots).
+fn is_identifier_like(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 80
+        && s.chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == ':' || c == '.')
 }
 
 #[cfg(test)]
@@ -477,5 +557,91 @@ mod tests {
         };
         assert!(is_test_chunk(&test_result));
         assert!(!is_test_chunk(&non_test_result));
+    }
+
+    #[test]
+    fn dedup_overlapping_removes_lower_scored_overlap() {
+        let mut results = vec![
+            SearchResult {
+                chunk_id: "1".into(),
+                file_path: "src/main.rs".into(),
+                language: "Rust".into(),
+                score: 10.0,
+                line_start: 0,
+                line_end: 20,
+                signature: "fn main()".into(),
+                scope_chain: vec![],
+                content: "fn main() {}".into(),
+            },
+            SearchResult {
+                chunk_id: "2".into(),
+                file_path: "src/main.rs".into(),
+                language: "Rust".into(),
+                score: 5.0,
+                line_start: 15,
+                line_end: 30,
+                signature: "fn helper()".into(),
+                scope_chain: vec![],
+                content: "fn helper() {}".into(),
+            },
+            SearchResult {
+                chunk_id: "3".into(),
+                file_path: "src/lib.rs".into(),
+                language: "Rust".into(),
+                score: 3.0,
+                line_start: 0,
+                line_end: 10,
+                signature: "fn lib_fn()".into(),
+                scope_chain: vec![],
+                content: "fn lib_fn() {}".into(),
+            },
+        ];
+        dedup_overlapping(&mut results);
+        // chunk 2 overlaps chunk 1 (same file, lines 15-30 overlaps 0-20)
+        // chunk 1 has higher score, so chunk 2 is removed
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].chunk_id, "1");
+        assert_eq!(results[1].chunk_id, "3");
+    }
+
+    #[test]
+    fn dedup_overlapping_keeps_non_overlapping() {
+        let mut results = vec![
+            SearchResult {
+                chunk_id: "1".into(),
+                file_path: "src/main.rs".into(),
+                language: "Rust".into(),
+                score: 10.0,
+                line_start: 0,
+                line_end: 20,
+                signature: String::new(),
+                scope_chain: vec![],
+                content: String::new(),
+            },
+            SearchResult {
+                chunk_id: "2".into(),
+                file_path: "src/main.rs".into(),
+                language: "Rust".into(),
+                score: 5.0,
+                line_start: 25,
+                line_end: 40,
+                signature: String::new(),
+                scope_chain: vec![],
+                content: String::new(),
+            },
+        ];
+        dedup_overlapping(&mut results);
+        assert_eq!(results.len(), 2, "non-overlapping results should be kept");
+    }
+
+    #[test]
+    fn is_identifier_like_detects_identifiers() {
+        assert!(is_identifier_like("Engine"));
+        assert!(is_identifier_like("compute_pagerank"));
+        assert!(is_identifier_like("std::io::Read"));
+        assert!(is_identifier_like("BM25Retriever"));
+        assert!(!is_identifier_like("how does search work"));
+        assert!(!is_identifier_like("find all callers"));
+        assert!(!is_identifier_like(""));
     }
 }

@@ -4,22 +4,22 @@
     "tasks": 10,
     "hit1": 5,
     "hit5": 8,
-    "hit10": 8,
+    "hit10": 9,
     "hit1_pct": 50.0,
     "hit5_pct": 80.0,
-    "hit10_pct": 80.0,
-    "index_time": 0.7945102190133184
+    "hit10_pct": 90.0,
+    "index_time": 0.7601327750016935
   },
   "django": {
     "lang": "Python",
     "tasks": 10,
-    "hit1": 3,
-    "hit5": 9,
+    "hit1": 8,
+    "hit5": 10,
     "hit10": 10,
-    "hit1_pct": 30.0,
-    "hit5_pct": 90.0,
+    "hit1_pct": 80.0,
+    "hit5_pct": 100.0,
     "hit10_pct": 100.0,
-    "index_time": 2.4255776229838375
+    "index_time": 2.310506579990033
   },
   "gin": {
     "lang": "Go",
@@ -30,7 +30,7 @@
     "hit1_pct": 50.0,
     "hit5_pct": 90.0,
     "hit10_pct": 90.0,
-    "index_time": 0.17393019399605691
+    "index_time": 0.16986988100688905
   },
   "leveldb": {
     "lang": "C++",
@@ -41,17 +41,17 @@
     "hit1_pct": 50.0,
     "hit5_pct": 70.0,
     "hit10_pct": 100.0,
-    "index_time": 0.1741550530132372
+    "index_time": 0.17902383900946006
   },
   "react": {
     "lang": "JavaScript",
     "tasks": 10,
-    "hit1": 1,
-    "hit5": 5,
-    "hit10": 7,
-    "hit1_pct": 10.0,
-    "hit5_pct": 50.0,
-    "hit10_pct": 70.0,
-    "index_time": 4.368534217996057
+    "hit1": 7,
+    "hit5": 9,
+    "hit10": 10,
+    "hit1_pct": 70.0,
+    "hit5_pct": 90.0,
+    "hit10_pct": 100.0,
+    "index_time": 4.174496590974741
   }
 }
