@@ -529,11 +529,9 @@ fn split_identifier(s: &str) -> Vec<String> {
             // - OR next char is lowercase and current accumulator has >1 char (e.g. "UR|L|Resolver" → "url" break before 'R')
             let prev_lower = chars[i - 1].is_lowercase();
             let next_lower = i + 1 < chars.len() && chars[i + 1].is_lowercase() && current.len() > 1;
-            if prev_lower || next_lower {
-                if !current.is_empty() {
-                    parts.push(current.to_lowercase());
-                    current.clear();
-                }
+            if (prev_lower || next_lower) && !current.is_empty() {
+                parts.push(current.to_lowercase());
+                current.clear();
             }
         }
         current.push(c);

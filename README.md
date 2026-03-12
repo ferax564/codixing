@@ -358,9 +358,9 @@ By category:
 | Metric | grep | Codixing | Improvement |
 |--------|------|----------|-------------|
 | Recall@1 | 14.7% | **48.0%** | **+227%** |
-| Recall@5 | 41.3% | **71.0%** | **+72%** |
-| Recall@10 | 54.7% | **74.3%** | **+36%** |
-| Contains GT | 64.7% | **75.3%** | **+16%** |
+| Recall@5 | 41.3% | **71.3%** | **+73%** |
+| Recall@10 | 54.7% | **74.7%** | **+37%** |
+| Contains GT | 64.7% | **75.7%** | **+17%** |
 
 Multi-strategy BM25 search with SweRankEmbed-Small outline reranking, query extraction, score-weighted ranking, and usage-based file coverage. No LLM needed — pure retrieval + lightweight embedding.
 
@@ -372,12 +372,12 @@ Symbol localization across 5 languages (BM25-only, no GPU needed):
 
 | Language | Repo | Tasks | Hit@1 | Hit@5 | Hit@10 |
 |----------|------|-------|-------|-------|--------|
-| Rust | tokio | 10 | 50% | 80% | 90% |
+| Rust | tokio | 10 | 50% | 90% | 100% |
 | Python | django | 10 | 80% | 100% | 100% |
 | Go | gin | 10 | 50% | 90% | 90% |
-| C++ | leveldb | 10 | 50% | 70% | 100% |
-| JavaScript | react | 10 | 70% | 90% | 100% |
-| **Overall** | **5 repos** | **50** | **60%** | **86%** | **96%** |
+| C++ | leveldb | 10 | 40% | 70% | 100% |
+| JavaScript | react | 10 | 60% | 90% | 100% |
+| **Overall** | **5 repos** | **50** | **56%** | **88%** | **98%** |
 
 14 languages supported with full AST parsing via tree-sitter. Run `python3 benchmarks/multilang_eval.py` to reproduce.
 
@@ -408,7 +408,7 @@ codixing init . --model snowflake-arctic-l
 ## Key Features
 
 - **AST-aware chunking** — Tree-sitter parsing across 10 language families; never splits a function in half
-- **BM25 full-text search** — Tantivy-backed with a custom code tokenizer; `signature` field ×3.0 and `entity_names` ×2.0 field boosts ensure definitions rank above mentions
+- **BM25 full-text search** — Tantivy-backed with a custom code tokenizer; `signature` field ×3.0 and `entity_names` ×2.0 field boosts ensure definitions rank above mentions; automatic CamelCase↔snake_case query expansion for cross-convention matching
 - **Hybrid retrieval** — BM25 + vector (fastembed BGE-Base-EN-v1.5, 768 dims) fused with asymmetric Reciprocal Rank Fusion; identifier queries route BM25-dominant, natural language routes vector-dominant
 - **Code dependency graph** — Import + call extraction for all 10 languages, petgraph `DiGraph`, PageRank scoring; transparently boosts search result ranking
 - **Band merging** — Adjacent same-file result chunks within 3 lines are merged before rendering; reduces token output by 25–91% on typical codebases
