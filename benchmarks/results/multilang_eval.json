@@ -3,12 +3,12 @@
     "lang": "Rust",
     "tasks": 10,
     "hit1": 5,
-    "hit5": 8,
-    "hit10": 9,
+    "hit5": 9,
+    "hit10": 10,
     "hit1_pct": 50.0,
-    "hit5_pct": 80.0,
-    "hit10_pct": 90.0,
-    "index_time": 0.7601327750016935
+    "hit5_pct": 90.0,
+    "hit10_pct": 100.0,
+    "index_time": 1.1903914819995407
   },
   "django": {
     "lang": "Python",
@@ -19,7 +19,7 @@
     "hit1_pct": 80.0,
     "hit5_pct": 100.0,
     "hit10_pct": 100.0,
-    "index_time": 2.310506579990033
+    "index_time": 3.5990440949972253
   },
   "gin": {
     "lang": "Go",
@@ -30,28 +30,28 @@
     "hit1_pct": 50.0,
     "hit5_pct": 90.0,
     "hit10_pct": 90.0,
-    "index_time": 0.16986988100688905
+    "index_time": 0.17040506700868718
   },
   "leveldb": {
     "lang": "C++",
     "tasks": 10,
-    "hit1": 5,
+    "hit1": 4,
     "hit5": 7,
     "hit10": 10,
-    "hit1_pct": 50.0,
+    "hit1_pct": 40.0,
     "hit5_pct": 70.0,
     "hit10_pct": 100.0,
-    "index_time": 0.17902383900946006
+    "index_time": 0.18045484201866202
   },
   "react": {
     "lang": "JavaScript",
     "tasks": 10,
-    "hit1": 7,
+    "hit1": 6,
     "hit5": 9,
     "hit10": 10,
-    "hit1_pct": 70.0,
+    "hit1_pct": 60.0,
     "hit5_pct": 90.0,
     "hit10_pct": 100.0,
-    "index_time": 4.174496590974741
+    "index_time": 6.674372388981283
   }
 }

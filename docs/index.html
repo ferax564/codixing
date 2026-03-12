@@ -1323,11 +1323,11 @@
               <div style="color:var(--text-muted);font-size:0.85rem">Recall@1<br><span style="font-size:0.8em">vs grep 14.7%</span></div>
             </div>
             <div>
-              <div style="font-size:2rem;font-weight:700;color:var(--cyan)">71.0%</div>
+              <div style="font-size:2rem;font-weight:700;color:var(--cyan)">71.3%</div>
               <div style="color:var(--text-muted);font-size:0.85rem">Recall@5<br><span style="font-size:0.8em">vs grep 41.3%</span></div>
             </div>
             <div>
-              <div style="font-size:2rem;font-weight:700;color:var(--cyan)">74.3%</div>
+              <div style="font-size:2rem;font-weight:700;color:var(--cyan)">74.7%</div>
               <div style="color:var(--text-muted);font-size:0.85rem">Recall@10<br><span style="font-size:0.8em">vs grep 54.7%</span></div>
             </div>
           </div>
@@ -1338,7 +1338,7 @@
           <p style="margin-top:8px">Symbol localization across 5 languages, 50 queries (BM25-only, no GPU):</p>
           <div style="margin-top:16px;display:grid;grid-template-columns:repeat(5,1fr);gap:12px;text-align:center">
             <div>
-              <div style="font-size:1.5rem;font-weight:700;color:var(--cyan)">80%</div>
+              <div style="font-size:1.5rem;font-weight:700;color:var(--cyan)">90%</div>
               <div style="color:var(--text-muted);font-size:0.82rem">Rust<br><span style="font-size:0.8em">Hit@5</span></div>
             </div>
             <div>
@@ -1416,8 +1416,8 @@
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3H6a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3h12a3 3 0 0 0 3-3 3 3 0 0 0-3-3z"/></svg>
           </div>
           <h3>Hybrid retrieval</h3>
-          <p>BM25 + BGE-Base-EN vector fusion with Reciprocal Rank Fusion. Five strategy levels from <code style="color:var(--cyan);font-size:0.85em">instant</code> to <code style="color:var(--cyan);font-size:0.85em">deep</code> cross-encoder reranking.</p>
-          <span class="feature-tag">RRF &bull; MMR &bull; Asymmetric routing</span>
+          <p>BM25 + vector fusion with Reciprocal Rank Fusion and automatic CamelCase&#x2194;snake_case query expansion. Four strategy levels from <code style="color:var(--cyan);font-size:0.85em">instant</code> to <code style="color:var(--cyan);font-size:0.85em">thorough</code> MMR dedup.</p>
+          <span class="feature-tag">RRF &bull; MMR &bull; Query expansion</span>
         </div>
         <div class="feature-card" style="--delay:0.14s">
           <div class="feature-icon orange">
