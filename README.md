@@ -357,12 +357,12 @@ By category:
 
 | Metric | grep | Codixing | Improvement |
 |--------|------|----------|-------------|
-| Recall@1 | 14.7% | **48.0%** | **+227%** |
-| Recall@5 | 41.3% | **71.3%** | **+73%** |
-| Recall@10 | 54.7% | **74.7%** | **+37%** |
-| Contains GT | 64.7% | **75.7%** | **+17%** |
+| Recall@1 | 14.7% | **48.7%** | **+231%** |
+| Recall@5 | 41.3% | **74.3%** | **+80%** |
+| Recall@10 | 54.7% | **77.3%** | **+41%** |
+| Contains GT | 64.7% | **78.7%** | **+22%** |
 
-Multi-strategy BM25 search with SweRankEmbed-Small outline reranking, query extraction, score-weighted ranking, and usage-based file coverage. No LLM needed — pure retrieval + lightweight embedding.
+Multi-strategy BM25 search with SweRankEmbed-Small outline reranking, automatic CamelCase↔snake_case query expansion, score-weighted ranking, and usage-based file coverage. No LLM needed — pure retrieval + lightweight embedding.
 
 Run `python3 benchmarks/swe_bench_eval.py --skip-clone` to reproduce (requires `datasets` package).
 

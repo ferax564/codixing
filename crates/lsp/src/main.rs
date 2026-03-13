@@ -1,6 +1,6 @@
 //! Codixing LSP server — hover, go-to-definition, references, workspace symbols,
 //! document sync, live reindex on save, cyclomatic complexity diagnostics,
-//! code actions, inlay hints, and completions.
+//! code actions, inlay hints, completions, and signature help.
 //!
 //! # Usage
 //!
@@ -62,6 +62,11 @@ impl LanguageServer for CodixingBackend {
                 inlay_hint_provider: Some(OneOf::Left(true)),
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(vec![".".to_string(), ":".to_string()]),
+                    ..Default::default()
+                }),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+                    retrigger_characters: Some(vec![",".to_string()]),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -520,6 +525,64 @@ impl LanguageServer for CodixingBackend {
             Ok(Some(CompletionResponse::Array(items)))
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Signature help — show function parameters on "("
+    // -----------------------------------------------------------------------
+    async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
+        // Find the function name being called by scanning back from the cursor.
+        let fn_name = self.function_name_before_paren(&params.text_document_position_params);
+        let fn_name = match fn_name {
+            Some(n) => n,
+            None => return Ok(None),
+        };
+
+        let engine = self.engine.read().unwrap();
+        let sym = match self.best_symbol(
+            &engine,
+            &fn_name,
+            &params.text_document_position_params.text_document.uri,
+        ) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        let signature_text = sym
+            .signature
+            .as_ref()
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("{}()", sym.name));
+
+        // Extract parameter names from the signature.
+        let params_list = extract_parameters(&signature_text);
+        let parameters: Vec<ParameterInformation> = params_list
+            .iter()
+            .map(|p| ParameterInformation {
+                label: ParameterLabel::Simple(p.clone()),
+                documentation: None,
+            })
+            .collect();
+
+        // Determine active parameter from comma count before cursor.
+        let active_param = self
+            .count_commas_before_cursor(&params.text_document_position_params)
+            .unwrap_or(0);
+
+        Ok(Some(SignatureHelp {
+            signatures: vec![SignatureInformation {
+                label: signature_text,
+                documentation: Some(Documentation::String(format!(
+                    "Defined in {} [L{}-L{}]",
+                    sym.file_path, sym.line_start, sym.line_end
+                ))),
+                parameters: Some(parameters),
+                active_parameter: Some(active_param),
+            }],
+            active_signature: Some(0),
+            active_parameter: Some(active_param),
+        }))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -566,6 +629,86 @@ impl CodixingBackend {
 
         // Fall back to first substring match.
         all.into_iter().next()
+    }
+
+    /// Collect the text before the cursor, joining with previous lines for
+    /// multi-line call support.  Returns up to 5 preceding lines concatenated.
+    fn text_before_cursor(&self, pos: &TextDocumentPositionParams) -> Option<String> {
+        let content = {
+            let docs = self.open_docs.lock().unwrap();
+            docs.get(&pos.text_document.uri).cloned()
+        };
+        let content = content.or_else(|| {
+            let path = pos.text_document.uri.to_file_path().ok()?;
+            std::fs::read_to_string(path).ok()
+        })?;
+
+        let lines: Vec<&str> = content.lines().collect();
+        let cur_line = pos.position.line as usize;
+        if cur_line >= lines.len() {
+            return None;
+        }
+        let col = (pos.position.character as usize).min(lines[cur_line].len());
+        // Join up to 5 preceding lines to handle multi-line calls.
+        let start_line = cur_line.saturating_sub(5);
+        let mut buf = String::new();
+        for item in lines.iter().take(cur_line).skip(start_line) {
+            buf.push_str(item);
+            buf.push(' '); // collapse newlines to spaces
+        }
+        buf.push_str(&lines[cur_line][..col]);
+        Some(buf)
+    }
+
+    /// Find the unmatched open-paren scanning backwards (depth-aware), then
+    /// extract the identifier before it.  Handles `outer(inner(a, b), c|)`.
+    fn function_name_before_paren(&self, pos: &TextDocumentPositionParams) -> Option<String> {
+        let before = self.text_before_cursor(pos)?;
+
+        // Scan backwards to find the unmatched '(' (depth 0).
+        let paren_idx = find_unmatched_open_paren(&before)?;
+        let before_paren = before[..paren_idx].trim_end();
+        if before_paren.is_empty() {
+            return None;
+        }
+
+        // Extract the last identifier-like token before the paren.
+        let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let bytes = before_paren.as_bytes();
+        let end = bytes.len();
+        let start = (0..end)
+            .rev()
+            .find(|&i| !is_ident(bytes[i]))
+            .map_or(0, |i| i + 1);
+
+        let name = &before_paren[start..end];
+        if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        }
+    }
+
+    /// Count the number of commas between the enclosing open paren and the
+    /// cursor, skipping nested parens/brackets.
+    fn count_commas_before_cursor(&self, pos: &TextDocumentPositionParams) -> Option<u32> {
+        let before = self.text_before_cursor(pos)?;
+
+        let paren_idx = find_unmatched_open_paren(&before)?;
+        let inside = &before[paren_idx + 1..];
+
+        // Count commas at depth 0 (skip nested parens/brackets).
+        let mut depth = 0i32;
+        let mut commas = 0u32;
+        for ch in inside.chars() {
+            match ch {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth -= 1,
+                ',' if depth == 0 => commas += 1,
+                _ => {}
+            }
+        }
+        Some(commas)
     }
 
     /// Extract the identifier prefix up to (but not past) the cursor position.
@@ -746,6 +889,91 @@ fn prefix_at_position(content: &str, position: Position) -> Option<String> {
     } else {
         Some(prefix.to_string())
     }
+}
+
+/// Extract parameter strings from a function signature like "fn foo(a: i32, b: &str) -> bool".
+fn extract_parameters(signature: &str) -> Vec<String> {
+    // Find the first '(' and matching ')'.
+    let open = match signature.find('(') {
+        Some(i) => i,
+        None => return vec![],
+    };
+    let mut depth = 0i32;
+    let mut close = signature.len();
+    for (i, ch) in signature[open..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = open + i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let inside = &signature[open + 1..close];
+    if inside.trim().is_empty() {
+        return vec![];
+    }
+    // Split by ',' at depth 0.
+    // Handle `->` as a non-bracket token so it doesn't decrement depth.
+    let mut params = Vec::new();
+    let mut depth = 0i32;
+    let mut start = 0;
+    let bytes = inside.as_bytes();
+    for (i, ch) in inside.char_indices() {
+        match ch {
+            '(' | '<' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            '>' => {
+                // Only decrement for '>' if not preceded by '-' (i.e. skip '->')
+                if i == 0 || bytes[i - 1] != b'-' {
+                    depth -= 1;
+                }
+            }
+            ',' if depth == 0 => {
+                let p = inside[start..i].trim();
+                if !p.is_empty() {
+                    params.push(p.to_string());
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    let last = inside[start..].trim();
+    if !last.is_empty() {
+        params.push(last.to_string());
+    }
+    // Filter out `self` / `&self` / `&mut self`.
+    params.retain(|p| !p.contains("self"));
+    params
+}
+
+/// Find the position of the unmatched open-paren scanning backwards.
+/// For `outer(inner(a, b), c|)` returns the position of `(` after `outer`.
+fn find_unmatched_open_paren(text: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, ch) in text.char_indices().rev() {
+        match ch {
+            ')' | ']' | '}' => depth += 1,
+            '(' => {
+                if depth == 0 {
+                    return Some(i);
+                }
+                depth -= 1;
+            }
+            '[' | '{' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn kind_to_completion_kind(kind: EntityKind) -> CompletionItemKind {
@@ -947,6 +1175,68 @@ mod tests {
             kind_to_completion_kind(EntityKind::Trait),
             CompletionItemKind::INTERFACE
         );
+    }
+
+    // -- extract_parameters --------------------------------------------------
+
+    #[test]
+    fn extract_params_from_rust_fn() {
+        let params = extract_parameters("pub fn search(query: &str, limit: usize) -> Vec<Result>");
+        assert_eq!(params, vec!["query: &str", "limit: usize"]);
+    }
+
+    #[test]
+    fn extract_params_filters_self() {
+        let params =
+            extract_parameters("pub fn apply_boost(&mut self, results: &mut [SearchResult])");
+        assert_eq!(params, vec!["results: &mut [SearchResult]"]);
+    }
+
+    #[test]
+    fn extract_params_empty_parens() {
+        let params = extract_parameters("fn main()");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn extract_params_nested_generics() {
+        let params = extract_parameters("fn foo(map: HashMap<String, Vec<u8>>, count: usize)");
+        assert_eq!(
+            params,
+            vec!["map: HashMap<String, Vec<u8>>", "count: usize"]
+        );
+    }
+
+    #[test]
+    fn extract_params_with_arrow_return_type() {
+        // The `->` should NOT be treated as a closing bracket.
+        let params = extract_parameters("fn bar(x: i32, f: fn(i32) -> bool)");
+        assert_eq!(params, vec!["x: i32", "f: fn(i32) -> bool"]);
+    }
+
+    // -- find_unmatched_open_paren -------------------------------------------
+
+    #[test]
+    fn unmatched_paren_simple() {
+        assert_eq!(find_unmatched_open_paren("foo(a, b"), Some(3));
+    }
+
+    #[test]
+    fn unmatched_paren_nested() {
+        // outer(inner(a, b), c  — cursor after c
+        let text = "outer(inner(a, b), c";
+        assert_eq!(find_unmatched_open_paren(text), Some(5));
+    }
+
+    #[test]
+    fn unmatched_paren_nested_closed() {
+        // outer(inner(a, b), c)  — all parens matched
+        assert_eq!(find_unmatched_open_paren("outer(inner(a, b), c)"), None);
+    }
+
+    #[test]
+    fn unmatched_paren_no_paren() {
+        assert_eq!(find_unmatched_open_paren("hello world"), None);
     }
 }
 

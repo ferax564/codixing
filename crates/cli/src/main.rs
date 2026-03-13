@@ -66,13 +66,18 @@ enum Command {
         #[arg(short, long)]
         file: Option<String>,
 
-        /// Retrieval strategy: instant (BM25 only), fast (hybrid, default), thorough (hybrid+MMR).
-        #[arg(long, default_value = "fast")]
+        /// Retrieval strategy: auto (detect from query, default), instant (BM25 only),
+        /// fast (hybrid), thorough (hybrid+MMR), explore (graph), deep (reranker).
+        #[arg(long, default_value = "auto")]
         strategy: StrategyArg,
 
         /// Print formatted context block (token-budget aware).
         #[arg(long)]
         format: bool,
+
+        /// Output results as JSON (one object per result).
+        #[arg(long)]
+        json: bool,
 
         /// Token budget for formatted output (implies --format).
         #[arg(long)]
@@ -214,6 +219,8 @@ enum Command {
 /// Clap-parseable strategy argument.
 #[derive(Debug, Clone, clap::ValueEnum)]
 enum StrategyArg {
+    /// Auto-detect based on query characteristics and available capabilities.
+    Auto,
     Instant,
     Fast,
     Thorough,
@@ -224,9 +231,11 @@ enum StrategyArg {
     Deep,
 }
 
-impl From<StrategyArg> for Strategy {
-    fn from(s: StrategyArg) -> Self {
-        match s {
+impl StrategyArg {
+    /// Resolve this argument to a concrete [`Strategy`], using auto-detection when `Auto`.
+    fn resolve(self, engine: &Engine, query: &str) -> Strategy {
+        match self {
+            StrategyArg::Auto => engine.detect_strategy(query),
             StrategyArg::Instant => Strategy::Instant,
             StrategyArg::Fast => Strategy::Fast,
             StrategyArg::Thorough => Strategy::Thorough,
@@ -262,6 +271,7 @@ async fn main() -> Result<()> {
             file,
             strategy,
             format,
+            json,
             token_budget,
         } => cmd_search(
             query,
@@ -269,6 +279,7 @@ async fn main() -> Result<()> {
             file,
             strategy,
             format || token_budget.is_some(),
+            json,
             token_budget,
         ),
         Command::Symbols { filter, file } => cmd_symbols(filter, file),
@@ -390,6 +401,7 @@ fn cmd_search(
     file: Option<String>,
     strategy: StrategyArg,
     format: bool,
+    json: bool,
     token_budget: Option<usize>,
 ) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
@@ -400,9 +412,10 @@ fn cmd_search(
         )
     })?;
 
+    let resolved_strategy = strategy.resolve(&engine, &query);
     let mut sq = SearchQuery::new(&query)
         .with_limit(limit)
-        .with_strategy(strategy.into());
+        .with_strategy(resolved_strategy);
     if let Some(ref f) = file {
         sq = sq.with_file_filter(f);
     }
@@ -420,6 +433,28 @@ fn cmd_search(
     if format {
         let ctx = engine.format_results(&results, token_budget);
         print!("{ctx}");
+        return Ok(());
+    }
+
+    if json {
+        let json_results: Vec<serde_json::Value> = results
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "file": r.file_path,
+                    "line_start": r.line_start,
+                    "line_end": r.line_end,
+                    "language": r.language,
+                    "score": r.score,
+                    "signature": r.signature,
+                    "content": r.content,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json_results).unwrap_or_default()
+        );
         return Ok(());
     }
 

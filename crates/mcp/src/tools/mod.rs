@@ -29,7 +29,7 @@ pub fn tool_definitions() -> Value {
                     "strategy": {
                         "type": "string",
                         "enum": ["instant", "fast", "thorough", "explore", "deep"],
-                        "description": "Retrieval strategy: 'instant'=BM25 only (fastest), 'fast'=hybrid BM25+vector (default), 'thorough'=hybrid+MMR deduplication, 'explore'=BM25 + graph expansion (best for architectural investigation), 'deep'=hybrid first-pass then BGE-Reranker cross-encoder re-scoring (highest precision, requires reranker_enabled=true in config)"
+                        "description": "Retrieval strategy. Omit to auto-detect from query: single identifiers use 'instant' (BM25), multi-word uses 'fast'/'thorough'. Explicit options: 'instant'=BM25 only (fastest), 'fast'=hybrid BM25+vector, 'thorough'=hybrid+MMR deduplication, 'explore'=BM25 + graph expansion, 'deep'=hybrid + reranker"
                     },
                     "limit": {
                         "type": "integer",
@@ -143,7 +143,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "explain",
-            "description": "Assemble a complete understanding package for a named symbol: its definition source, the dependency graph for its containing file (what imports it, what it imports), and the top call sites from the index. Ideal first step before modifying any significant function or class.",
+            "description": "Assemble a complete understanding package for a named symbol: its definition source, the top usage sites found via BM25 search (callers), and functions it calls (callees extracted from source). Ideal first step before modifying any significant function or class.",
             "inputSchema": { "type": "object", "properties": { "symbol": { "type": "string", "description": "Symbol name to explain (e.g. 'compute_pagerank', 'BM25Retriever')" }, "file": { "type": "string", "description": "Optional file path to disambiguate" } }, "required": ["symbol"] }
         },
         {
@@ -210,6 +210,32 @@ pub fn tool_definitions() -> Value {
             "name": "generate_onboarding",
             "description": "Assemble index statistics, language breakdown, top files by PageRank, and a token-budgeted repository map, then write the result to .codixing/ONBOARDING.md. Run once after indexing a new project.",
             "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        {
+            "name": "git_diff",
+            "description": "Show git diff output for the indexed project. Shows unstaged working tree changes by default. Useful for reviewing pending changes, creating commit messages, or understanding recent modifications.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "commit": {
+                        "type": "string",
+                        "description": "Compare against this commit/ref (e.g. 'HEAD~1', 'main', 'abc123'). Default: compare working tree against index (unstaged changes)."
+                    },
+                    "staged": {
+                        "type": "boolean",
+                        "description": "Show staged (cached) changes instead of unstaged. Default: false."
+                    },
+                    "file": {
+                        "type": "string",
+                        "description": "Restrict diff to a specific file path."
+                    },
+                    "stat_only": {
+                        "type": "boolean",
+                        "description": "Show only file names and line count summary, not full patch. Default: false."
+                    }
+                },
+                "required": []
+            }
         }
     ])
 }
@@ -256,6 +282,7 @@ pub fn dispatch_tool(engine: &mut Engine, name: &str, args: &Value) -> (String, 
         "get_complexity" => analysis::call_get_complexity(engine, args),
         "review_context" => analysis::call_review_context(engine, args),
         "generate_onboarding" => analysis::call_generate_onboarding(engine),
+        "git_diff" => files::call_git_diff(engine, args),
         _ => (format!("Unknown tool: {name}"), true),
     }
 }

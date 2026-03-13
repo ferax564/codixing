@@ -14,10 +14,11 @@ pub(crate) fn call_code_search(engine: &mut Engine, args: &Value) -> (String, bo
 
     let strategy = match args.get("strategy").and_then(|v| v.as_str()) {
         Some("instant") => Strategy::Instant,
+        Some("fast") => Strategy::Fast,
         Some("thorough") => Strategy::Thorough,
         Some("explore") => Strategy::Explore,
         Some("deep") => Strategy::Deep,
-        _ => Strategy::Fast,
+        _ => engine.detect_strategy(&query_str),
     };
 
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
@@ -232,15 +233,34 @@ pub(crate) fn call_explain(engine: &mut Engine, args: &Value) -> (String, bool) 
     let syms = engine.symbols(&symbol, file_hint).unwrap_or_default();
     let def_file = syms.first().map(|s| s.file_path.clone());
 
-    let (callers, callees) = if let Some(ref f) = def_file {
-        let c_in = engine.callers(f);
-        let c_out = engine.callees(f);
-        (c_in, c_out)
-    } else {
-        (vec![], vec![])
-    };
+    // Find actual call sites via BM25 search (symbol-level, not file-level).
+    let usages = engine.search_usages(&symbol, 8).unwrap_or_default();
 
-    let usages = engine.search_usages(&symbol, 5).unwrap_or_default();
+    // Extract callees from the symbol's source code (functions it calls).
+    let callees: Vec<String> = {
+        let call_pattern = regex::Regex::new(r"\b([a-z_][a-zA-Z0-9_]*)\s*\(").unwrap();
+        let keywords: std::collections::HashSet<&str> = [
+            "if", "while", "for", "loop", "match", "return", "let", "use", "fn", "pub", "mod",
+            "struct", "enum", "impl", "trait", "type",
+        ]
+        .iter()
+        .copied()
+        .collect();
+        call_pattern
+            .captures_iter(&definition)
+            .filter_map(|cap| {
+                let name = cap.get(1)?.as_str().to_string();
+                if keywords.contains(name.as_str()) || name == symbol {
+                    None
+                } else {
+                    Some(name)
+                }
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .take(10)
+            .collect()
+    };
 
     let mut out = format!("## Explanation: `{symbol}`\n\n");
 
@@ -252,26 +272,25 @@ pub(crate) fn call_explain(engine: &mut Engine, args: &Value) -> (String, bool) 
         out.push_str(&format!("**Defined in:** `{f}`\n\n"));
     }
 
-    if !callers.is_empty() {
-        out.push_str("### Files that import the defining file\n");
-        for c in callers.iter().take(8) {
-            out.push_str(&format!("  - {c}\n"));
+    if !usages.is_empty() {
+        out.push_str(&format!("### Callers ({} usage sites)\n", usages.len()));
+        for u in &usages {
+            out.push_str(&format!("  - `{}` L{}", u.file_path, u.line_start));
+            if !u.signature.is_empty() {
+                out.push_str(&format!("  \u{2014} {}", u.signature));
+            }
+            out.push('\n');
         }
         out.push('\n');
     }
 
     if !callees.is_empty() {
-        out.push_str("### Files imported by the defining file\n");
-        for c in callees.iter().take(8) {
-            out.push_str(&format!("  - {c}\n"));
-        }
-        out.push('\n');
-    }
-
-    if !usages.is_empty() {
-        out.push_str(&format!("### Top {} usage sites\n", usages.len()));
-        for u in &usages {
-            out.push_str(&format!("  - `{}` L{}\n", u.file_path, u.line_start));
+        out.push_str(&format!(
+            "### Callees ({} functions called)\n",
+            callees.len()
+        ));
+        for c in &callees {
+            out.push_str(&format!("  - `{c}`\n"));
         }
     }
 
