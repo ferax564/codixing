@@ -1,0 +1,193 @@
+[
+  {
+    "task_id": "swe-django-1",
+    "repo": "django",
+    "title": "QuerySet.count() issues with annotations",
+    "grep_files_found": [
+      "django/db/models/sql/query.py",
+      "django/db/models/query.py"
+    ],
+    "grep_symbols_found": [],
+    "grep_file_score": 1.0,
+    "grep_symbol_score": 0.0,
+    "grep_bytes": 51743,
+    "grep_calls": 8,
+    "grep_ms": 457,
+    "cdx_files_found": [
+      "django/db/models/sql/query.py",
+      "django/db/models/query.py"
+    ],
+    "cdx_symbols_found": [
+      "get_count"
+    ],
+    "cdx_file_score": 1.0,
+    "cdx_symbol_score": 0.5,
+    "cdx_bytes": 7119,
+    "cdx_calls": 2,
+    "cdx_ms": 253
+  },
+  {
+    "task_id": "swe-django-2",
+    "repo": "django",
+    "title": "CSRF middleware breaks with async views",
+    "grep_files_found": [
+      "django/middleware/csrf.py"
+    ],
+    "grep_symbols_found": [],
+    "grep_file_score": 1.0,
+    "grep_symbol_score": 0.0,
+    "grep_bytes": 21427,
+    "grep_calls": 8,
+    "grep_ms": 474,
+    "cdx_files_found": [
+      "django/middleware/csrf.py"
+    ],
+    "cdx_symbols_found": [
+      "process_view"
+    ],
+    "cdx_file_score": 1.0,
+    "cdx_symbol_score": 0.3333333333333333,
+    "cdx_bytes": 7135,
+    "cdx_calls": 2,
+    "cdx_ms": 251
+  },
+  {
+    "task_id": "swe-django-3",
+    "repo": "django",
+    "title": "Migration squashing loses RunPython operations",
+    "grep_files_found": [
+      "django/db/migrations/optimizer.py",
+      "django/core/management/commands/squashmigrations.py"
+    ],
+    "grep_symbols_found": [
+      "optimize"
+    ],
+    "grep_file_score": 1.0,
+    "grep_symbol_score": 0.3333333333333333,
+    "grep_bytes": 77250,
+    "grep_calls": 8,
+    "grep_ms": 478,
+    "cdx_files_found": [
+      "django/db/migrations/optimizer.py",
+      "django/core/management/commands/squashmigrations.py"
+    ],
+    "cdx_symbols_found": [
+      "MigrationOptimizer",
+      "optimize",
+      "reduce"
+    ],
+    "cdx_file_score": 1.0,
+    "cdx_symbol_score": 1.0,
+    "cdx_bytes": 5648,
+    "cdx_calls": 2,
+    "cdx_ms": 254
+  },
+  {
+    "task_id": "swe-tokio-1",
+    "repo": "tokio",
+    "title": "Task budget unfairness in multi-threaded runtime",
+    "grep_files_found": [
+      "tokio/src/runtime/scheduler/multi_thread/worker.rs"
+    ],
+    "grep_symbols_found": [
+      "budget"
+    ],
+    "grep_file_score": 1.0,
+    "grep_symbol_score": 0.3333333333333333,
+    "grep_bytes": 31263,
+    "grep_calls": 8,
+    "grep_ms": 85,
+    "cdx_files_found": [
+      "tokio/src/runtime/scheduler/multi_thread/worker.rs"
+    ],
+    "cdx_symbols_found": [
+      "run_task",
+      "steal",
+      "budget"
+    ],
+    "cdx_file_score": 1.0,
+    "cdx_symbol_score": 1.0,
+    "cdx_bytes": 4647,
+    "cdx_calls": 2,
+    "cdx_ms": 63
+  },
+  {
+    "task_id": "swe-tokio-2",
+    "repo": "tokio",
+    "title": "select! macro doesn't properly drop futures",
+    "grep_files_found": [
+      "tokio/src/macros/select.rs"
+    ],
+    "grep_symbols_found": [
+      "select"
+    ],
+    "grep_file_score": 1.0,
+    "grep_symbol_score": 1.0,
+    "grep_bytes": 38341,
+    "grep_calls": 8,
+    "grep_ms": 87,
+    "cdx_files_found": [
+      "tokio/src/macros/select.rs"
+    ],
+    "cdx_symbols_found": [
+      "select"
+    ],
+    "cdx_file_score": 1.0,
+    "cdx_symbol_score": 1.0,
+    "cdx_bytes": 5374,
+    "cdx_calls": 2,
+    "cdx_ms": 64
+  },
+  {
+    "task_id": "swe-react-1",
+    "repo": "react",
+    "title": "useEffect cleanup runs after component unmount with Suspense",
+    "grep_files_found": [
+      "packages/react-reconciler/src/ReactFiberCommitWork.js"
+    ],
+    "grep_symbols_found": [],
+    "grep_file_score": 1.0,
+    "grep_symbol_score": 0.0,
+    "grep_bytes": 346629,
+    "grep_calls": 8,
+    "grep_ms": 347,
+    "cdx_files_found": [
+      "packages/react-reconciler/src/ReactFiberCommitWork.js"
+    ],
+    "cdx_symbols_found": [
+      "commitPassiveUnmountEffects"
+    ],
+    "cdx_file_score": 1.0,
+    "cdx_symbol_score": 0.5,
+    "cdx_bytes": 6120,
+    "cdx_calls": 2,
+    "cdx_ms": 180
+  },
+  {
+    "task_id": "swe-react-2",
+    "repo": "react",
+    "title": "Hydration mismatch with useId in streaming SSR",
+    "grep_files_found": [
+      "packages/react-dom/src/server/ReactDOMFizzServerNode.js",
+      "packages/react-reconciler/src/ReactFiberHooks.js"
+    ],
+    "grep_symbols_found": [],
+    "grep_file_score": 1.0,
+    "grep_symbol_score": 0.0,
+    "grep_bytes": 102135,
+    "grep_calls": 7,
+    "grep_ms": 308,
+    "cdx_files_found": [
+      "packages/react-dom/src/server/ReactDOMFizzServerNode.js",
+      "packages/react-reconciler/src/ReactFiberHooks.js"
+    ],
+    "cdx_symbols_found": [
+      "useId"
+    ],
+    "cdx_file_score": 1.0,
+    "cdx_symbol_score": 0.3333333333333333,
+    "cdx_bytes": 6222,
+    "cdx_calls": 2,
+    "cdx_ms": 189
+  }
+]

@@ -82,9 +82,39 @@ def checkout_commit(repo_path: Path, commit: str) -> bool:
     return result.returncode == 0
 
 
+def _is_test_file(path: str) -> bool:
+    """Check if a file path looks like a test file."""
+    return "/test" in path or path.startswith("tests/") or path.startswith("test/") or path.split("/")[-1].startswith("test_")
+
+
+def _list_py_files(repo_path: Path) -> list[str]:
+    """List all non-test .py files in a repo, relative paths."""
+    import subprocess as sp
+    result = sp.run(
+        ["find", ".", "-name", "*.py",
+         "-not", "-path", "*/.git/*",
+         "-not", "-path", "*/.codixing/*",
+         "-not", "-path", "*/__pycache__/*",
+         "-not", "-path", "*/node_modules/*"],
+        capture_output=True, timeout=30, cwd=str(repo_path),
+    )
+    files = []
+    for line in result.stdout.decode(errors="replace").strip().split("\n"):
+        f = line.strip().lstrip("./")
+        if f and f.endswith(".py") and not _is_test_file(f):
+            files.append(f)
+    return sorted(files)
+
+
 SEARCH_STRATEGY = None  # Set via --strategy CLI flag (None = default/auto)
 EMBED_MODEL = None  # SweRankEmbed or other embedding model for reranking
 EMBED_MODEL_NAME = None  # Model name string
+CE_RERANKER = None  # Cross-encoder reranker model
+CE_RERANKER_NAME = None  # Cross-encoder model name
+EMBED_RETRIEVE_NAME = None  # Model name for full file retrieval
+EMBED_RETRIEVE_MODEL = None  # Loaded model instance
+EMBED_CACHE_DIR = ROOT / "benchmarks" / "embed_cache"
+EMBED_ALPHA = 2.0  # Weight for embed retrieval in RRF fusion
 
 
 def index_repo(repo_path: Path) -> tuple[int, bool]:
@@ -325,6 +355,150 @@ def get_embed_model():
 
 
 
+def get_ce_reranker():
+    """Lazily initialize the cross-encoder reranker model."""
+    global CE_RERANKER
+    if CE_RERANKER is None and CE_RERANKER_NAME:
+        from sentence_transformers import CrossEncoder
+        print(f"  [ce-rerank] Loading {CE_RERANKER_NAME}...", flush=True)
+        CE_RERANKER = CrossEncoder(CE_RERANKER_NAME, trust_remote_code=True)
+        print(f"  [ce-rerank] Ready.", flush=True)
+    return CE_RERANKER
+
+
+def get_embed_retrieve_model():
+    """Lazily initialize the embedding retrieval model."""
+    global EMBED_RETRIEVE_MODEL
+    if EMBED_RETRIEVE_MODEL is None and EMBED_RETRIEVE_NAME:
+        from sentence_transformers import SentenceTransformer
+        print(f"  [embed-retrieve] Loading {EMBED_RETRIEVE_NAME}...", flush=True)
+        EMBED_RETRIEVE_MODEL = SentenceTransformer(EMBED_RETRIEVE_NAME, trust_remote_code=True)
+        EMBED_RETRIEVE_MODEL.max_seq_length = 512  # Truncate for CPU speed
+        print(f"  [embed-retrieve] Ready ({EMBED_RETRIEVE_MODEL.get_sentence_embedding_dimension()}d, max_seq=512).", flush=True)
+    return EMBED_RETRIEVE_MODEL
+
+
+def _file_content_hash(content: bytes) -> str:
+    """Short hash of file content for cache key."""
+    import hashlib
+    return hashlib.sha256(content).hexdigest()[:16]
+
+
+def _get_cached_embeddings(
+    repo_path: Path, repo_name: str, files: list[str]
+) -> tuple[list[str], "np.ndarray"]:
+    """Load or compute embeddings for all files. Returns (file_list, embeddings_matrix).
+
+    Cache is stored per-repo in EMBED_CACHE_DIR/<repo_name>/<content_hash>.npy.
+    Files whose content hash is already cached are loaded from disk; the rest
+    are batch-encoded with SweRankEmbed and cached.
+    """
+    import numpy as np
+
+    model = get_embed_retrieve_model()
+    if model is None:
+        return [], np.array([])
+
+    cache_dir = EMBED_CACHE_DIR / repo_name
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    valid_files = []
+    embeddings = []
+    to_encode = []  # (index_in_valid, content_text)
+
+    for fp in files:
+        full_path = repo_path / fp
+        try:
+            content_bytes = full_path.read_bytes()
+        except OSError:
+            continue
+
+        chash = _file_content_hash(content_bytes)
+        cache_path = cache_dir / f"{chash}.npy"
+        valid_files.append(fp)
+
+        if cache_path.exists():
+            emb = np.load(cache_path)
+            embeddings.append(emb)
+        else:
+            embeddings.append(None)
+            content_text = content_bytes.decode(errors="replace")[:8000]  # ~2K tokens
+            to_encode.append((len(valid_files) - 1, content_text, chash))
+
+    # Batch encode uncached files
+    if to_encode:
+        texts = [text for _, text, _ in to_encode]
+        encoded = model.encode(texts, batch_size=8, normalize_embeddings=True,
+                               show_progress_bar=len(texts) > 100)
+        for j, (idx, _, chash) in enumerate(to_encode):
+            emb = encoded[j]
+            embeddings[idx] = emb
+            np.save(cache_dir / f"{chash}.npy", emb)
+
+    if not embeddings or all(e is None for e in embeddings):
+        return [], np.array([])
+
+    return valid_files, np.stack(embeddings)
+
+
+def embed_retrieve_files(
+    repo_path: Path, repo_name: str, query: str, files: list[str], top_k: int = 20
+) -> list[tuple[str, float]]:
+    """Full-file embedding retrieval: encode all files, rank by cosine similarity.
+
+    Unlike embed_rerank_files() which only scores outlines of BM25's top-20,
+    this scores ALL non-test .py files in the repo against the query.
+    """
+    import numpy as np
+
+    model = get_embed_retrieve_model()
+    if model is None or not files:
+        return []
+
+    valid_files, file_embs = _get_cached_embeddings(repo_path, repo_name, files)
+    if len(valid_files) == 0:
+        return []
+
+    q_emb = model.encode([query], prompt_name="query", normalize_embeddings=True)
+    scores = (q_emb @ file_embs.T)[0]
+
+    scored = sorted(zip(valid_files, scores.tolist()), key=lambda x: -x[1])
+    return scored[:top_k]
+
+
+def ce_rerank_files(
+    repo_path: Path, query: str, files: list[str], top_k: int = 10
+) -> list[tuple[str, float]]:
+    """Cross-encoder reranking: score (query, file_outline) pairs jointly.
+
+    Uses a code-aware cross-encoder (e.g. GTE-Reranker-ModernBERT-Base) that
+    has been evaluated on code retrieval benchmarks (COIR).
+    """
+    model = get_ce_reranker()
+    if model is None or not files:
+        return [(f, 0.0) for f in files]
+
+    # Build (query, outline) pairs
+    pairs = []
+    valid_files = []
+    for fp in files[:top_k]:
+        full_path = repo_path / fp
+        if full_path.exists():
+            outline = extract_file_outline(full_path, fp)
+            pairs.append((query[:1500], outline))
+            valid_files.append(fp)
+        else:
+            valid_files.append(fp)
+            pairs.append((query[:1500], fp))
+
+    # Score all pairs at once
+    scores = model.predict(pairs)
+
+    scored = list(zip(valid_files, scores.tolist()))
+    scored.sort(key=lambda x: -x[1])
+    return scored
+
+
 def extract_functions_from_file(file_path: Path, rel_path: str) -> list[tuple[str, str]]:
     """Extract functions/methods from a Python file using AST.
 
@@ -465,7 +639,7 @@ def embed_rerank_files(
 
 
 
-def search_codixing_multi(repo_path: Path, problem: str) -> list[str]:
+def search_codixing_multi(repo_path: Path, problem: str, repo_name: str = "") -> list[str]:
     """Multi-strategy Codixing search combining chunk-level + file-level results.
 
     Runs multiple queries and merges results using score-weighted ranking.
@@ -510,7 +684,8 @@ def search_codixing_multi(repo_path: Path, problem: str) -> list[str]:
                 candidate = "/".join(parts[i:])
                 if (repo_path / candidate).exists():
                     seen_tb.add(basename)
-                    file_scores[candidate] += 70.0
+                    boost = 20.0 if _is_test_file(candidate) else 70.0
+                    file_scores[candidate] += boost
                     break
         else:
             # Fallback: find by basename
@@ -545,21 +720,31 @@ def search_codixing_multi(repo_path: Path, problem: str) -> list[str]:
         r"\b(\w[\w/]*\.(?:py|rs|js|ts|go|java|rb|cpp|c|h))\b", problem
     )
     seen_fm = set()
+    # Common names that appear in hundreds of files — skip them
+    common_basenames = {"models.py", "__init__.py", "views.py", "forms.py", "admin.py", "urls.py", "apps.py", "utils.py"}
     for fm in file_mentions[:10]:
         basename = fm.split("/")[-1]
         if basename in seen_fm or basename in ("setup.py", "manage.py", "conftest.py"):
             continue
+        if basename in common_basenames:
+            continue  # Too ambiguous — hundreds of matches
         seen_fm.add(basename)
         # Find actual files matching this basename
         find_result = subprocess.run(
             ["find", ".", "-name", basename, "-not", "-path", "*/.codixing/*"],
             capture_output=True, timeout=5, cwd=str(repo_path),
         )
-        for line in find_result.stdout.decode(errors="replace").strip().split("\n"):
-            fp = line.strip().lstrip("./")
-            if fp and fp.endswith(".py"):
-                # Strong boost for file name mentioned in problem
-                file_scores[fp] += 80.0
+        matches = [
+            line.strip().lstrip("./")
+            for line in find_result.stdout.decode(errors="replace").strip().split("\n")
+            if line.strip() and line.strip().lstrip("./").endswith(".py")
+        ]
+        if len(matches) > 10:
+            continue  # Too many matches — not discriminative
+        for fp in matches:
+            # Strong boost, but reduce for test files
+            boost = 20.0 if _is_test_file(fp) else 80.0
+            file_scores[fp] += boost
 
     # ── Dotted module path → file path mapping ──
     # e.g., "django.db.models.fields" → "django/db/models/fields.py" or "__init__.py"
@@ -637,8 +822,8 @@ def search_codixing_multi(repo_path: Path, problem: str) -> list[str]:
     ranked = sorted(file_scores.items(), key=lambda x: -x[1])
 
     # Separate non-test and test files
-    non_test = [(f, s) for f, s in ranked if "/test" not in f and "/tests/" not in f]
-    test_files = [(f, s) for f, s in ranked if "/test" in f or "/tests/" in f]
+    non_test = [(f, s) for f, s in ranked if not _is_test_file(f)]
+    test_files = [(f, s) for f, s in ranked if _is_test_file(f)]
 
     # Interleave: non-test files first, then test files
     final = [f for f, _ in non_test] + [f for f, _ in test_files]
@@ -648,7 +833,7 @@ def search_codixing_multi(repo_path: Path, problem: str) -> list[str]:
         # Use full problem statement (model was trained on full issue text)
         rerank_query = problem
         # Only embed non-test files
-        non_test_final = [f for f in final[:20] if "/test" not in f and not f.split("/")[-1].startswith("test_")]
+        non_test_final = [f for f in final[:20] if not _is_test_file(f)]
         embed_ranked = embed_rerank_files(repo_path, rerank_query, non_test_final, top_k=20)
 
         # Weighted RRF fusion: embed gets 2x weight over BM25
@@ -668,6 +853,47 @@ def search_codixing_multi(repo_path: Path, problem: str) -> list[str]:
             if f not in seen:
                 final.append(f)
                 seen.add(f)
+
+    # ── Optional: full-file embedding retrieval ──
+    if EMBED_RETRIEVE_NAME:
+        all_py_files = _list_py_files(repo_path)
+        if all_py_files:
+            embed_results = embed_retrieve_files(
+                repo_path, repo_name, problem, all_py_files, top_k=20
+            )
+            if embed_results:
+                bm25_rank = {f: i for i, f in enumerate(final[:20])}
+                embed_rank = {f: i for i, (f, _) in enumerate(embed_results)}
+                k = 60
+                rrf_scores = {}
+                all_candidates = set(list(bm25_rank.keys()) + list(embed_rank.keys()))
+                for f in all_candidates:
+                    bm25_rrf = 1.0 / (k + bm25_rank.get(f, 100))
+                    embed_rrf = 1.0 / (k + embed_rank.get(f, 100))
+                    rrf_scores[f] = bm25_rrf + EMBED_ALPHA * embed_rrf
+                fused = sorted(rrf_scores.keys(), key=lambda f: -rrf_scores[f])
+                if EMBED_ALPHA >= 100:
+                    # Standalone mode: only embed results, no BM25
+                    final = [f for f, _ in embed_results]
+                else:
+                    seen = set(fused)
+                    for f in final:
+                        if f not in seen:
+                            fused.append(f)
+                            seen.add(f)
+                    final = fused
+
+    # ── Optional: cross-encoder reranking (currently disabled — hurts R@1) ──
+    # GTE-Reranker-ModernBERT-Base and ms-marco-MiniLM both degrade performance.
+    # Cross-encoders trained on text relevance don't transfer to code localization.
+    if CE_RERANKER_NAME and final:
+        rerank_query = problem
+        top_non_test = [f for f in final[:5] if not _is_test_file(f)]
+        if len(top_non_test) >= 2:
+            ce_ranked = ce_rerank_files(repo_path, rerank_query, top_non_test, top_k=5)
+            ce_order = [f for f, _ in ce_ranked]
+            rest = [f for f in final if f not in set(ce_order)]
+            final = ce_order + rest
 
     return final[:20]
 
@@ -742,11 +968,26 @@ def main():
         metavar="MODEL",
         help="Embedding model for file reranking (e.g. Salesforce/SweRankEmbed-Small)",
     )
+    parser.add_argument(
+        "--ce-rerank",
+        metavar="MODEL",
+        help="Cross-encoder model for reranking (e.g. Alibaba-NLP/gte-reranker-modernbert-base)",
+    )
+    parser.add_argument(
+        "--embed-retrieve",
+        metavar="MODEL",
+        help="Embedding model for full-file retrieval (e.g. Salesforce/SweRankEmbed-Small)",
+    )
+    parser.add_argument("--embed-alpha", type=float, default=2.0,
+                        help="Weight for embed retrieval in RRF fusion (default: 2.0)")
     args = parser.parse_args()
 
-    global SEARCH_STRATEGY, EMBED_MODEL_NAME
+    global SEARCH_STRATEGY, EMBED_MODEL_NAME, CE_RERANKER_NAME, EMBED_RETRIEVE_NAME, EMBED_ALPHA
     SEARCH_STRATEGY = args.strategy
     EMBED_MODEL_NAME = args.embed_rerank
+    CE_RERANKER_NAME = args.ce_rerank
+    EMBED_RETRIEVE_NAME = args.embed_retrieve
+    EMBED_ALPHA = args.embed_alpha
 
     if not CODIXING.exists():
         print(f"ERROR: codixing binary not found at {CODIXING}")
@@ -812,7 +1053,7 @@ def main():
             repo_cache[cache_key] = idx_ms
 
         # Multi-strategy Codixing search: multiple queries + usages
-        cdx_files = search_codixing_multi(repo_path, problem)
+        cdx_files = search_codixing_multi(repo_path, problem, repo_name=name)
 
         # Compute codixing metrics
         cdx_r1 = recall_at_k(cdx_files, gold, 1)

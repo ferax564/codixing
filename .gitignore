@@ -17,6 +17,9 @@
 # Test / benchmark data
 data/*.redb
 
+# Benchmark cloned repos (large, not committed)
+benchmarks/repos/
+
 # Internal tooling and working files
 .playwright-mcp/
 GTM_Strategy.md
@@ -41,3 +44,10 @@ Thumbs.db
 # Environment
 .env
 .env.local
+benchmarks/swe_bench_repos/
+
+# Benchmark caches and models (large, generated at runtime)
+benchmarks/embed_cache/
+benchmarks/models/
+benchmarks/reranker_data/
+benchmarks/__pycache__/
