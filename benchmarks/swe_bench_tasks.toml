@@ -1,0 +1,107 @@
+# SWE-bench inspired tasks
+# Based on real GitHub issues from these repos.
+# Each task simulates what an AI agent needs to do to localize and fix a bug.
+#
+# Scoring:
+#   - found_file: Did the search find the correct file? (1 point)
+#   - found_function: Did it find the correct function? (1 point)
+#   - total_context: How many bytes of context were consumed? (lower is better)
+#
+# These are modeled after SWE-bench "localization" — the step where the agent
+# identifies which files and functions need modification.
+
+# ═══════════════════════════════════════════════════════════════════════
+# DJANGO — Real GitHub issue patterns
+# ═══════════════════════════════════════════════════════════════════════
+
+[[task]]
+repo = "django"
+id = "swe-django-1"
+title = "QuerySet.count() issues with annotations"
+issue_text = "When using .annotate() followed by .count(), the generated SQL includes unnecessary GROUP BY clauses that slow down the query."
+expected_files = ["django/db/models/sql/query.py", "django/db/models/query.py"]
+expected_symbols = ["get_count", "get_aggregation"]
+search_queries = [
+    "QuerySet count annotation GROUP BY SQL",
+    "get_count aggregation query",
+]
+
+[[task]]
+repo = "django"
+id = "swe-django-2"
+title = "CSRF middleware breaks with async views"
+issue_text = "CsrfViewMiddleware raises a 403 Forbidden error when used with async views because it tries to access request.POST synchronously."
+expected_files = ["django/middleware/csrf.py"]
+expected_symbols = ["CsrfViewMiddleware", "process_view", "_check_token"]
+search_queries = [
+    "CSRF middleware async view request POST",
+    "CsrfViewMiddleware process_view",
+]
+
+[[task]]
+repo = "django"
+id = "swe-django-3"
+title = "Migration squashing loses RunPython operations"
+issue_text = "When squashing migrations, RunPython operations with elidable=False are incorrectly dropped if they appear between two CreateModel operations."
+expected_files = ["django/db/migrations/optimizer.py", "django/core/management/commands/squashmigrations.py"]
+expected_symbols = ["MigrationOptimizer", "optimize", "reduce"]
+search_queries = [
+    "migration squash optimize RunPython elidable",
+    "MigrationOptimizer reduce operations",
+]
+
+# ═══════════════════════════════════════════════════════════════════════
+# TOKIO — Async runtime issues
+# ═══════════════════════════════════════════════════════════════════════
+
+[[task]]
+repo = "tokio"
+id = "swe-tokio-1"
+title = "Task budget unfairness in multi-threaded runtime"
+issue_text = "Under heavy load, some worker threads get starved because the task budget mechanism doesn't account for cross-thread task stealing properly."
+expected_files = ["tokio/src/runtime/scheduler/multi_thread/worker.rs"]
+expected_symbols = ["run_task", "steal", "budget"]
+search_queries = [
+    "worker thread task budget steal fairness",
+    "multi_thread worker run_task budget",
+]
+
+[[task]]
+repo = "tokio"
+id = "swe-tokio-2"
+title = "select! macro doesn't properly drop futures"
+issue_text = "When using tokio::select! with multiple branches, the non-selected futures are not properly dropped, causing resource leaks in some cases."
+expected_files = ["tokio/src/macros/select.rs"]
+expected_symbols = ["select"]
+search_queries = [
+    "select macro future drop branch",
+    "select! drop non-selected futures",
+]
+
+# ═══════════════════════════════════════════════════════════════════════
+# REACT — UI framework issues
+# ═══════════════════════════════════════════════════════════════════════
+
+[[task]]
+repo = "react"
+id = "swe-react-1"
+title = "useEffect cleanup runs after component unmount with Suspense"
+issue_text = "When a component wrapped in Suspense is unmounted, the useEffect cleanup function runs after the component has already been removed from the DOM, causing errors when accessing refs."
+expected_files = ["packages/react-reconciler/src/ReactFiberCommitWork.js"]
+expected_symbols = ["commitPassiveUnmountEffects", "commitHookEffectListUnmount"]
+search_queries = [
+    "useEffect cleanup unmount Suspense",
+    "commitPassiveUnmountEffects hook cleanup",
+]
+
+[[task]]
+repo = "react"
+id = "swe-react-2"
+title = "Hydration mismatch with useId in streaming SSR"
+issue_text = "When using useId with streaming SSR (renderToPipeableStream), the generated IDs don't match between server and client when components are wrapped in Suspense boundaries."
+expected_files = ["packages/react-dom/src/server/ReactDOMFizzServerNode.js", "packages/react-reconciler/src/ReactFiberHooks.js"]
+expected_symbols = ["useId", "mountId", "renderToPipeableStream"]
+search_queries = [
+    "useId hydration mismatch streaming SSR",
+    "mountId server client Suspense streaming",
+]
