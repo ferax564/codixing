@@ -869,6 +869,12 @@ Sync complete in 0.12s</span></code></pre>
         <div class="pre-label">shell</div>
         <pre><code>codixing-mcp --root /path/to/project --daemon</code></pre>
 
+        <h3>Session tracking</h3>
+        <p>The MCP server tracks agent interactions (file reads, edits, symbol lookups, searches) and uses them to boost search relevance. Recently-touched files rank higher, and graph neighbors of active files receive propagated boosts. After 5+ interactions in the same directory, <strong>progressive focus</strong> automatically narrows search results.</p>
+        <div class="pre-label">shell</div>
+        <pre><code><span class="tok-comment"># Disable session tracking (for benchmarking or privacy)</span>
+codixing-mcp --root /path/to/project --no-session</code></pre>
+
         <h3>Auto-init</h3>
         <p>If no index exists at <code>--root</code>, the MCP server automatically runs <code>init --no-embeddings</code> before serving the first request. No manual setup required when connecting from Claude Code.</p>
 
@@ -878,8 +884,8 @@ Sync complete in 0.12s</span></code></pre>
 
       <!-- MCP Tools -->
       <section class="doc-section" id="mcp-tools">
-        <h2>MCP — Tools Reference (32 tools)</h2>
-        <p>All tools are called via JSON-RPC 2.0 <code>tools/call</code> with a <code>name</code> and <code>arguments</code> object. Write tools (<code>write_file</code>, <code>edit_file</code>, <code>delete_file</code>) automatically reindex after every operation. Intelligence tools expose the call graph, impact analysis, context stitching, complexity metrics, persistent memory, test discovery, duplicate detection, PR review context, and project onboarding generation.</p>
+        <h2>MCP — Tools Reference (34 tools)</h2>
+        <p>All tools are called via JSON-RPC 2.0 <code>tools/call</code> with a <code>name</code> and <code>arguments</code> object. Write tools (<code>write_file</code>, <code>edit_file</code>, <code>delete_file</code>) automatically reindex after every operation. Intelligence tools expose the call graph, impact analysis, context stitching, complexity metrics, persistent memory, test discovery, duplicate detection, PR review context, and project onboarding generation. Session tools track agent interactions and provide context-aware retrieval boosting.</p>
 
         <div class="tool-card">
           <div class="tool-header">
@@ -1352,6 +1358,32 @@ Sync complete in 0.12s</span></code></pre>
           </div>
           <div class="tool-body">
             <p>Assembles index statistics, language breakdown, top files by PageRank, and a token-budgeted repository map, then writes the result to <code>.codixing/ONBOARDING.md</code>. Run once after indexing a new project to produce a living reference document.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{}  <span class="tok-comment">// no parameters required</span></code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#a78bfa">get_session_summary</span>
+            <span class="tool-desc">Structured session activity summary</span>
+          </div>
+          <div class="tool-body">
+            <p>Returns a structured summary of the current session: files read/edited, symbols explored, and searches performed, grouped by directory/module. Useful for understanding what the agent has been working on and for orienting after context window compression.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"token_budget"</span>: <span class="tok-num">1500</span>  <span class="tok-comment">// optional, default: 1500</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#a78bfa">session_reset_focus</span>
+            <span class="tool-desc">Clear progressive focus narrowing</span>
+          </div>
+          <div class="tool-body">
+            <p>Clears the progressive focus that automatically narrows search results to the most-interacted directory. Use when switching to a different part of the codebase. The focus will re-establish itself after 5+ interactions in a new directory.</p>
             <div class="pre-label">parameters</div>
             <pre><code>{}  <span class="tok-comment">// no parameters required</span></code></pre>
           </div>

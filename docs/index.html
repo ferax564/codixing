@@ -1070,7 +1070,7 @@
     <div class="hero">
       <div class="hero-badge">
         <span class="badge-dot"></span>
-        Rust-native &bull; 244 tests &bull; MCP-ready
+        Rust-native &bull; 286 tests &bull; MCP-ready
       </div>
       <h1>Code retrieval<br><span class="grad">built for AI agents</span></h1>
       <p class="hero-sub">
@@ -1301,11 +1301,19 @@
         </div>
         <div class="feature-card" style="--delay:0.28s">
           <div class="feature-icon green">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#3fb950" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+          </div>
+          <h3>Session-aware retrieval</h3>
+          <p>Tracks agent reads, edits, and lookups. Recently-touched files rank higher and graph neighbors get propagated boosts. Progressive focus auto-narrows after repeated interaction.</p>
+          <span class="feature-tag">Session boost &bull; Graph propagation &bull; Progressive focus</span>
+        </div>
+        <div class="feature-card" style="--delay:0.35s">
+          <div class="feature-icon green">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#3fb950" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 17h6M17 14v6"/><path d="M7 10v4M10 7h4M17 10v4"/></svg>
           </div>
           <h3>MCP-ready</h3>
-          <p>10 JSON-RPC 2.0 tools exposed for Claude Code and any MCP-capable client. Auto-registers in <code style="color:var(--cyan);font-size:0.85em">~/.claude.json</code> via VS Code extension.</p>
-          <span class="feature-tag">10 tools &bull; stdin/stdout &bull; Unix socket</span>
+          <p>34 JSON-RPC 2.0 tools exposed for Claude Code and any MCP-capable client. Auto-registers in <code style="color:var(--cyan);font-size:0.85em">~/.claude.json</code> via VS Code extension.</p>
+          <span class="feature-tag">34 tools &bull; stdin/stdout &bull; Unix socket</span>
         </div>
         <div class="feature-card" style="--delay:0.35s">
           <div class="feature-icon pink">
@@ -1325,48 +1333,56 @@
       <div class="mcp-layout">
         <div>
           <div class="section-label reveal">MCP Integration</div>
-          <h2 class="section-title reveal">10 tools for<br>your AI agent</h2>
-          <p class="section-sub reveal">Codixing exposes retrieval, symbols, graph traversal, file reading, and diagnostics over the Model Context Protocol.</p>
+          <h2 class="section-title reveal">34 tools for<br>your AI agent</h2>
+          <p class="section-sub reveal">Codixing exposes retrieval, symbols, graph traversal, file editing, session intelligence, and diagnostics over the Model Context Protocol.</p>
           <div class="tools-grid reveal">
             <div class="tool-card">
               <div class="tool-name">code_search</div>
-              <div class="tool-desc">Bounded hybrid search across all strategies</div>
+              <div class="tool-desc">Session-boosted hybrid search across all strategies</div>
             </div>
             <div class="tool-card">
               <div class="tool-name">find_symbol</div>
               <div class="tool-desc">Case-insensitive definition lookup</div>
             </div>
             <div class="tool-card">
-              <div class="tool-name">read_symbol</div>
-              <div class="tool-desc">Full source of any symbol by name</div>
+              <div class="tool-name">explain</div>
+              <div class="tool-desc">Definition + deps + usages + session context</div>
             </div>
             <div class="tool-card">
-              <div class="tool-name">get_repo_map</div>
-              <div class="tool-desc">Token-budgeted PageRank architecture map</div>
+              <div class="tool-name">predict_impact</div>
+              <div class="tool-desc">Blast-radius analysis from a diff</div>
             </div>
             <div class="tool-card">
-              <div class="tool-name">get_references</div>
-              <div class="tool-desc">Callers + callees for any file</div>
+              <div class="tool-name">stitch_context</div>
+              <div class="tool-desc">Cross-file context in one call</div>
             </div>
             <div class="tool-card">
-              <div class="tool-name">get_transitive_deps</div>
-              <div class="tool-desc">Blast-radius multi-hop traversal</div>
+              <div class="tool-name">review_context</div>
+              <div class="tool-desc">Code review context from a diff</div>
             </div>
             <div class="tool-card">
-              <div class="tool-name">search_usages</div>
-              <div class="tool-desc">All usage locations for a symbol</div>
+              <div class="tool-name">get_session_summary</div>
+              <div class="tool-desc">Session activity grouped by module</div>
             </div>
             <div class="tool-card">
-              <div class="tool-name">grep_code</div>
-              <div class="tool-desc">Regex/literal search with context lines</div>
+              <div class="tool-name">session_reset_focus</div>
+              <div class="tool-desc">Clear progressive focus narrowing</div>
             </div>
             <div class="tool-card">
-              <div class="tool-name">read_file</div>
-              <div class="tool-desc">Raw source with optional line range</div>
+              <div class="tool-name">remember / recall</div>
+              <div class="tool-desc">Persistent cross-session memory store</div>
             </div>
             <div class="tool-card">
-              <div class="tool-name">index_status</div>
-              <div class="tool-desc">Diagnostic report with full index stats</div>
+              <div class="tool-name">write_file / edit_file</div>
+              <div class="tool-desc">Write or edit with auto-reindex</div>
+            </div>
+            <div class="tool-card">
+              <div class="tool-name">get_complexity</div>
+              <div class="tool-desc">Cyclomatic complexity per function</div>
+            </div>
+            <div class="tool-card">
+              <div class="tool-name">+22 more</div>
+              <div class="tool-desc">grep, read, outline, rename, tests, deps&hellip;</div>
             </div>
           </div>
         </div>
