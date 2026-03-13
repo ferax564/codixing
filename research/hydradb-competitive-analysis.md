@@ -74,10 +74,27 @@ Based on their published research paper ("Hydra DB: Beyond Context Windows for L
 4. **Research credibility** — published academic paper to establish technical legitimacy
 5. **Social proof via funding announcement** — used the $6.5M raise as a narrative event ("kill vector databases") to generate viral distribution on X and LinkedIn
 
-### Pricing (Inferred)
-- **No public pricing page found** — likely usage-based or enterprise sales
-- Free development tier (no credit card required)
-- Likely a self-serve → sales-assisted pipeline similar to other infra companies (Pinecone, Supabase pattern)
+### Pricing (Actual — from hydradb.com/pricing)
+
+Billing options: **Monthly** or **Yearly (20% off)**. Monthly prices shown below.
+
+| Plan | Price | Tenants | Tokens | Rate Limits | Support | Self-Host |
+|---|---|---|---|---|---|---|
+| **Ship** | **$249/mo** | Up to 5 | Up to 10M stored/mo | 10× higher | Standard | No |
+| **Surge** | **$1,000/mo** | Up to 5 | Up to 10M stored/mo | 10× higher | Standard | No |
+| **Scale** ⭐ Popular | **$5,000/mo** | Unlimited | Unlimited | — | Dedicated Slack + advisory | Yes (option) |
+
+All plans include **unlimited users**.
+
+#### Pricing Analysis
+
+- **No free tier on the pricing page** — "no credit card for development" likely means a sandbox/trial, not a permanent free plan
+- **High floor ($249/mo)** — signals enterprise/mid-market positioning, not indie developer PLG
+- **4× jump from Ship to Surge ($249 → $1,000)** with seemingly identical feature limits — the differentiation is likely in rate limits or unlisted features (throughput, latency SLAs)
+- **Scale at $5,000/mo** unlocks the real enterprise features: unlimited everything, self-hosting option, and dedicated support
+- **Yearly discount (20%)** — standard SaaS retention play, brings Scale to ~$4,000/mo effective
+- **Token-based metering** — "10M tokens stored per month" is the primary usage dimension, aligning with LLM-native pricing expectations
+- **Self-hosting option only at $5K** — suggests on-prem/VPC deployment is a key enterprise buying criterion they're monetizing
 
 ---
 
@@ -101,13 +118,17 @@ Both Codixing and HydraDB/Cortex address the same fundamental insight: **flat em
 
 2. **"Kill X" narrative** — Aggressive category positioning ("kill vector databases") generated massive attention. Codixing could position against "grep/find/IDE search is broken" with similar conviction.
 
-3. **Developer PLG with enterprise upsell** — Free dev tier → paid cloud/enterprise is the proven playbook. Codixing's local-first model is a strong dev hook; a hosted version could be the enterprise upsell.
+3. **High-floor pricing signals confidence** — HydraDB starts at $249/mo with no permanent free tier. This is a bet that AI infra buyers are enterprises, not hobbyists. Codixing could adopt a similar model for a hosted offering: free local CLI (already exists) → paid cloud API starting at $200+/mo for teams. The $249→$1K→$5K ladder is a clean 4-5× step-up pattern worth emulating.
 
-4. **Research papers build credibility** — Publishing benchmarks and architecture papers (as HydraDB did) establishes technical legitimacy. Codixing's embedding model benchmarks are a start; a more formal paper on code graph retrieval could be valuable.
+4. **Token-based metering** — HydraDB meters on "tokens stored per month," which maps to LLM-native thinking. For Codixing, the equivalent could be "files indexed" or "queries per month" — metrics that scale with codebase size and team usage.
 
-5. **The "context" framing is hot** — "Context infrastructure" is emerging as a recognized category. Codixing sits squarely in this space for code. Aligning messaging with this trend could help with discoverability and investor conversations.
+5. **Self-hosting as premium feature** — HydraDB only offers self-hosting at $5K/mo. Codixing is already local-first, which is a competitive advantage — but a hosted version could flip the model: free self-hosted, paid cloud.
 
-6. **Temporal/versioned context** — HydraDB's Git-style versioning is interesting. Codixing already has access to git history but doesn't deeply integrate it into retrieval. This could be a differentiator — "how did this function's callers change over the last 5 commits?"
+6. **Research papers build credibility** — Publishing benchmarks and architecture papers (as HydraDB did) establishes technical legitimacy. Codixing's embedding model benchmarks are a start; a more formal paper on code graph retrieval could be valuable.
+
+7. **The "context" framing is hot** — "Context infrastructure" is emerging as a recognized category. Codixing sits squarely in this space for code. Aligning messaging with this trend could help with discoverability and investor conversations.
+
+8. **Temporal/versioned context** — HydraDB's Git-style versioning is interesting. Codixing already has access to git history but doesn't deeply integrate it into retrieval. This could be a differentiator — "how did this function's callers change over the last 5 commits?"
 
 ---
 
