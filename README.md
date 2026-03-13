@@ -158,7 +158,16 @@ codixing-mcp --root /path/to/project --daemon &
 
 The daemon runs a background file watcher. When you save a file, the index updates within ~100ms. Claude Code always queries a fresh index.
 
-### Available MCP tools (19)
+### Session tracking
+
+The MCP server tracks agent interactions (file reads, edits, symbol lookups, searches) and uses them to boost search relevance. Recently-touched files rank higher, and graph neighbors of active files receive propagated boosts. After 5+ interactions in the same directory, **progressive focus** automatically narrows search results.
+
+```bash
+# Disable session tracking (for benchmarking or privacy)
+codixing-mcp --root /path/to/project --no-session
+```
+
+### Available MCP tools (34)
 
 | Tool | What it does |
 |------|-------------|
@@ -172,7 +181,7 @@ The daemon runs a background file watcher. When you save a file, the index updat
 | `get_references` | Who imports a file (callers) + what it imports (callees) |
 | `get_transitive_deps` | Multi-hop dependency chain to arbitrary depth |
 | `search_usages` | All usage sites of a symbol across the codebase |
-| `index_status` | Current index statistics (files, chunks, symbols, graph) |
+| `index_status` | Current index statistics (files, chunks, symbols, graph, session) |
 | `list_files` | List all indexed files with optional glob filter and chunk counts |
 | `write_file` | Write a file and immediately reindex it |
 | `edit_file` | Exact find-and-replace in a file with immediate reindex |
@@ -180,12 +189,22 @@ The daemon runs a background file watcher. When you save a file, the index updat
 | `apply_patch` | Apply a unified git diff across one or more files with auto-reindex |
 | `run_tests` | Execute a test command in the project root and return stdout + exit code |
 | `rename_symbol` | Project-wide identifier rename with auto-reindex of all affected files |
-| `explain` | Assembled context package: definition + file deps + usage sites for any symbol |
+| `explain` | Assembled context package: definition + file deps + usage sites + session context for any symbol |
 | `symbol_callers` | Symbol-level call graph: which functions directly call a given symbol |
 | `symbol_callees` | Symbol-level call graph: which functions a given symbol directly calls |
 | `predict_impact` | Given a unified diff, rank files most likely to need changes (call graph + import graph) |
 | `stitch_context` | Search + automatically attach callee definitions for cross-file context in one call |
 | `enrich_docs` | LLM-generated doc summaries per symbol, stored in `.codixing/symbol_docs.json` (Anthropic or Ollama) |
+| `remember` | Store a persistent key/value note in `.codixing/memory.json` — survives restarts |
+| `recall` | Retrieve stored memory entries by keyword or tag filter |
+| `forget` | Remove a memory entry by key |
+| `find_tests` | Discover test functions across languages by naming conventions and annotations |
+| `find_similar` | Find semantically similar code chunks using vector embeddings or BM25 fallback |
+| `get_complexity` | Cyclomatic complexity (McCabe) per function — risk-banded table sorted by complexity |
+| `review_context` | Given a git diff: changed symbols, impact prediction, and cross-file context for code review |
+| `generate_onboarding` | Assemble index stats, language breakdown, and PageRank repo map into `.codixing/ONBOARDING.md` |
+| `get_session_summary` | Structured summary of current session: files read/edited, symbols explored, grouped by directory |
+| `session_reset_focus` | Clear progressive focus that narrows search to the most-interacted directory |
 
 ---
 
