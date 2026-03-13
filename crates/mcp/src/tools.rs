@@ -5,7 +5,9 @@ use std::path::PathBuf;
 
 use serde_json::{Value, json};
 
-use codixing_core::{Engine, EntityKind, GrepMatch, RepoMapOptions, SearchQuery, Strategy};
+use codixing_core::{
+    Engine, EntityKind, GrepMatch, RepoMapOptions, SearchQuery, SessionEventKind, Strategy,
+};
 
 /// Return the JSON-Schema definitions for all MCP tools.
 pub fn tool_definitions() -> Value {
@@ -590,6 +592,29 @@ pub fn tool_definitions() -> Value {
                 "properties": {},
                 "required": []
             }
+        },
+        {
+            "name": "get_session_summary",
+            "description": "Return a structured summary of the current session: files read/edited, symbols explored, searches performed, grouped by directory/module. Useful for understanding what the agent has been working on.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "token_budget": {
+                        "type": "integer",
+                        "description": "Maximum tokens for the summary output (default: 1500)"
+                    }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "session_reset_focus",
+            "description": "Clear the progressive focus that narrows search results to the most-interacted directory. Use when switching to a different part of the codebase.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
         }
     ])
 }
@@ -636,6 +661,9 @@ pub fn dispatch_tool(engine: &mut Engine, name: &str, args: &Value) -> (String, 
         "get_complexity" => call_get_complexity(engine, args),
         "review_context" => call_review_context(engine, args),
         "generate_onboarding" => call_generate_onboarding(engine),
+        // Phase 13a session tools
+        "get_session_summary" => call_get_session_summary(engine, args),
+        "session_reset_focus" => call_session_reset_focus(engine),
         _ => (format!("Unknown tool: {name}"), true),
     }
 }
@@ -737,13 +765,26 @@ fn call_index_status(engine: &mut Engine) -> (String, bool) {
         "instant only (no vectors, no graph)"
     };
 
+    let session = engine.session();
+    let session_status = if session.is_enabled() {
+        let event_count = session.event_count();
+        let focus = session
+            .focus_directory()
+            .map(|f| format!(" (focus: {f})"))
+            .unwrap_or_default();
+        format!("{event_count} events{focus}")
+    } else {
+        "disabled".to_string()
+    };
+
     let out = format!(
         "# Codixing Index Status\n\n\
          Files indexed:    {}\n\
          Code chunks:      {}\n\
          Symbols:          {}\n\
          Vector index:     {}\n\
-         Dependency graph: {}\n\n\
+         Dependency graph: {}\n\
+         Session:          {}\n\n\
          Available strategies: {}\n\n\
          Root: {}\n",
         stats.file_count,
@@ -751,6 +792,7 @@ fn call_index_status(engine: &mut Engine) -> (String, bool) {
         stats.symbol_count,
         vector_status,
         graph_status,
+        session_status,
         strategies,
         config.root.display(),
     );
@@ -782,8 +824,43 @@ fn call_code_search(engine: &mut Engine, args: &Value) -> (String, bool) {
     }
 
     match engine.search(query) {
-        Ok(results) if results.is_empty() => ("No results found.".to_string(), false),
-        Ok(results) => (engine.format_results(&results, Some(8000)), false),
+        Ok(results) if results.is_empty() => {
+            engine.session().record(SessionEventKind::Search {
+                query: query_str,
+                result_count: 0,
+            });
+            ("No results found.".to_string(), false)
+        }
+        Ok(mut results) => {
+            // Apply session boost to results and re-sort.
+            let session = engine.session().clone();
+            if session.is_enabled() {
+                for r in &mut results {
+                    let boost = session.compute_file_boost_with_graph(&r.file_path, &|file| {
+                        engine.file_neighbors(file)
+                    });
+                    r.score += boost;
+                }
+                results.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+
+            session.record(SessionEventKind::Search {
+                query: query_str.clone(),
+                result_count: results.len(),
+            });
+
+            let mut out = String::new();
+            // Include focus info in the response if active.
+            if let Some(focus) = session.focus_directory() {
+                out.push_str(&format!("*focus: {focus}*\n\n"));
+            }
+            out.push_str(&engine.format_results(&results, Some(8000)));
+            (out, false)
+        }
         Err(e) => (format!("Search error: {e}"), true),
     }
 }
@@ -801,6 +878,13 @@ fn call_find_symbol(engine: &mut Engine, args: &Value) -> (String, bool) {
             (format!("No symbols found matching '{name}'."), false)
         }
         Ok(symbols) => {
+            // Record session event with the first matching file.
+            let first_file = symbols.first().map(|s| s.file_path.clone());
+            engine.session().record(SessionEventKind::SymbolLookup {
+                name: name.clone(),
+                file: first_file,
+            });
+
             let mut out = format!("Found {} symbol(s) matching '{name}':\n\n", symbols.len());
             for sym in &symbols {
                 out.push_str(&format!(
@@ -898,6 +982,9 @@ fn call_read_file(engine: &mut Engine, args: &Value) -> (String, bool) {
             true,
         ),
         Ok(Some(content)) => {
+            engine
+                .session()
+                .record(SessionEventKind::FileRead(file.to_string()));
             let max_chars = token_budget * 4;
             let (body, truncated) = if content.len() > max_chars {
                 (&content[..max_chars], true)
@@ -1112,13 +1199,18 @@ fn call_write_file(engine: &mut Engine, args: &Value) -> (String, bool) {
         .reindex_file(&abs_path)
         .and_then(|()| engine.persist_incremental())
     {
-        Ok(()) => (
-            format!(
-                "Written and indexed: {file} ({line_count} lines, {byte_count} bytes).\n\
-                 The file is now searchable via code_search and find_symbol."
-            ),
-            false,
-        ),
+        Ok(()) => {
+            engine
+                .session()
+                .record(SessionEventKind::FileWrite(file.to_string()));
+            (
+                format!(
+                    "Written and indexed: {file} ({line_count} lines, {byte_count} bytes).\n\
+                     The file is now searchable via code_search and find_symbol."
+                ),
+                false,
+            )
+        }
         Err(e) => (
             format!(
                 "File written to disk but re-index failed: {e}\n\
@@ -1191,16 +1283,21 @@ fn call_edit_file(engine: &mut Engine, args: &Value) -> (String, bool) {
         .reindex_file(&abs_path)
         .and_then(|()| engine.persist_incremental())
     {
-        Ok(()) => (
-            format!(
-                "Edited and re-indexed: {file}\n\
-                 Replaced {} line(s) with {} line(s). \
-                 The change is now searchable via code_search and find_symbol.",
-                old_lines.len().max(1),
-                new_lines.len().max(1),
-            ),
-            false,
-        ),
+        Ok(()) => {
+            engine
+                .session()
+                .record(SessionEventKind::FileEdit(file.to_string()));
+            (
+                format!(
+                    "Edited and re-indexed: {file}\n\
+                     Replaced {} line(s) with {} line(s). \
+                     The change is now searchable via code_search and find_symbol.",
+                    old_lines.len().max(1),
+                    new_lines.len().max(1),
+                ),
+                false,
+            )
+        }
         Err(e) => (
             format!(
                 "File edited on disk but re-index failed: {e}\n\
@@ -1604,6 +1701,12 @@ fn call_explain(engine: &mut Engine, args: &Value) -> (String, bool) {
     let syms = engine.symbols(&symbol, file_hint).unwrap_or_default();
     let def_file = syms.first().map(|s| s.file_path.clone());
 
+    // Record session event.
+    engine.session().record(SessionEventKind::SymbolLookup {
+        name: symbol.clone(),
+        file: def_file.clone(),
+    });
+
     // 3. File-level dependencies.
     let (callers, callees) = if let Some(ref f) = def_file {
         let c_in = engine.callers(f);
@@ -1624,6 +1727,35 @@ fn call_explain(engine: &mut Engine, args: &Value) -> (String, bool) {
 
     if let Some(ref f) = def_file {
         out.push_str(&format!("**Defined in:** `{f}`\n\n"));
+    }
+
+    // 5. Session context: show previously explored related symbols.
+    let related_symbols: Vec<String> = usages
+        .iter()
+        .filter_map(|u| {
+            if !u.signature.is_empty() {
+                Some(
+                    u.signature
+                        .split_whitespace()
+                        .last()
+                        .unwrap_or("")
+                        .to_string(),
+                )
+            } else {
+                None
+            }
+        })
+        .collect();
+    let explored = engine.session().previously_explored(&related_symbols);
+    if !explored.is_empty() {
+        out.push_str("### Session context\n");
+        out.push_str("Previously explored: ");
+        let items: Vec<String> = explored
+            .iter()
+            .map(|(name, mins)| format!("`{name}` ({mins} min ago)"))
+            .collect();
+        out.push_str(&items.join(", "));
+        out.push_str("\n\n");
     }
 
     if !callers.is_empty() {
@@ -2587,6 +2719,28 @@ fn chrono_now() -> String {
 }
 
 // =============================================================================
+// Phase 13a: Session tools
+// =============================================================================
+
+fn call_get_session_summary(engine: &mut Engine, args: &Value) -> (String, bool) {
+    let token_budget = args
+        .get("token_budget")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1500) as usize;
+
+    let summary = engine.session().summary(token_budget);
+    (summary, false)
+}
+
+fn call_session_reset_focus(engine: &mut Engine) -> (String, bool) {
+    engine.session().reset_focus();
+    (
+        "Progressive focus cleared. Search results will no longer be narrowed to a specific directory.".to_string(),
+        false,
+    )
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -2677,13 +2831,13 @@ func TestHandleRequest(t *testing.T) {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn tool_definitions_returns_32_tools() {
+    fn tool_definitions_returns_34_tools() {
         let defs = tool_definitions();
         let arr = defs.as_array().expect("tool_definitions returns array");
         assert_eq!(
             arr.len(),
-            32,
-            "expected exactly 32 tool definitions, got {}",
+            34,
+            "expected exactly 34 tool definitions, got {}",
             arr.len()
         );
     }

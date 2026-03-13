@@ -29,7 +29,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use codixing_core::{EmbeddingConfig, Engine, IndexConfig};
+use codixing_core::{EmbeddingConfig, Engine, IndexConfig, SessionState};
 
 use protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
@@ -55,6 +55,11 @@ struct Args {
     /// Defaults to `<root>/.codixing/daemon.sock`.
     #[arg(long)]
     socket: Option<PathBuf>,
+
+    /// Disable session tracking entirely. When set, no session events are
+    /// recorded and no session-based search boosting is applied.
+    #[arg(long)]
+    no_session: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -84,7 +89,10 @@ async fn main() -> Result<()> {
 
     if args.daemon {
         // ── Daemon mode ────────────────────────────────────────────────────
-        let engine = load_engine(&root).await?;
+        let mut engine = load_engine(&root).await?;
+        if args.no_session {
+            engine.set_session(Arc::new(SessionState::new(false)));
+        }
         let engine = Arc::new(Mutex::new(engine));
         run_daemon(engine, &socket_path).await
     } else {
@@ -93,7 +101,10 @@ async fn main() -> Result<()> {
             info!(socket = %socket_path.display(), "daemon detected — proxying through socket");
             run_proxy(&socket_path).await
         } else {
-            let engine = load_engine(&root).await?;
+            let mut engine = load_engine(&root).await?;
+            if args.no_session {
+                engine.set_session(Arc::new(SessionState::new(false)));
+            }
             let engine = Arc::new(Mutex::new(engine));
             info!("Codixing MCP server ready — listening on stdin");
             let stdin = tokio::io::stdin();

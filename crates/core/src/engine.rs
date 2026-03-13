@@ -29,6 +29,7 @@ use crate::retriever::bm25::BM25Retriever;
 use crate::retriever::hybrid::HybridRetriever;
 use crate::retriever::mmr::mmr_select;
 use crate::retriever::{ChunkMeta, Retriever, SearchQuery, SearchResult, Strategy};
+use crate::session::SessionState;
 use crate::symbols::persistence::{deserialize_symbols, serialize_symbols};
 use crate::symbols::{Symbol, SymbolTable};
 use crate::vector::VectorIndex;
@@ -174,6 +175,8 @@ pub struct Engine {
     graph: Option<CodeGraph>,
     /// Optional cross-encoder reranker (BGE-Reranker-Base) for the `deep` strategy.
     reranker: Option<Arc<Reranker>>,
+    /// Session state for tracking agent interactions.
+    session: Arc<SessionState>,
 }
 
 impl Engine {
@@ -359,6 +362,9 @@ impl Engine {
             None
         };
 
+        let session = Arc::new(SessionState::with_root(true, &root));
+        session.cleanup_old_sessions();
+
         Ok(Self {
             config,
             store,
@@ -371,6 +377,7 @@ impl Engine {
             chunk_meta: chunk_meta_map,
             graph,
             reranker,
+            session,
         })
     }
 
@@ -488,6 +495,9 @@ impl Engine {
             None
         };
 
+        let session = Arc::new(SessionState::with_root(true, &root));
+        session.cleanup_old_sessions();
+
         Ok(Self {
             config,
             store,
@@ -500,6 +510,7 @@ impl Engine {
             chunk_meta,
             graph,
             reranker,
+            session,
         })
     }
 
@@ -977,6 +988,25 @@ impl Engine {
     /// Access the underlying index configuration.
     pub fn config(&self) -> &IndexConfig {
         &self.config
+    }
+
+    /// Access the session state.
+    pub fn session(&self) -> &Arc<SessionState> {
+        &self.session
+    }
+
+    /// Replace the session state (e.g. to disable session tracking).
+    pub fn set_session(&mut self, session: Arc<SessionState>) {
+        self.session = session;
+    }
+
+    /// Get combined callers + callees for a file (used for graph-propagated session context).
+    pub fn file_neighbors(&self, file: &str) -> Vec<String> {
+        let mut neighbors = self.callers(file);
+        neighbors.extend(self.callees(file));
+        neighbors.sort();
+        neighbors.dedup();
+        neighbors
     }
 
     /// Access the underlying symbol table.

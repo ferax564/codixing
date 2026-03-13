@@ -312,7 +312,8 @@ codixing init . --model snowflake-arctic-l
 - **Live index freshness** — Daemon file watcher updates the in-memory engine within 100ms of any file save; no restart needed
 - **`.gitignore`-aware indexing** — File walker respects `.gitignore`, `.ignore`, and global gitignore (same as ripgrep); no manual exclude lists needed
 - **Hash-based incremental sync** — `codixing sync` diffs xxh3 content hashes and re-indexes only changed files; no git required
-- **MCP server** — 24 tools exposed via JSON-RPC 2.0; Claude Code registers with one command
+- **MCP server** — 34 tools exposed via JSON-RPC 2.0; Claude Code registers with one command
+- **Session-aware retrieval** — Tracks agent interactions (reads, edits, searches) and boosts recently-touched files in search results with graph-propagated context
 - **Concurrent symbol table** — DashMap-backed with exact, prefix, and substring matching
 - **Single binary, zero runtime deps** — No JVM, no Docker, no external databases
 
@@ -405,6 +406,7 @@ codixing init . --model snowflake-arctic-l
 | **Phase 7: Git Sync + Qwen3 + Eval** | ✅ Complete | Git-aware incremental sync, Qwen3 candle backend, embedding eval harness — 260 tests |
 | **Phase 8: Productivity + Ecosystem** | ✅ Complete | 24 MCP tools (apply_patch, run_tests, outline_file, rename_symbol, explain, symbol_callers, symbol_callees, predict_impact, stitch_context, enrich_docs), LSP server, Zig+PHP, Docker, Homebrew, 60s search cache — 260 tests |
 | **Phase 10: Developer Intelligence** | ✅ Complete | 32 MCP tools (remember, recall, forget, find_tests, find_similar, get_complexity, review_context, generate_onboarding), persistent memory store, cyclomatic complexity, onboarding doc generation — 210 tests |
+| **Phase 12+13a: Distribution + Session Intelligence** | ✅ Complete | 34 MCP tools (+get_session_summary, +session_reset_focus), session event tracking, session-boosted search with graph propagation, progressive focus, session-aware explain, session persistence across restarts, --no-session opt-out — 286 tests |
 | **Phase 11: IDE Integration** | ✅ Complete | LSP server (`codixing-lsp`) with hover, go-to-def, references, symbols, document sync, live reindex, cyclomatic complexity diagnostics; VS Code LSP client; BM25-only default; Tier 2 retrieval quality regression suite — 334 tests |
 
 ---
