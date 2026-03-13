@@ -18,7 +18,7 @@ mod protocol;
 mod tools;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -85,7 +85,7 @@ async fn main() -> Result<()> {
     if args.daemon {
         // ── Daemon mode ────────────────────────────────────────────────────
         let engine = load_engine(&root).await?;
-        let engine = Arc::new(Mutex::new(engine));
+        let engine = Arc::new(RwLock::new(engine));
         run_daemon(engine, &socket_path).await
     } else {
         // ── Normal mode: try proxy, fall back to direct ────────────────────
@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
             run_proxy(&socket_path).await
         } else {
             let engine = load_engine(&root).await?;
-            let engine = Arc::new(Mutex::new(engine));
+            let engine = Arc::new(RwLock::new(engine));
             info!("Codixing MCP server ready — listening on stdin");
             let stdin = tokio::io::stdin();
             let stdout = tokio::io::stdout();
@@ -145,7 +145,7 @@ async fn load_engine(root: &Path) -> Result<Engine> {
 // Daemon: Unix socket server
 // ---------------------------------------------------------------------------
 
-async fn run_daemon(engine: Arc<Mutex<Engine>>, socket_path: &Path) -> Result<()> {
+async fn run_daemon(engine: Arc<RwLock<Engine>>, socket_path: &Path) -> Result<()> {
     // Remove stale socket file if it exists.
     if socket_path.exists() {
         std::fs::remove_file(socket_path).ok();
@@ -165,7 +165,7 @@ async fn run_daemon(engine: Arc<Mutex<Engine>>, socket_path: &Path) -> Result<()
     let engine_for_watch = Arc::clone(&engine);
     tokio::task::spawn_blocking(move || {
         let config = engine_for_watch
-            .lock()
+            .read()
             .expect("engine lock poisoned")
             .config()
             .clone();
@@ -191,7 +191,7 @@ async fn run_daemon(engine: Arc<Mutex<Engine>>, socket_path: &Path) -> Result<()
                 count = changes.len(),
                 "daemon: file changes detected, updating index"
             );
-            let mut eng = engine_for_watch.lock().expect("engine lock poisoned");
+            let mut eng = engine_for_watch.write().expect("engine lock poisoned");
             if let Err(e) = eng.apply_changes(&changes) {
                 warn!(error = %e, "daemon: apply_changes failed");
             }
@@ -214,7 +214,7 @@ async fn run_daemon(engine: Arc<Mutex<Engine>>, socket_path: &Path) -> Result<()
 }
 
 /// Handle one client connection: run a JSON-RPC loop over the socket stream.
-async fn handle_socket_connection(stream: UnixStream, engine: Arc<Mutex<Engine>>) -> Result<()> {
+async fn handle_socket_connection(stream: UnixStream, engine: Arc<RwLock<Engine>>) -> Result<()> {
     let (read_half, write_half) = stream.into_split();
     run_jsonrpc_loop(
         engine,
@@ -292,7 +292,7 @@ async fn socket_alive(path: &Path) -> bool {
 // ---------------------------------------------------------------------------
 
 async fn run_jsonrpc_loop<R, W>(
-    engine: Arc<Mutex<Engine>>,
+    engine: Arc<RwLock<Engine>>,
     mut reader: tokio::io::Lines<BufReader<R>>,
     mut writer: BufWriter<W>,
 ) -> Result<()>
@@ -339,7 +339,7 @@ where
 // ---------------------------------------------------------------------------
 
 async fn dispatch(
-    engine: &Arc<Mutex<Engine>>,
+    engine: &Arc<RwLock<Engine>>,
     id: Value,
     method: &str,
     params: Option<Value>,
@@ -370,7 +370,11 @@ fn handle_tools_list(id: Value) -> Value {
     serde_json::to_value(JsonRpcResponse::new(id, result)).unwrap_or(Value::Null)
 }
 
-async fn handle_tools_call(engine: &Arc<Mutex<Engine>>, id: Value, params: Option<Value>) -> Value {
+async fn handle_tools_call(
+    engine: &Arc<RwLock<Engine>>,
+    id: Value,
+    params: Option<Value>,
+) -> Value {
     let params = match params {
         Some(p) => p,
         None => {
@@ -396,7 +400,7 @@ async fn handle_tools_call(engine: &Arc<Mutex<Engine>>, id: Value, params: Optio
     let tool_name_clone = tool_name.clone();
 
     let call_result = tokio::task::spawn_blocking(move || {
-        let mut engine = match engine_arc.lock() {
+        let mut engine = match engine_arc.write() {
             Ok(e) => e,
             Err(e) => return (format!("Engine lock poisoned: {e}"), true),
         };
@@ -476,7 +480,7 @@ mod tests {
             input.push(b'\n');
         }
 
-        let engine = Arc::new(Mutex::new(engine));
+        let engine = Arc::new(RwLock::new(engine));
 
         // Use a duplex channel as the transport.
         let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
@@ -740,7 +744,7 @@ mod tests {
     async fn daemon_socket_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let engine = make_test_engine(dir.path());
-        let engine = Arc::new(Mutex::new(engine));
+        let engine = Arc::new(RwLock::new(engine));
 
         let socket_path = dir.path().join("test_daemon.sock");
 

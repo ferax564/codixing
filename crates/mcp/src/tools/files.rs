@@ -401,6 +401,68 @@ pub(crate) fn call_delete_file(engine: &mut Engine, args: &Value) -> (String, bo
     }
 }
 
+pub(crate) fn call_git_diff(engine: &mut Engine, args: &Value) -> (String, bool) {
+    let root = engine.config().root.clone();
+
+    let commit = args.get("commit").and_then(|v| v.as_str());
+    let staged = args
+        .get("staged")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let file = args.get("file").and_then(|v| v.as_str());
+    let stat_only = args
+        .get("stat_only")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let mut cmd = std::process::Command::new("git");
+    cmd.current_dir(&root);
+
+    if staged {
+        cmd.args(["diff", "--cached"]);
+    } else if let Some(r) = commit {
+        cmd.args(["diff", r]);
+    } else {
+        cmd.arg("diff");
+    }
+
+    if stat_only {
+        cmd.arg("--stat");
+    }
+
+    if let Some(f) = file {
+        cmd.arg("--").arg(f);
+    }
+
+    match cmd.output() {
+        Err(e) => (format!("Failed to run git: {e}"), true),
+        Ok(out) if !out.status.success() => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            (format!("git diff failed: {stderr}"), true)
+        }
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if stdout.trim().is_empty() {
+                ("No changes detected.".to_string(), false)
+            } else {
+                let max = 12000;
+                if stdout.len() > max {
+                    (
+                        format!(
+                            "{}\n\n... (truncated, {} bytes total)",
+                            &stdout[..max],
+                            stdout.len()
+                        ),
+                        false,
+                    )
+                } else {
+                    (stdout.to_string(), false)
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn call_apply_patch(engine: &mut Engine, args: &Value) -> (String, bool) {
     let patch = match args.get("patch").and_then(|v| v.as_str()) {
         Some(p) => p,

@@ -275,19 +275,24 @@ impl Engine {
     /// terms (they mention all the keywords in assertions and comments), which
     /// causes BM25 to over-rank them above the actual implementation.
     ///
-    /// A 0.7× score multiplier pushes tests below equally-relevant impl code.
+    /// A 0.5× score multiplier pushes tests below equally-relevant impl code.
     /// Applied to concept/search queries, **not** to `search_usages` (where
     /// test call-sites are legitimate results).
     pub(super) fn apply_test_demotion(&self, results: &mut [SearchResult]) {
         const TEST_DEMOTION: f32 = 0.5;
-        let mut demoted = false;
+        let mut changed = false;
         for r in results.iter_mut() {
             if is_test_file(&r.file_path) || is_test_chunk(r) {
                 r.score *= TEST_DEMOTION;
-                demoted = true;
+                changed = true;
             }
         }
-        if demoted {
+
+        // Demote C/C++ header files when a corresponding implementation file
+        // is also in results.  Headers declare; .c/.cc/.cpp files implement.
+        apply_header_demotion(results, &mut changed);
+
+        if changed {
             results.sort_by(|a, b| {
                 b.score
                     .partial_cmp(&a.score)
@@ -467,16 +472,28 @@ fn is_test_chunk(result: &SearchResult) -> bool {
 /// Detect test files by common path patterns across languages.
 fn is_test_file(path: &str) -> bool {
     // Directory patterns: tests/, test/, __tests__/, fixtures/, __fixtures__/
+    // Also check start of path for relative paths like "tests/foo/bar.py"
     if path.contains("/tests/")
         || path.contains("/test/")
         || path.contains("/__tests__/")
         || path.contains("/fixtures/")
         || path.contains("/__fixtures__/")
+        || path.starts_with("tests/")
+        || path.starts_with("test/")
+        || path.starts_with("__tests__/")
     {
         return true;
     }
     // Rust: *_test.rs
     if path.ends_with("_test.rs") {
+        return true;
+    }
+    // C/C++: *_test.cc, *_test.cpp, *_unittest.cc, *_unittest.cpp
+    if path.ends_with("_test.cc")
+        || path.ends_with("_test.cpp")
+        || path.ends_with("_unittest.cc")
+        || path.ends_with("_unittest.cpp")
+    {
         return true;
     }
     // File-name patterns (case-insensitive basename check)
@@ -497,6 +514,58 @@ fn is_test_file(path: &str) -> bool {
         return true;
     }
     false
+}
+
+/// Demote C/C++ header files when implementation files (.c/.cc/.cpp) are also
+/// in results.  Headers declare; implementation files contain the actual logic.
+///
+/// Two matching strategies:
+/// 1. Same stem: `db/db_impl.h` demoted when `db/db_impl.cc` is present
+/// 2. Any impl present: when results contain both .h and .cc/.cpp files,
+///    all headers get a mild demotion to prefer implementation files.
+fn apply_header_demotion(results: &mut [SearchResult], changed: &mut bool) {
+    use std::collections::HashSet;
+
+    let is_impl = |p: &str| {
+        p.ends_with(".c") || p.ends_with(".cc") || p.ends_with(".cpp") || p.ends_with(".cxx")
+    };
+    let is_header = |p: &str| p.ends_with(".h") || p.ends_with(".hpp");
+
+    let has_impl = results.iter().any(|r| is_impl(&r.file_path));
+    let has_header = results.iter().any(|r| is_header(&r.file_path));
+
+    if !has_impl || !has_header {
+        return;
+    }
+
+    // Collect impl basenames (without extension) for exact-stem matching.
+    let impl_basenames: HashSet<String> = results
+        .iter()
+        .filter(|r| is_impl(&r.file_path))
+        .filter_map(|r| {
+            let basename = r.file_path.rsplit('/').next().unwrap_or(&r.file_path);
+            basename.rsplit_once('.').map(|(stem, _)| stem.to_string())
+        })
+        .collect();
+
+    const HEADER_DEMOTION_EXACT: f32 = 0.6; // strong: exact .h/.cc pair
+    const HEADER_DEMOTION_MILD: f32 = 0.85; // mild: impl files exist but no exact match
+
+    for r in results.iter_mut() {
+        if is_header(&r.file_path) {
+            let basename = r.file_path.rsplit('/').next().unwrap_or(&r.file_path);
+            if let Some((stem, _)) = basename.rsplit_once('.') {
+                if impl_basenames.contains(stem) {
+                    r.score *= HEADER_DEMOTION_EXACT;
+                    *changed = true;
+                    continue;
+                }
+            }
+            // Mild demotion: impl files exist but this header has no matching .cc
+            r.score *= HEADER_DEMOTION_MILD;
+            *changed = true;
+        }
+    }
 }
 
 /// Check if a string looks like a code identifier (alphanumeric + underscores/colons/dots).
@@ -618,6 +687,23 @@ mod tests {
     fn detects_python_test_files() {
         assert!(is_test_file("tests/test_engine.py"));
         assert!(is_test_file("src/engine_test.py"));
+    }
+
+    #[test]
+    fn detects_top_level_test_dirs() {
+        // Relative paths starting with tests/ (e.g., SWE-bench repos)
+        assert!(is_test_file("tests/admin_inlines/models.py"));
+        assert!(is_test_file("tests/forms_tests/tests.py"));
+        assert!(is_test_file("test/unit/helpers.rb"));
+        assert!(is_test_file("__tests__/App.test.tsx"));
+    }
+
+    #[test]
+    fn detects_cpp_test_files() {
+        assert!(is_test_file("db/db_test.cc"));
+        assert!(is_test_file("table/table_test.cpp"));
+        assert!(is_test_file("util/cache_unittest.cc"));
+        assert!(is_test_file("src/core_unittest.cpp"));
     }
 
     #[test]
@@ -782,5 +868,59 @@ mod tests {
     #[test]
     fn expand_query_preserves_plain_queries() {
         assert_eq!(expand_query("simple query words"), "simple query words");
+    }
+
+    #[test]
+    fn header_demotion_prefers_impl_over_header() {
+        let mut results = vec![
+            SearchResult {
+                chunk_id: "1".into(),
+                file_path: "db/db_impl.h".into(),
+                language: "C++".into(),
+                score: 10.0,
+                line_start: 0,
+                line_end: 20,
+                signature: String::new(),
+                scope_chain: vec![],
+                content: String::new(),
+            },
+            SearchResult {
+                chunk_id: "2".into(),
+                file_path: "db/db_impl.cc".into(),
+                language: "C++".into(),
+                score: 9.0,
+                line_start: 0,
+                line_end: 100,
+                signature: String::new(),
+                scope_chain: vec![],
+                content: String::new(),
+            },
+        ];
+        let mut changed = false;
+        apply_header_demotion(&mut results, &mut changed);
+        assert!(changed);
+        // Header should be demoted: 10.0 * 0.7 = 7.0, impl stays at 9.0
+        assert!(results[1].score > results[0].score, "impl should outrank header after demotion");
+    }
+
+    #[test]
+    fn header_demotion_no_effect_without_impl() {
+        let mut results = vec![
+            SearchResult {
+                chunk_id: "1".into(),
+                file_path: "include/leveldb/db.h".into(),
+                language: "C++".into(),
+                score: 10.0,
+                line_start: 0,
+                line_end: 20,
+                signature: String::new(),
+                scope_chain: vec![],
+                content: String::new(),
+            },
+        ];
+        let mut changed = false;
+        apply_header_demotion(&mut results, &mut changed);
+        assert!(!changed, "no impl file present, header should not be demoted");
+        assert_eq!(results[0].score, 10.0);
     }
 }
