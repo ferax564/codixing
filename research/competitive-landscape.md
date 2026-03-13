@@ -243,23 +243,32 @@ These are mostly small/hobby projects but indicate the direction the space is mo
 
 ## Part 6: Strategic Opportunities
 
+> **Full GTM strategy and development roadmap:** See [gtm-strategy.md](./gtm-strategy.md) for the detailed plan informed by this analysis.
+
+### Summary of Strategic Direction
+
+**Positioning:** Reframe from "code search tool" to **"the code context engine"** — infrastructure that powers every AI coding tool, not a point solution competing with Sourcegraph or Cursor.
+
+**Niche:** The intersection of **local-first** + **structural intelligence** (call graphs, impact prediction, complexity, temporal context) + **multi-interface engine** (CLI + MCP + LSP + REST). No competitor occupies all three.
+
 ### Immediate (0-3 months)
 
-1. **Continue.dev integration guide** — they deprecated @codebase for MCP. Codixing should be the recommended MCP code context provider. Write the guide, submit to their docs.
-2. **"Sourcegraph for individuals"** positioning — explicitly target the users left behind by Sourcegraph's enterprise-only shift ($0 → $19/mo range)
-3. **Cursor MCP showcase** — demonstrate Codixing as an MCP backend for Cursor, which has millions of users looking for better code context
+1. **Distribution push** — List on MCP directories (Anthropic, mcp.so, awesome-mcp-servers), publish VS Code extension to Marketplace, submit Continue.dev integration PR
+2. **Continue.dev integration** — they deprecated @codebase for MCP. Codixing is the natural replacement. Write guide, submit docs PR.
+3. **Cursor MCP showcase** — demonstrate Codixing as an MCP backend for Cursor's millions of users
+4. **Claude Code power user acquisition** — benchmarks, setup guides, demo videos targeting the active Claude Code community
 
 ### Medium-term (3-6 months)
 
-4. **Publish benchmarks vs. competitors** — formal comparison of retrieval quality against Sourcegraph, codebase-memory-mcp, Aider's repo map
-5. **Visualization layer** — even a basic web UI showing call graphs would match Axon and differentiate from text-only tools
-6. **Language support expansion** — document and expand supported languages to match codebase-memory-mcp's 64
+5. **Temporal code context** — git-aware retrieval (change velocity, hotspots, blame-aware context, co-change patterns). **Highest defensibility feature — no competitor has this.**
+6. **Language breadth** — expand to 30+ languages with structural support, 50+ with basic parse+search. Eliminates the "does it support X?" objection.
+7. **Published benchmarks** — reproducible, open-source evaluation harness. Head-to-head comparison with ripgrep, Sourcegraph, codebase-memory-mcp, Aider on real codebases.
 
 ### Long-term (6-12 months)
 
-7. **Hosted API** — "Codixing Cloud" for teams, priced at $19-49/user/month (Sourcegraph's abandoned mid-market)
-8. **Temporal code context** — integrate git history into retrieval (how did this function's callers change over time?), inspired by Zep's temporal approach
-9. **Partnership with AI coding tools** — formal integrations with Cursor, Windsurf, Continue, Aider as their recommended code context backend
+8. **Visualization expansion** — symbol drill-down, change heatmaps, impact blast radius visualization, shareable snapshots
+9. **Codixing Cloud** — hosted API at $19-49/user/month, filling Sourcegraph's abandoned mid-market. Free local CLI remains the core.
+10. **Formal partnerships** — Continue.dev, Aider, or similar tools as their recommended code context backend
 
 ---
 

@@ -157,22 +157,24 @@ Both Codixing and HydraDB/Cortex address the same fundamental insight: **flat em
 
 ## 8. Strategic Considerations for Codixing Expansion
 
-### Option A: Stay Vertical (Code-Only, Go Deep)
-- Codixing becomes the definitive "code context infrastructure"
-- Compete with Sourcegraph, GitHub code search, LSP servers
-- HydraDB validates the market but is horizontal; Codixing wins on domain depth
+> **Full GTM strategy and development roadmap:** See [gtm-strategy.md](./gtm-strategy.md)
 
-### Option B: Expand Horizontally (General Context Infra)
-- Apply the same graph + embedding + BM25 approach to docs, Slack, etc.
-- Directly compete with HydraDB/Cortex
-- Risk: dilution of focus, much larger competitive set
+### Decision: Stay Vertical, Win on Depth
 
-### Option C: Platform Play (Code Context as a Service)
-- Expose Codixing's engine as an API/cloud service
-- Target: AI coding assistants, code review tools, IDE plugins
-- HydraDB's pricing model (serverless, usage-based) could apply
+After analyzing the full competitive landscape (see [competitive-landscape.md](./competitive-landscape.md)), the strategy is clear: **stay vertical on code, go deeper than anyone else.**
 
-**Recommendation:** Option A with elements of C. The code domain is deep enough to build a large business, and HydraDB validates the "context infrastructure" framing. A hosted API would unlock B2B revenue without losing focus.
+**Why not expand horizontally:**
+- The AI memory/context space has >$65M deployed across ~10 startups (Mem0 $24M, Letta $10M, Cognee $7.5M, etc.)
+- HydraDB validates the category but has near-zero traction — the market is real but crowded
+- Codixing's structural intelligence (call graphs, impact prediction, complexity) is code-specific and not transferable to general documents
+
+**The niche to own:** "The code context engine" — local-first, structural intelligence, multi-interface (CLI+MCP+LSP+REST). No competitor occupies this intersection. The key defensibility plays are:
+
+1. **Temporal code context** (git-aware retrieval) — no competitor has this
+2. **Multi-interface exposure** — no competitor offers CLI+MCP+LSP+REST together
+3. **Hybrid retrieval quality** (BM25+vector+graph) — compound advantage that improves with each phase
+
+A hosted API (Codixing Cloud at $19-49/user/month) comes later to unlock team revenue, but local-first remains the core differentiator.
 
 ---
 
