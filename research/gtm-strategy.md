@@ -1,7 +1,7 @@
 # Codixing — GTM Strategy & Development Roadmap
 
-**Date:** 2026-03-13
-**Informed by:** [Competitive Landscape Analysis](./competitive-landscape.md) · [HydraDB Deep Dive](./hydradb-competitive-analysis.md)
+**Date:** 2026-03-13 (revised)
+**Informed by:** [Competitive Landscape Analysis](./competitive-landscape.md) · [HydraDB Deep Dive](./hydradb-competitive-analysis.md) · [context-mode](https://github.com/mksglu/context-mode) analysis
 
 ---
 
@@ -146,6 +146,7 @@ The roadmap is restructured around **defensibility** — each phase deepens the 
 | Local-first, single binary | Few (codebase-memory-mcp) | Medium |
 | Hybrid BM25+vector+graph retrieval | **None** — all three together | **High** |
 | Temporal code context (git-aware) | **None** | **High** (if built) |
+| Session-aware retrieval | context-mode has flat session tracking; **none** have structural session intelligence | **High** |
 
 The roadmap prioritizes **high-defensibility capabilities** that compound over time.
 
@@ -162,11 +163,33 @@ The roadmap prioritizes **high-defensibility capabilities** that compound over t
 | One-command install validation | Ensure `curl | sh` works flawlessly on macOS ARM, macOS x86, Linux x86 | Broken install = lost user |
 | README rewrite | Lead with positioning ("code context engine"), move benchmarks up, add 30-second GIF | First impression matters; current README is feature-list style |
 
-### Phase 13: Temporal Code Context (Weeks 4-8)
+### Phase 13: Temporal + Session-Aware Context (Weeks 4-8)
 
-**Goal:** Build the capability no competitor has — **git-aware retrieval** that understands how code evolves.
+**Goal:** Build two capabilities no competitor has — **git-aware retrieval** that understands how code evolves, and **session-aware retrieval** that gets smarter the longer an agent works.
 
-This is the single highest-value feature for defensibility. No existing tool (Sourcegraph, Cursor, Greptile, any MCP tool) integrates git history into code retrieval.
+**Inspiration:** [context-mode](https://github.com/mksglu/context-mode) (4K stars) validates that session continuity is a top pain point — agents lose track of what they were doing after conversation compaction. Context-mode solves this with flat SQLite event logging. Codixing can do something far more powerful: feed session activity into the *structural retrieval pipeline* so search results are influenced by what the agent has been working on.
+
+#### 13a: Session-Aware Retrieval (Weeks 4-6)
+
+The core insight from context-mode: **what the agent touched this session should influence retrieval**. But where context-mode stores flat events, Codixing can propagate session signals through the code graph.
+
+| Feature | Detail | MCP Tool |
+|---|---|---|
+| **Session event tracking** | Track every file read, symbol lookup, edit, and search in an in-memory session log (SQLite-backed for persistence across compactions) | Automatic — all existing tools emit events |
+| **Session-boosted search** | Files/symbols the agent recently read or edited get a retrieval boost. If you've been editing `auth.rs` for 20 minutes, a search for "handler" prioritizes auth-related handlers. | Enhancement to `code_search` |
+| **Graph-propagated session context** | Session boost propagates through the call graph. If the agent edited `auth.rs`, its callers and callees also get a mild boost — the agent is probably working in that subgraph. | Enhancement to `code_search` |
+| **Session summary** | On-demand snapshot of what the agent has explored, edited, and searched this session — structured by module/subsystem, not flat chronological. Survives compaction. | `get_session_summary` |
+| **Session-aware explain** | When explaining a symbol, highlight connections to other symbols the agent has already seen — "you looked at `verify_token` earlier; `authenticate` calls it here." | Enhancement to `explain` |
+| **Progressive focus** | As the session deepens in one area, retrieval automatically narrows. After 5+ interactions with auth code, search results are implicitly scoped. Agent can reset with `session_reset_focus`. | `session_reset_focus` |
+
+**Why this is better than context-mode's approach:**
+- Context-mode stores flat events and rebuilds a text summary. Codixing propagates session signals through the **code graph** — structurally aware, not just chronological.
+- Context-mode's progressive throttling is a blunt instrument (reduce results after N calls). Codixing's progressive focus is semantic — it narrows based on *what area* you're in, not *how many calls* you've made.
+- Context-mode is a wrapper around other tools. Codixing's session awareness is *inside* the retrieval engine — it changes ranking, not just output formatting.
+
+#### 13b: Temporal Code Context (Weeks 5-8)
+
+No existing tool (Sourcegraph, Cursor, Greptile, any MCP tool) integrates git history into code retrieval.
 
 | Feature | Detail | MCP Tool |
 |---|---|---|
@@ -176,7 +199,7 @@ This is the single highest-value feature for defensibility. No existing tool (So
 | **Blame-aware context** | When explaining a symbol, include who last modified it and the commit message | Enhancement to `explain` |
 | **Diff-aware impact** | Given a branch, predict what else needs to change based on the diff + historical co-change patterns | Enhancement to `predict_impact` |
 
-**Why this is defensible:** Git history is a massive, structured dataset that requires deep integration with the AST parser, graph engine, and retrieval pipeline. It's not a feature you bolt on — it requires architectural work across the entire engine. Competitors who started with flat search can't add this without significant refactoring.
+**Why Phase 13 as a whole is defensible:** Both session-awareness and temporal context require deep integration with the AST parser, graph engine, and retrieval pipeline. Context-mode proves the demand (4K stars) but solves it at the wrong layer — flat event logging can't understand code structure. Codixing's graph-propagated approach is architecturally impossible for tools that don't have a code graph. This is the moat.
 
 ### Phase 14: Language Breadth (Weeks 6-10)
 
@@ -266,6 +289,11 @@ This mirrors the market gap: Sourcegraph starts at enterprise pricing, Cursor is
 **Risk:** Medium. They deprecated @codebase but could rebuild.
 **Response:** Partnership > competition. Codixing as the recommended engine lets Continue focus on IDE UX while Codixing handles the hard retrieval problem. Propose formal integration.
 
+### If context-mode expands into code intelligence
+
+**Risk:** Low. Context-mode (4K stars, ELv2 license) solves context window management, not code understanding. Its TypeScript/SQLite stack can't replicate Codixing's Rust-native AST parsing, call graphs, or hybrid retrieval.
+**Response:** Complementary positioning. Context-mode wraps tool outputs; Codixing generates intelligent code context. They can coexist — and Codixing absorbing session-aware retrieval into its own engine makes the "use both" argument weaker over time. The session summary feature in Phase 13a directly subsumes context-mode's value for code-specific workflows.
+
 ### If a well-funded startup enters the MCP code intelligence space
 
 **Risk:** Low-medium (inevitable eventually).
@@ -330,26 +358,33 @@ Codixing occupies the intersection of three properties that no competitor combin
 ```
     ┌─────────────────────────────┐
     │     LOCAL-FIRST              │
-    │   (no cloud dependency,     │
-    │    data never leaves        │  ← Sourcegraph, Cursor, Greptile
-    │    the machine)             │     are all cloud-dependent
+    │   (no cloud dependency,     │  ← Sourcegraph, Cursor, Greptile
+    │    data never leaves        │     are all cloud-dependent
+    │    the machine)             │
     └──────────┬──────────────────┘
                │
     ┌──────────▼──────────────────┐
     │   STRUCTURAL INTELLIGENCE   │
-    │  (call graphs, PageRank,    │
-    │   impact prediction,        │  ← ripgrep, codebase-memory-mcp,
-    │   complexity, temporal)     │     CodeGrok are flat search
+    │  (call graphs, PageRank,    │  ← ripgrep, codebase-memory-mcp,
+    │   impact prediction,        │     CodeGrok are flat search
+    │   complexity, temporal)     │
+    └──────────┬──────────────────┘
+               │
+    ┌──────────▼──────────────────┐
+    │  SESSION-AWARE RETRIEVAL    │
+    │  (gets smarter as the       │  ← context-mode has flat event logs;
+    │   agent works; graph-       │     no one has graph-propagated
+    │   propagated focus)         │     session intelligence
     └──────────┬──────────────────┘
                │
     ┌──────────▼──────────────────┐
     │   MULTI-INTERFACE ENGINE    │
-    │  (CLI + MCP + LSP + REST,   │
-    │   usable by any tool)       │  ← All competitors are single-interface
+    │  (CLI + MCP + LSP + REST,   │  ← All competitors are single-interface
+    │   usable by any tool)       │
     └─────────────────────────────┘
 ```
 
-**No competitor occupies this intersection.** Sourcegraph has structural intelligence but is cloud/enterprise. Ripgrep and codebase-memory-mcp are local but flat. Cursor is an IDE, not an engine. This three-way intersection is the niche to own and defend.
+**No competitor occupies this intersection.** Sourcegraph has structural intelligence but is cloud/enterprise. Context-mode has session tracking but no code understanding. Ripgrep and codebase-memory-mcp are local but flat. Cursor is an IDE, not an engine. This four-way intersection is the niche to own and defend.
 
 ---
 
@@ -361,3 +396,4 @@ Codixing occupies the intersection of three properties that no competitor combin
 - [Continue.dev MCP Migration](https://docs.continue.dev/customize/context/codebase)
 - [MCP Linux Foundation](https://modelcontextprotocol.io/)
 - [Cursor MCP Support](https://cursor.com/docs)
+- [context-mode](https://github.com/mksglu/context-mode) — session continuity MCP server (4K stars, ELv2)

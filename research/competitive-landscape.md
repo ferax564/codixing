@@ -211,6 +211,7 @@ These are mostly small/hobby projects but indicate the direction the space is mo
 |---|---|---|
 | **Codixing** | Provider (native server) | Active |
 | **Sourcegraph** | Provider (GA, Anthropic launch partner) | Active |
+| **context-mode** | Provider (session/context management) | Active — 4K stars |
 | **Continue.dev** | Consumer (recommends MCP for context) | Active |
 | **Cursor** | Consumer (connects to MCP servers) | Active |
 | **Sweep AI** | Consumer (remote MCP + OAuth) | Active |
@@ -249,7 +250,7 @@ These are mostly small/hobby projects but indicate the direction the space is mo
 
 **Positioning:** Reframe from "code search tool" to **"the code context engine"** — infrastructure that powers every AI coding tool, not a point solution competing with Sourcegraph or Cursor.
 
-**Niche:** The intersection of **local-first** + **structural intelligence** (call graphs, impact prediction, complexity, temporal context) + **multi-interface engine** (CLI + MCP + LSP + REST). No competitor occupies all three.
+**Niche:** The intersection of **local-first** + **structural intelligence** (call graphs, impact prediction, complexity, temporal context) + **session-aware retrieval** (gets smarter as the agent works) + **multi-interface engine** (CLI + MCP + LSP + REST). No competitor occupies all four.
 
 ### Immediate (0-3 months)
 
@@ -260,15 +261,16 @@ These are mostly small/hobby projects but indicate the direction the space is mo
 
 ### Medium-term (3-6 months)
 
-5. **Temporal code context** — git-aware retrieval (change velocity, hotspots, blame-aware context, co-change patterns). **Highest defensibility feature — no competitor has this.**
-6. **Language breadth** — expand to 30+ languages with structural support, 50+ with basic parse+search. Eliminates the "does it support X?" objection.
-7. **Published benchmarks** — reproducible, open-source evaluation harness. Head-to-head comparison with ripgrep, Sourcegraph, codebase-memory-mcp, Aider on real codebases.
+5. **Session-aware retrieval** — inspired by [context-mode](https://github.com/mksglu/context-mode) (4K stars), but structurally deeper. Track agent activity (reads, edits, searches) and propagate session signals through the code graph to boost retrieval relevance. Context-mode proves the demand; Codixing solves it at the retrieval layer, not the output-wrapping layer.
+6. **Temporal code context** — git-aware retrieval (change velocity, hotspots, blame-aware context, co-change patterns). **Highest defensibility feature — no competitor has this.**
+7. **Language breadth** — expand to 30+ languages with structural support, 50+ with basic parse+search. Eliminates the "does it support X?" objection.
+8. **Published benchmarks** — reproducible, open-source evaluation harness. Head-to-head comparison with ripgrep, Sourcegraph, codebase-memory-mcp, Aider on real codebases.
 
 ### Long-term (6-12 months)
 
-8. **Visualization expansion** — symbol drill-down, change heatmaps, impact blast radius visualization, shareable snapshots
-9. **Codixing Cloud** — hosted API at $19-49/user/month, filling Sourcegraph's abandoned mid-market. Free local CLI remains the core.
-10. **Formal partnerships** — Continue.dev, Aider, or similar tools as their recommended code context backend
+9. **Visualization expansion** — symbol drill-down, change heatmaps, impact blast radius visualization, shareable snapshots
+10. **Codixing Cloud** — hosted API at $19-49/user/month, filling Sourcegraph's abandoned mid-market. Free local CLI remains the core.
+11. **Formal partnerships** — Continue.dev, Aider, or similar tools as their recommended code context backend
 
 ---
 
@@ -281,9 +283,10 @@ These are mostly small/hobby projects but indicate the direction the space is mo
 | 3 | **Continue.dev** | Medium (opportunity) | Moving to MCP = distribution channel, but could build own provider |
 | 4 | **Greptile** | Medium | Similar tech (code graphs) but different use case (review vs. navigation) |
 | 5 | **codebase-memory-mcp** | Medium | Direct MCP competitor, 64 languages, but early/small |
-| 6 | **Copilot workspace** | Medium | Microsoft/GitHub resources, but cloud-only and GitHub-tied |
-| 7 | **HydraDB** | Low | Near-zero traction; horizontal, not code-specific |
-| 8 | **Mem0/Zep/Letta** | Low | Horizontal memory, not code-focused |
+| 6 | **context-mode** | Low-Medium | 4K stars, session management; complementary but could expand into code intelligence. ELv2 license limits ecosystem trust. |
+| 7 | **Copilot workspace** | Medium | Microsoft/GitHub resources, but cloud-only and GitHub-tied |
+| 8 | **HydraDB** | Low | Near-zero traction; horizontal, not code-specific |
+| 9 | **Mem0/Zep/Letta** | Low | Horizontal memory, not code-focused |
 
 ---
 
@@ -327,3 +330,4 @@ These are mostly small/hobby projects but indicate the direction the space is mo
 - [Axon](https://github.com/harshkedia177/axon)
 - [Code Pathfinder](https://codepathfinder.dev/mcp)
 - [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp)
+- [context-mode](https://github.com/mksglu/context-mode) — session continuity MCP server (4K stars, ELv2)
