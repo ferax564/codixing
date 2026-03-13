@@ -98,7 +98,30 @@ All plans include **unlimited users**.
 
 ---
 
-## 6. Relevance to Codixing
+## 6. Actual Traction (Reality Check)
+
+Despite aggressive marketing, HydraDB has **near-zero measurable public traction**:
+
+| Metric | Finding |
+|---|---|
+| GitHub stars | ~12 total across 3 dormant repos (from 2021, pre-pivot) |
+| Open source | Current Cortex product is **closed-source** |
+| SDK downloads | No public npm/PyPI/crate packages |
+| Community | No Discord, no Slack, Twitter created Aug 2025 |
+| Named customers | Zero |
+| Case studies | Zero |
+| HackerNews mentions | Zero |
+| Reddit mentions | Zero |
+| Independent press | Zero |
+| Job postings | Zero |
+
+**Assessment:** Pre-PMF startup, likely in first 6-8 months of GTM. The $6.5M raise announcement was the primary distribution strategy. "Used by publicly-listed companies" cannot be verified. Self-reported 90% LongMemEvals claim is unverified by any third party. **Not a competitive threat today** — worth monitoring but not worth reacting to.
+
+See also: [Full Competitive Landscape](./competitive-landscape.md) for comparison with Mem0, Zep, Letta, Sourcegraph, and 15+ other competitors.
+
+---
+
+## 7. Relevance to Codixing
 
 ### Overlap
 Both Codixing and HydraDB/Cortex address the same fundamental insight: **flat embedding search is insufficient for structured, relational information.**
@@ -132,7 +155,7 @@ Both Codixing and HydraDB/Cortex address the same fundamental insight: **flat em
 
 ---
 
-## 7. Strategic Considerations for Codixing Expansion
+## 8. Strategic Considerations for Codixing Expansion
 
 ### Option A: Stay Vertical (Code-Only, Go Deep)
 - Codixing becomes the definitive "code context infrastructure"
