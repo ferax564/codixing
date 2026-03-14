@@ -66,7 +66,7 @@ pub(crate) fn call_remember(engine: &mut Engine, args: &Value) -> (String, bool)
     }
 }
 
-pub(crate) fn call_recall(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_recall(engine: &Engine, args: &Value) -> (String, bool) {
     let query = args
         .get("query")
         .and_then(|v| v.as_str())

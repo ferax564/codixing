@@ -8,7 +8,7 @@ use serde_json::Value;
 use codixing_core::complexity::{count_cyclomatic_complexity, risk_band};
 use codixing_core::{Engine, EntityKind, RepoMapOptions, SearchQuery};
 
-pub(crate) fn call_index_status(engine: &mut Engine) -> (String, bool) {
+pub(crate) fn call_index_status(engine: &Engine) -> (String, bool) {
     let stats = engine.stats();
     let config = engine.config();
 
@@ -156,7 +156,7 @@ pub(crate) fn call_rename_symbol(engine: &mut Engine, args: &Value) -> (String, 
     )
 }
 
-pub(crate) fn call_find_tests(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_find_tests(engine: &Engine, args: &Value) -> (String, bool) {
     let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
     let file_filter = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -242,7 +242,7 @@ pub(crate) fn call_find_tests(engine: &mut Engine, args: &Value) -> (String, boo
     (out, false)
 }
 
-pub(crate) fn call_find_similar(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_find_similar(engine: &Engine, args: &Value) -> (String, bool) {
     let symbol = match args.get("symbol").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => return ("Missing required argument: symbol".to_string(), true),
@@ -310,7 +310,7 @@ pub(crate) fn call_find_similar(engine: &mut Engine, args: &Value) -> (String, b
     (out, false)
 }
 
-pub(crate) fn call_get_complexity(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_get_complexity(engine: &Engine, args: &Value) -> (String, bool) {
     let file = match args.get("file").and_then(|v| v.as_str()) {
         Some(f) => f.to_string(),
         None => return ("Missing required argument: file".to_string(), true),
@@ -390,7 +390,7 @@ pub(crate) fn call_get_complexity(engine: &mut Engine, args: &Value) -> (String,
     (out, false)
 }
 
-pub(crate) fn call_review_context(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_review_context(engine: &Engine, args: &Value) -> (String, bool) {
     let patch = match args.get("patch").and_then(|v| v.as_str()) {
         Some(p) => p,
         None => return ("Missing required argument: patch".to_string(), true),

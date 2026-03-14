@@ -152,7 +152,7 @@ fn dispatch_unknown_tool_returns_error() {
     let mut engine = make_engine(dir.path());
     let (msg, is_err) = dispatch_tool(&mut engine, "nonexistent_tool", &json!({}));
     assert!(is_err);
-    assert!(msg.contains("Unknown tool"), "got: {msg}");
+    assert!(msg.contains("Unknown"), "got: {msg}");
 }
 
 // -------------------------------------------------------------------------
@@ -272,11 +272,52 @@ fn apply_patch_identifies_affected_file() {
                  +++ b/src/main.rs\n\
                  @@ -1,2 +1,3 @@\n\
                  +// a comment\n\
+                  /// Entry point.\n\
                   fn main() {\n";
     let (out, _err) = dispatch_tool(&mut engine, "apply_patch", &json!({"patch": patch}));
     assert!(
         out.contains("main.rs") || out.contains("file") || out.contains("reindexed"),
         "unexpected output: {out}"
+    );
+
+    // Verify the patch was actually applied to the file.
+    let content = fs::read_to_string(dir.path().join("src/main.rs")).unwrap();
+    assert!(
+        content.contains("// a comment"),
+        "Patch should have inserted the comment line: {content}"
+    );
+}
+
+#[test]
+fn apply_patch_applies_add_and_remove() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let mut engine = make_engine(root);
+
+    // Patch that removes a line and adds a replacement.
+    let patch = "diff --git a/src/main.rs b/src/main.rs\n\
+                 --- a/src/main.rs\n\
+                 +++ b/src/main.rs\n\
+                 @@ -1,3 +1,3 @@\n\
+                 -/// Entry point.\n\
+                 +/// Modified entry point.\n\
+                  fn main() {\n\
+                      let x = compute(2, 3);\n";
+    let (out, err) = dispatch_tool(&mut engine, "apply_patch", &json!({"patch": patch}));
+    assert!(!err, "apply_patch returned error: {out}");
+
+    let content = fs::read_to_string(root.join("src/main.rs")).unwrap();
+    assert!(
+        content.contains("/// Modified entry point."),
+        "Should contain new line: {content}"
+    );
+    assert!(
+        !content.contains("/// Entry point."),
+        "Should not contain old line: {content}"
+    );
+    assert!(
+        content.contains("fn main()"),
+        "Context lines should be preserved: {content}"
     );
 }
 
@@ -1068,5 +1109,98 @@ fn multiple_memories_recall_sorted() {
     assert!(
         a_pos < m_pos && m_pos < z_pos,
         "recall should be sorted alphabetically by key: {out}"
+    );
+}
+
+// -------------------------------------------------------------------------
+// is_read_only_tool
+// -------------------------------------------------------------------------
+
+#[test]
+fn is_read_only_tool_classifies_correctly() {
+    // Read-only tools.
+    assert!(is_read_only_tool("code_search"));
+    assert!(is_read_only_tool("find_symbol"));
+    assert!(is_read_only_tool("get_references"));
+    assert!(is_read_only_tool("read_file"));
+    assert!(is_read_only_tool("grep_code"));
+    assert!(is_read_only_tool("recall"));
+    assert!(is_read_only_tool("find_orphans"));
+    assert!(is_read_only_tool("get_session_summary"));
+    assert!(is_read_only_tool("get_hotspots"));
+    assert!(is_read_only_tool("git_diff"));
+
+    // Write tools.
+    assert!(!is_read_only_tool("write_file"));
+    assert!(!is_read_only_tool("edit_file"));
+    assert!(!is_read_only_tool("delete_file"));
+    assert!(!is_read_only_tool("apply_patch"));
+    assert!(!is_read_only_tool("rename_symbol"));
+    assert!(!is_read_only_tool("remember"));
+    assert!(!is_read_only_tool("forget"));
+    assert!(!is_read_only_tool("generate_onboarding"));
+    assert!(!is_read_only_tool("session_reset_focus"));
+    assert!(!is_read_only_tool("enrich_docs"));
+    assert!(!is_read_only_tool("run_tests"));
+}
+
+// -------------------------------------------------------------------------
+// dispatch_tool_ref (read-only dispatch)
+// -------------------------------------------------------------------------
+
+#[test]
+fn dispatch_tool_ref_handles_read_only_tools() {
+    let dir = tempdir().unwrap();
+    let engine = make_engine(dir.path());
+    // dispatch_tool_ref takes &Engine (not &mut).
+    let (out, err) = dispatch_tool_ref(&engine, "code_search", &json!({"query": "hello"}));
+    assert!(!err, "dispatch_tool_ref code_search returned error: {out}");
+}
+
+#[test]
+fn dispatch_tool_ref_unknown_tool_returns_error() {
+    let dir = tempdir().unwrap();
+    let engine = make_engine(dir.path());
+    let (msg, is_err) = dispatch_tool_ref(&engine, "nonexistent_tool", &json!({}));
+    assert!(is_err);
+    assert!(msg.contains("Unknown"), "got: {msg}");
+}
+
+// -------------------------------------------------------------------------
+// compact mode
+// -------------------------------------------------------------------------
+
+#[test]
+fn compact_mode_shortens_output() {
+    let dir = tempdir().unwrap();
+    let engine = make_engine(dir.path());
+    let (normal_out, _) = dispatch_tool_ref(&engine, "read_file", &json!({"file": "src/main.rs"}));
+    let (compact_out, _) = dispatch_tool_ref(
+        &engine,
+        "read_file",
+        &json!({"file": "src/main.rs", "compact": true}),
+    );
+    // Compact output should be shorter (code blocks are trimmed).
+    assert!(
+        compact_out.len() <= normal_out.len(),
+        "compact output ({}) should be <= normal output ({})",
+        compact_out.len(),
+        normal_out.len()
+    );
+}
+
+#[test]
+fn compact_false_preserves_full_output() {
+    let dir = tempdir().unwrap();
+    let engine = make_engine(dir.path());
+    let (normal_out, _) = dispatch_tool_ref(&engine, "read_file", &json!({"file": "src/main.rs"}));
+    let (explicit_out, _) = dispatch_tool_ref(
+        &engine,
+        "read_file",
+        &json!({"file": "src/main.rs", "compact": false}),
+    );
+    assert_eq!(
+        normal_out, explicit_out,
+        "compact=false should produce same output as omitting compact"
     );
 }

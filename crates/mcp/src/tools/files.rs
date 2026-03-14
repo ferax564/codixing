@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use codixing_core::{Engine, GrepMatch, SessionEventKind};
 
-pub(crate) fn call_read_file(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_read_file(engine: &Engine, args: &Value) -> (String, bool) {
     let file = match args.get("file").and_then(|v| v.as_str()) {
         Some(f) => f,
         None => return ("Missing required argument: file".to_string(), true),
@@ -58,7 +58,7 @@ pub(crate) fn call_read_file(engine: &mut Engine, args: &Value) -> (String, bool
     }
 }
 
-pub(crate) fn call_grep_code(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_grep_code(engine: &Engine, args: &Value) -> (String, bool) {
     let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
         Some(p) => p,
         None => return ("Missing required argument: pattern".to_string(), true),
@@ -107,7 +107,7 @@ fn format_grep_matches(pattern: &str, matches: &[GrepMatch]) -> String {
     out
 }
 
-pub(crate) fn call_list_files(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_list_files(engine: &Engine, args: &Value) -> (String, bool) {
     let pattern = args.get("pattern").and_then(|v| v.as_str());
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
 
@@ -158,7 +158,7 @@ pub(crate) fn call_list_files(engine: &mut Engine, args: &Value) -> (String, boo
     (out, false)
 }
 
-pub(crate) fn call_outline_file(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_outline_file(engine: &Engine, args: &Value) -> (String, bool) {
     let file = match args.get("file").and_then(|v| v.as_str()) {
         Some(f) => f,
         None => return ("Missing required argument: file".to_string(), true),
@@ -414,7 +414,7 @@ pub(crate) fn call_delete_file(engine: &mut Engine, args: &Value) -> (String, bo
     }
 }
 
-pub(crate) fn call_git_diff(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_git_diff(engine: &Engine, args: &Value) -> (String, bool) {
     let root = engine.config().root.clone();
 
     let commit = args.get("commit").and_then(|v| v.as_str());
@@ -486,46 +486,53 @@ pub(crate) fn call_apply_patch(engine: &mut Engine, args: &Value) -> (String, bo
     let mut affected: Vec<PathBuf> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
 
-    let mut current_file: Option<PathBuf> = None;
-    let mut current_content: Option<String> = None;
-    let mut current_lines: Vec<String> = Vec::new();
-    let mut in_hunk = false;
+    // Parse the patch into per-file hunk groups.
+    let file_patches = match parse_unified_diff(patch) {
+        Ok(fp) => fp,
+        Err(e) => return (format!("Patch parse error: {e}"), true),
+    };
 
-    for line in patch.lines() {
-        if let Some(rest) = line.strip_prefix("+++ b/") {
-            if let (Some(path), Some(_)) = (current_file.take(), current_content.take()) {
-                let full = root.join(&path);
-                let content = current_lines.join("\n");
-                if let Err(e) = std::fs::write(&full, &content) {
-                    errors.push(format!("Failed to write {}: {e}", path.display()));
-                } else {
-                    affected.push(full);
+    if file_patches.is_empty() {
+        return (
+            "No files were affected by the patch. Ensure it is a valid unified diff.".to_string(),
+            false,
+        );
+    }
+
+    for fp in &file_patches {
+        let abs_path = root.join(&fp.path);
+
+        // Read the original file content.
+        let original = match std::fs::read_to_string(&abs_path) {
+            Ok(s) => s,
+            Err(e) => {
+                errors.push(format!("Cannot read '{}': {e}", fp.path));
+                continue;
+            }
+        };
+
+        let original_lines: Vec<&str> = original.lines().collect();
+
+        match apply_hunks(&original_lines, &fp.hunks) {
+            Ok(new_content) => {
+                // Preserve the trailing newline if the original had one.
+                let mut output = new_content.join("\n");
+                if original.ends_with('\n') {
+                    output.push('\n');
                 }
-                current_lines.clear();
+                if let Err(e) = std::fs::write(&abs_path, &output) {
+                    errors.push(format!("Failed to write '{}': {e}", fp.path));
+                } else {
+                    affected.push(abs_path);
+                }
             }
-            let rel = PathBuf::from(rest.trim());
-            let full = root.join(&rel);
-            current_content = std::fs::read_to_string(&full).ok();
-            if let Some(ref src) = current_content {
-                current_lines = src.lines().map(|l| l.to_string()).collect();
-            }
-            current_file = Some(rel);
-            in_hunk = false;
-        } else if line.starts_with("@@ ") {
-            in_hunk = true;
-        } else if in_hunk {
-            if let Some(rest) = line.strip_prefix('+') {
-                let _ = rest;
-            } else if let Some(_rest) = line.strip_prefix('-') {
-                // Removal
+            Err(e) => {
+                errors.push(format!("Failed to apply hunks to '{}': {e}", fp.path));
             }
         }
     }
-    if let (Some(path), Some(_)) = (current_file, current_content) {
-        let full = root.join(&path);
-        affected.push(full);
-    }
 
+    // Reindex affected files.
     let mut reindexed = 0usize;
     for path in &affected {
         if path.exists() {
@@ -549,9 +556,7 @@ pub(crate) fn call_apply_patch(engine: &mut Engine, args: &Value) -> (String, bo
 
     if reindexed == 0 {
         return (
-            "No files were affected by the patch or files don't exist on disk yet. \
-             Apply the patch to the filesystem first, then call apply_patch to reindex."
-                .to_string(),
+            "No files were affected by the patch or files don't exist on disk yet.".to_string(),
             false,
         );
     }
@@ -559,7 +564,7 @@ pub(crate) fn call_apply_patch(engine: &mut Engine, args: &Value) -> (String, bo
     let _ = engine.persist_incremental();
     (
         format!(
-            "Patch processed: {reindexed} file(s) reindexed.\n\
+            "Patch applied: {reindexed} file(s) modified and reindexed.\n\
              Affected files:\n{}",
             affected
                 .iter()
@@ -569,6 +574,179 @@ pub(crate) fn call_apply_patch(engine: &mut Engine, args: &Value) -> (String, bo
         ),
         false,
     )
+}
+
+// ---------------------------------------------------------------------------
+// Unified diff parser + applier
+// ---------------------------------------------------------------------------
+
+/// A parsed hunk from a unified diff.
+struct DiffHunk {
+    /// 1-based start line in the original file.
+    old_start: usize,
+    /// Lines in this hunk: '+' = add, '-' = remove, ' ' = context.
+    lines: Vec<DiffLine>,
+}
+
+enum DiffLine {
+    Context(String),
+    Add(String),
+    Remove,
+}
+
+/// A set of hunks for a single file.
+struct FilePatch {
+    path: String,
+    hunks: Vec<DiffHunk>,
+}
+
+/// Parse a unified diff into per-file patches with hunks.
+fn parse_unified_diff(patch: &str) -> Result<Vec<FilePatch>, String> {
+    let mut file_patches: Vec<FilePatch> = Vec::new();
+    let mut current_path: Option<String> = None;
+    let mut current_hunks: Vec<DiffHunk> = Vec::new();
+    let mut current_hunk: Option<DiffHunk> = None;
+
+    for line in patch.lines() {
+        if let Some(rest) = line.strip_prefix("+++ b/") {
+            // Flush previous hunk.
+            if let Some(hunk) = current_hunk.take() {
+                current_hunks.push(hunk);
+            }
+            // Flush previous file.
+            if let Some(path) = current_path.take() {
+                if !current_hunks.is_empty() {
+                    file_patches.push(FilePatch {
+                        path,
+                        hunks: std::mem::take(&mut current_hunks),
+                    });
+                }
+            }
+            current_path = Some(rest.trim().to_string());
+        } else if line.starts_with("--- ") {
+            // Skip the old file header.
+            continue;
+        } else if line.starts_with("@@ ") {
+            // Flush previous hunk.
+            if let Some(hunk) = current_hunk.take() {
+                current_hunks.push(hunk);
+            }
+            // Parse @@ -old_start[,old_count] +new_start[,new_count] @@
+            let old_start = parse_hunk_header_old_start(line)?;
+            current_hunk = Some(DiffHunk {
+                old_start,
+                lines: Vec::new(),
+            });
+        } else if let Some(ref mut hunk) = current_hunk {
+            if let Some(rest) = line.strip_prefix('+') {
+                hunk.lines.push(DiffLine::Add(rest.to_string()));
+            } else if let Some(rest) = line.strip_prefix('-') {
+                let _ = rest;
+                hunk.lines.push(DiffLine::Remove);
+            } else if let Some(rest) = line.strip_prefix(' ') {
+                hunk.lines.push(DiffLine::Context(rest.to_string()));
+            } else if line == "\\ No newline at end of file" {
+                // Git marker, skip.
+            } else {
+                // Treat unrecognized lines in hunk as context (handles missing
+                // leading space which some tools produce).
+                hunk.lines.push(DiffLine::Context(line.to_string()));
+            }
+        }
+        // Lines outside any file / hunk are ignored (e.g. diff --git header).
+    }
+
+    // Flush remaining hunk / file.
+    if let Some(hunk) = current_hunk.take() {
+        current_hunks.push(hunk);
+    }
+    if let Some(path) = current_path.take() {
+        if !current_hunks.is_empty() {
+            file_patches.push(FilePatch {
+                path,
+                hunks: current_hunks,
+            });
+        }
+    }
+
+    Ok(file_patches)
+}
+
+/// Parse the old-file start line from a `@@ -start[,count] +start[,count] @@` header.
+fn parse_hunk_header_old_start(header: &str) -> Result<usize, String> {
+    // Example: "@@ -10,5 +10,7 @@ fn foo()"
+    let parts: Vec<&str> = header.split_whitespace().collect();
+    if parts.len() < 3 {
+        return Err(format!("Malformed hunk header: {header}"));
+    }
+    let old_range = parts[1].trim_start_matches('-');
+    let start_str = old_range.split(',').next().unwrap_or(old_range);
+    start_str
+        .parse::<usize>()
+        .map_err(|_| format!("Cannot parse old start from hunk header: {header}"))
+}
+
+/// Apply a sequence of hunks to the original file lines.
+///
+/// Hunks must be sorted by `old_start` (ascending), which is the natural order
+/// in a unified diff.
+fn apply_hunks(original: &[&str], hunks: &[DiffHunk]) -> Result<Vec<String>, String> {
+    let mut output: Vec<String> = Vec::with_capacity(original.len());
+    // 0-based cursor into the original lines.
+    let mut cursor: usize = 0;
+
+    for hunk in hunks {
+        // old_start is 1-based; convert to 0-based.
+        let hunk_start = if hunk.old_start == 0 {
+            0
+        } else {
+            hunk.old_start - 1
+        };
+
+        // Copy original lines before this hunk.
+        if hunk_start > original.len() {
+            return Err(format!(
+                "Hunk starts at line {} but file only has {} lines",
+                hunk.old_start,
+                original.len()
+            ));
+        }
+        while cursor < hunk_start {
+            output.push(original[cursor].to_string());
+            cursor += 1;
+        }
+
+        // Apply hunk lines.
+        for diff_line in &hunk.lines {
+            match diff_line {
+                DiffLine::Context(_ctx) => {
+                    // Context line: take the original line and advance cursor.
+                    if cursor < original.len() {
+                        output.push(original[cursor].to_string());
+                        cursor += 1;
+                    }
+                }
+                DiffLine::Remove => {
+                    // Skip the original line (it's being removed).
+                    if cursor < original.len() {
+                        cursor += 1;
+                    }
+                }
+                DiffLine::Add(text) => {
+                    // Insert new line into output, don't advance cursor.
+                    output.push(text.clone());
+                }
+            }
+        }
+    }
+
+    // Copy remaining original lines after the last hunk.
+    while cursor < original.len() {
+        output.push(original[cursor].to_string());
+        cursor += 1;
+    }
+
+    Ok(output)
 }
 
 pub(crate) fn call_run_tests(engine: &mut Engine, args: &Value) -> (String, bool) {

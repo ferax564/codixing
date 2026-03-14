@@ -3,7 +3,7 @@
 use codixing_core::{Engine, OrphanOptions};
 use serde_json::Value;
 
-pub(crate) fn call_find_orphans(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_find_orphans(engine: &Engine, args: &Value) -> (String, bool) {
     let mut options = OrphanOptions::default();
 
     if let Some(include) = args.get("include").and_then(|v| v.as_str()) {
