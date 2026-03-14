@@ -11,7 +11,12 @@ use crate::error::Result;
 use crate::language::detect_language;
 
 /// Default debounce window — events within this period are coalesced.
-const DEBOUNCE_MS: u64 = 100;
+///
+/// 500ms strikes a good balance: fast enough to feel responsive, but long
+/// enough to coalesce rapid editor auto-saves and multi-file operations
+/// (e.g. `git checkout`, formatter runs) into a single batch, avoiding
+/// redundant reindex cycles.
+const DEBOUNCE_MS: u64 = 500;
 
 /// A debounced file-system watcher that emits batches of changed paths.
 ///
