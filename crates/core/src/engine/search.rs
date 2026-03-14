@@ -17,11 +17,17 @@ impl Engine {
     /// - `Fast`    → BM25 + vector + RRF fusion (falls back to BM25 if no embedder)
     /// - `Thorough` → hybrid + MMR deduplication
     pub fn search(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
-        // Expand CamelCase/snake_case identifiers in the query for better BM25 matching
-        let query = if query.query != expand_query(&query.query) {
-            SearchQuery {
-                query: expand_query(&query.query),
-                ..query
+        // Expand CamelCase/snake_case identifiers in the query for better BM25 matching.
+        // Skip expansion for Instant strategy (exact symbol lookups) to avoid false positives.
+        let query = if query.strategy != Strategy::Instant {
+            let expanded = expand_query(&query.query);
+            if expanded != query.query {
+                SearchQuery {
+                    query: expanded,
+                    ..query
+                }
+            } else {
+                query
             }
         } else {
             query
