@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use codixing_core::{Engine, GrepMatch};
+use codixing_core::{Engine, GrepMatch, SessionEventKind};
 
 pub(crate) fn call_read_file(engine: &mut Engine, args: &Value) -> (String, bool) {
     let file = match args.get("file").and_then(|v| v.as_str()) {
@@ -28,6 +28,9 @@ pub(crate) fn call_read_file(engine: &mut Engine, args: &Value) -> (String, bool
             true,
         ),
         Ok(Some(content)) => {
+            engine
+                .session()
+                .record(SessionEventKind::FileRead(file.to_string()));
             let max_chars = token_budget * 4;
             let (body, truncated) = if content.len() > max_chars {
                 (&content[..max_chars], true)
@@ -261,13 +264,18 @@ pub(crate) fn call_write_file(engine: &mut Engine, args: &Value) -> (String, boo
         .reindex_file(&abs_path)
         .and_then(|()| engine.persist_incremental())
     {
-        Ok(()) => (
-            format!(
-                "Written and indexed: {file} ({line_count} lines, {byte_count} bytes).\n\
-                 The file is now searchable via code_search and find_symbol."
-            ),
-            false,
-        ),
+        Ok(()) => {
+            engine
+                .session()
+                .record(SessionEventKind::FileWrite(file.to_string()));
+            (
+                format!(
+                    "Written and indexed: {file} ({line_count} lines, {byte_count} bytes).\n\
+                     The file is now searchable via code_search and find_symbol."
+                ),
+                false,
+            )
+        }
         Err(e) => (
             format!(
                 "File written to disk but re-index failed: {e}\n\
@@ -338,16 +346,21 @@ pub(crate) fn call_edit_file(engine: &mut Engine, args: &Value) -> (String, bool
         .reindex_file(&abs_path)
         .and_then(|()| engine.persist_incremental())
     {
-        Ok(()) => (
-            format!(
-                "Edited and re-indexed: {file}\n\
-                 Replaced {} line(s) with {} line(s). \
-                 The change is now searchable via code_search and find_symbol.",
-                old_lines.len().max(1),
-                new_lines.len().max(1),
-            ),
-            false,
-        ),
+        Ok(()) => {
+            engine
+                .session()
+                .record(SessionEventKind::FileEdit(file.to_string()));
+            (
+                format!(
+                    "Edited and re-indexed: {file}\n\
+                     Replaced {} line(s) with {} line(s). \
+                     The change is now searchable via code_search and find_symbol.",
+                    old_lines.len().max(1),
+                    new_lines.len().max(1),
+                ),
+                false,
+            )
+        }
         Err(e) => (
             format!(
                 "File edited on disk but re-index failed: {e}\n\

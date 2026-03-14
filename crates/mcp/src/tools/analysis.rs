@@ -42,13 +42,26 @@ pub(crate) fn call_index_status(engine: &mut Engine) -> (String, bool) {
         "instant only (no vectors, no graph)"
     };
 
+    let session = engine.session();
+    let session_status = if session.is_enabled() {
+        let event_count = session.event_count();
+        let focus = session
+            .focus_directory()
+            .map(|f| format!(" (focus: {f})"))
+            .unwrap_or_default();
+        format!("{event_count} events{focus}")
+    } else {
+        "disabled".to_string()
+    };
+
     let out = format!(
         "# Codixing Index Status\n\n\
          Files indexed:    {}\n\
          Code chunks:      {}\n\
          Symbols:          {}\n\
          Vector index:     {}\n\
-         Dependency graph: {}\n\n\
+         Dependency graph: {}\n\
+         Session:          {}\n\n\
          Available strategies: {}\n\n\
          Root: {}\n",
         stats.file_count,
@@ -56,6 +69,7 @@ pub(crate) fn call_index_status(engine: &mut Engine) -> (String, bool) {
         stats.symbol_count,
         vector_status,
         graph_status,
+        session_status,
         strategies,
         config.root.display(),
     );
