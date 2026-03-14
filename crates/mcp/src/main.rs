@@ -443,13 +443,22 @@ async fn handle_tools_call(
 
     let engine_arc = Arc::clone(engine);
     let tool_name_clone = tool_name.clone();
+    let read_only = tools::is_read_only_tool(&tool_name);
 
     let call_result = tokio::task::spawn_blocking(move || {
-        let mut engine = match engine_arc.write() {
-            Ok(e) => e,
-            Err(e) => return (format!("Engine lock poisoned: {e}"), true),
-        };
-        tools::dispatch_tool(&mut engine, &tool_name_clone, &args)
+        if read_only {
+            let engine = match engine_arc.read() {
+                Ok(e) => e,
+                Err(e) => return (format!("Engine lock poisoned: {e}"), true),
+            };
+            tools::dispatch_tool_ref(&engine, &tool_name_clone, &args)
+        } else {
+            let mut engine = match engine_arc.write() {
+                Ok(e) => e,
+                Err(e) => return (format!("Engine lock poisoned: {e}"), true),
+            };
+            tools::dispatch_tool(&mut engine, &tool_name_clone, &args)
+        }
     })
     .await;
 

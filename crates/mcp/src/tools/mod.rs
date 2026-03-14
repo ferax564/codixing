@@ -352,14 +352,54 @@ pub fn tool_definitions() -> Value {
     ])
 }
 
-/// Dispatch a `tools/call` invocation to the appropriate engine method.
+/// Returns true if the tool only needs read access to the engine.
 ///
-/// Takes `&mut Engine` so that write tools (write_file, edit_file, delete_file)
-/// can mutate the index inline. Read-only tools use the engine immutably.
+/// Read-only tools can acquire a shared `RwLock::read()` lock, allowing
+/// concurrent execution.  Write tools must acquire an exclusive
+/// `RwLock::write()` lock.
+pub fn is_read_only_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "code_search"
+            | "find_symbol"
+            | "search_usages"
+            | "read_symbol"
+            | "stitch_context"
+            | "explain"
+            | "get_references"
+            | "get_transitive_deps"
+            | "get_repo_map"
+            | "symbol_callers"
+            | "symbol_callees"
+            | "predict_impact"
+            | "read_file"
+            | "grep_code"
+            | "outline_file"
+            | "list_files"
+            | "index_status"
+            | "find_tests"
+            | "find_similar"
+            | "get_complexity"
+            | "review_context"
+            | "get_hotspots"
+            | "search_changes"
+            | "get_blame"
+            | "find_orphans"
+            | "get_session_summary"
+            | "recall"
+            | "get_context_for_task"
+            | "git_diff"
+    )
+}
+
+/// Dispatch a read-only `tools/call` invocation.
+///
+/// Takes `&Engine` (shared reference) so multiple read-only calls can run
+/// concurrently under a `RwLock::read()` guard.
 ///
 /// Returns `(text_output, is_error)`.
-pub fn dispatch_tool(engine: &mut Engine, name: &str, args: &Value) -> (String, bool) {
-    match name {
+pub fn dispatch_tool_ref(engine: &Engine, name: &str, args: &Value) -> (String, bool) {
+    let (output, is_error) = match name {
         "code_search" => search::call_code_search(engine, args),
         "find_symbol" => search::call_find_symbol(engine, args),
         "get_references" => graph::call_get_references(engine, args),
@@ -370,45 +410,147 @@ pub fn dispatch_tool(engine: &mut Engine, name: &str, args: &Value) -> (String, 
         "read_file" => files::call_read_file(engine, args),
         "read_symbol" => search::call_read_symbol(engine, args),
         "grep_code" => files::call_grep_code(engine, args),
-        "write_file" => files::call_write_file(engine, args),
-        "edit_file" => files::call_edit_file(engine, args),
-        "delete_file" => files::call_delete_file(engine, args),
-        // Phase 8 tools
         "list_files" => files::call_list_files(engine, args),
         "outline_file" => files::call_outline_file(engine, args),
-        "apply_patch" => files::call_apply_patch(engine, args),
-        "run_tests" => files::call_run_tests(engine, args),
-        "rename_symbol" => analysis::call_rename_symbol(engine, args),
         "explain" => search::call_explain(engine, args),
         "symbol_callers" => graph::call_symbol_callers(engine, args),
         "symbol_callees" => graph::call_symbol_callees(engine, args),
         "predict_impact" => graph::call_predict_impact(engine, args),
         "stitch_context" => search::call_stitch_context(engine, args),
-        "enrich_docs" => memory::call_enrich_docs(engine, args),
-        // Phase 10 tools
-        "remember" => memory::call_remember(engine, args),
         "recall" => memory::call_recall(engine, args),
-        "forget" => memory::call_forget(engine, args),
         "find_tests" => analysis::call_find_tests(engine, args),
         "find_similar" => analysis::call_find_similar(engine, args),
         "get_complexity" => analysis::call_get_complexity(engine, args),
         "review_context" => analysis::call_review_context(engine, args),
-        "generate_onboarding" => analysis::call_generate_onboarding(engine),
         "git_diff" => files::call_git_diff(engine, args),
-        // Phase 13a session tools
         "get_session_summary" => call_get_session_summary(engine, args),
-        "session_reset_focus" => call_session_reset_focus(engine),
-        // Phase 13b temporal tools
         "get_hotspots" => temporal::call_get_hotspots(engine, args),
         "search_changes" => temporal::call_search_changes(engine, args),
         "get_blame" => temporal::call_get_blame(engine, args),
-        // Phase 14: orphan detection
         "find_orphans" => orphans::call_find_orphans(engine, args),
-        _ => (format!("Unknown tool: {name}"), true),
+        _ => (format!("Unknown read-only tool: {name}"), true),
+    };
+    (maybe_compact(output, args), is_error)
+}
+
+/// Dispatch a `tools/call` invocation to the appropriate engine method.
+///
+/// Takes `&mut Engine` so that write tools (write_file, edit_file, delete_file,
+/// etc.) can mutate the index inline.
+///
+/// Returns `(text_output, is_error)`.
+pub fn dispatch_tool(engine: &mut Engine, name: &str, args: &Value) -> (String, bool) {
+    let (output, is_error) = match name {
+        // Write tools — require exclusive access.
+        "write_file" => files::call_write_file(engine, args),
+        "edit_file" => files::call_edit_file(engine, args),
+        "delete_file" => files::call_delete_file(engine, args),
+        "apply_patch" => files::call_apply_patch(engine, args),
+        "run_tests" => files::call_run_tests(engine, args),
+        "rename_symbol" => analysis::call_rename_symbol(engine, args),
+        "enrich_docs" => memory::call_enrich_docs(engine, args),
+        "remember" => memory::call_remember(engine, args),
+        "forget" => memory::call_forget(engine, args),
+        "generate_onboarding" => analysis::call_generate_onboarding(engine),
+        "session_reset_focus" => call_session_reset_focus(engine),
+        // Fallback: if a read-only tool is accidentally dispatched through the
+        // write path, handle it rather than returning an error.
+        other => dispatch_tool_ref(engine, other, args),
+    };
+    (maybe_compact(output, args), is_error)
+}
+
+// ---------------------------------------------------------------------------
+// Compact output post-processing
+// ---------------------------------------------------------------------------
+
+/// If `compact: true` is present in the args, compress the output to reduce
+/// token usage for AI agents.
+fn maybe_compact(output: String, args: &Value) -> String {
+    let compact = args
+        .get("compact")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !compact {
+        return output;
+    }
+    compact_output(&output)
+}
+
+/// Compress tool output for token-constrained AI agents:
+/// - Remove fenced code blocks, keep only `// <file>` headers and signatures
+/// - Truncate lines longer than 120 chars
+/// - Limit total output to ~2000 chars
+/// - Preserve structural elements (headers, file paths, line numbers)
+fn compact_output(output: &str) -> String {
+    let mut result = String::with_capacity(output.len().min(2200));
+    let mut in_code_block = false;
+    let mut code_block_lines = 0u32;
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+
+        // Track fenced code blocks.
+        if trimmed.starts_with("```") {
+            if in_code_block {
+                // Closing fence — emit summary if we skipped lines.
+                if code_block_lines > 2 {
+                    result.push_str(&format!("  ... ({code_block_lines} lines)\n"));
+                }
+                in_code_block = false;
+                code_block_lines = 0;
+            } else {
+                in_code_block = true;
+                code_block_lines = 0;
+            }
+            continue;
+        }
+
+        if in_code_block {
+            code_block_lines += 1;
+            // Keep only the first 2 lines of each code block (signature / key info).
+            if code_block_lines <= 2 {
+                let truncated = truncate_line(line, 120);
+                result.push_str(truncated);
+                result.push('\n');
+            }
+            continue;
+        }
+
+        // Outside code blocks: keep headers, file paths, bullet points.
+        let truncated = truncate_line(line, 120);
+        result.push_str(truncated);
+        result.push('\n');
+
+        // Hard limit on total output.
+        if result.len() > 2000 {
+            result.push_str("\n... (output compacted)\n");
+            break;
+        }
+    }
+
+    result
+}
+
+/// Return a `&str` slice of at most `max_len` characters.
+fn truncate_line(line: &str, max_len: usize) -> &str {
+    if line.len() <= max_len {
+        line
+    } else {
+        // Find a safe char boundary.
+        let mut end = max_len;
+        while end > 0 && !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        &line[..end]
     }
 }
 
-fn call_get_session_summary(engine: &mut Engine, args: &Value) -> (String, bool) {
+// ---------------------------------------------------------------------------
+// Session helpers
+// ---------------------------------------------------------------------------
+
+fn call_get_session_summary(engine: &Engine, args: &Value) -> (String, bool) {
     let token_budget = args
         .get("token_budget")
         .and_then(|v| v.as_u64())
@@ -418,7 +560,7 @@ fn call_get_session_summary(engine: &mut Engine, args: &Value) -> (String, bool)
     (summary, false)
 }
 
-fn call_session_reset_focus(engine: &mut Engine) -> (String, bool) {
+fn call_session_reset_focus(engine: &Engine) -> (String, bool) {
     engine.session().reset_focus();
     (
         "Progressive focus cleared. Search results will no longer be narrowed to a specific directory.".to_string(),

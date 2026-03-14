@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use codixing_core::{Engine, RepoMapOptions};
 
-pub(crate) fn call_get_references(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_get_references(engine: &Engine, args: &Value) -> (String, bool) {
     let file = match args.get("file").and_then(|v| v.as_str()) {
         Some(f) => f.to_string(),
         None => return ("Missing required argument: file".to_string(), true),
@@ -38,7 +38,7 @@ pub(crate) fn call_get_references(engine: &mut Engine, args: &Value) -> (String,
     (out, false)
 }
 
-pub(crate) fn call_get_transitive_deps(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_get_transitive_deps(engine: &Engine, args: &Value) -> (String, bool) {
     let file = match args.get("file").and_then(|v| v.as_str()) {
         Some(f) => f.to_string(),
         None => return ("Missing required argument: file".to_string(), true),
@@ -67,7 +67,7 @@ pub(crate) fn call_get_transitive_deps(engine: &mut Engine, args: &Value) -> (St
     (out, false)
 }
 
-pub(crate) fn call_get_repo_map(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_get_repo_map(engine: &Engine, args: &Value) -> (String, bool) {
     let token_budget = args
         .get("token_budget")
         .and_then(|v| v.as_u64())
@@ -91,7 +91,7 @@ pub(crate) fn call_get_repo_map(engine: &mut Engine, args: &Value) -> (String, b
     }
 }
 
-pub(crate) fn call_symbol_callers(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_symbol_callers(engine: &Engine, args: &Value) -> (String, bool) {
     let symbol = match args.get("symbol").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => return ("Missing required argument: symbol".to_string(), true),
@@ -126,7 +126,7 @@ pub(crate) fn call_symbol_callers(engine: &mut Engine, args: &Value) -> (String,
     (out, false)
 }
 
-pub(crate) fn call_symbol_callees(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_symbol_callees(engine: &Engine, args: &Value) -> (String, bool) {
     let symbol = match args.get("symbol").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => return ("Missing required argument: symbol".to_string(), true),
@@ -182,7 +182,7 @@ pub(crate) fn call_symbol_callees(engine: &mut Engine, args: &Value) -> (String,
     (out, false)
 }
 
-pub(crate) fn call_predict_impact(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_predict_impact(engine: &Engine, args: &Value) -> (String, bool) {
     let patch = match args.get("patch").and_then(|v| v.as_str()) {
         Some(p) => p,
         None => return ("Missing required argument: patch".to_string(), true),

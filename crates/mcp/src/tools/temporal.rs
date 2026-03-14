@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use codixing_core::Engine;
 
-pub(crate) fn call_get_hotspots(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_get_hotspots(engine: &Engine, args: &Value) -> (String, bool) {
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(15) as usize;
     let days = args.get("days").and_then(|v| v.as_u64()).unwrap_or(90);
 
@@ -40,7 +40,7 @@ pub(crate) fn call_get_hotspots(engine: &mut Engine, args: &Value) -> (String, b
     (out, false)
 }
 
-pub(crate) fn call_search_changes(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_search_changes(engine: &Engine, args: &Value) -> (String, bool) {
     let query = args.get("query").and_then(|v| v.as_str());
     let file_filter = args.get("file").and_then(|v| v.as_str());
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
@@ -76,7 +76,7 @@ pub(crate) fn call_search_changes(engine: &mut Engine, args: &Value) -> (String,
     (out, false)
 }
 
-pub(crate) fn call_get_blame(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_get_blame(engine: &Engine, args: &Value) -> (String, bool) {
     let file = match args.get("file").and_then(|v| v.as_str()) {
         Some(f) => f,
         None => return ("Missing required argument: file".to_string(), true),

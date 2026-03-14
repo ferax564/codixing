@@ -6,7 +6,7 @@ use serde_json::Value;
 
 use codixing_core::{Engine, SearchQuery, SessionEventKind, Strategy};
 
-pub(crate) fn call_code_search(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) {
     let query_str = match args.get("query").and_then(|v| v.as_str()) {
         Some(q) => q.to_string(),
         None => return ("Missing required argument: query".to_string(), true),
@@ -71,7 +71,7 @@ pub(crate) fn call_code_search(engine: &mut Engine, args: &Value) -> (String, bo
     }
 }
 
-pub(crate) fn call_find_symbol(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_find_symbol(engine: &Engine, args: &Value) -> (String, bool) {
     let name = match args.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
         None => return ("Missing required argument: name".to_string(), true),
@@ -109,7 +109,7 @@ pub(crate) fn call_find_symbol(engine: &mut Engine, args: &Value) -> (String, bo
     }
 }
 
-pub(crate) fn call_search_usages(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_search_usages(engine: &Engine, args: &Value) -> (String, bool) {
     let symbol = match args.get("symbol").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => return ("Missing required argument: symbol".to_string(), true),
@@ -142,7 +142,7 @@ pub(crate) fn call_search_usages(engine: &mut Engine, args: &Value) -> (String, 
     }
 }
 
-pub(crate) fn call_read_symbol(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_read_symbol(engine: &Engine, args: &Value) -> (String, bool) {
     let name = match args.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
         None => return ("Missing required argument: name".to_string(), true),
@@ -202,7 +202,7 @@ pub(crate) fn call_read_symbol(engine: &mut Engine, args: &Value) -> (String, bo
     }
 }
 
-pub(crate) fn call_stitch_context(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_stitch_context(engine: &Engine, args: &Value) -> (String, bool) {
     let query = match args.get("query").and_then(|v| v.as_str()) {
         Some(q) => q.to_string(),
         None => return ("Missing required argument: query".to_string(), true),
@@ -257,7 +257,7 @@ pub(crate) fn call_stitch_context(engine: &mut Engine, args: &Value) -> (String,
     (stitched, false)
 }
 
-pub(crate) fn call_explain(engine: &mut Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_explain(engine: &Engine, args: &Value) -> (String, bool) {
     let symbol = match args.get("symbol").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => return ("Missing required argument: symbol".to_string(), true),
