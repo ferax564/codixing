@@ -51,3 +51,4 @@ benchmarks/embed_cache/
 benchmarks/models/
 benchmarks/reranker_data/
 benchmarks/__pycache__/
+.claude/worktrees/
