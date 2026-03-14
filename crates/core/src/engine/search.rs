@@ -252,7 +252,7 @@ impl Engine {
             return;
         }
 
-        const DEFINITION_BOOST: f32 = 2.0;
+        const DEFINITION_BOOST: f32 = 3.5;
         let mut boosted = false;
         for r in results.iter_mut() {
             if defining_files.contains(&r.file_path) {
