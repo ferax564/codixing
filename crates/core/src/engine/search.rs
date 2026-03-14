@@ -34,6 +34,7 @@ impl Engine {
                 // Apply definition boost even on the BM25-only path: it's pure
                 // HashMap lookups and fixes the definition-vs-usage ranking issue.
                 self.apply_definition_boost(&mut results, &query.query);
+                apply_path_match_boost(&mut results, &query.query);
                 self.apply_test_demotion(&mut results);
                 results
             }
@@ -54,6 +55,7 @@ impl Engine {
                 };
                 self.apply_graph_boost(&mut results, self.config.graph.boost_weight);
                 self.apply_definition_boost(&mut results, &query.query);
+                apply_path_match_boost(&mut results, &query.query);
                 self.apply_test_demotion(&mut results);
                 results
             }
@@ -101,6 +103,7 @@ impl Engine {
                 };
                 self.apply_graph_boost(&mut results, self.config.graph.boost_weight);
                 self.apply_definition_boost(&mut results, &query.query);
+                apply_path_match_boost(&mut results, &query.query);
                 self.apply_test_demotion(&mut results);
                 results
             }
@@ -252,7 +255,7 @@ impl Engine {
             return;
         }
 
-        const DEFINITION_BOOST: f32 = 2.0;
+        const DEFINITION_BOOST: f32 = 3.5;
         let mut boosted = false;
         for r in results.iter_mut() {
             if defining_files.contains(&r.file_path) {
@@ -568,6 +571,50 @@ fn apply_header_demotion(results: &mut [SearchResult], changed: &mut bool) {
     }
 }
 
+/// Extract dotted module paths from a query (e.g. "django.db.models.lookups").
+///
+/// Only matches paths with at least 3 dot-separated segments to avoid false
+/// positives on version numbers or short identifiers.
+fn extract_dotted_paths(query: &str) -> Vec<String> {
+    use std::sync::LazyLock;
+
+    static RE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"[a-z]\w*(?:\.[a-z]\w*){2,}").unwrap());
+
+    RE.find_iter(query)
+        .map(|m| m.as_str().replace('.', "/"))
+        .collect()
+}
+
+/// Boost results whose file path contains a dotted-path reference from the query.
+///
+/// When a query mentions something like `django.db.models.lookups`, results
+/// whose `file_path` contains `django/db/models/lookups` get a 2× score boost.
+/// This is a zero-cost post-retrieval heuristic — no ML compute involved.
+fn apply_path_match_boost(results: &mut [SearchResult], query: &str) {
+    let dotted = extract_dotted_paths(query);
+    if dotted.is_empty() {
+        return;
+    }
+    let mut boosted = false;
+    for r in results.iter_mut() {
+        for d in &dotted {
+            if r.file_path.contains(d.as_str()) {
+                r.score *= 2.0; // Strong boost for path match
+                boosted = true;
+                break;
+            }
+        }
+    }
+    if boosted {
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+}
+
 /// Check if a string looks like a code identifier (alphanumeric + underscores/colons/dots).
 fn is_identifier_like(s: &str) -> bool {
     !s.is_empty()
@@ -578,7 +625,7 @@ fn is_identifier_like(s: &str) -> bool {
 
 /// Split a CamelCase or PascalCase identifier into lowercase words.
 /// E.g. "URLResolver" → ["url", "resolver"], "getServerSideProps" → ["get", "server", "side", "props"]
-fn split_identifier(s: &str) -> Vec<String> {
+fn split_camel_case(s: &str) -> Vec<String> {
     let mut parts = Vec::new();
     let mut current = String::new();
     let chars: Vec<char> = s.chars().collect();
@@ -597,7 +644,8 @@ fn split_identifier(s: &str) -> Vec<String> {
             // - previous char was lowercase (e.g. "get|S" in getServerSideProps)
             // - OR next char is lowercase and current accumulator has >1 char (e.g. "UR|L|Resolver" → "url" break before 'R')
             let prev_lower = chars[i - 1].is_lowercase();
-            let next_lower = i + 1 < chars.len() && chars[i + 1].is_lowercase() && current.len() > 1;
+            let next_lower =
+                i + 1 < chars.len() && chars[i + 1].is_lowercase() && current.len() > 1;
             if (prev_lower || next_lower) && !current.is_empty() {
                 parts.push(current.to_lowercase());
                 current.clear();
@@ -615,19 +663,24 @@ fn split_identifier(s: &str) -> Vec<String> {
 /// Original terms are kept; split terms are appended as additional keywords.
 fn expand_query(query: &str) -> String {
     let mut extra_terms: Vec<String> = Vec::new();
-    let existing_words: Vec<String> = query
-        .split_whitespace()
-        .map(|w| w.to_lowercase())
-        .collect();
+    let existing_words: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
 
     for word in query.split_whitespace() {
         // Only expand words that look like identifiers (>3 chars, alphanumeric+underscore)
         if word.len() > 3 && word.chars().all(|c| c.is_alphanumeric() || c == '_') {
-            let parts = split_identifier(word);
+            let parts = split_camel_case(word);
             if parts.len() > 1 {
                 // Check if the word is CamelCase or snake_case and add the alternate form.
                 let has_uppercase = word.chars().any(|c| c.is_uppercase());
                 let has_underscore = word.contains('_');
+
+                // Always add the individual split words for BM25 matching
+                // (e.g. "URLResolver" → "url resolver" as separate tokens)
+                for part in &parts {
+                    if !existing_words.contains(part) {
+                        extra_terms.push(part.clone());
+                    }
+                }
 
                 if has_uppercase && !has_underscore {
                     // CamelCase → add snake_case form (e.g. "URLResolver" → "url_resolver")
@@ -652,7 +705,6 @@ fn expand_query(query: &str) -> String {
                         extra_terms.push(camel);
                     }
                 }
-
             }
         }
     }
@@ -833,24 +885,24 @@ mod tests {
     #[test]
     fn split_identifier_camel_case() {
         assert_eq!(
-            split_identifier("getServerSideProps"),
+            split_camel_case("getServerSideProps"),
             vec!["get", "server", "side", "props"]
         );
-        assert_eq!(split_identifier("URLResolver"), vec!["url", "resolver"]);
+        assert_eq!(split_camel_case("URLResolver"), vec!["url", "resolver"]);
         assert_eq!(
-            split_identifier("ReactFiberBeginWork"),
+            split_camel_case("ReactFiberBeginWork"),
             vec!["react", "fiber", "begin", "work"]
         );
-        assert_eq!(split_identifier("simple"), vec!["simple"]);
+        assert_eq!(split_camel_case("simple"), vec!["simple"]);
     }
 
     #[test]
     fn split_identifier_snake_case() {
         assert_eq!(
-            split_identifier("get_server_side_props"),
+            split_camel_case("get_server_side_props"),
             vec!["get", "server", "side", "props"]
         );
-        assert_eq!(split_identifier("url_resolver"), vec!["url", "resolver"]);
+        assert_eq!(split_camel_case("url_resolver"), vec!["url", "resolver"]);
     }
 
     #[test]
@@ -900,16 +952,81 @@ mod tests {
         apply_header_demotion(&mut results, &mut changed);
         assert!(changed);
         // Header should be demoted: 10.0 * 0.7 = 7.0, impl stays at 9.0
-        assert!(results[1].score > results[0].score, "impl should outrank header after demotion");
+        assert!(
+            results[1].score > results[0].score,
+            "impl should outrank header after demotion"
+        );
     }
 
     #[test]
-    fn header_demotion_no_effect_without_impl() {
+    fn split_camel_case_url_resolver() {
+        assert_eq!(split_camel_case("URLResolver"), vec!["url", "resolver"]);
+    }
+
+    #[test]
+    fn split_camel_case_get_server_side_props() {
+        assert_eq!(
+            split_camel_case("getServerSideProps"),
+            vec!["get", "server", "side", "props"]
+        );
+    }
+
+    #[test]
+    fn split_camel_case_simple() {
+        assert_eq!(split_camel_case("simple"), vec!["simple"]);
+    }
+
+    #[test]
+    fn split_camel_case_snake_case_input() {
+        assert_eq!(split_camel_case("snake_case"), vec!["snake", "case"]);
+    }
+
+    #[test]
+    fn expand_query_contains_split_words() {
+        let expanded = expand_query("find URLResolver class");
+        assert!(
+            expanded.contains("url") && expanded.contains("resolver"),
+            "expand_query should contain individual split words 'url' and 'resolver', got: {expanded}"
+        );
+    }
+
+    #[test]
+    fn extract_dotted_paths_django() {
+        assert_eq!(
+            extract_dotted_paths("fix django.db.models.lookups"),
+            vec!["django/db/models/lookups"]
+        );
+    }
+
+    #[test]
+    fn extract_dotted_paths_no_match() {
+        assert!(extract_dotted_paths("simple query words").is_empty());
+    }
+
+    #[test]
+    fn extract_dotted_paths_short_path_ignored() {
+        // Two segments (only one dot) should not match — need at least 3 segments
+        assert!(extract_dotted_paths("os.path").is_empty());
+    }
+
+    #[test]
+    fn apply_path_match_boost_boosts_matching_paths() {
         let mut results = vec![
             SearchResult {
                 chunk_id: "1".into(),
-                file_path: "include/leveldb/db.h".into(),
-                language: "C++".into(),
+                file_path: "django/db/models/lookups.py".into(),
+                language: "Python".into(),
+                score: 5.0,
+                line_start: 0,
+                line_end: 20,
+                signature: String::new(),
+                scope_chain: vec![],
+                content: String::new(),
+            },
+            SearchResult {
+                chunk_id: "2".into(),
+                file_path: "django/utils/text.py".into(),
+                language: "Python".into(),
                 score: 10.0,
                 line_start: 0,
                 line_end: 20,
@@ -918,9 +1035,32 @@ mod tests {
                 content: String::new(),
             },
         ];
+        apply_path_match_boost(&mut results, "fix django.db.models.lookups");
+        // The matching file should be boosted: 5.0 * 2.0 = 10.0
+        // The non-matching file stays at 10.0
+        assert_eq!(results[0].score, 10.0); // boosted result
+        assert_eq!(results[0].file_path, "django/db/models/lookups.py");
+    }
+
+    #[test]
+    fn header_demotion_no_effect_without_impl() {
+        let mut results = vec![SearchResult {
+            chunk_id: "1".into(),
+            file_path: "include/leveldb/db.h".into(),
+            language: "C++".into(),
+            score: 10.0,
+            line_start: 0,
+            line_end: 20,
+            signature: String::new(),
+            scope_chain: vec![],
+            content: String::new(),
+        }];
         let mut changed = false;
         apply_header_demotion(&mut results, &mut changed);
-        assert!(!changed, "no impl file present, header should not be demoted");
+        assert!(
+            !changed,
+            "no impl file present, header should not be demoted"
+        );
         assert_eq!(results[0].score, 10.0);
     }
 }
