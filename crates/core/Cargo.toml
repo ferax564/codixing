@@ -47,6 +47,8 @@ tree-sitter-ruby.workspace = true
 tree-sitter-swift.workspace = true
 tree-sitter-kotlin-ng.workspace = true
 tree-sitter-scala.workspace = true
+tree-sitter-zig.workspace = true
+tree-sitter-php.workspace = true
 
 petgraph.workspace = true
 tantivy.workspace = true
