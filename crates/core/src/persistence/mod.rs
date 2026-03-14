@@ -109,6 +109,11 @@ impl IndexStore {
         root.join(CODEFORGE_DIR).is_dir()
     }
 
+    /// Return the project root path.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Path to the `.codixing/` directory.
     pub fn codixing_dir(&self) -> PathBuf {
         self.root.join(CODEFORGE_DIR)

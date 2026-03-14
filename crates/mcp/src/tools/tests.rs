@@ -85,13 +85,13 @@ func TestHandleRequest(t *testing.T) {
 // -------------------------------------------------------------------------
 
 #[test]
-fn tool_definitions_returns_35_tools() {
+fn tool_definitions_returns_38_tools() {
     let defs = tool_definitions();
     let arr = defs.as_array().expect("tool_definitions returns array");
     assert_eq!(
         arr.len(),
-        35,
-        "expected exactly 35 tool definitions, got {}",
+        38,
+        "expected exactly 38 tool definitions, got {}",
         arr.len()
     );
 }

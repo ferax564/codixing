@@ -2,6 +2,7 @@ mod files;
 mod graph;
 mod search;
 mod sync;
+mod temporal;
 
 use std::collections::HashMap;
 use std::fs;

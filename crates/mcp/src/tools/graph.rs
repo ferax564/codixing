@@ -244,5 +244,21 @@ pub(crate) fn call_predict_impact(engine: &mut Engine, args: &Value) -> (String,
         }
     }
 
+    // Temporal: show change frequency for changed files.
+    let mut has_temporal = false;
+    for file in &changed_files {
+        let (count, authors) = engine.file_change_frequency(file, 90);
+        if count > 0 {
+            if !has_temporal {
+                out.push_str("\n### Change frequency (last 90 days)\n");
+                has_temporal = true;
+            }
+            out.push_str(&format!(
+                "  - {file}: {count} commits, {} author(s)\n",
+                authors.len()
+            ));
+        }
+    }
+
     (out, false)
 }
