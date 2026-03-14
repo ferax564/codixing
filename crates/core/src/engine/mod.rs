@@ -26,7 +26,7 @@ use crate::graph::{CallExtractor, CodeGraph, ImportExtractor, ImportResolver, co
 use crate::index::TantivyIndex;
 use crate::language::{Language, SemanticEntity, detect_language};
 use crate::parser::Parser;
-use crate::persistence::{IndexMeta, IndexStore};
+use crate::persistence::{FileHashEntry, IndexMeta, IndexStore};
 use crate::reranker::Reranker;
 use crate::retriever::ChunkMeta;
 use crate::session::SessionState;
@@ -311,6 +311,18 @@ impl Engine {
 
         let hashes: Vec<(PathBuf, u64)> = parser.cache().content_hashes().into_iter().collect();
         store.save_tree_hashes(&hashes)?;
+
+        // Also write v2 hashes with mtime+size for fast sync pre-filtering.
+        let v2_hashes: Vec<(PathBuf, FileHashEntry)> = hashes
+            .iter()
+            .map(|(path, hash)| {
+                let (mtime, size) = fs::metadata(path)
+                    .map(|m| (m.modified().ok(), m.len()))
+                    .unwrap_or((None, 0));
+                (path.clone(), FileHashEntry::new(*hash, mtime, size))
+            })
+            .collect();
+        store.save_tree_hashes_v2(&v2_hashes)?;
 
         // Persist chunk_meta.
         let meta_pairs: Vec<(u64, ChunkMeta)> = chunk_meta_map

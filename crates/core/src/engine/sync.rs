@@ -8,7 +8,7 @@ use crate::chunker::cast::CastChunker;
 use crate::error::{CodixingError, Result};
 use crate::graph::{CallExtractor, ImportExtractor, ImportResolver, compute_pagerank};
 use crate::language::detect_language;
-use crate::persistence::IndexMeta;
+use crate::persistence::{FileHashEntry, IndexMeta};
 use crate::retriever::ChunkMeta;
 use crate::symbols::persistence::serialize_symbols;
 
@@ -329,21 +329,25 @@ impl Engine {
 
     /// Sync the index with the current filesystem state using stored content hashes.
     ///
-    /// Computes xxh3 hashes for all current source files, diffs against the hashes
-    /// saved during the last `init()` or `sync()`, and calls `apply_changes()` with
-    /// only the delta — skipping unchanged files entirely.
+    /// Uses a two-tier change detection strategy:
+    /// 1. **Fast pre-filter (mtime+size)**: For each file, compare the current
+    ///    filesystem mtime and size against cached values. If both match, the
+    ///    file is assumed unchanged — no I/O beyond a `stat()` call.
+    /// 2. **Full content hash (xxh3)**: Only files that fail the mtime+size
+    ///    check are read and hashed. This catches actual changes while
+    ///    eliminating ~95% of file reads on a typical sync.
     ///
     /// This works without `git` and handles any form of file drift (editor saves,
     /// `git pull`, manual copies, etc.). For an already-current index the method
-    /// returns in milliseconds (hash scan only, no Tantivy commit).
+    /// returns in milliseconds (stat scan only, no file reads or Tantivy commit).
     pub fn sync(&mut self) -> Result<SyncStats> {
         use crate::watcher::{ChangeKind, FileChange};
         use std::collections::{HashMap, HashSet};
 
-        // Load stored hashes (absolute path → xxh3). Missing file → treat as empty (full re-index).
-        let old_hashes: HashMap<std::path::PathBuf, u64> = self
+        // Load stored hashes (v2 format with mtime+size, falls back to v1).
+        let old_hashes: HashMap<std::path::PathBuf, FileHashEntry> = self
             .store
-            .load_tree_hashes()
+            .load_tree_hashes_v2()
             .unwrap_or_default()
             .into_iter()
             .collect();
@@ -353,24 +357,50 @@ impl Engine {
         let mut changes: Vec<FileChange> = Vec::new();
         let mut seen: HashSet<std::path::PathBuf> = HashSet::new();
         let mut unchanged = 0usize;
-        // Collect all current hashes so we can persist the complete set after a
-        // partial sync.  save() only writes hashes for files parsed in the current
-        // session (via parser.cache()), so after a 1-file add the next sync would
-        // treat all pre-existing files as new.  We fix this by overriding the saved
-        // tree hashes with the full current set computed here.
-        let mut current_hashes: Vec<(std::path::PathBuf, u64)> = Vec::new();
+        let mut skipped_by_mtime = 0usize;
+        // Collect all current hashes so we can persist the complete set.
+        let mut current_hashes: Vec<(std::path::PathBuf, FileHashEntry)> = Vec::new();
 
         for abs_path in &current_files {
             seen.insert(abs_path.clone());
+
+            // Phase 1: Fast mtime+size pre-filter (stat only, no file read).
+            let metadata = fs::metadata(abs_path);
+            let (current_mtime, current_size) = match &metadata {
+                Ok(m) => (m.modified().ok(), m.len()),
+                Err(_) => (None, 0),
+            };
+
+            if let Some(cached) = old_hashes.get(abs_path) {
+                if !cached.file_might_have_changed(current_mtime, current_size) {
+                    // mtime+size unchanged — skip the expensive content hash.
+                    unchanged += 1;
+                    skipped_by_mtime += 1;
+                    current_hashes.push((abs_path.clone(), cached.clone()));
+                    continue;
+                }
+            }
+
+            // Phase 2: File potentially changed — read and compute xxh3.
             let content = fs::read(abs_path)?;
             let hash = xxhash_rust::xxh3::xxh3_64(&content);
-            current_hashes.push((abs_path.clone(), hash));
+            let entry = FileHashEntry::new(hash, current_mtime, current_size);
+
             match old_hashes.get(abs_path) {
-                Some(&old) if old == hash => unchanged += 1,
-                _ => changes.push(FileChange {
-                    path: abs_path.clone(),
-                    kind: ChangeKind::Modified,
-                }),
+                Some(cached) if cached.content_hash == hash => {
+                    // mtime/size changed but content is identical (e.g. touch).
+                    // Update the cached mtime+size but don't reindex.
+                    unchanged += 1;
+                    current_hashes.push((abs_path.clone(), entry));
+                }
+                _ => {
+                    // Genuinely changed or new file.
+                    current_hashes.push((abs_path.clone(), entry));
+                    changes.push(FileChange {
+                        path: abs_path.clone(),
+                        kind: ChangeKind::Modified,
+                    });
+                }
             }
         }
 
@@ -397,15 +427,29 @@ impl Engine {
             .filter(|c| matches!(c.kind, ChangeKind::Removed))
             .count();
 
-        info!(added, modified, removed, unchanged, "syncing index");
+        info!(
+            added,
+            modified, removed, unchanged, skipped_by_mtime, "syncing index"
+        );
 
         if !changes.is_empty() {
             self.apply_changes(&changes)?;
             self.save()?;
             // Override the hashes written by save() (which only covers files parsed
-            // this session) with the complete current-file set computed above.
-            self.store.save_tree_hashes(&current_hashes)?;
+            // this session) with the complete current-file set computed here.
+            // Write both v1 (for backward compat) and v2 (for mtime+size).
+            let v1_hashes: Vec<(std::path::PathBuf, u64)> = current_hashes
+                .iter()
+                .map(|(p, e)| (p.clone(), e.content_hash))
+                .collect();
+            self.store.save_tree_hashes(&v1_hashes)?;
+            self.store.save_tree_hashes_v2(&current_hashes)?;
         } else {
+            // Even if nothing changed content-wise, update the v2 hashes
+            // to capture any mtime+size updates (e.g. file was touched).
+            if skipped_by_mtime != unchanged || !current_hashes.is_empty() {
+                self.store.save_tree_hashes_v2(&current_hashes)?;
+            }
             info!("index already up-to-date");
         }
 
@@ -548,6 +592,18 @@ impl Engine {
         let hashes: Vec<(std::path::PathBuf, u64)> =
             self.parser.cache().content_hashes().into_iter().collect();
         self.store.save_tree_hashes(&hashes)?;
+
+        // Also write v2 hashes with mtime+size for fast sync pre-filtering.
+        let v2_hashes: Vec<(std::path::PathBuf, FileHashEntry)> = hashes
+            .iter()
+            .map(|(path, hash)| {
+                let (mtime, size) = fs::metadata(path)
+                    .map(|m| (m.modified().ok(), m.len()))
+                    .unwrap_or((None, 0));
+                (path.clone(), FileHashEntry::new(*hash, mtime, size))
+            })
+            .collect();
+        self.store.save_tree_hashes_v2(&v2_hashes)?;
 
         // Persist chunk_meta.
         let meta_pairs: Vec<(u64, ChunkMeta)> = self
