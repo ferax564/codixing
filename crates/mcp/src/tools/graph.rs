@@ -98,6 +98,28 @@ pub(crate) fn call_symbol_callers(engine: &Engine, args: &Value) -> (String, boo
     };
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
 
+    // Try precise graph lookup first (AST-validated references)
+    let precise = engine.symbol_callers_precise(&symbol, limit);
+    if !precise.is_empty() {
+        let mut out = format!(
+            "## Callers of `{symbol}` ({} found, precise graph lookup)\n\n",
+            precise.len()
+        );
+        for r in &precise {
+            out.push_str(&format!(
+                "  `{}` L{} [{}]\n",
+                r.file_path,
+                r.line + 1,
+                r.kind
+            ));
+            if !r.context.is_empty() {
+                out.push_str(&format!("    {}\n", r.context));
+            }
+        }
+        return (out, false);
+    }
+
+    // Fall back to BM25 text search
     let usages = match engine.search_usages(&symbol, limit) {
         Ok(u) => u,
         Err(e) => return (format!("Error: {e}"), true),
@@ -112,7 +134,10 @@ pub(crate) fn call_symbol_callers(engine: &Engine, args: &Value) -> (String, boo
         );
     }
 
-    let mut out = format!("## Callers of `{symbol}` ({} found)\n\n", usages.len());
+    let mut out = format!(
+        "## Callers of `{symbol}` ({} found, text search fallback)\n\n",
+        usages.len()
+    );
     for u in &usages {
         out.push_str(&format!("  `{}` L{}", u.file_path, u.line_start));
         if !u.signature.is_empty() {
@@ -133,40 +158,16 @@ pub(crate) fn call_symbol_callees(engine: &Engine, args: &Value) -> (String, boo
     };
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
 
-    let src = match engine.read_symbol_source(&symbol, None) {
-        Ok(Some(s)) => s,
-        Ok(None) => return (format!("Symbol `{symbol}` not found in the index."), false),
-        Err(e) => return (format!("Error: {e}"), true),
-    };
-
-    let call_pattern = &*super::common::CALL_PATTERN;
-    let keywords: std::collections::HashSet<&str> = [
-        "if", "while", "for", "loop", "match", "return", "let", "use", "fn", "pub", "mod",
-        "struct", "enum", "impl", "trait", "type",
-    ]
-    .iter()
-    .copied()
-    .collect();
-
-    let mut callees: Vec<String> = call_pattern
-        .captures_iter(&src)
-        .filter_map(|cap| {
-            let name = cap.get(1)?.as_str().to_string();
-            if keywords.contains(name.as_str()) || name == symbol {
-                None
-            } else {
-                Some(name)
-            }
-        })
-        .collect::<std::collections::LinkedList<_>>()
-        .into_iter()
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .take(limit)
-        .collect();
-    callees.sort();
+    // Use precise AST-based callee extraction
+    let mut callees = engine.symbol_callees_precise(&symbol, None);
 
     if callees.is_empty() {
+        // Check if the symbol exists at all
+        match engine.read_symbol_source(&symbol, None) {
+            Ok(None) => return (format!("Symbol `{symbol}` not found in the index."), false),
+            Err(e) => return (format!("Error: {e}"), true),
+            Ok(Some(_)) => {}
+        }
         return (
             format!(
                 "No callees detected in `{symbol}`. May be a data type or the call graph was built without call extraction."
@@ -174,6 +175,8 @@ pub(crate) fn call_symbol_callees(engine: &Engine, args: &Value) -> (String, boo
             false,
         );
     }
+
+    callees.truncate(limit);
 
     let mut out = format!("## Callees of `{symbol}`\n\n");
     for callee in &callees {

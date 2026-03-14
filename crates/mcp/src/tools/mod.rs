@@ -2,6 +2,7 @@
 
 mod analysis;
 mod common;
+mod context;
 mod files;
 mod graph;
 mod memory;
@@ -348,6 +349,29 @@ pub fn tool_definitions() -> Value {
                 },
                 "required": []
             }
+        },
+        // Intelligent context assembly
+        {
+            "name": "get_context_for_task",
+            "description": "Given a task description, automatically assembles the most relevant code context. Uses hybrid search + dependency-aware ordering so definitions appear before usages. Perfect for understanding a feature or preparing for an edit.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Natural language description of the task (e.g. 'understand how PageRank is computed', 'prepare to add caching to the search function')"
+                    },
+                    "token_budget": {
+                        "type": "integer",
+                        "description": "Maximum tokens in response (default: 4000)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of code snippets (default: 10)"
+                    }
+                },
+                "required": ["task"]
+            }
         }
     ])
 }
@@ -428,6 +452,7 @@ pub fn dispatch_tool_ref(engine: &Engine, name: &str, args: &Value) -> (String, 
         "search_changes" => temporal::call_search_changes(engine, args),
         "get_blame" => temporal::call_get_blame(engine, args),
         "find_orphans" => orphans::call_find_orphans(engine, args),
+        "get_context_for_task" => context::call_get_context_for_task(engine, args),
         _ => (format!("Unknown read-only tool: {name}"), true),
     };
     (maybe_compact(output, args), is_error)

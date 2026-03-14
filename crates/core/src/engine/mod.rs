@@ -2,8 +2,11 @@ mod files;
 mod graph;
 mod orphans;
 mod search;
+mod symbol_graph;
 mod sync;
 mod temporal;
+
+pub use symbol_graph::SymbolReference;
 
 use std::collections::HashMap;
 use std::fs;
