@@ -12,7 +12,9 @@ pub mod parser;
 pub mod persistence;
 pub mod reranker;
 pub mod retriever;
+pub mod session;
 pub mod symbols;
+pub mod temporal;
 pub mod vector;
 pub mod watcher;
 
@@ -23,5 +25,7 @@ pub use error::{CodixingError, Result};
 pub use graph::{CodeEdge, CodeGraph, CodeNode, EdgeKind, GraphStats, RepoMapOptions};
 pub use language::EntityKind;
 pub use retriever::{ChunkMeta, SearchQuery, SearchResult, Strategy};
+pub use session::{SessionEvent, SessionEventKind, SessionState};
 pub use symbols::Symbol;
+pub use temporal::{BlameLine, ChangeEntry, Hotspot};
 pub use vector::VectorBackend;

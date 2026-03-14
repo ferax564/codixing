@@ -2,6 +2,7 @@ mod files;
 mod graph;
 mod search;
 mod sync;
+mod temporal;
 
 use std::collections::HashMap;
 use std::fs;
@@ -27,6 +28,7 @@ use crate::parser::Parser;
 use crate::persistence::{IndexMeta, IndexStore};
 use crate::reranker::Reranker;
 use crate::retriever::ChunkMeta;
+use crate::session::SessionState;
 use crate::symbols::persistence::{deserialize_symbols, serialize_symbols};
 use crate::symbols::{Symbol, SymbolTable};
 use crate::vector::VectorIndex;
@@ -172,6 +174,8 @@ pub struct Engine {
     pub(super) graph: Option<CodeGraph>,
     /// Optional cross-encoder reranker (BGE-Reranker-Base) for the `deep` strategy.
     pub(super) reranker: Option<Arc<Reranker>>,
+    /// Session state for tracking agent interactions.
+    session: Arc<SessionState>,
 }
 
 impl Engine {
@@ -357,6 +361,9 @@ impl Engine {
             None
         };
 
+        let session = Arc::new(SessionState::with_root(true, &root));
+        session.cleanup_old_sessions();
+
         Ok(Self {
             config,
             store,
@@ -369,6 +376,7 @@ impl Engine {
             chunk_meta: chunk_meta_map,
             graph,
             reranker,
+            session,
         })
     }
 
@@ -486,6 +494,9 @@ impl Engine {
             None
         };
 
+        let session = Arc::new(SessionState::with_root(true, &root));
+        session.cleanup_old_sessions();
+
         Ok(Self {
             config,
             store,
@@ -498,6 +509,7 @@ impl Engine {
             chunk_meta,
             graph,
             reranker,
+            session,
         })
     }
 
@@ -536,6 +548,25 @@ impl Engine {
     /// Used by the MCP server to decide whether auto-init is needed.
     pub fn index_exists(root: impl AsRef<Path>) -> bool {
         IndexStore::exists(root.as_ref())
+    }
+
+    /// Access the session state.
+    pub fn session(&self) -> &Arc<SessionState> {
+        &self.session
+    }
+
+    /// Replace the session state (e.g. to disable session tracking).
+    pub fn set_session(&mut self, session: Arc<SessionState>) {
+        self.session = session;
+    }
+
+    /// Get combined callers + callees for a file (used for graph-propagated session boost).
+    pub fn file_neighbors(&self, file: &str) -> Vec<String> {
+        let mut neighbors = self.callers(file);
+        neighbors.extend(self.callees(file));
+        neighbors.sort();
+        neighbors.dedup();
+        neighbors
     }
 }
 

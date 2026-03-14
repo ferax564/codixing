@@ -5,6 +5,7 @@ mod files;
 mod graph;
 mod memory;
 mod search;
+mod temporal;
 
 #[cfg(test)]
 mod tests;
@@ -236,6 +237,88 @@ pub fn tool_definitions() -> Value {
                 },
                 "required": []
             }
+        },
+        {
+            "name": "get_session_summary",
+            "description": "Return a structured markdown summary of the current session: files read/edited, symbols explored, and searches performed, grouped by directory. Useful for understanding what context the agent has gathered so far.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "token_budget": {
+                        "type": "integer",
+                        "description": "Maximum tokens for the summary output (default: 1500)"
+                    }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "session_reset_focus",
+            "description": "Clear progressive focus narrowing. After 5+ interactions in the same directory, search results are automatically narrowed to that directory. Call this when switching to a different area of the codebase.",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
+        // Phase 13b: Temporal code context
+        {
+            "name": "get_hotspots",
+            "description": "Identify the most frequently changed files in the project using git history. Returns files ranked by a composite score of commit frequency and author diversity. Useful for finding areas of active development, likely bug sources, or code that needs refactoring.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of hotspot files to return (default: 15)"
+                    },
+                    "days": {
+                        "type": "integer",
+                        "description": "Time window in days to analyze (default: 90)"
+                    }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "search_changes",
+            "description": "Search recent git commits by message content and/or file path. Returns commit hash, author, date, subject, and affected files. Useful for understanding recent modifications, finding when a bug was introduced, or tracing the evolution of a feature.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Substring to search for in commit messages (case-insensitive)"
+                    },
+                    "file": {
+                        "type": "string",
+                        "description": "Restrict to commits that touched this file path"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of commits to return (default: 20)"
+                    }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "get_blame",
+            "description": "Show git blame for a file, revealing who last modified each line and when. Groups consecutive lines by the same commit for compact output. Useful for understanding code ownership, finding the commit that introduced a bug, or knowing who to ask about a section of code.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "description": "Relative file path within the project (e.g. 'src/engine.rs')"
+                    },
+                    "line_start": {
+                        "type": "integer",
+                        "description": "First line to blame (1-indexed). Omit for entire file."
+                    },
+                    "line_end": {
+                        "type": "integer",
+                        "description": "Last line to blame (1-indexed). Omit for entire file."
+                    }
+                },
+                "required": ["file"]
+            }
         }
     ])
 }
@@ -283,6 +366,31 @@ pub fn dispatch_tool(engine: &mut Engine, name: &str, args: &Value) -> (String, 
         "review_context" => analysis::call_review_context(engine, args),
         "generate_onboarding" => analysis::call_generate_onboarding(engine),
         "git_diff" => files::call_git_diff(engine, args),
+        // Phase 13a session tools
+        "get_session_summary" => call_get_session_summary(engine, args),
+        "session_reset_focus" => call_session_reset_focus(engine),
+        // Phase 13b temporal tools
+        "get_hotspots" => temporal::call_get_hotspots(engine, args),
+        "search_changes" => temporal::call_search_changes(engine, args),
+        "get_blame" => temporal::call_get_blame(engine, args),
         _ => (format!("Unknown tool: {name}"), true),
     }
+}
+
+fn call_get_session_summary(engine: &mut Engine, args: &Value) -> (String, bool) {
+    let token_budget = args
+        .get("token_budget")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1500) as usize;
+
+    let summary = engine.session().summary(token_budget);
+    (summary, false)
+}
+
+fn call_session_reset_focus(engine: &mut Engine) -> (String, bool) {
+    engine.session().reset_focus();
+    (
+        "Progressive focus cleared. Search results will no longer be narrowed to a specific directory.".to_string(),
+        false,
+    )
 }

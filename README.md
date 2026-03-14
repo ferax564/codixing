@@ -130,6 +130,22 @@ Codixing exposes all its tools via the [Model Context Protocol](https://modelcon
 claude mcp add codixing -- npx -y codixing-mcp --root .
 ```
 
+### Continue.dev
+
+Add to your `~/.continue/config.json` under `mcpServers`:
+
+```json
+{
+  "mcpServers": [
+    {
+      "name": "codixing",
+      "command": "npx",
+      "args": ["-y", "codixing-mcp", "--root", "."]
+    }
+  ]
+}
+```
+
 ### Cursor / Windsurf / other MCP clients
 
 Add to your MCP configuration (`.mcp.json` or settings):
@@ -212,6 +228,11 @@ The daemon runs a background file watcher. When you save a file, the index updat
 | `review_context` | Assemble context for reviewing a diff: changed symbols, callers, related tests |
 | `generate_onboarding` | Generate a structured onboarding document for the indexed project |
 | `git_diff` | Show `git diff` output for the working tree or between commits |
+| `get_session_summary` | Inspect current session state: files read/edited, symbols explored |
+| `session_reset_focus` | Clear progressive directory focus narrowing |
+| `get_hotspots` | Rank files by change frequency and author diversity from git history |
+| `search_changes` | Search git log by commit message or file path |
+| `get_blame` | Show git blame with grouped output by commit |
 
 ---
 
@@ -416,7 +437,7 @@ codixing init . --model snowflake-arctic-l
 - **Live index freshness** — Daemon file watcher updates the in-memory engine within 100ms of any file save; no restart needed
 - **`.gitignore`-aware indexing** — File walker respects `.gitignore`, `.ignore`, and global gitignore (same as ripgrep); no manual exclude lists needed
 - **Hash-based incremental sync** — `codixing sync` diffs xxh3 content hashes and re-indexes only changed files; no git required
-- **MCP server** — 33 tools exposed via JSON-RPC 2.0; Claude Code registers with one command
+- **MCP server** — 38 tools exposed via JSON-RPC 2.0; Claude Code registers with one command
 - **Concurrent symbol table** — DashMap-backed with exact, prefix, and substring matching
 - **Single binary, zero runtime deps** — No JVM, no Docker, no external databases
 
@@ -503,7 +524,7 @@ codixing init . --model snowflake-arctic-l
 | **Phase 1: Foundation** | ✅ Complete | AST parsing, BM25, CLI, file watcher — 111 tests |
 | **Phase 2: Semantic Search** | ✅ Complete | BGE-Base embeddings, hybrid RRF+MMR, REST API |
 | **Phase 3: Graph Intelligence** | ✅ Complete | Import graph, PageRank, repo map — 165 tests |
-| **Phase 4: Agent Integration** | ✅ Complete | MCP (33 tools), daemon mode, 2.6× faster init, live watcher — 222 tests |
+| **Phase 4: Agent Integration** | ✅ Complete | MCP (38 tools), daemon mode, 2.6× faster init, live watcher — 222 tests |
 | **Phase 5: Production Hardening** | ✅ Complete | Field boosts, band merging, asymmetric RRF, call graph edges, sync, .gitignore walker — 232 tests |
 | **Phase 6: Ecosystem Expansion** | ✅ Complete | Tier 2 languages (Ruby/Swift/Kotlin/Scala), multi-repo, VS Code extension, CI matrix, Qdrant backend — 244 tests |
 | **Phase 7: Git Sync + Qwen3 + Eval** | ✅ Complete | Git-aware incremental sync, Qwen3 candle backend, embedding eval harness — 260 tests |
@@ -511,6 +532,8 @@ codixing init . --model snowflake-arctic-l
 | **Phase 10: Developer Intelligence** | ✅ Complete | 33 MCP tools (remember, recall, forget, find_tests, find_similar, get_complexity, review_context, generate_onboarding), persistent memory store, cyclomatic complexity, onboarding doc generation — 210 tests |
 | **Phase 11: IDE Integration** | ✅ Complete | LSP server (`codixing-lsp`) with hover, go-to-def, references, symbols, document sync, live reindex, cyclomatic complexity diagnostics; VS Code LSP client; BM25-only default; Tier 2 retrieval quality regression suite — 368 tests |
 | **Phase 12: Launch Prep** | ✅ Complete | Multi-language benchmarks, code cleanup, binary optimization (thin LTO + strip), website update — 368 tests |
+| **Phase 13a: Session-Aware Retrieval** | ✅ Complete | Track agent interactions, graph-propagated session boost (1-hop 0.3×, 2-hop 0.1×), progressive focus, linear decay, session persistence — 377 tests |
+| **Phase 13b: Temporal Code Context** | ✅ Complete | `get_hotspots`, `search_changes`, `get_blame`, blame-aware `explain`, diff-aware `predict_impact` — 383 tests |
 
 ---
 

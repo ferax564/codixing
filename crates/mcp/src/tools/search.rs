@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use codixing_core::{Engine, SearchQuery, Strategy};
+use codixing_core::{Engine, SearchQuery, SessionEventKind, Strategy};
 
 pub(crate) fn call_code_search(engine: &mut Engine, args: &Value) -> (String, bool) {
     let query_str = match args.get("query").and_then(|v| v.as_str()) {
@@ -32,8 +32,41 @@ pub(crate) fn call_code_search(engine: &mut Engine, args: &Value) -> (String, bo
     }
 
     match engine.search(query) {
-        Ok(results) if results.is_empty() => ("No results found.".to_string(), false),
-        Ok(results) => (engine.format_results(&results, Some(8000)), false),
+        Ok(results) if results.is_empty() => {
+            engine.session().record(SessionEventKind::Search {
+                query: query_str,
+                result_count: 0,
+            });
+            ("No results found.".to_string(), false)
+        }
+        Ok(mut results) => {
+            engine.session().record(SessionEventKind::Search {
+                query: query_str,
+                result_count: results.len(),
+            });
+
+            // Apply session boost to results and re-sort.
+            let session = engine.session().clone();
+            for r in results.iter_mut() {
+                let boost = session.compute_file_boost_with_graph(&r.file_path, &|file| {
+                    engine.file_neighbors(file)
+                });
+                r.score += boost;
+            }
+            results.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            // Include focus info if active.
+            let mut out = String::new();
+            if let Some(focus) = session.focus_directory() {
+                out.push_str(&format!("*focus: {focus}*\n\n"));
+            }
+            out.push_str(&engine.format_results(&results, Some(8000)));
+            (out, false)
+        }
         Err(e) => (format!("Search error: {e}"), true),
     }
 }
@@ -51,6 +84,13 @@ pub(crate) fn call_find_symbol(engine: &mut Engine, args: &Value) -> (String, bo
             (format!("No symbols found matching '{name}'."), false)
         }
         Ok(symbols) => {
+            // Record session event.
+            let first_file = symbols.first().map(|s| s.file_path.clone());
+            engine.session().record(SessionEventKind::SymbolLookup {
+                name: name.clone(),
+                file: first_file,
+            });
+
             let mut out = format!("Found {} symbol(s) matching '{name}':\n\n", symbols.len());
             for sym in &symbols {
                 out.push_str(&format!(
@@ -233,6 +273,12 @@ pub(crate) fn call_explain(engine: &mut Engine, args: &Value) -> (String, bool) 
     let syms = engine.symbols(&symbol, file_hint).unwrap_or_default();
     let def_file = syms.first().map(|s| s.file_path.clone());
 
+    // Record session event.
+    engine.session().record(SessionEventKind::SymbolLookup {
+        name: symbol.clone(),
+        file: def_file.clone(),
+    });
+
     // Find actual call sites via BM25 search (symbol-level, not file-level).
     let usages = engine.search_usages(&symbol, 8).unwrap_or_default();
 
@@ -292,6 +338,63 @@ pub(crate) fn call_explain(engine: &mut Engine, args: &Value) -> (String, bool) 
         for c in &callees {
             out.push_str(&format!("  - `{c}`\n"));
         }
+    }
+
+    // Temporal context: change frequency and recent blame for the symbol.
+    if let Some(ref f) = def_file {
+        let (change_count, authors) = engine.file_change_frequency(f, 90);
+        if change_count > 0 {
+            out.push_str(&format!(
+                "\n### Change history (last 90 days)\n**{}** commits by {}\n",
+                change_count,
+                if authors.len() <= 3 {
+                    authors.join(", ")
+                } else {
+                    format!("{} authors", authors.len())
+                }
+            ));
+        }
+        // Show blame for the symbol's line range.
+        if let Some(sym) = syms.first() {
+            let blame = engine.get_blame(f, Some(sym.line_start as u64), Some(sym.line_end as u64));
+            if !blame.is_empty() {
+                // Collect unique authors from blame.
+                let blame_authors: std::collections::BTreeSet<&str> =
+                    blame.iter().map(|b| b.author.as_str()).collect();
+                let latest = blame.iter().max_by_key(|b| &b.date);
+                if let Some(latest) = latest {
+                    out.push_str(&format!(
+                        "**Last modified:** {} by {} ({})\n",
+                        latest.date, latest.author,
+                        if blame_authors.len() == 1 {
+                            "sole author".to_string()
+                        } else {
+                            format!("{} contributors", blame_authors.len())
+                        }
+                    ));
+                }
+            }
+        }
+    }
+
+    // Show previously explored related symbols from this session.
+    let related: Vec<String> = usages
+        .iter()
+        .flat_map(|u| u.signature.split_whitespace())
+        .filter(|w| w.len() > 2 && w.chars().all(|c| c.is_alphanumeric() || c == '_'))
+        .map(|w| w.to_string())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let explored = engine.session().previously_explored(&related);
+    if !explored.is_empty() {
+        out.push_str("\n### Session context\nPreviously explored: ");
+        let items: Vec<String> = explored
+            .iter()
+            .map(|(name, mins)| format!("`{name}` ({mins} min ago)"))
+            .collect();
+        out.push_str(&items.join(", "));
+        out.push_str("\n\n");
     }
 
     (out, false)
