@@ -7,10 +7,7 @@ use serde_json::Value;
 use codixing_core::Engine;
 
 pub(crate) fn call_get_hotspots(engine: &mut Engine, args: &Value) -> (String, bool) {
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(15) as usize;
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(15) as usize;
     let days = args.get("days").and_then(|v| v.as_u64()).unwrap_or(90);
 
     let hotspots = engine.get_hotspots(limit, days);
@@ -46,10 +43,7 @@ pub(crate) fn call_get_hotspots(engine: &mut Engine, args: &Value) -> (String, b
 pub(crate) fn call_search_changes(engine: &mut Engine, args: &Value) -> (String, bool) {
     let query = args.get("query").and_then(|v| v.as_str());
     let file_filter = args.get("file").and_then(|v| v.as_str());
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(20) as usize;
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
 
     let entries = engine.search_changes(query, file_filter, limit);
 

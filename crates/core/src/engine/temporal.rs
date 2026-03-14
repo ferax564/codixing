@@ -1,6 +1,4 @@
-use crate::temporal::{
-    self, BlameLine, ChangeEntry, Hotspot,
-};
+use crate::temporal::{self, BlameLine, ChangeEntry, Hotspot};
 
 use super::Engine;
 

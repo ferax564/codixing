@@ -365,7 +365,8 @@ pub(crate) fn call_explain(engine: &mut Engine, args: &Value) -> (String, bool) 
                 if let Some(latest) = latest {
                     out.push_str(&format!(
                         "**Last modified:** {} by {} ({})\n",
-                        latest.date, latest.author,
+                        latest.date,
+                        latest.author,
                         if blame_authors.len() == 1 {
                             "sole author".to_string()
                         } else {

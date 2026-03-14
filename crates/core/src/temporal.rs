@@ -56,12 +56,7 @@ pub struct BlameLine {
 pub fn get_hotspots(root: &Path, limit: usize, days: u64) -> Vec<Hotspot> {
     let since = format!("--since={days} days ago");
     let out = Command::new("git")
-        .args([
-            "log",
-            "--format=%H %an",
-            "--name-only",
-            &since,
-        ])
+        .args(["log", "--format=%H %an", "--name-only", &since])
         .current_dir(root)
         .output();
 
@@ -117,10 +112,7 @@ pub fn get_hotspots(root: &Path, limit: usize, days: u64) -> Vec<Hotspot> {
         .into_iter()
         .map(|(file_path, commits)| {
             let commit_count = commits.len();
-            let author_count = file_authors
-                .get(&file_path)
-                .map(|a| a.len())
-                .unwrap_or(1);
+            let author_count = file_authors.get(&file_path).map(|a| a.len()).unwrap_or(1);
             // Score: frequency normalized + author diversity bonus.
             let freq_score = commit_count as f32 / total_commits;
             let author_bonus = (author_count as f32).ln().max(0.0) * 0.1;
@@ -171,10 +163,7 @@ pub fn search_changes(
         args.push(f.to_string());
     }
 
-    let out = Command::new("git")
-        .args(&args)
-        .current_dir(root)
-        .output();
+    let out = Command::new("git").args(&args).current_dir(root).output();
 
     let out = match out {
         Ok(o) if o.status.success() => o,
@@ -231,10 +220,7 @@ pub fn get_blame(
     args.push("--".to_string());
     args.push(file.to_string());
 
-    let out = Command::new("git")
-        .args(&args)
-        .current_dir(root)
-        .output();
+    let out = Command::new("git").args(&args).current_dir(root).output();
 
     let out = match out {
         Ok(o) if o.status.success() => o,
@@ -289,14 +275,7 @@ pub fn get_blame(
 pub fn file_change_frequency(root: &Path, file: &str, days: u64) -> (usize, Vec<String>) {
     let since = format!("--since={days} days ago");
     let out = Command::new("git")
-        .args([
-            "log",
-            "--format=%an",
-            &since,
-            "--follow",
-            "--",
-            file,
-        ])
+        .args(["log", "--format=%an", &since, "--follow", "--", file])
         .current_dir(root)
         .output();
 
@@ -430,7 +409,10 @@ mod tests {
     fn test_search_changes_file_filter() {
         let dir = setup_git_repo();
         let entries = search_changes(dir.path(), None, Some("main.rs"), 10);
-        assert!(entries.len() >= 2, "expected at least 2 commits for main.rs");
+        assert!(
+            entries.len() >= 2,
+            "expected at least 2 commits for main.rs"
+        );
     }
 
     #[test]
