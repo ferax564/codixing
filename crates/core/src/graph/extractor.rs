@@ -35,8 +35,8 @@ impl ImportExtractor {
             Language::Swift => extract_swift(tree, source),
             Language::Kotlin => extract_kotlin(tree, source),
             Language::Scala => extract_scala(tree, source),
-            // Tier 3: Zig and PHP use C grammar; import extraction not yet supported.
-            Language::Zig | Language::Php => vec![],
+            Language::Zig => extract_zig(tree, source),
+            Language::Php => extract_php(tree, source),
         }
     }
 }
@@ -601,6 +601,107 @@ fn extract_scala(tree: &Tree, source: &[u8]) -> Vec<RawImport> {
 }
 
 // ---------------------------------------------------------------------------
+// Zig
+// ---------------------------------------------------------------------------
+
+fn extract_zig(tree: &Tree, source: &[u8]) -> Vec<RawImport> {
+    let mut imports = Vec::new();
+    walk_all(tree.root_node(), &mut |node| {
+        if node.kind() != "builtin_function" {
+            return;
+        }
+        // Check if this is an @import call.
+        let builtin_name = node.child(0).map(|n| node_text(&n, source)).unwrap_or("");
+        if builtin_name != "@import" {
+            return;
+        }
+        // Find the string argument.
+        let mut c = node.walk();
+        for child in node.children(&mut c) {
+            if child.kind() == "arguments" {
+                let mut ac = child.walk();
+                for arg in child.children(&mut ac) {
+                    if arg.kind() == "string" {
+                        // Extract string_content child.
+                        let mut sc = arg.walk();
+                        for s in arg.children(&mut sc) {
+                            if s.kind() == "string_content" {
+                                let path = node_text(&s, source).to_string();
+                                if !path.is_empty() {
+                                    let is_relative = path.ends_with(".zig");
+                                    imports.push(RawImport {
+                                        path,
+                                        language: Language::Zig,
+                                        is_relative,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+    imports
+}
+
+// ---------------------------------------------------------------------------
+// PHP
+// ---------------------------------------------------------------------------
+
+fn extract_php(tree: &Tree, source: &[u8]) -> Vec<RawImport> {
+    let mut imports = Vec::new();
+    walk_all(tree.root_node(), &mut |node| {
+        match node.kind() {
+            "namespace_use_declaration" => {
+                // `use Foo\Bar\Baz;`
+                let mut c = node.walk();
+                for child in node.children(&mut c) {
+                    if child.kind() == "namespace_use_clause" {
+                        let text = node_text(&child, source).trim().to_string();
+                        if !text.is_empty() {
+                            imports.push(RawImport {
+                                path: text,
+                                language: Language::Php,
+                                is_relative: false,
+                            });
+                        }
+                    }
+                }
+            }
+            "require_expression"
+            | "require_once_expression"
+            | "include_expression"
+            | "include_once_expression" => {
+                // Find the string argument.
+                let mut c = node.walk();
+                for child in node.children(&mut c) {
+                    if child.kind() == "string" {
+                        let mut sc = child.walk();
+                        for s in child.children(&mut sc) {
+                            if s.kind() == "string_content" {
+                                let path = node_text(&s, source).to_string();
+                                if !path.is_empty() {
+                                    let is_relative =
+                                        path.starts_with("./") || path.starts_with("../");
+                                    imports.push(RawImport {
+                                        path,
+                                        language: Language::Php,
+                                        is_relative,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    });
+    imports
+}
+
+// ---------------------------------------------------------------------------
 // CallExtractor — function/method call sites
 // ---------------------------------------------------------------------------
 
@@ -621,7 +722,11 @@ impl CallExtractor {
                 extract_js_calls(tree, source)
             }
             Language::Go => extract_go_calls(tree, source),
-            // Java, C, C++, C# — tree-sitter node shapes differ; skip for now.
+            Language::Java => extract_java_calls(tree, source),
+            Language::C | Language::Cpp => extract_c_cpp_calls(tree, source),
+            Language::Ruby => extract_ruby_calls(tree, source),
+            Language::Swift => extract_swift_calls(tree, source),
+            Language::Kotlin => extract_kotlin_calls(tree, source),
             _ => Vec::new(),
         }
     }
@@ -717,6 +822,173 @@ fn extract_go_calls(tree: &Tree, source: &[u8]) -> Vec<String> {
             };
             if !name.is_empty() {
                 calls.push(name);
+            }
+        }
+    });
+    calls
+}
+
+fn extract_java_calls(tree: &Tree, source: &[u8]) -> Vec<String> {
+    let mut calls = Vec::new();
+    walk_all(tree.root_node(), &mut |node| {
+        match node.kind() {
+            "method_invocation" => {
+                // `obj.method(args)` — the name field holds the method name.
+                if let Some(name_node) = node.child_by_field_name("name") {
+                    let name = node_text(&name_node, source).to_string();
+                    if !name.is_empty() {
+                        calls.push(name);
+                    }
+                }
+            }
+            "object_creation_expression" => {
+                // `new Foo(args)` — the type field holds the class name.
+                if let Some(type_node) = node.child_by_field_name("type") {
+                    let name = node_text(&type_node, source).to_string();
+                    if !name.is_empty() {
+                        calls.push(name);
+                    }
+                }
+            }
+            _ => {}
+        }
+    });
+    calls
+}
+
+fn extract_c_cpp_calls(tree: &Tree, source: &[u8]) -> Vec<String> {
+    let mut calls = Vec::new();
+    walk_all(tree.root_node(), &mut |node| {
+        if node.kind() != "call_expression" {
+            return;
+        }
+        if let Some(func) = node.child_by_field_name("function") {
+            let name = match func.kind() {
+                "identifier" => node_text(&func, source).to_string(),
+                "qualified_identifier" => {
+                    // For C++ qualified calls like `ns::func()`, extract the
+                    // last identifier segment.
+                    let text = node_text(&func, source);
+                    text.rsplit("::").next().unwrap_or(text).to_string()
+                }
+                "field_expression" => {
+                    // `obj.method()` or `ptr->method()`
+                    func.child_by_field_name("field")
+                        .map(|n| node_text(&n, source).to_string())
+                        .unwrap_or_default()
+                }
+                "template_function" => {
+                    // `func<T>()` — extract the function name.
+                    func.child_by_field_name("name")
+                        .map(|n| node_text(&n, source).to_string())
+                        .unwrap_or_default()
+                }
+                _ => String::new(),
+            };
+            if !name.is_empty() {
+                calls.push(name);
+            }
+        }
+    });
+    calls
+}
+
+fn extract_ruby_calls(tree: &Tree, source: &[u8]) -> Vec<String> {
+    let mut calls = Vec::new();
+    walk_all(tree.root_node(), &mut |node| {
+        if node.kind() != "call" {
+            return;
+        }
+        // Ruby `call` nodes have a `method` field.
+        if let Some(method) = node.child_by_field_name("method") {
+            let name = node_text(&method, source).to_string();
+            if !name.is_empty() {
+                calls.push(name);
+            }
+        }
+    });
+    calls
+}
+
+fn extract_swift_calls(tree: &Tree, source: &[u8]) -> Vec<String> {
+    let mut calls = Vec::new();
+    walk_all(tree.root_node(), &mut |node| {
+        if node.kind() != "call_expression" {
+            return;
+        }
+        // Swift call_expression: first child is the function expression.
+        let mut c = node.walk();
+        for child in node.children(&mut c) {
+            match child.kind() {
+                "simple_identifier" => {
+                    let name = node_text(&child, source).to_string();
+                    if !name.is_empty() {
+                        calls.push(name);
+                    }
+                    break;
+                }
+                "navigation_expression" => {
+                    // `obj.method()` — last simple_identifier child.
+                    let mut nc = child.walk();
+                    let mut last_id = String::new();
+                    for nav_child in child.children(&mut nc) {
+                        if nav_child.kind() == "simple_identifier" {
+                            last_id = node_text(&nav_child, source).to_string();
+                        }
+                    }
+                    if !last_id.is_empty() {
+                        calls.push(last_id);
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
+    calls
+}
+
+fn extract_kotlin_calls(tree: &Tree, source: &[u8]) -> Vec<String> {
+    let mut calls = Vec::new();
+    walk_all(tree.root_node(), &mut |node| {
+        if node.kind() != "call_expression" {
+            return;
+        }
+        // Kotlin call_expression: first child is the callee.
+        let mut c = node.walk();
+        for child in node.children(&mut c) {
+            match child.kind() {
+                "simple_identifier" => {
+                    let name = node_text(&child, source).to_string();
+                    if !name.is_empty() {
+                        calls.push(name);
+                    }
+                    break;
+                }
+                "navigation_expression" => {
+                    // `obj.method()` — the navigation_suffix contains the
+                    // method name.
+                    if let Some(suffix) = child.child_by_field_name("suffix") {
+                        let name = node_text(&suffix, source).to_string();
+                        if !name.is_empty() {
+                            calls.push(name);
+                        }
+                    } else {
+                        // Fallback: last simple_identifier child.
+                        let mut nc = child.walk();
+                        let mut last_id = String::new();
+                        for nav_child in child.children(&mut nc) {
+                            if nav_child.kind() == "simple_identifier" {
+                                last_id = node_text(&nav_child, source).to_string();
+                            }
+                        }
+                        if !last_id.is_empty() {
+                            calls.push(last_id);
+                        }
+                    }
+                    break;
+                }
+                _ => {}
             }
         }
     });

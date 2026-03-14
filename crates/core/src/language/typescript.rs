@@ -1,8 +1,8 @@
 use tree_sitter::{Node, Tree};
 
 use super::{
-    EntityKind, Language, LanguageSupport, SemanticEntity, extract_preceding_comments,
-    find_name_node, node_line_range, node_text,
+    EntityKind, Language, LanguageSupport, SemanticEntity, find_name_node, node_line_range,
+    node_text,
 };
 
 /// TypeScript language support.
@@ -19,6 +19,8 @@ const TS_ENTITY_KINDS: &[&str] = &[
     "class_declaration",
     "interface_declaration",
     "type_alias_declaration",
+    "enum_declaration",
+    "internal_module",
     "method_definition",
     "export_statement",
     "import_statement",
@@ -59,7 +61,7 @@ impl LanguageSupport for TypeScriptLanguage {
     }
 
     fn extract_doc_comment(&self, node: &Node, source: &[u8]) -> Option<String> {
-        extract_preceding_comments(node, source, "//")
+        extract_ts_doc_comment(node, source)
     }
 }
 
@@ -88,7 +90,7 @@ impl LanguageSupport for TsxLanguage {
     }
 
     fn extract_doc_comment(&self, node: &Node, source: &[u8]) -> Option<String> {
-        extract_preceding_comments(node, source, "//")
+        extract_ts_doc_comment(node, source)
     }
 }
 
@@ -117,7 +119,7 @@ impl LanguageSupport for JavaScriptLanguage {
     }
 
     fn extract_doc_comment(&self, node: &Node, source: &[u8]) -> Option<String> {
-        extract_preceding_comments(node, source, "//")
+        extract_ts_doc_comment(node, source)
     }
 }
 
@@ -144,17 +146,20 @@ fn collect_entities(
                 kind: entity_kind.clone(),
                 name: name.clone(),
                 signature: extract_ts_signature(node, source),
-                doc_comment: extract_preceding_comments(node, source, "//"),
+                doc_comment: extract_ts_doc_comment(node, source),
                 byte_range: node.start_byte()..node.end_byte(),
                 line_range: node_line_range(node),
                 scope: scope.to_vec(),
             };
             entities.push(entity);
 
-            // Recurse into class/interface bodies with updated scope
+            // Recurse into class/interface/namespace bodies with updated scope
             if matches!(
                 entity_kind,
-                EntityKind::Class | EntityKind::Interface | EntityKind::Module
+                EntityKind::Class
+                    | EntityKind::Interface
+                    | EntityKind::Module
+                    | EntityKind::Namespace
             ) {
                 let mut child_scope = scope.to_vec();
                 if !name.is_empty() {
@@ -214,6 +219,10 @@ fn match_entity_kind(
         "method_definition" => Some(EntityKind::Method),
         "interface_declaration" if is_typescript => Some(EntityKind::Interface),
         "type_alias_declaration" if is_typescript => Some(EntityKind::TypeAlias),
+        "enum_declaration" if is_typescript => Some(EntityKind::Enum),
+        // tree-sitter-typescript uses "internal_module" for `namespace Foo { ... }`
+        // and `module Foo { ... }` declarations.
+        "internal_module" if is_typescript => Some(EntityKind::Namespace),
         "import_statement" => Some(EntityKind::Import),
         "lexical_declaration" => {
             // Check if this is a `const foo = (...) => ...` pattern
@@ -260,6 +269,56 @@ fn extract_entity_name(node: &Node, source: &[u8], kind: &str) -> Option<String>
     }
 }
 
+/// Extract doc comments for TS/JS nodes, including JSDoc `/** ... */` blocks
+/// and `//` line comments.
+fn extract_ts_doc_comment(node: &Node, source: &[u8]) -> Option<String> {
+    let mut comments = Vec::new();
+    let mut sibling = node.prev_sibling();
+    while let Some(sib) = sibling {
+        let kind = sib.kind();
+        if kind == "comment" {
+            let text = node_text(&sib, source).trim().to_string();
+            comments.push(text);
+            sibling = sib.prev_sibling();
+        } else {
+            break;
+        }
+    }
+    if comments.is_empty() {
+        return None;
+    }
+    comments.reverse();
+    let cleaned: Vec<String> = comments
+        .iter()
+        .map(|c| {
+            if c.starts_with("/**") {
+                // JSDoc block comment: strip `/**`, `*/`, and leading `*` on
+                // each line.
+                let inner = c.trim_start_matches("/**").trim_end_matches("*/").trim();
+                inner
+                    .lines()
+                    .map(|line| line.trim().trim_start_matches('*').trim().to_string())
+                    .filter(|line| !line.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else if c.starts_with("/*") {
+                c.trim_start_matches("/*")
+                    .trim_end_matches("*/")
+                    .trim()
+                    .to_string()
+            } else {
+                c.trim_start_matches("//").trim().to_string()
+            }
+        })
+        .filter(|c| !c.is_empty())
+        .collect();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned.join("\n"))
+    }
+}
+
 fn extract_ts_signature(node: &Node, source: &[u8]) -> Option<String> {
     let kind = node.kind();
     match kind {
@@ -271,7 +330,7 @@ fn extract_ts_signature(node: &Node, source: &[u8]) -> Option<String> {
                 Some(text.lines().next().unwrap_or(text).to_string())
             }
         }
-        "class_declaration" | "interface_declaration" => {
+        "class_declaration" | "interface_declaration" | "enum_declaration" | "internal_module" => {
             let text = node_text(node, source);
             if let Some(brace) = text.find('{') {
                 Some(text[..brace].trim().to_string())
