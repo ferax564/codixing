@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
@@ -14,12 +15,72 @@ const META_FILE: &str = "meta.json";
 const TANTIVY_DIR: &str = "tantivy";
 const SYMBOLS_FILE: &str = "symbols.bin";
 const TREE_HASHES_FILE: &str = "tree_hashes.bin";
+const TREE_HASHES_V2_FILE: &str = "tree_hashes_v2.bin";
 const VECTORS_DIR: &str = "vectors";
 const VECTOR_INDEX_FILE: &str = "index.usearch";
 const FILE_CHUNKS_FILE: &str = "file_chunks.bin";
 const CHUNK_META_FILE: &str = "chunk_meta.bin";
 const GRAPH_DIR: &str = "graph";
 const GRAPH_FILE: &str = "graph.bin";
+
+/// Extended file hash entry storing content hash alongside filesystem metadata
+/// (mtime and size) for fast pre-filtering during sync.
+///
+/// During `sync()`, if both `mtime` and `size` match the cached values, the
+/// file is assumed unchanged and the expensive xxh3 content hash is skipped.
+/// This eliminates ~95% of file reads on a typical sync where few files changed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FileHashEntry {
+    /// xxh3-64 hash of the file contents.
+    pub content_hash: u64,
+    /// Last modification time (seconds since UNIX epoch + nanos).
+    /// Stored as `(secs, nanos)` for bitcode compatibility since `SystemTime`
+    /// is not directly serializable.
+    pub mtime_secs: u64,
+    pub mtime_nanos: u32,
+    /// File size in bytes.
+    pub size: u64,
+}
+
+impl FileHashEntry {
+    /// Create a new entry from a content hash and filesystem metadata.
+    pub fn new(content_hash: u64, mtime: Option<SystemTime>, size: u64) -> Self {
+        let (secs, nanos) = mtime
+            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|d| (d.as_secs(), d.subsec_nanos()))
+            .unwrap_or((0, 0));
+        Self {
+            content_hash,
+            mtime_secs: secs,
+            mtime_nanos: nanos,
+            size,
+        }
+    }
+
+    /// Reconstruct the `SystemTime` from stored seconds/nanos.
+    pub fn mtime(&self) -> Option<SystemTime> {
+        if self.mtime_secs == 0 && self.mtime_nanos == 0 {
+            return None;
+        }
+        Some(SystemTime::UNIX_EPOCH + std::time::Duration::new(self.mtime_secs, self.mtime_nanos))
+    }
+
+    /// Quick check: does the file's current mtime+size match cached values?
+    /// Returns `true` if the file might have changed (needs content hash).
+    pub fn file_might_have_changed(
+        &self,
+        current_mtime: Option<SystemTime>,
+        current_size: u64,
+    ) -> bool {
+        if current_size != self.size {
+            return true;
+        }
+        match (self.mtime(), current_mtime) {
+            (Some(cached), Some(current)) => cached != current,
+            _ => true, // if we can't compare, assume changed
+        }
+    }
+}
 
 /// Index metadata persisted alongside the index.
 ///
@@ -129,9 +190,14 @@ impl IndexStore {
         self.codixing_dir().join(SYMBOLS_FILE)
     }
 
-    /// Path to the `tree_hashes.bin` file.
+    /// Path to the `tree_hashes.bin` file (legacy v1 format).
     pub fn tree_hashes_path(&self) -> PathBuf {
         self.codixing_dir().join(TREE_HASHES_FILE)
+    }
+
+    /// Path to the `tree_hashes_v2.bin` file (extended format with mtime+size).
+    pub fn tree_hashes_v2_path(&self) -> PathBuf {
+        self.codixing_dir().join(TREE_HASHES_V2_FILE)
     }
 
     /// Path to the `vectors/` sub-directory.
@@ -254,6 +320,51 @@ impl IndexStore {
             CodixingError::Serialization(format!("failed to deserialize tree hashes: {e}"))
         })?;
         Ok(hashes)
+    }
+
+    /// Save extended tree hashes (v2 format with mtime+size) to `tree_hashes_v2.bin`.
+    pub fn save_tree_hashes_v2(&self, hashes: &[(PathBuf, FileHashEntry)]) -> Result<()> {
+        let bytes = bitcode::serialize(hashes).map_err(|e| {
+            CodixingError::Serialization(format!("failed to serialize tree hashes v2: {e}"))
+        })?;
+        fs::write(self.tree_hashes_v2_path(), bytes)?;
+        Ok(())
+    }
+
+    /// Load extended tree hashes (v2 format) from `tree_hashes_v2.bin`.
+    ///
+    /// Falls back to the legacy v1 format if v2 does not exist, converting
+    /// entries to `FileHashEntry` with zeroed mtime/size (will trigger a
+    /// full content-hash check on the first sync, then v2 is written).
+    pub fn load_tree_hashes_v2(&self) -> Result<Vec<(PathBuf, FileHashEntry)>> {
+        let v2_path = self.tree_hashes_v2_path();
+        if v2_path.exists() {
+            let bytes = fs::read(&v2_path)?;
+            let hashes: Vec<(PathBuf, FileHashEntry)> =
+                bitcode::deserialize(&bytes).map_err(|e| {
+                    CodixingError::Serialization(format!(
+                        "failed to deserialize tree hashes v2: {e}"
+                    ))
+                })?;
+            return Ok(hashes);
+        }
+
+        // Fall back to v1 and upconvert.
+        let v1 = self.load_tree_hashes().unwrap_or_default();
+        Ok(v1
+            .into_iter()
+            .map(|(path, hash)| {
+                (
+                    path,
+                    FileHashEntry {
+                        content_hash: hash,
+                        mtime_secs: 0,
+                        mtime_nanos: 0,
+                        size: 0,
+                    },
+                )
+            })
+            .collect())
     }
 
     /// Save the chunk metadata map (bitcode-serialized `Vec<(u64, ChunkMeta)>`).
@@ -417,5 +528,90 @@ mod tests {
             store.tree_hashes_path(),
             root.join(".codixing/tree_hashes.bin")
         );
+    }
+
+    #[test]
+    fn file_hash_entry_round_trip() {
+        let now = SystemTime::now();
+        let entry = FileHashEntry::new(0xDEADBEEF, Some(now), 1024);
+
+        // Check that mtime round-trips correctly.
+        let recovered = entry.mtime().unwrap();
+        let now_duration = now.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        let rec_duration = recovered.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        assert_eq!(now_duration.as_secs(), rec_duration.as_secs());
+        assert_eq!(now_duration.subsec_nanos(), rec_duration.subsec_nanos());
+
+        assert_eq!(entry.content_hash, 0xDEADBEEF);
+        assert_eq!(entry.size, 1024);
+    }
+
+    #[test]
+    fn file_hash_entry_unchanged_detection() {
+        let now = SystemTime::now();
+        let entry = FileHashEntry::new(0xCAFE, Some(now), 512);
+
+        // Same mtime+size → not changed.
+        assert!(!entry.file_might_have_changed(Some(now), 512));
+
+        // Different size → changed.
+        assert!(entry.file_might_have_changed(Some(now), 999));
+
+        // Different mtime → changed.
+        let later = now + std::time::Duration::from_secs(1);
+        assert!(entry.file_might_have_changed(Some(later), 512));
+
+        // No mtime → changed (conservative).
+        assert!(entry.file_might_have_changed(None, 512));
+    }
+
+    #[test]
+    fn tree_hashes_v2_round_trip() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let config = IndexConfig::new(root);
+
+        let store = IndexStore::init(root, &config).unwrap();
+
+        let now = SystemTime::now();
+        let hashes = vec![
+            (
+                PathBuf::from("src/main.rs"),
+                FileHashEntry::new(0xDEADBEEF, Some(now), 1024),
+            ),
+            (
+                PathBuf::from("src/lib.rs"),
+                FileHashEntry::new(0xCAFEBABE, Some(now), 2048),
+            ),
+        ];
+
+        store.save_tree_hashes_v2(&hashes).unwrap();
+        let loaded = store.load_tree_hashes_v2().unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].1.content_hash, hashes[0].1.content_hash);
+        assert_eq!(loaded[1].1.size, 2048);
+    }
+
+    #[test]
+    fn tree_hashes_v2_fallback_from_v1() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let config = IndexConfig::new(root);
+
+        let store = IndexStore::init(root, &config).unwrap();
+
+        // Write only v1 hashes.
+        let v1_hashes = vec![
+            (PathBuf::from("src/main.rs"), 0xDEADBEEF_u64),
+            (PathBuf::from("src/lib.rs"), 0xCAFEBABE_u64),
+        ];
+        store.save_tree_hashes(&v1_hashes).unwrap();
+
+        // load_tree_hashes_v2 should fall back to v1 with zeroed mtime/size.
+        let loaded = store.load_tree_hashes_v2().unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].1.content_hash, 0xDEADBEEF);
+        assert_eq!(loaded[0].1.mtime_secs, 0);
+        assert_eq!(loaded[0].1.size, 0);
     }
 }

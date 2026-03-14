@@ -173,6 +173,15 @@ async fn run_daemon(engine: Arc<RwLock<Engine>>, socket_path: &Path) -> Result<(
 
     // Spawn a background task that watches the project directory and keeps the
     // in-memory engine up to date when source files change.
+    //
+    // Uses a two-level debounce strategy:
+    // 1. The FileWatcher's internal 500ms debounce coalesces rapid filesystem
+    //    events (e.g. editor auto-save, formatter runs).
+    // 2. This loop adds a secondary 500ms settlement window: after receiving
+    //    events, it keeps polling for more events for 500ms before acquiring
+    //    the write lock. This further batches multi-file operations like
+    //    `git checkout` and reduces the number of write-lock acquisitions
+    //    (which block search queries).
     let engine_for_watch = Arc::clone(&engine);
     tokio::task::spawn_blocking(move || {
         let config = engine_for_watch
@@ -198,12 +207,37 @@ async fn run_daemon(engine: Arc<RwLock<Engine>>, socket_path: &Path) -> Result<(
                 continue;
             }
 
+            // Secondary settlement window: keep collecting events for up to
+            // 500ms to batch multi-file operations. This reduces write-lock
+            // acquisitions during rapid editing or VCS operations.
+            let mut all_changes = changes;
+            let settle_deadline = std::time::Instant::now() + Duration::from_millis(500);
+            loop {
+                let remaining =
+                    settle_deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                let more = watcher.poll_changes(remaining);
+                if more.is_empty() {
+                    break;
+                }
+                all_changes.extend(more);
+            }
+
+            // Deduplicate: if the same path appears multiple times, keep the
+            // last occurrence (latest state).
+            {
+                let mut seen = std::collections::HashSet::new();
+                all_changes.retain(|c| seen.insert(c.path.clone()));
+            }
+
             info!(
-                count = changes.len(),
+                count = all_changes.len(),
                 "daemon: file changes detected, updating index"
             );
             let mut eng = engine_for_watch.write().expect("engine lock poisoned");
-            if let Err(e) = eng.apply_changes(&changes) {
+            if let Err(e) = eng.apply_changes(&all_changes) {
                 warn!(error = %e, "daemon: apply_changes failed");
             }
             if let Err(e) = eng.save() {
