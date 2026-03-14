@@ -5,6 +5,7 @@ mod common;
 mod files;
 mod graph;
 mod memory;
+mod orphans;
 mod search;
 mod temporal;
 
@@ -320,6 +321,33 @@ pub fn tool_definitions() -> Value {
                 },
                 "required": ["file"]
             }
+        },
+        // Phase 14: Orphan file detection
+        {
+            "name": "find_orphans",
+            "description": "Identify orphan files \u{2014} files with zero in-degree in the dependency graph (no other tracked file imports them). These are potential dead code candidates. Returns a table sorted by confidence level. Requires graph intelligence to be enabled.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "include": {
+                        "type": "string",
+                        "description": "File pattern to include (substring match, e.g. '*.rs', 'src/'). Omit to check all files."
+                    },
+                    "exclude": {
+                        "type": "string",
+                        "description": "File pattern to exclude (substring match, e.g. 'test', 'vendor'). Default excludes test/spec/bench/__pycache__/node_modules."
+                    },
+                    "check_dynamic": {
+                        "type": "boolean",
+                        "description": "Check for dynamic references via text search to refine confidence (default: true)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of orphan files to return (default: 50)"
+                    }
+                },
+                "required": []
+            }
         }
     ])
 }
@@ -374,6 +402,8 @@ pub fn dispatch_tool(engine: &mut Engine, name: &str, args: &Value) -> (String, 
         "get_hotspots" => temporal::call_get_hotspots(engine, args),
         "search_changes" => temporal::call_search_changes(engine, args),
         "get_blame" => temporal::call_get_blame(engine, args),
+        // Phase 14: orphan detection
+        "find_orphans" => orphans::call_find_orphans(engine, args),
         _ => (format!("Unknown tool: {name}"), true),
     }
 }
