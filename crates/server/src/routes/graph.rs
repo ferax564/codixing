@@ -793,48 +793,6 @@ pub async fn history_handler(
 }
 
 // ---------------------------------------------------------------------------
-// GET /graph/call-graph
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Serialize)]
-pub struct CallGraphEdge {
-    /// Relative path of the caller file.
-    pub caller_file: String,
-    /// Name of the calling symbol.
-    pub caller_name: String,
-    /// Name of the called symbol (unresolved — may appear in multiple files).
-    pub callee_name: String,
-}
-
-#[derive(Debug, Serialize)]
-pub struct CallGraphResponse {
-    pub available: bool,
-    pub edge_count: usize,
-    pub edges: Vec<CallGraphEdge>,
-}
-
-pub async fn call_graph_handler(
-    State(state): State<AppState>,
-) -> Result<Json<CallGraphResponse>, ApiError> {
-    let engine = state.read().await;
-    let edges: Vec<CallGraphEdge> = engine
-        .call_graph_edges()
-        .into_iter()
-        .map(|(caller_file, caller_name, callee_name)| CallGraphEdge {
-            caller_file,
-            caller_name,
-            callee_name,
-        })
-        .collect();
-    let edge_count = edges.len();
-    Ok(Json(CallGraphResponse {
-        available: engine.has_call_graph(),
-        edge_count,
-        edges,
-    }))
-}
-
-// ---------------------------------------------------------------------------
 // GET /graph/view
 // ---------------------------------------------------------------------------
 

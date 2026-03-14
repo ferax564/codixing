@@ -47,8 +47,6 @@ cargo clippy --workspace -- -D warnings     # lint (must pass)
 cargo fmt --check                           # format check (must pass)
 ```
 
-The workspace has pre-existing dead-code warnings in `crates/server/src/routes/graph.rs` (`CallGraphEdge`, `CallGraphResponse`, `call_graph_handler`) — these are not introduced by new changes.
-
 ## MCP Index Maintenance
 
 The Codixing index lives in `.codixing/`. After significant file changes, sync it:
