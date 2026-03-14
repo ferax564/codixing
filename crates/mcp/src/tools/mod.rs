@@ -236,6 +236,25 @@ pub fn tool_definitions() -> Value {
                 },
                 "required": []
             }
+        },
+        {
+            "name": "get_session_summary",
+            "description": "Return a structured markdown summary of the current session: files read/edited, symbols explored, and searches performed, grouped by directory. Useful for understanding what context the agent has gathered so far.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "token_budget": {
+                        "type": "integer",
+                        "description": "Maximum tokens for the summary output (default: 1500)"
+                    }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "session_reset_focus",
+            "description": "Clear progressive focus narrowing. After 5+ interactions in the same directory, search results are automatically narrowed to that directory. Call this when switching to a different area of the codebase.",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
         }
     ])
 }
@@ -283,6 +302,27 @@ pub fn dispatch_tool(engine: &mut Engine, name: &str, args: &Value) -> (String, 
         "review_context" => analysis::call_review_context(engine, args),
         "generate_onboarding" => analysis::call_generate_onboarding(engine),
         "git_diff" => files::call_git_diff(engine, args),
+        // Phase 13a session tools
+        "get_session_summary" => call_get_session_summary(engine, args),
+        "session_reset_focus" => call_session_reset_focus(engine),
         _ => (format!("Unknown tool: {name}"), true),
     }
+}
+
+fn call_get_session_summary(engine: &mut Engine, args: &Value) -> (String, bool) {
+    let token_budget = args
+        .get("token_budget")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(1500) as usize;
+
+    let summary = engine.session().summary(token_budget);
+    (summary, false)
+}
+
+fn call_session_reset_focus(engine: &mut Engine) -> (String, bool) {
+    engine.session().reset_focus();
+    (
+        "Progressive focus cleared. Search results will no longer be narrowed to a specific directory.".to_string(),
+        false,
+    )
 }
