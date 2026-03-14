@@ -1,7 +1,10 @@
+pub mod extract;
 pub mod extractor;
 pub mod pagerank;
+pub mod persistence;
 pub mod repomap;
 pub mod resolver;
+pub mod types;
 
 use std::collections::HashMap;
 
@@ -16,6 +19,7 @@ pub use extractor::{CallExtractor, ImportExtractor};
 pub use pagerank::{compute_pagerank, compute_personalized_pagerank};
 pub use repomap::{RepoMapOptions, generate_repo_map};
 pub use resolver::ImportResolver;
+pub use types::{ReferenceKind, SymbolKind, SymbolNode};
 
 /// Kind of a dependency edge between files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,9 +83,15 @@ pub struct GraphStats {
 ///
 /// Wraps a petgraph `DiGraph` with a path→NodeIndex lookup table so callers
 /// can work with file paths rather than opaque indices.
+///
+/// Also contains an optional symbol-level graph (`inner`) that tracks
+/// fine-grained symbol→symbol references (calls, type refs, imports).
 pub struct CodeGraph {
     graph: DiGraph<CodeNode, CodeEdge>,
     path_to_node: HashMap<String, NodeIndex>,
+    /// Symbol-level directed graph: nodes are [`SymbolNode`]s, edges are
+    /// [`ReferenceKind`]s. Used by context assembly and precise callers/callees.
+    pub(crate) inner: DiGraph<types::SymbolNode, types::ReferenceKind>,
 }
 
 impl CodeGraph {
@@ -90,7 +100,33 @@ impl CodeGraph {
         Self {
             graph: DiGraph::new(),
             path_to_node: HashMap::new(),
+            inner: DiGraph::new(),
         }
+    }
+
+    /// Add a symbol node to the symbol-level graph, returning its index.
+    pub fn add_symbol(&mut self, name: &str, file: &str, kind: types::SymbolKind) -> NodeIndex {
+        self.inner.add_node(types::SymbolNode {
+            name: name.to_string(),
+            file: file.to_string(),
+            kind,
+            line: None,
+        })
+    }
+
+    /// Add a reference edge to the symbol-level graph.
+    pub fn add_reference(&mut self, from: NodeIndex, to: NodeIndex, kind: types::ReferenceKind) {
+        self.inner.add_edge(from, to, kind);
+    }
+
+    /// Return the number of nodes in the symbol-level graph.
+    pub fn node_count(&self) -> usize {
+        self.inner.node_count()
+    }
+
+    /// Return the number of edges in the symbol-level graph.
+    pub fn edge_count(&self) -> usize {
+        self.inner.edge_count()
     }
 
     /// Return or insert a node for `file_path`.

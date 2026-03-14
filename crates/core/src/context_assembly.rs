@@ -279,6 +279,7 @@ mod tests {
             line_start,
             line_end,
             signature: String::new(),
+            scope_chain: Vec::new(),
             content: content.to_string(),
         }
     }
@@ -315,7 +316,13 @@ mod tests {
 
         let results = vec![
             // main.rs has higher score but uses Config from config.rs
-            make_result("src/main.rs", 1, 10, 9.0, "fn main() { let c = Config::new(); }"),
+            make_result(
+                "src/main.rs",
+                1,
+                10,
+                9.0,
+                "fn main() { let c = Config::new(); }",
+            ),
             make_result("src/config.rs", 1, 10, 5.0, "pub struct Config { }"),
         ];
 
@@ -334,9 +341,9 @@ mod tests {
         // Results that exceed budget — should be truncated.
         // Each content is ~40 chars = 10 tokens at 4 chars/token.
         let results = vec![
-            make_result("a.rs", 1, 5, 9.0, &"x".repeat(40)),  // 10 tokens
-            make_result("b.rs", 1, 5, 8.0, &"y".repeat(40)),  // 10 tokens
-            make_result("c.rs", 1, 5, 7.0, &"z".repeat(40)),  // 10 tokens
+            make_result("a.rs", 1, 5, 9.0, &"x".repeat(40)), // 10 tokens
+            make_result("b.rs", 1, 5, 8.0, &"y".repeat(40)), // 10 tokens
+            make_result("c.rs", 1, 5, 7.0, &"z".repeat(40)), // 10 tokens
         ];
 
         // Budget for only 15 tokens — fits first 2 results but not 3rd.
@@ -504,9 +511,7 @@ mod tests {
     fn test_budget_exactly_fits() {
         // Content exactly fills the budget.
         // 40 chars / 4 = 10 tokens.
-        let results = vec![
-            make_result("a.rs", 1, 5, 9.0, &"x".repeat(40)),
-        ];
+        let results = vec![make_result("a.rs", 1, 5, 9.0, &"x".repeat(40))];
 
         let mut assembler = IntelligentContextAssembler::new(10);
         let snippets = assembler.assemble(results);

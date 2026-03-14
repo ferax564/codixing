@@ -1,6 +1,7 @@
 pub mod chunker;
 pub mod complexity;
 pub mod config;
+pub mod context_assembly;
 pub mod embedder;
 pub mod engine;
 pub mod error;
@@ -16,12 +17,13 @@ pub mod retriever;
 pub mod session;
 pub mod symbols;
 pub mod temporal;
+pub mod tokenizer;
 pub mod vector;
 pub mod watcher;
 
 // Re-export primary public API types.
 pub use config::{EmbeddingConfig, EmbeddingModel, GraphConfig, IndexConfig};
-pub use engine::{Engine, GitSyncStats, GrepMatch, IndexStats, SyncStats};
+pub use engine::{Engine, GitSyncStats, GrepMatch, IndexStats, SymbolReference, SyncStats};
 pub use error::{CodixingError, Result};
 pub use graph::{CodeEdge, CodeGraph, CodeNode, EdgeKind, GraphStats, RepoMapOptions};
 pub use language::EntityKind;
