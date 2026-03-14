@@ -340,6 +340,43 @@ pub(crate) fn call_explain(engine: &mut Engine, args: &Value) -> (String, bool) 
         }
     }
 
+    // Temporal context: change frequency and recent blame for the symbol.
+    if let Some(ref f) = def_file {
+        let (change_count, authors) = engine.file_change_frequency(f, 90);
+        if change_count > 0 {
+            out.push_str(&format!(
+                "\n### Change history (last 90 days)\n**{}** commits by {}\n",
+                change_count,
+                if authors.len() <= 3 {
+                    authors.join(", ")
+                } else {
+                    format!("{} authors", authors.len())
+                }
+            ));
+        }
+        // Show blame for the symbol's line range.
+        if let Some(sym) = syms.first() {
+            let blame = engine.get_blame(f, Some(sym.line_start as u64), Some(sym.line_end as u64));
+            if !blame.is_empty() {
+                // Collect unique authors from blame.
+                let blame_authors: std::collections::BTreeSet<&str> =
+                    blame.iter().map(|b| b.author.as_str()).collect();
+                let latest = blame.iter().max_by_key(|b| &b.date);
+                if let Some(latest) = latest {
+                    out.push_str(&format!(
+                        "**Last modified:** {} by {} ({})\n",
+                        latest.date, latest.author,
+                        if blame_authors.len() == 1 {
+                            "sole author".to_string()
+                        } else {
+                            format!("{} contributors", blame_authors.len())
+                        }
+                    ));
+                }
+            }
+        }
+    }
+
     // Show previously explored related symbols from this session.
     let related: Vec<String> = usages
         .iter()
