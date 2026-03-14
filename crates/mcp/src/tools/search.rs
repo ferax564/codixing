@@ -219,7 +219,7 @@ pub(crate) fn call_stitch_context(engine: &mut Engine, args: &Value) -> (String,
         return (format!("No results found for '{query}'."), false);
     }
 
-    let call_pattern = regex::Regex::new(r"\b([a-z_][a-zA-Z0-9_]{2,})\s*\(").unwrap();
+    let call_pattern = &*super::common::CALL_PATTERN;
     let mut stitched = String::new();
     let mut callee_sources: HashMap<String, String> = HashMap::new();
 
@@ -284,7 +284,7 @@ pub(crate) fn call_explain(engine: &mut Engine, args: &Value) -> (String, bool) 
 
     // Extract callees from the symbol's source code (functions it calls).
     let callees: Vec<String> = {
-        let call_pattern = regex::Regex::new(r"\b([a-z_][a-zA-Z0-9_]*)\s*\(").unwrap();
+        let call_pattern = &*super::common::CALL_PATTERN;
         let keywords: std::collections::HashSet<&str> = [
             "if", "while", "for", "loop", "match", "return", "let", "use", "fn", "pub", "mod",
             "struct", "enum", "impl", "trait", "type",

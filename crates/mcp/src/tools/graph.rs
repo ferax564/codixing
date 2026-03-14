@@ -139,7 +139,7 @@ pub(crate) fn call_symbol_callees(engine: &mut Engine, args: &Value) -> (String,
         Err(e) => return (format!("Error: {e}"), true),
     };
 
-    let call_pattern = regex::Regex::new(r"\b([a-z_][a-zA-Z0-9_]*)\s*\(").unwrap();
+    let call_pattern = &*super::common::CALL_PATTERN;
     let keywords: std::collections::HashSet<&str> = [
         "if", "while", "for", "loop", "match", "return", "let", "use", "fn", "pub", "mod",
         "struct", "enum", "impl", "trait", "type",

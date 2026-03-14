@@ -1,6 +1,7 @@
 //! MCP tool definitions and engine dispatch helpers.
 
 mod analysis;
+mod common;
 mod files;
 mod graph;
 mod memory;
