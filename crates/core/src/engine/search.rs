@@ -4,7 +4,7 @@ use tracing::debug;
 
 use crate::error::Result;
 use crate::retriever::bm25::BM25Retriever;
-use crate::retriever::hybrid::HybridRetriever;
+use crate::retriever::hybrid::{HybridRetriever, rrf_fuse};
 use crate::retriever::mmr::mmr_select;
 use crate::retriever::{Retriever, SearchQuery, SearchResult, Strategy};
 
@@ -61,6 +61,7 @@ impl Engine {
                 };
                 self.apply_graph_boost(&mut results, self.config.graph.boost_weight);
                 self.apply_definition_boost(&mut results, &query.query);
+                self.apply_popularity_boost(&mut results);
                 apply_path_match_boost(&mut results, &query.query);
                 self.apply_test_demotion(&mut results);
                 results
@@ -109,6 +110,7 @@ impl Engine {
                 };
                 self.apply_graph_boost(&mut results, self.config.graph.boost_weight);
                 self.apply_definition_boost(&mut results, &query.query);
+                self.apply_popularity_boost(&mut results);
                 apply_path_match_boost(&mut results, &query.query);
                 self.apply_test_demotion(&mut results);
                 results
@@ -372,10 +374,38 @@ impl Engine {
         Ok(results)
     }
 
-    /// Two-stage reranked search: hybrid first-pass then cross-encoder scoring.
+    /// First-pass retrieval: BM25+vector hybrid (if available) with graph boost.
     ///
-    /// Phase 1: collect up to `max(limit × 3, 30)` candidates via the `Fast`
-    ///          hybrid pipeline (BM25 + vector + graph boost).
+    /// This is the shared retrieval core used by `search_deep` (and its
+    /// multi-query variant) to avoid duplicating the BM25/hybrid logic
+    /// and — critically — to avoid recursion through the public `search()`
+    /// method which would trigger query expansion and strategy dispatch again.
+    fn search_first_pass(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
+        let mut candidates = if let (Some(emb), Some(vec_idx)) = (&self.embedder, &self.vector) {
+            let retriever = HybridRetriever::new(
+                &self.tantivy,
+                Arc::clone(emb),
+                vec_idx,
+                &self.chunk_meta,
+                self.config.embedding.rrf_k,
+            );
+            retriever.search(query)?
+        } else {
+            BM25Retriever::new(&self.tantivy).search(query)?
+        };
+        self.apply_graph_boost(&mut candidates, self.config.graph.boost_weight);
+        self.apply_definition_boost(&mut candidates, &query.query);
+        self.apply_popularity_boost(&mut candidates);
+        Ok(candidates)
+    }
+
+    /// Two-stage reranked search with multi-query RRF fusion.
+    ///
+    /// Phase 0: generate query reformulations (keywords-only, CamelCase,
+    ///          snake_case variants) and run a first-pass retrieval for each,
+    ///          fusing results via Reciprocal Rank Fusion.
+    /// Phase 1: collect up to `max(limit × 3, 30)` candidates via the fused
+    ///          first-pass results.
     /// Phase 2: BGE-Reranker-Base scores each `(query, chunk)` pair jointly.
     ///          Results are re-sorted by reranker score and truncated.
     ///
@@ -396,27 +426,45 @@ impl Engine {
             }
         };
 
-        // Phase 1: over-fetch candidates.
+        // Phase 0 & 1: multi-query retrieval with RRF fusion.
         let candidate_limit = (query.limit * 3).max(30);
-        let candidate_query = SearchQuery {
-            limit: candidate_limit,
-            strategy: Strategy::Fast,
-            ..query.clone()
-        };
+        let reformulations = generate_reformulations(&query.query);
 
-        let mut candidates = if let (Some(emb), Some(vec_idx)) = (&self.embedder, &self.vector) {
-            let retriever = HybridRetriever::new(
-                &self.tantivy,
-                Arc::clone(emb),
-                vec_idx,
-                &self.chunk_meta,
-                self.config.embedding.rrf_k,
-            );
-            retriever.search(&candidate_query)?
-        } else {
-            BM25Retriever::new(&self.tantivy).search(&candidate_query)?
+        debug!(
+            reformulations = ?reformulations,
+            "deep: multi-query reformulations"
+        );
+
+        let mut candidates = {
+            // Run first-pass for each reformulation, then fuse.
+            let mut all_results: Vec<Vec<SearchResult>> = Vec::new();
+            for q_text in &reformulations {
+                let sub_query = SearchQuery {
+                    query: expand_query(q_text),
+                    limit: candidate_limit,
+                    file_filter: query.file_filter.clone(),
+                    strategy: Strategy::Fast,
+                    token_budget: None,
+                };
+                if let Ok(results) = self.search_first_pass(&sub_query) {
+                    if !results.is_empty() {
+                        all_results.push(results);
+                    }
+                }
+            }
+
+            if all_results.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            // Progressive RRF fusion: fold all result lists together.
+            let mut fused = all_results.remove(0);
+            for results in &all_results {
+                fused = rrf_fuse(&fused, results, 60.0);
+            }
+            fused.truncate(candidate_limit);
+            fused
         };
-        self.apply_graph_boost(&mut candidates, self.config.graph.boost_weight);
 
         if candidates.is_empty() {
             return Ok(Vec::new());
@@ -446,6 +494,32 @@ impl Engine {
         candidates.truncate(query.limit);
 
         Ok(candidates)
+    }
+
+    /// Boost results whose files have many callers in the dependency graph.
+    ///
+    /// Files that are imported by many other files are architecturally central
+    /// and often more relevant to a broad concept query.  The boost is
+    /// logarithmic to avoid letting mega-popular files dominate all results.
+    pub(super) fn apply_popularity_boost(&self, results: &mut [SearchResult]) {
+        if let Some(ref graph) = self.graph {
+            let mut boosted = false;
+            for r in results.iter_mut() {
+                let caller_count = graph.callers(&r.file_path).len();
+                if caller_count > 3 {
+                    // Modest logarithmic boost: ln(4)≈1.4 → 7%, ln(10)≈2.3 → 11.5%
+                    r.score *= 1.0 + (caller_count as f32).ln() * 0.05;
+                    boosted = true;
+                }
+            }
+            if boosted {
+                results.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+        }
     }
 }
 
@@ -619,6 +693,125 @@ fn apply_path_match_boost(results: &mut [SearchResult], query: &str) {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
     }
+}
+
+/// Generate query reformulations for multi-query search (RRF fusion).
+///
+/// Given a natural-language query, produces multiple complementary search
+/// strings that together improve recall:
+///
+/// 1. **Original** — the query as-is.
+/// 2. **Keywords only** — stop words removed (action verbs, articles, prepositions).
+/// 3. **CamelCase identifier** — keywords concatenated as a synthetic identifier
+///    (e.g. "authentication token" → "AuthenticationToken").
+/// 4. **snake_case identifier** — keywords joined with underscores
+///    (e.g. "authentication token" → "authentication_token").
+///
+/// These variants are fused with RRF so that results matching any variant
+/// contribute to the final ranking.
+fn generate_reformulations(query: &str) -> Vec<String> {
+    let mut reformulations = vec![query.to_string()];
+
+    // Stop words: common action verbs, articles, prepositions, and issue-related
+    // noise words that don't carry discriminative signal for code search.
+    let stop_words: &[&str] = &[
+        "fix",
+        "bug",
+        "issue",
+        "error",
+        "problem",
+        "how",
+        "to",
+        "the",
+        "a",
+        "an",
+        "is",
+        "in",
+        "of",
+        "for",
+        "with",
+        "this",
+        "that",
+        "when",
+        "where",
+        "why",
+        "what",
+        "does",
+        "do",
+        "not",
+        "can",
+        "should",
+        "would",
+        "could",
+        "find",
+        "get",
+        "set",
+        "make",
+        "add",
+        "remove",
+        "update",
+        "change",
+        "implement",
+        "use",
+        "handle",
+        "check",
+        "create",
+    ];
+
+    let keywords: Vec<&str> = query
+        .split_whitespace()
+        .filter(|w| !stop_words.contains(&w.to_lowercase().as_str()))
+        .collect();
+
+    // 1. Keywords only (if any stop words were actually removed)
+    if keywords.len() < query.split_whitespace().count() && !keywords.is_empty() {
+        reformulations.push(keywords.join(" "));
+    }
+
+    // 2. CamelCase synthetic identifier (2..=4 keywords)
+    if keywords.len() >= 2 && keywords.len() <= 4 {
+        let camel: String = keywords
+            .iter()
+            .map(|w| {
+                let mut c = w.chars();
+                match c.next() {
+                    None => String::new(),
+                    Some(f) => f.to_uppercase().to_string() + &c.as_str().to_lowercase(),
+                }
+            })
+            .collect();
+        reformulations.push(camel);
+    }
+
+    // 3. snake_case variant (2+ keywords)
+    if keywords.len() >= 2 {
+        reformulations.push(
+            keywords
+                .iter()
+                .map(|w| w.to_lowercase())
+                .collect::<Vec<_>>()
+                .join("_"),
+        );
+    }
+
+    reformulations
+}
+
+/// Fuse multiple ranked result lists via iterative Reciprocal Rank Fusion.
+///
+/// Folds an arbitrary number of result lists into a single ranked output
+/// by pairwise RRF. Used by the multi-query Deep strategy tests.
+#[cfg(test)]
+fn rrf_fuse_multi(lists: Vec<Vec<SearchResult>>, k: f32) -> Vec<SearchResult> {
+    let mut lists = lists;
+    if lists.is_empty() {
+        return Vec::new();
+    }
+    let mut fused = lists.remove(0);
+    for list in &lists {
+        fused = rrf_fuse(&fused, list, k);
+    }
+    fused
 }
 
 /// Check if a string looks like a code identifier (alphanumeric + underscores/colons/dots).
@@ -1068,5 +1261,153 @@ mod tests {
             "no impl file present, header should not be demoted"
         );
         assert_eq!(results[0].score, 10.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-query reformulation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reformulations_natural_language_query() {
+        let r = generate_reformulations("fix authentication token expiry");
+        // Should have: original, keywords-only, CamelCase, snake_case
+        assert!(
+            r.len() >= 3,
+            "expected at least 3 reformulations, got {r:?}"
+        );
+        assert_eq!(r[0], "fix authentication token expiry"); // original
+        // Keywords-only should drop "fix"
+        assert!(
+            r.iter().any(|q| q == "authentication token expiry"),
+            "expected keywords-only reformulation, got: {r:?}"
+        );
+        // CamelCase
+        assert!(
+            r.iter().any(|q| q == "AuthenticationTokenExpiry"),
+            "expected CamelCase reformulation, got: {r:?}"
+        );
+        // snake_case
+        assert!(
+            r.iter().any(|q| q == "authentication_token_expiry"),
+            "expected snake_case reformulation, got: {r:?}"
+        );
+    }
+
+    #[test]
+    fn reformulations_single_identifier() {
+        let r = generate_reformulations("URLResolver");
+        // Single word, no stop words to remove, can't make CamelCase/snake from 1 keyword
+        assert_eq!(
+            r.len(),
+            1,
+            "single identifier should produce only 1 reformulation"
+        );
+        assert_eq!(r[0], "URLResolver");
+    }
+
+    #[test]
+    fn reformulations_two_keywords() {
+        let r = generate_reformulations("token expiry");
+        // No stop words → no keywords-only variant, but should have CamelCase + snake_case
+        assert!(
+            r.len() >= 3,
+            "expected at least 3 reformulations, got {r:?}"
+        );
+        assert_eq!(r[0], "token expiry");
+        assert!(
+            r.iter().any(|q| q == "TokenExpiry"),
+            "expected CamelCase variant, got: {r:?}"
+        );
+        assert!(
+            r.iter().any(|q| q == "token_expiry"),
+            "expected snake_case variant, got: {r:?}"
+        );
+    }
+
+    #[test]
+    fn reformulations_all_stop_words() {
+        let r = generate_reformulations("how to fix this");
+        // All words are stop words → no keywords, so only the original
+        assert_eq!(
+            r.len(),
+            1,
+            "all-stop-word query should produce only 1 reformulation"
+        );
+        assert_eq!(r[0], "how to fix this");
+    }
+
+    #[test]
+    fn reformulations_five_keywords_no_camel() {
+        // More than 4 non-stop keywords → should NOT produce CamelCase (too long)
+        // but should still produce snake_case.
+        let r = generate_reformulations("database connection pool timeout retry backoff");
+        assert!(r[0] == "database connection pool timeout retry backoff");
+        // Should have snake_case
+        assert!(
+            r.iter()
+                .any(|q| q == "database_connection_pool_timeout_retry_backoff"),
+            "expected snake_case variant for 6-keyword query, got: {r:?}"
+        );
+        // Should NOT have CamelCase (>4 keywords)
+        assert!(
+            !r.iter()
+                .any(|q| q == "DatabaseConnectionPoolTimeoutRetryBackoff"),
+            "should not produce CamelCase for >4 keywords, got: {r:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RRF multi-list fusion tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rrf_fuse_multi_empty() {
+        let result = rrf_fuse_multi(vec![], 60.0);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn rrf_fuse_multi_single_list() {
+        let list = vec![SearchResult {
+            chunk_id: "a".into(),
+            file_path: "src/lib.rs".into(),
+            language: "Rust".into(),
+            score: 1.0,
+            line_start: 0,
+            line_end: 10,
+            signature: String::new(),
+            scope_chain: vec![],
+            content: String::new(),
+        }];
+        let result = rrf_fuse_multi(vec![list], 60.0);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].chunk_id, "a");
+    }
+
+    #[test]
+    fn rrf_fuse_multi_promotes_shared_results() {
+        // Result "shared" appears in all 3 lists → should rank highest.
+        // Result "only1" appears in list 1 only.
+        let make = |id: &str| SearchResult {
+            chunk_id: id.into(),
+            file_path: format!("src/{id}.rs"),
+            language: "Rust".into(),
+            score: 1.0,
+            line_start: 0,
+            line_end: 10,
+            signature: String::new(),
+            scope_chain: vec![],
+            content: String::new(),
+        };
+
+        let list1 = vec![make("only1"), make("shared")];
+        let list2 = vec![make("shared"), make("only2")];
+        let list3 = vec![make("only3"), make("shared")];
+
+        let fused = rrf_fuse_multi(vec![list1, list2, list3], 60.0);
+        assert_eq!(
+            fused[0].chunk_id, "shared",
+            "result appearing in all lists should rank first"
+        );
     }
 }
