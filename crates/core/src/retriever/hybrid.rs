@@ -141,18 +141,27 @@ pub fn rrf_fuse_asymmetric(
         }
     }
 
+    let rank_a: HashMap<&str, usize> = list_a
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.chunk_id.as_str(), i))
+        .collect();
+    let rank_b: HashMap<&str, usize> = list_b
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.chunk_id.as_str(), i))
+        .collect();
+
     let mut scored: Vec<(&str, f32)> = all_ids
         .into_iter()
         .map(|id| {
-            let score_a = list_a
-                .iter()
-                .position(|r| r.chunk_id == id)
-                .map(|r| 1.0 / (k_a + r as f32 + 1.0))
+            let score_a = rank_a
+                .get(id)
+                .map(|&r| 1.0 / (k_a + r as f32 + 1.0))
                 .unwrap_or(0.0);
-            let score_b = list_b
-                .iter()
-                .position(|r| r.chunk_id == id)
-                .map(|r| 1.0 / (k_b + r as f32 + 1.0))
+            let score_b = rank_b
+                .get(id)
+                .map(|&r| 1.0 / (k_b + r as f32 + 1.0))
                 .unwrap_or(0.0);
             (id, score_a + score_b)
         })
@@ -197,15 +206,30 @@ pub fn rrf_fuse(list_a: &[SearchResult], list_b: &[SearchResult], k: f32) -> Vec
         }
     }
 
+    // Pre-build rank maps for O(1) position lookup (avoids O(N×M) linear scans).
+    let rank_a: HashMap<&str, usize> = list_a
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.chunk_id.as_str(), i))
+        .collect();
+    let rank_b: HashMap<&str, usize> = list_b
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.chunk_id.as_str(), i))
+        .collect();
+
     // Compute RRF scores.
     let mut scored: Vec<(&str, f32)> = all_ids
         .into_iter()
         .map(|id| {
-            let rank_a = list_a.iter().position(|r| r.chunk_id == id);
-            let rank_b = list_b.iter().position(|r| r.chunk_id == id);
-
-            let score_a = rank_a.map(|r| 1.0 / (k + r as f32 + 1.0)).unwrap_or(0.0);
-            let score_b = rank_b.map(|r| 1.0 / (k + r as f32 + 1.0)).unwrap_or(0.0);
+            let score_a = rank_a
+                .get(id)
+                .map(|&r| 1.0 / (k + r as f32 + 1.0))
+                .unwrap_or(0.0);
+            let score_b = rank_b
+                .get(id)
+                .map(|&r| 1.0 / (k + r as f32 + 1.0))
+                .unwrap_or(0.0);
 
             (id, score_a + score_b)
         })
