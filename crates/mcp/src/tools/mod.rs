@@ -4,6 +4,7 @@ mod analysis;
 mod common;
 mod context;
 mod files;
+mod focus;
 mod graph;
 mod memory;
 mod orphans;
@@ -387,6 +388,29 @@ pub fn tool_definitions() -> Value {
                 },
                 "required": ["task"]
             }
+        },
+        {
+            "name": "focus_map",
+            "description": "Generate a focus-aware repository map using Personalized PageRank seeded by recently edited/viewed files. Surfaces the files most relevant to your current working context — direct dependencies, transitive imports, and co-dependent modules. If no seed files are given, auto-detects from git (unstaged changes, staged changes, recent commits).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "seed_files": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "File paths to seed the focus map (most important first). If omitted, auto-detects from git working tree changes and recent commits."
+                    },
+                    "max_files": {
+                        "type": "integer",
+                        "description": "Maximum number of files to return (default: 20)"
+                    },
+                    "include_symbols": {
+                        "type": "boolean",
+                        "description": "Whether to include top symbol names per file (default: true)"
+                    }
+                },
+                "required": []
+            }
         }
     ])
 }
@@ -429,6 +453,7 @@ pub fn is_read_only_tool(name: &str) -> bool {
             | "get_context_for_task"
             | "git_diff"
             | "find_source_for_test"
+            | "focus_map"
     )
 }
 
@@ -470,6 +495,7 @@ pub fn dispatch_tool_ref(engine: &Engine, name: &str, args: &Value) -> (String, 
         "find_orphans" => orphans::call_find_orphans(engine, args),
         "find_source_for_test" => analysis::call_find_source_for_test(engine, args),
         "get_context_for_task" => context::call_get_context_for_task(engine, args),
+        "focus_map" => focus::call_focus_map(engine, args),
         _ => (format!("Unknown read-only tool: {name}"), true),
     };
     (maybe_compact(output, args), is_error)
