@@ -157,7 +157,7 @@ pub fn find_best_source_match(test_file: &str, all_files: &[String]) -> Option<(
             // Base confidence 0.7, boost slightly if paths share components.
             let shared = count_shared_path_components(test_file, file);
             let confidence = (0.7 + shared as f32 * 0.05).min(0.85);
-            if best.as_ref().map_or(true, |(_, c)| confidence > *c) {
+            if best.as_ref().is_none_or(|(_, c)| confidence > *c) {
                 best = Some((file.clone(), confidence));
             }
         }

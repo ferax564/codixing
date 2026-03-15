@@ -1,3 +1,4 @@
+#![recursion_limit = "512"]
 //! Codixing MCP server — exposes code search and graph tools via the
 //! Model Context Protocol (JSON-RPC 2.0 over stdin/stdout or Unix socket).
 //!

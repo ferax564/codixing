@@ -366,6 +366,12 @@ pub fn tool_definitions() -> Value {
                 "required": ["file"]
             }
         },
+        // Index health
+        {
+            "name": "check_staleness",
+            "description": "Check whether the Codixing index is out of date relative to the current filesystem. Uses fast stat() checks (mtime + size) without reading file content. Reports modified, new, and deleted file counts with a sync suggestion.",
+            "inputSchema": { "type": "object", "properties": {}, "required": [] }
+        },
         // Intelligent context assembly
         {
             "name": "get_context_for_task",
@@ -467,6 +473,7 @@ pub fn is_read_only_tool(name: &str) -> bool {
             | "session_status"
             | "recall"
             | "get_context_for_task"
+            | "check_staleness"
             | "git_diff"
             | "find_source_for_test"
             | "focus_map"
@@ -513,6 +520,7 @@ pub fn dispatch_tool_ref(engine: &Engine, name: &str, args: &Value) -> (String, 
         "find_source_for_test" => analysis::call_find_source_for_test(engine, args),
         "get_context_for_task" => context::call_get_context_for_task(engine, args),
         "focus_map" => focus::call_focus_map(engine, args),
+        "check_staleness" => analysis::call_check_staleness(engine),
         _ => (format!("Unknown read-only tool: {name}"), true),
     };
     (maybe_compact(output, args), is_error)

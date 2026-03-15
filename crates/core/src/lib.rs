@@ -26,8 +26,8 @@ pub mod watcher;
 // Re-export primary public API types.
 pub use config::{EmbeddingConfig, EmbeddingModel, GraphConfig, IndexConfig};
 pub use engine::{
-    Engine, FocusMapEntry, FocusMapOptions, GitSyncStats, GrepMatch, IndexStats, SymbolReference,
-    SyncStats,
+    ConflictKind, Engine, FocusMapEntry, FocusMapOptions, GitSyncStats, GrepMatch, IndexStats,
+    RenameConflict, RenameValidation, StaleReport, SymbolReference, SyncStats,
 };
 pub use error::{CodixingError, Result};
 pub use graph::{CodeEdge, CodeGraph, CodeNode, EdgeKind, GraphStats, RepoMapOptions};

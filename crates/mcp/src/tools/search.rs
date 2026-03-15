@@ -81,6 +81,17 @@ pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) 
 
             // Include focus info if active.
             let mut out = String::new();
+
+            // Staleness warning when index is significantly out of date.
+            let stale = engine.check_staleness();
+            let total_stale = stale.modified_files + stale.new_files + stale.deleted_files;
+            if stale.is_stale && total_stale > 10 {
+                out.push_str(&format!(
+                    "> **Warning:** Index is stale ({} file(s) changed). Run `codixing sync .` to update.\n\n",
+                    total_stale
+                ));
+            }
+
             if let Some(focus) = session.focus_directory() {
                 out.push_str(&format!("*focus: {focus}*\n\n"));
             }
