@@ -85,13 +85,13 @@ func TestHandleRequest(t *testing.T) {
 // -------------------------------------------------------------------------
 
 #[test]
-fn tool_definitions_returns_40_tools() {
+fn tool_definitions_returns_41_tools() {
     let defs = tool_definitions();
     let arr = defs.as_array().expect("tool_definitions returns array");
     assert_eq!(
         arr.len(),
-        40,
-        "expected exactly 40 tool definitions, got {}",
+        41,
+        "expected exactly 41 tool definitions, got {}",
         arr.len()
     );
 }
@@ -1129,6 +1129,7 @@ fn is_read_only_tool_classifies_correctly() {
     assert!(is_read_only_tool("get_session_summary"));
     assert!(is_read_only_tool("get_hotspots"));
     assert!(is_read_only_tool("git_diff"));
+    assert!(is_read_only_tool("find_source_for_test"));
 
     // Write tools.
     assert!(!is_read_only_tool("write_file"));
@@ -1202,5 +1203,51 @@ fn compact_false_preserves_full_output() {
     assert_eq!(
         normal_out, explicit_out,
         "compact=false should produce same output as omitting compact"
+    );
+}
+
+// -------------------------------------------------------------------------
+// find_source_for_test
+// -------------------------------------------------------------------------
+
+#[test]
+fn find_source_for_test_missing_arg() {
+    let dir = tempdir().unwrap();
+    let mut engine = make_engine(dir.path());
+    let (msg, err) = dispatch_tool(&mut engine, "find_source_for_test", &json!({}));
+    assert!(err);
+    assert!(msg.contains("Missing"), "got: {msg}");
+}
+
+#[test]
+fn find_source_for_test_returns_output_for_test_file() {
+    let dir = tempdir().unwrap();
+    let engine = make_engine(dir.path());
+    let (out, err) = dispatch_tool_ref(
+        &engine,
+        "find_source_for_test",
+        &json!({"file": "tests/server_test.go"}),
+    );
+    assert!(!err, "find_source_for_test returned error: {out}");
+    // Should either find a source mapping or report none found gracefully.
+    assert!(
+        out.contains("Source files tested by") || out.contains("No source files found"),
+        "unexpected output: {out}"
+    );
+}
+
+#[test]
+fn find_source_for_test_no_match_for_regular_file() {
+    let dir = tempdir().unwrap();
+    let engine = make_engine(dir.path());
+    let (out, err) = dispatch_tool_ref(
+        &engine,
+        "find_source_for_test",
+        &json!({"file": "src/main.rs"}),
+    );
+    assert!(!err, "find_source_for_test returned error: {out}");
+    assert!(
+        out.contains("No source files found"),
+        "regular file should have no test mappings: {out}"
     );
 }

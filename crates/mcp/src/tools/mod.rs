@@ -350,6 +350,21 @@ pub fn tool_definitions() -> Value {
                 "required": []
             }
         },
+        // Phase 15: Test-to-code mapping
+        {
+            "name": "find_source_for_test",
+            "description": "Given a test file, find the source files it tests using naming conventions, directory structure, and import graph analysis. Returns matched source files with confidence scores.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "description": "Relative path to a test file (e.g. 'tests/test_engine.py', 'src/engine_test.rs', '__tests__/Button.test.tsx')"
+                    }
+                },
+                "required": ["file"]
+            }
+        },
         // Intelligent context assembly
         {
             "name": "get_context_for_task",
@@ -413,6 +428,7 @@ pub fn is_read_only_tool(name: &str) -> bool {
             | "recall"
             | "get_context_for_task"
             | "git_diff"
+            | "find_source_for_test"
     )
 }
 
@@ -452,6 +468,7 @@ pub fn dispatch_tool_ref(engine: &Engine, name: &str, args: &Value) -> (String, 
         "search_changes" => temporal::call_search_changes(engine, args),
         "get_blame" => temporal::call_get_blame(engine, args),
         "find_orphans" => orphans::call_find_orphans(engine, args),
+        "find_source_for_test" => analysis::call_find_source_for_test(engine, args),
         "get_context_for_task" => context::call_get_context_for_task(engine, args),
         _ => (format!("Unknown read-only tool: {name}"), true),
     };

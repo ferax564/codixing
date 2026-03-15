@@ -160,6 +160,74 @@ pub(crate) fn call_find_tests(engine: &Engine, args: &Value) -> (String, bool) {
     let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
     let file_filter = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
 
+    // If a specific source file is given, try test-to-code mapping first.
+    if !file_filter.is_empty() {
+        let mappings = engine.find_tests_for_file(file_filter);
+        if !mappings.is_empty() {
+            let filtered: Vec<_> = if pattern.is_empty() {
+                mappings
+            } else {
+                let pat = pattern.to_lowercase();
+                mappings
+                    .into_iter()
+                    .filter(|m| {
+                        m.test_file.to_lowercase().contains(&pat)
+                            || m.source_file.to_lowercase().contains(&pat)
+                    })
+                    .collect()
+            };
+            if !filtered.is_empty() {
+                let mut out = format!(
+                    "## Tests for `{file_filter}` ({} mapping(s))\n\n",
+                    filtered.len()
+                );
+                for m in &filtered {
+                    out.push_str(&format!(
+                        "  - **{}** (confidence: {:.0}%, {})\n",
+                        m.test_file,
+                        m.confidence * 100.0,
+                        m.reason,
+                    ));
+                }
+                out.push('\n');
+
+                // Also list test symbols from mapped test files.
+                let mut test_syms_out = String::new();
+                for m in &filtered {
+                    let syms = engine.symbols("", Some(&m.test_file)).unwrap_or_default();
+                    let test_fns: Vec<_> = syms
+                        .iter()
+                        .filter(|s| {
+                            let n = s.name.to_lowercase();
+                            n.starts_with("test_")
+                                || n.ends_with("_test")
+                                || s.name.starts_with("Test")
+                        })
+                        .collect();
+                    if !test_fns.is_empty() {
+                        test_syms_out.push_str(&format!("**{}**\n", m.test_file));
+                        let mut sorted = test_fns;
+                        sorted.sort_by_key(|t| t.line_start);
+                        for t in sorted {
+                            test_syms_out.push_str(&format!(
+                                "  L{:>4}  {:?}  {}\n",
+                                t.line_start, t.kind, t.name
+                            ));
+                        }
+                        test_syms_out.push('\n');
+                    }
+                }
+                if !test_syms_out.is_empty() {
+                    out.push_str("### Test functions in mapped files\n\n");
+                    out.push_str(&test_syms_out);
+                }
+
+                return (out, false);
+            }
+        }
+    }
+
+    // Fallback: symbol-based discovery (original behavior).
     let syms = match engine.symbols(
         "",
         if file_filter.is_empty() {
@@ -238,6 +306,42 @@ pub(crate) fn call_find_tests(engine: &Engine, args: &Value) -> (String, bool) {
         }
         out.push('\n');
     }
+
+    (out, false)
+}
+
+pub(crate) fn call_find_source_for_test(engine: &Engine, args: &Value) -> (String, bool) {
+    let test_file = match args.get("file").and_then(|v| v.as_str()) {
+        Some(f) => f,
+        None => return ("Missing required argument: file".to_string(), true),
+    };
+
+    let mappings = engine.find_source_for_test(test_file);
+
+    if mappings.is_empty() {
+        return (
+            format!(
+                "No source files found for test file '{test_file}'. \
+                 The file may not follow standard test naming conventions, \
+                 or the tested source may not be in the index."
+            ),
+            false,
+        );
+    }
+
+    let mut out = format!(
+        "## Source files tested by `{test_file}` ({} mapping(s))\n\n",
+        mappings.len()
+    );
+    for m in &mappings {
+        out.push_str(&format!(
+            "  - **{}** (confidence: {:.0}%, {})\n",
+            m.source_file,
+            m.confidence * 100.0,
+            m.reason,
+        ));
+    }
+    out.push('\n');
 
     (out, false)
 }
