@@ -5,6 +5,7 @@ mod search;
 mod symbol_graph;
 mod sync;
 mod temporal;
+mod test_mapping;
 
 pub use symbol_graph::SymbolReference;
 
