@@ -1,10 +1,11 @@
 //! File I/O tool handlers: read, list, grep, outline, write, edit, delete, apply_patch, run_tests.
 
 use std::path::PathBuf;
+use std::time::Instant;
 
 use serde_json::Value;
 
-use codixing_core::{Engine, GrepMatch, SessionEventKind};
+use codixing_core::{Engine, GrepMatch, SessionEventKind, SharedEventType, SharedSessionEvent};
 
 pub(crate) fn call_read_file(engine: &Engine, args: &Value) -> (String, bool) {
     let file = match args.get("file").and_then(|v| v.as_str()) {
@@ -31,6 +32,13 @@ pub(crate) fn call_read_file(engine: &Engine, args: &Value) -> (String, bool) {
             engine
                 .session()
                 .record(SessionEventKind::FileRead(file.to_string()));
+            engine.shared_session().record(SharedSessionEvent {
+                timestamp: Instant::now(),
+                event_type: SharedEventType::FileRead,
+                file_path: file.to_string(),
+                symbol: None,
+                agent_id: engine.session().session_id().to_string(),
+            });
             let max_chars = token_budget * 4;
             let (body, truncated) = if content.len() > max_chars {
                 (&content[..max_chars], true)
@@ -268,6 +276,13 @@ pub(crate) fn call_write_file(engine: &mut Engine, args: &Value) -> (String, boo
             engine
                 .session()
                 .record(SessionEventKind::FileWrite(file.to_string()));
+            engine.shared_session().record(SharedSessionEvent {
+                timestamp: Instant::now(),
+                event_type: SharedEventType::FileWrite,
+                file_path: file.to_string(),
+                symbol: None,
+                agent_id: engine.session().session_id().to_string(),
+            });
             (
                 format!(
                     "Written and indexed: {file} ({line_count} lines, {byte_count} bytes).\n\
@@ -350,6 +365,13 @@ pub(crate) fn call_edit_file(engine: &mut Engine, args: &Value) -> (String, bool
             engine
                 .session()
                 .record(SessionEventKind::FileEdit(file.to_string()));
+            engine.shared_session().record(SharedSessionEvent {
+                timestamp: Instant::now(),
+                event_type: SharedEventType::FileWrite,
+                file_path: file.to_string(),
+                symbol: None,
+                agent_id: engine.session().session_id().to_string(),
+            });
             (
                 format!(
                     "Edited and re-indexed: {file}\n\

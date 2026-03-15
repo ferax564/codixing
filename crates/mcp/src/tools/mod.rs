@@ -372,6 +372,21 @@ pub fn tool_definitions() -> Value {
                 },
                 "required": ["task"]
             }
+        },
+        // Multi-agent shared session status
+        {
+            "name": "session_status",
+            "description": "Return the shared multi-agent session status: active agents, hot files (ranked by recent cross-agent activity), and total event count. Use this to understand what other agents have been working on and which files are currently receiving the most attention.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of hot files to return (default: 10)"
+                    }
+                },
+                "required": []
+            }
         }
     ])
 }
@@ -410,6 +425,7 @@ pub fn is_read_only_tool(name: &str) -> bool {
             | "get_blame"
             | "find_orphans"
             | "get_session_summary"
+            | "session_status"
             | "recall"
             | "get_context_for_task"
             | "git_diff"
@@ -448,6 +464,7 @@ pub fn dispatch_tool_ref(engine: &Engine, name: &str, args: &Value) -> (String, 
         "review_context" => analysis::call_review_context(engine, args),
         "git_diff" => files::call_git_diff(engine, args),
         "get_session_summary" => call_get_session_summary(engine, args),
+        "session_status" => call_session_status(engine, args),
         "get_hotspots" => temporal::call_get_hotspots(engine, args),
         "search_changes" => temporal::call_search_changes(engine, args),
         "get_blame" => temporal::call_get_blame(engine, args),
@@ -583,6 +600,45 @@ fn call_get_session_summary(engine: &Engine, args: &Value) -> (String, bool) {
 
     let summary = engine.session().summary(token_budget);
     (summary, false)
+}
+
+fn call_session_status(engine: &Engine, args: &Value) -> (String, bool) {
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(10) as usize;
+
+    let shared = engine.shared_session();
+    let agents = shared.active_agents();
+    let hot_files = shared.get_hot_files(limit);
+    let event_count = shared.event_count();
+
+    let mut out = String::from("## Shared Session Status\n\n");
+
+    out.push_str(&format!("**Total events:** {event_count}\n"));
+    out.push_str(&format!(
+        "**Active agents:** {}\n",
+        if agents.is_empty() {
+            "none".to_string()
+        } else {
+            format!("{} ({})", agents.len(), agents.join(", "))
+        }
+    ));
+    out.push_str(&format!(
+        "**Current agent:** {}\n\n",
+        engine.session().session_id()
+    ));
+
+    if hot_files.is_empty() {
+        out.push_str("No recently active files.\n");
+    } else {
+        out.push_str("### Hot files (cross-agent activity)\n\n");
+        for (i, (file, score)) in hot_files.iter().enumerate() {
+            out.push_str(&format!("  {}. `{}` (score: {:.3})\n", i + 1, file, score));
+        }
+    }
+
+    (out, false)
 }
 
 fn call_session_reset_focus(engine: &Engine) -> (String, bool) {
