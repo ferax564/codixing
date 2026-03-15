@@ -76,6 +76,55 @@ pub(crate) fn call_index_status(engine: &Engine) -> (String, bool) {
     (out, false)
 }
 
+pub(crate) fn call_check_staleness(engine: &Engine) -> (String, bool) {
+    let report = engine.check_staleness();
+
+    let last_sync_str = report
+        .last_sync
+        .and_then(|t| {
+            t.duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .ok()
+                .map(|d| {
+                    let secs = d.as_secs();
+                    let elapsed = std::time::SystemTime::now()
+                        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                        .map(|now| now.as_secs().saturating_sub(secs))
+                        .unwrap_or(0);
+                    if elapsed < 60 {
+                        format!("{elapsed}s ago")
+                    } else if elapsed < 3600 {
+                        format!("{}m ago", elapsed / 60)
+                    } else if elapsed < 86400 {
+                        format!("{}h ago", elapsed / 3600)
+                    } else {
+                        format!("{}d ago", elapsed / 86400)
+                    }
+                })
+        })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let status = if report.is_stale {
+        "STALE"
+    } else {
+        "UP TO DATE"
+    };
+
+    let mut out = format!(
+        "## Index Staleness: {status}\n\n\
+         Last sync: {last_sync_str}\n\
+         Modified files: {}\n\
+         New files:      {}\n\
+         Deleted files:  {}\n",
+        report.modified_files, report.new_files, report.deleted_files,
+    );
+
+    if report.is_stale {
+        out.push_str(&format!("\n**Suggestion:** {}\n", report.suggestion));
+    }
+
+    (out, false)
+}
+
 pub(crate) fn call_rename_symbol(engine: &mut Engine, args: &Value) -> (String, bool) {
     let old_name = match args.get("old_name").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
@@ -89,6 +138,31 @@ pub(crate) fn call_rename_symbol(engine: &mut Engine, args: &Value) -> (String, 
         .get("file_filter")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+
+    // Validate the rename before applying it.
+    let validation = engine.validate_rename(
+        &old_name,
+        &new_name,
+        file_filter.as_deref(),
+    );
+
+    // Build validation summary for the output.
+    let mut validation_summary = String::new();
+    if !validation.is_safe {
+        validation_summary.push_str("\n**Warnings:**\n");
+        for conflict in &validation.conflicts {
+            let kind_str = match conflict.kind {
+                codixing_core::ConflictKind::NameCollision => "NAME COLLISION",
+                codixing_core::ConflictKind::Shadowing => "SHADOWING",
+                codixing_core::ConflictKind::ImportConflict => "IMPORT CONFLICT",
+            };
+            validation_summary.push_str(&format!(
+                "  - [{kind_str}] {}\n",
+                conflict.message
+            ));
+        }
+        validation_summary.push('\n');
+    }
 
     let root = engine.config().root.clone();
 
@@ -140,7 +214,7 @@ pub(crate) fn call_rename_symbol(engine: &mut Engine, args: &Value) -> (String, 
     if !errors.is_empty() {
         return (
             format!(
-                "Rename completed with errors ({modified} files, {replacements} replacements):\n{}",
+                "Rename completed with errors ({modified} files, {replacements} replacements):{validation_summary}\n{}",
                 errors.join("\n")
             ),
             true,
@@ -150,7 +224,7 @@ pub(crate) fn call_rename_symbol(engine: &mut Engine, args: &Value) -> (String, 
     (
         format!(
             "Renamed '{old_name}' \u{2192} '{new_name}' in {modified} file(s), \
-             {replacements} total replacement(s). All affected files reindexed."
+             {replacements} total replacement(s). All affected files reindexed.{validation_summary}"
         ),
         false,
     )
