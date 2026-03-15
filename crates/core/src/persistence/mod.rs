@@ -22,6 +22,7 @@ const FILE_CHUNKS_FILE: &str = "file_chunks.bin";
 const CHUNK_META_FILE: &str = "chunk_meta.bin";
 const GRAPH_DIR: &str = "graph";
 const GRAPH_FILE: &str = "graph.bin";
+const MMAP_VECTOR_FILE: &str = "vectors.mmap";
 
 /// Extended file hash entry storing content hash alongside filesystem metadata
 /// (mtime and size) for fast pre-filtering during sync.
@@ -218,6 +219,11 @@ impl IndexStore {
     /// Path to the chunk metadata binary.
     pub fn chunk_meta_path(&self) -> PathBuf {
         self.codixing_dir().join(CHUNK_META_FILE)
+    }
+
+    /// Path to the memory-mapped vector index file (`vectors.mmap`).
+    pub fn mmap_vector_path(&self) -> PathBuf {
+        self.codixing_dir().join(MMAP_VECTOR_FILE)
     }
 
     /// Save the [`IndexConfig`] to `config.json`.

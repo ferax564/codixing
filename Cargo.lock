@@ -536,6 +536,7 @@ dependencies = [
  "glob",
  "hf-hub",
  "ignore",
+ "memmap2",
  "ndarray",
  "notify",
  "ort",

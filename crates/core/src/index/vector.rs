@@ -100,6 +100,14 @@ impl BruteForceVectorIndex {
         self.dimension
     }
 
+    /// Return a snapshot of the index data (for cross-index conversions).
+    pub(crate) fn to_index_data(&self) -> VectorIndexData {
+        VectorIndexData {
+            dimension: self.dimension,
+            entries: self.entries.clone(),
+        }
+    }
+
     /// Cosine similarity between two vectors.
     ///
     /// Delegates to the SIMD-accelerated implementation in [`super::simd_distance`].
