@@ -17,7 +17,9 @@ pub struct ParseResult {
     /// Semantic entities extracted from the AST.
     pub entities: Vec<SemanticEntity>,
     /// The tree-sitter concrete syntax tree.
-    pub tree: tree_sitter::Tree,
+    /// `None` for config languages (YAML, TOML, Dockerfile, Makefile) which
+    /// use line-based parsing instead of tree-sitter.
+    pub tree: Option<tree_sitter::Tree>,
     /// xxh3-64 hash of the source bytes, used for cache validation.
     pub content_hash: u64,
 }
@@ -45,10 +47,18 @@ impl Parser {
     ///
     /// If the cache already holds a result whose content hash matches, the cached
     /// tree and entities are returned without re-parsing.
+    ///
+    /// Config languages (YAML, TOML, Dockerfile, Makefile) use line-based
+    /// parsing and return `tree: None`.
     pub fn parse_file(&self, path: &Path, source: &[u8]) -> Result<ParseResult> {
         let language = detect_language(path).ok_or_else(|| CodixingError::UnsupportedLanguage {
             path: path.to_path_buf(),
         })?;
+
+        // Config languages bypass tree-sitter entirely.
+        if !language.is_tree_sitter() {
+            return self.do_config_parse(path, source, language);
+        }
 
         let content_hash = xxh3_64(source);
 
@@ -58,7 +68,7 @@ impl Parser {
             return Ok(ParseResult {
                 language,
                 entities,
-                tree,
+                tree: Some(tree),
                 content_hash,
             });
         }
@@ -66,12 +76,14 @@ impl Parser {
         // Slow path: parse and populate cache.
         let result = self.do_parse(path, source, language, content_hash)?;
 
-        self.cache.insert(
-            path.to_path_buf(),
-            result.tree.clone(),
-            content_hash,
-            result.entities.clone(),
-        );
+        if let Some(ref tree) = result.tree {
+            self.cache.insert(
+                path.to_path_buf(),
+                tree.clone(),
+                content_hash,
+                result.entities.clone(),
+            );
+        }
 
         Ok(result)
     }
@@ -84,15 +96,21 @@ impl Parser {
             path: path.to_path_buf(),
         })?;
 
+        if !language.is_tree_sitter() {
+            return self.do_config_parse(path, source, language);
+        }
+
         let content_hash = xxh3_64(source);
         let result = self.do_parse(path, source, language, content_hash)?;
 
-        self.cache.insert(
-            path.to_path_buf(),
-            result.tree.clone(),
-            content_hash,
-            result.entities.clone(),
-        );
+        if let Some(ref tree) = result.tree {
+            self.cache.insert(
+                path.to_path_buf(),
+                tree.clone(),
+                content_hash,
+                result.entities.clone(),
+            );
+        }
 
         Ok(result)
     }
@@ -165,7 +183,39 @@ impl Parser {
         Ok(ParseResult {
             language,
             entities,
-            tree,
+            tree: Some(tree),
+            content_hash,
+        })
+    }
+
+    /// Parse a config language file using line-based extraction (no tree-sitter).
+    fn do_config_parse(
+        &self,
+        path: &Path,
+        source: &[u8],
+        language: Language,
+    ) -> Result<ParseResult> {
+        let config_support =
+            self.registry
+                .get_config(language)
+                .ok_or_else(|| CodixingError::UnsupportedLanguage {
+                    path: path.to_path_buf(),
+                })?;
+
+        let entities = config_support.extract_entities(source);
+        let content_hash = xxh3_64(source);
+
+        debug!(
+            path = %path.display(),
+            language = language.name(),
+            entities = entities.len(),
+            "parsed config file"
+        );
+
+        Ok(ParseResult {
+            language,
+            entities,
+            tree: None,
             content_hash,
         })
     }
@@ -281,6 +331,46 @@ pub struct Config {
         let parser = Parser::new();
         let result = parser.parse_file(Path::new("data.xyz"), b"hello");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_yaml_config() {
+        let parser = Parser::new();
+        let src = b"name: my-app\nversion: 1.0\n";
+        let result = parser.parse_file(Path::new("config.yaml"), src).unwrap();
+        assert_eq!(result.language, Language::Yaml);
+        assert!(result.tree.is_none(), "config languages should have no tree");
+        assert!(!result.entities.is_empty());
+    }
+
+    #[test]
+    fn parse_dockerfile_config() {
+        let parser = Parser::new();
+        let src = b"FROM rust:1.75 AS builder\nEXPOSE 8080\n";
+        let result = parser.parse_file(Path::new("Dockerfile"), src).unwrap();
+        assert_eq!(result.language, Language::Dockerfile);
+        assert!(result.tree.is_none());
+        assert!(!result.entities.is_empty());
+    }
+
+    #[test]
+    fn parse_makefile_config() {
+        let parser = Parser::new();
+        let src = b"CC = gcc\nall: main.o\n\tmake\n";
+        let result = parser.parse_file(Path::new("Makefile"), src).unwrap();
+        assert_eq!(result.language, Language::Makefile);
+        assert!(result.tree.is_none());
+        assert!(!result.entities.is_empty());
+    }
+
+    #[test]
+    fn parse_toml_config() {
+        let parser = Parser::new();
+        let src = b"[package]\nname = \"test\"\n";
+        let result = parser.parse_file(Path::new("Cargo.toml"), src).unwrap();
+        assert_eq!(result.language, Language::Toml);
+        assert!(result.tree.is_none());
+        assert!(!result.entities.is_empty());
     }
 
     #[test]

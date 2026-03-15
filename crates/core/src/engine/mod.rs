@@ -624,7 +624,7 @@ fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
     let chunks = chunker.chunk(
         &rel_str,
         &source,
-        &result.tree,
+        result.tree.as_ref(),
         result.language,
         &ctx.config.chunk,
     );
@@ -660,12 +660,19 @@ fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
 
     // Extract imports now — we already have the tree in memory, so this
     // avoids a second read+parse pass during build_graph.
-    let raw_imports = ImportExtractor::extract(&result.tree, &source, result.language);
+    // Config languages have no tree-sitter tree; skip import/call extraction.
+    let raw_imports = match result.tree.as_ref() {
+        Some(tree) => ImportExtractor::extract(tree, &source, result.language),
+        None => Vec::new(),
+    };
     ctx.pending_imports
         .insert(rel_str.clone(), (raw_imports, result.language));
 
     // Extract call sites for later call-graph edge resolution.
-    let call_names = CallExtractor::extract_calls(&result.tree, &source, result.language);
+    let call_names = match result.tree.as_ref() {
+        Some(tree) => CallExtractor::extract_calls(tree, &source, result.language),
+        None => Vec::new(),
+    };
     if !call_names.is_empty() {
         ctx.pending_calls.insert(rel_str.clone(), call_names);
     }
