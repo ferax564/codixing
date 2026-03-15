@@ -36,6 +36,7 @@ use crate::persistence::{FileHashEntry, IndexMeta, IndexStore};
 use crate::reranker::Reranker;
 use crate::retriever::ChunkMeta;
 use crate::session::SessionState;
+use crate::shared_session::SharedSession;
 use crate::symbols::persistence::{deserialize_symbols, serialize_symbols};
 use crate::symbols::{Symbol, SymbolTable};
 use crate::vector::VectorIndex;
@@ -183,6 +184,8 @@ pub struct Engine {
     pub(super) reranker: Option<Arc<Reranker>>,
     /// Session state for tracking agent interactions.
     session: Arc<SessionState>,
+    /// Shared session store for multi-agent context sharing.
+    shared_session: SharedSession,
 }
 
 impl Engine {
@@ -396,6 +399,7 @@ impl Engine {
             graph,
             reranker,
             session,
+            shared_session: SharedSession::default_new(),
         })
     }
 
@@ -529,6 +533,7 @@ impl Engine {
             graph,
             reranker,
             session,
+            shared_session: SharedSession::default_new(),
         })
     }
 
@@ -577,6 +582,17 @@ impl Engine {
     /// Replace the session state (e.g. to disable session tracking).
     pub fn set_session(&mut self, session: Arc<SessionState>) {
         self.session = session;
+    }
+
+    /// Access the shared (multi-agent) session store.
+    pub fn shared_session(&self) -> &SharedSession {
+        &self.shared_session
+    }
+
+    /// Replace the shared session store (e.g. to inject a shared instance
+    /// across multiple engine references in daemon mode).
+    pub fn set_shared_session(&mut self, shared: SharedSession) {
+        self.shared_session = shared;
     }
 
     /// Get combined callers + callees for a file (used for graph-propagated session boost).

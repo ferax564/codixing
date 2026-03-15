@@ -4,7 +4,9 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use codixing_core::{Engine, SearchQuery, SessionEventKind, Strategy};
+use std::time::Instant;
+
+use codixing_core::{Engine, SearchQuery, SessionEventKind, SharedEventType, SharedSessionEvent, Strategy};
 
 pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) {
     let query_str = match args.get("query").and_then(|v| v.as_str()) {
@@ -40,18 +42,36 @@ pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) 
             ("No results found.".to_string(), false)
         }
         Ok(mut results) => {
+            let agent_id = engine.session().session_id().to_string();
             engine.session().record(SessionEventKind::Search {
-                query: query_str,
+                query: query_str.clone(),
                 result_count: results.len(),
             });
 
+            // Record top search results in the shared session so other
+            // agents benefit from this agent's search activity.
+            for r in results.iter().take(3) {
+                engine.shared_session().record(SharedSessionEvent {
+                    timestamp: Instant::now(),
+                    event_type: SharedEventType::Search,
+                    file_path: r.file_path.clone(),
+                    symbol: None,
+                    agent_id: agent_id.clone(),
+                });
+            }
+
             // Apply session boost to results and re-sort.
+            // Combines per-agent session boost with cross-agent shared session boost.
             let session = engine.session().clone();
+            let shared = engine.shared_session();
             for r in results.iter_mut() {
-                let boost = session.compute_file_boost_with_graph(&r.file_path, &|file| {
+                let agent_boost = session.compute_file_boost_with_graph(&r.file_path, &|file| {
                     engine.file_neighbors(file)
                 });
-                r.score += boost;
+                let shared_boost = shared.get_file_boost(&r.file_path);
+                // Apply shared boost at 0.2x weight to avoid over-boosting
+                // from other agents' activity.
+                r.score += agent_boost + shared_boost * 0.2;
             }
             results.sort_by(|a, b| {
                 b.score
@@ -88,8 +108,19 @@ pub(crate) fn call_find_symbol(engine: &Engine, args: &Value) -> (String, bool) 
             let first_file = symbols.first().map(|s| s.file_path.clone());
             engine.session().record(SessionEventKind::SymbolLookup {
                 name: name.clone(),
-                file: first_file,
+                file: first_file.clone(),
             });
+
+            // Record in shared session for cross-agent context.
+            if let Some(ref file) = first_file {
+                engine.shared_session().record(SharedSessionEvent {
+                    timestamp: Instant::now(),
+                    event_type: SharedEventType::SymbolLookup,
+                    file_path: file.clone(),
+                    symbol: Some(name.clone()),
+                    agent_id: engine.session().session_id().to_string(),
+                });
+            }
 
             let mut out = format!("Found {} symbol(s) matching '{name}':\n\n", symbols.len());
             for sym in &symbols {
@@ -278,6 +309,17 @@ pub(crate) fn call_explain(engine: &Engine, args: &Value) -> (String, bool) {
         name: symbol.clone(),
         file: def_file.clone(),
     });
+
+    // Record in shared session for cross-agent context.
+    if let Some(ref file) = def_file {
+        engine.shared_session().record(SharedSessionEvent {
+            timestamp: Instant::now(),
+            event_type: SharedEventType::SymbolLookup,
+            file_path: file.clone(),
+            symbol: Some(symbol.clone()),
+            agent_id: engine.session().session_id().to_string(),
+        });
+    }
 
     // Find actual call sites via BM25 search (symbol-level, not file-level).
     let usages = engine.search_usages(&symbol, 8).unwrap_or_default();
