@@ -26,14 +26,19 @@ For broad codebase exploration, always try a Codixing tool first. Fall back to B
 - **Seeing what a function calls** → `symbol_callees`
 - **Rename across codebase** → `rename_symbol`
 - **Test coverage discovery** → `find_tests`
+- **Finding code that a test covers** → `find_source_for_test`
 - **Cyclomatic complexity** → `get_complexity`
 - **Code review context** → `review_context`
+- **Context-aware repo map** → `focus_map` (PPR seeded by recent edits)
+- **Index freshness check** → `check_staleness`
+- **Multi-agent session status** → `session_status`
+- **Assembled context for a task** → `get_context_for_task`
 
 ## Project Structure
 
-- `crates/core/` — engine: AST parsing, BM25, graph, embeddings
+- `crates/core/` — engine: AST parsing, BM25, graph, embeddings, PageRank, test mapping, shared sessions
 - `crates/cli/` — `codixing` CLI binary
-- `crates/mcp/` — MCP server (`codixing-mcp`), tools in `src/tools.rs`
+- `crates/mcp/` — MCP server (`codixing-mcp`), 44 tools in `src/tools/`
 - `crates/lsp/` — LSP server (`codixing-lsp`), hover/go-to-def/refs/symbols/complexity diagnostics, file-local symbol ranking
 - `crates/server/` — REST API server (`codixing-server`)
 - `.codixing/` — index data (do not edit manually)

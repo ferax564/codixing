@@ -191,48 +191,79 @@ codixing-mcp --root /path/to/project --daemon &
 
 The daemon runs a background file watcher. When you save a file, the index updates within ~100ms. Claude Code always queries a fresh index.
 
-### Available MCP tools (33)
+### Available MCP tools (44)
 
+#### Search & Navigation
 | Tool | What it does |
 |------|-------------|
-| `code_search` | BM25 + graph-boosted search; `instant`/`fast`/`thorough`/`explore` strategies (results cached 60s) |
+| `code_search` | BM25 + graph-boosted search; `instant`/`fast`/`thorough`/`explore`/`deep` strategies |
 | `grep_code` | Regex or literal search across indexed files; bounded output, glob filter, context lines |
 | `find_symbol` | Structured symbol lookup — returns definition location + signature |
 | `read_symbol` | Full source of a named symbol |
 | `read_file` | Token-budgeted file reader with line range |
 | `outline_file` | Per-file symbol tree sorted by line number — token-efficient alternative to `read_file` |
+| `search_usages` | All usage sites of a symbol across the codebase |
+| `list_files` | List all indexed files with optional glob filter and chunk counts |
+| `find_similar` | Find code chunks semantically similar to a given snippet or description |
+
+#### Graph & Architecture
+| Tool | What it does |
+|------|-------------|
 | `get_repo_map` | PageRank-ranked architecture overview within a token budget |
+| `focus_map` | **NEW** — Context-aware repo map using Personalized PageRank seeded by recently edited files |
 | `get_references` | Who imports a file (callers) + what it imports (callees) |
 | `get_transitive_deps` | Multi-hop dependency chain to arbitrary depth |
-| `search_usages` | All usage sites of a symbol across the codebase |
-| `index_status` | Current index statistics (files, chunks, symbols, graph) |
-| `list_files` | List all indexed files with optional glob filter and chunk counts |
+| `symbol_callers` | Symbol-level call graph: which functions directly call a given symbol |
+| `symbol_callees` | Symbol-level call graph: which functions a given symbol directly calls |
+| `explain` | Assembled context package: definition + usage sites (callers) + callees for any symbol |
+| `get_context_for_task` | Given a task description, assembles relevant context with dependency-aware ordering |
+
+#### Code Modification
+| Tool | What it does |
+|------|-------------|
 | `write_file` | Write a file and immediately reindex it |
 | `edit_file` | Exact find-and-replace in a file with immediate reindex |
 | `delete_file` | Delete a file and remove it from the index |
 | `apply_patch` | Apply a unified git diff across one or more files with auto-reindex |
+| `rename_symbol` | Project-wide identifier rename with conflict validation and auto-reindex |
 | `run_tests` | Execute a test command in the project root and return stdout + exit code |
-| `rename_symbol` | Project-wide identifier rename with auto-reindex of all affected files |
-| `explain` | Assembled context package: definition + usage sites (callers) + callees for any symbol |
-| `symbol_callers` | Symbol-level call graph: which functions directly call a given symbol |
-| `symbol_callees` | Symbol-level call graph: which functions a given symbol directly calls |
+
+#### Analysis & Quality
+| Tool | What it does |
+|------|-------------|
 | `predict_impact` | Given a unified diff, rank files most likely to need changes (call graph + import graph) |
 | `stitch_context` | Search + automatically attach callee definitions for cross-file context in one call |
-| `enrich_docs` | LLM-generated doc summaries per symbol, stored in `.codixing/symbol_docs.json` (Anthropic or Ollama) |
-| `remember` | Store a key-value note in persistent project memory (`.codixing/memory.json`) |
-| `recall` | Retrieve notes from project memory by key or keyword search |
-| `forget` | Remove a note from project memory |
-| `find_tests` | Find test files and test functions related to a given source file or symbol |
-| `find_similar` | Find code chunks semantically similar to a given snippet or description |
-| `get_complexity` | Compute cyclomatic complexity for functions in a file |
 | `review_context` | Assemble context for reviewing a diff: changed symbols, callers, related tests |
-| `generate_onboarding` | Generate a structured onboarding document for the indexed project |
+| `find_tests` | Find test files and test functions related to a given source file or symbol |
+| `find_source_for_test` | **NEW** — Given a test file, find the source it tests (naming, imports, co-location) |
+| `get_complexity` | Compute cyclomatic complexity for functions in a file |
+| `find_orphans` | Detect dead code — files with zero in-degree in the dependency graph |
+| `check_staleness` | **NEW** — Fast stat()-based check if the index is out of date |
+
+#### Git & Temporal
+| Tool | What it does |
+|------|-------------|
 | `git_diff` | Show `git diff` output for the working tree or between commits |
-| `get_session_summary` | Inspect current session state: files read/edited, symbols explored |
-| `session_reset_focus` | Clear progressive directory focus narrowing |
 | `get_hotspots` | Rank files by change frequency and author diversity from git history |
 | `search_changes` | Search git log by commit message or file path |
 | `get_blame` | Show git blame with grouped output by commit |
+
+#### Session & Memory
+| Tool | What it does |
+|------|-------------|
+| `get_session_summary` | Inspect current session state: files read/edited, symbols explored |
+| `session_status` | **NEW** — Multi-agent shared session: active agents, hot files, event count |
+| `session_reset_focus` | Clear progressive directory focus narrowing |
+| `remember` | Store a key-value note in persistent project memory (`.codixing/memory.json`) |
+| `recall` | Retrieve notes from project memory by key or keyword search |
+| `forget` | Remove a note from project memory |
+
+#### Other
+| Tool | What it does |
+|------|-------------|
+| `index_status` | Current index statistics (files, chunks, symbols, graph) |
+| `enrich_docs` | LLM-generated doc summaries per symbol (Anthropic or Ollama) |
+| `generate_onboarding` | Generate a structured onboarding document for the indexed project |
 
 ---
 
@@ -317,7 +348,7 @@ All numbers measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — a r
 | **File watcher latency** | ≤100ms from save to queryable |
 | **Daemon IPC overhead** | ~6ms per call (Unix socket round-trip) |
 | **BM25 search** | <10ms p99 |
-| **Test suite** | 368 tests (including retrieval quality regression suite) |
+| **Test suite** | 452 tests (including retrieval quality regression suite) |
 
 ### Init speed breakdown (0.87s on 246K LoC)
 
@@ -400,7 +431,7 @@ Symbol localization across 5 languages (BM25-only, no GPU needed):
 | JavaScript | react | 10 | 60% | 90% | 100% |
 | **Overall** | **5 repos** | **50** | **56%** | **88%** | **98%** |
 
-14 languages supported with full AST parsing via tree-sitter. Run `python3 benchmarks/multilang_eval.py` to reproduce.
+16 languages supported with full AST parsing via tree-sitter, plus 4 config formats (YAML, TOML, Dockerfile, Makefile). Run `python3 benchmarks/multilang_eval.py` to reproduce.
 
 ---
 
@@ -428,16 +459,23 @@ codixing init . --model snowflake-arctic-l
 
 ## Key Features
 
-- **AST-aware chunking** — Tree-sitter parsing across 10 language families; never splits a function in half
-- **BM25 full-text search** — Tantivy-backed with a custom code tokenizer; `signature` field ×3.0 and `entity_names` ×2.0 field boosts ensure definitions rank above mentions; automatic CamelCase↔snake_case query expansion for cross-convention matching
-- **Hybrid retrieval** — BM25 + vector (fastembed BGE-Base-EN-v1.5, 768 dims) fused with asymmetric Reciprocal Rank Fusion; identifier queries route BM25-dominant, natural language routes vector-dominant
-- **Code dependency graph** — Import + call extraction for all 10 languages, petgraph `DiGraph`, PageRank scoring; transparently boosts search result ranking
+- **AST-aware chunking** — Tree-sitter parsing across 16 language families + 4 config formats; never splits a function in half
+- **BM25 full-text search** — Tantivy-backed with a custom code tokenizer; `signature` field ×3.0 and `entity_names` ×2.0 field boosts; 3.5× definition boost; automatic CamelCase↔snake_case query expansion for cross-convention matching
+- **Hybrid retrieval** — BM25 + vector (fastembed BGE-Base-EN-v1.5, 768 dims) fused with asymmetric Reciprocal Rank Fusion (O(N+M) HashMap-based); identifier queries route BM25-dominant, natural language routes vector-dominant
+- **Code dependency graph** — Import + call extraction for all 16 languages, petgraph `DiGraph`, PageRank scoring; transparently boosts search result ranking
+- **Personalized PageRank** — Focus-aware repo maps seeded by recently edited files; surfaces contextually relevant code for AI agents
+- **Test-to-code mapping** — Automatically links test files to source via naming conventions, imports, and co-location analysis
+- **Memory-mapped vectors** — Optional mmap backend for the vector index; reduces RSS for large repositories
+- **Multi-agent sessions** — Shared session context across concurrent MCP clients; time-decayed file boost from cross-agent activity
+- **Signature-aware truncation** — Smart snippet formatting that preserves function signatures while eliding bodies
+- **Stale index detection** — Fast stat()-based freshness check without content hashing
+- **Rename validation** — Detects name collisions and shadowing before applying project-wide renames
 - **Band merging** — Adjacent same-file result chunks within 3 lines are merged before rendering; reduces token output by 25–91% on typical codebases
 - **Repo map generation** — Aider-style, token-budgeted output sorted by PageRank (importance) not file size
 - **Live index freshness** — Daemon file watcher updates the in-memory engine within 100ms of any file save; no restart needed
 - **`.gitignore`-aware indexing** — File walker respects `.gitignore`, `.ignore`, and global gitignore (same as ripgrep); no manual exclude lists needed
-- **Hash-based incremental sync** — `codixing sync` diffs xxh3 content hashes and re-indexes only changed files; no git required
-- **MCP server** — 38 tools exposed via JSON-RPC 2.0; Claude Code registers with one command
+- **Hash-based incremental sync** — `codixing sync` uses mtime+size pre-filtering then xxh3 content hashes; re-indexes only changed files
+- **MCP server** — 44 tools exposed via JSON-RPC 2.0; Claude Code registers with one command
 - **Concurrent symbol table** — DashMap-backed with exact, prefix, and substring matching
 - **Single binary, zero runtime deps** — No JVM, no Docker, no external databases
 
@@ -450,35 +488,41 @@ codixing init . --model snowflake-arctic-l
 | **Tier 1** (full AST + graph) | Rust, Python, TypeScript, TSX, JavaScript, Go, Java, C, C++, C# |
 | **Tier 2** (full AST + graph) | Ruby, Swift, Kotlin, Scala |
 | **Tier 3** (full AST + graph) | Zig, PHP |
+| **Config** (symbol extraction) | YAML, TOML, Dockerfile, Makefile |
 
 ---
 
 ## Architecture
 
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│                           Codixing Engine                              │
-│                                                                         │
-│  ┌─────────────┐  ┌──────────┐  ┌──────────────┐  ┌─────────────────┐  │
-│  │ Tree-sitter  │  │ Tantivy  │  │    Symbol    │  │   Code Graph    │  │
-│  │ AST Parser   │  │  (BM25)  │  │    Table     │  │  (petgraph)     │  │
-│  └──────┬───────┘  └────┬─────┘  └──────┬───────┘  └───────┬─────────┘  │
-│         │               │               │                   │            │
-│  ┌──────▼───────┐  ┌────▼──────┐  ┌─────▼──────┐  ┌────────▼─────────┐  │
-│  │     cAST     │  │   Code    │  │  DashMap   │  │ ImportExtractor  │  │
-│  │   Chunker    │  │ Tokenizer │  │  (conc.)   │  │   + PageRank     │  │
-│  └──────────────┘  └────┬──────┘  └────────────┘  └────────┬─────────┘  │
-│                          │                                  │            │
-│  ┌───────────────────────▼──────────────────────────────────▼──────────┐ │
-│  │      Retriever: BM25 · Hybrid (RRF) · Thorough (MMR) · Explore     │ │
-│  │                   + Graph PageRank score boost                      │ │
-│  └──────────────────────────────────────────────────────────────────── ┘ │
-│                                                                         │
-│  ┌─────────────────────────────────────────────────────────────────────┐ │
-│  │   API Layer: CLI (clap) · REST (axum) · MCP (JSON-RPC 2.0)         │ │
-│  │              + Daemon (Unix socket) · File Watcher                  │ │
-│  └─────────────────────────────────────────────────────────────────────┘ │
-└────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              Codixing Engine                                │
+│                                                                             │
+│  ┌─────────────┐  ┌──────────┐  ┌──────────────┐  ┌──────────────────────┐ │
+│  │ Tree-sitter  │  │ Tantivy  │  │    Symbol    │  │   Code Graph         │ │
+│  │ AST Parser   │  │  (BM25)  │  │    Table     │  │ (petgraph + PPR)     │ │
+│  └──────┬───────┘  └────┬─────┘  └──────┬───────┘  └──────────┬───────────┘ │
+│         │               │               │                      │            │
+│  ┌──────▼───────┐  ┌────▼──────┐  ┌─────▼──────┐  ┌───────────▼──────────┐ │
+│  │     cAST     │  │   Code    │  │  DashMap   │  │ ImportExtractor      │ │
+│  │   Chunker    │  │ Tokenizer │  │  (conc.)   │  │ + PageRank + PPR     │ │
+│  └──────────────┘  └────┬──────┘  └────────────┘  └───────────┬──────────┘ │
+│                          │                                     │            │
+│  ┌───────────────────────▼─────────────────────────────────────▼──────────┐ │
+│  │  Retriever: BM25 · Hybrid (RRF) · Thorough (MMR) · Explore · Deep     │ │
+│  │  + Graph PageRank boost · Definition 3.5× · Popularity boost          │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+│  ┌──────────────────┐  ┌───────────────┐  ┌────────────────────────────┐   │
+│  │   Test Mapping    │  │ Shared Session │  │   Vector Index             │   │
+│  │ (naming+imports)  │  │ (multi-agent)  │  │ (brute-force / mmap)       │   │
+│  └──────────────────┘  └───────────────┘  └────────────────────────────┘   │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────────────┐ │
+│  │ API Layer: CLI (clap) · REST (axum) · MCP 44 tools (JSON-RPC 2.0)      │ │
+│  │            + Daemon (Unix socket) · File Watcher · LSP Server           │ │
+│  └─────────────────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -487,10 +531,11 @@ codixing init . --model snowflake-arctic-l
 
 | Strategy | Method | Graph boost | Latency |
 |----------|--------|-------------|---------|
-| `instant` | BM25 only | No | <10ms |
+| `instant` | BM25 only (exact match, no query expansion) | No | <10ms |
 | `fast` | BM25 + vector (RRF) | Yes | <50ms |
 | `thorough` | Hybrid + MMR dedup | Yes | <200ms |
 | `explore` | BM25 + graph neighbor expansion | Yes | <100ms |
+| `deep` | Multi-query RRF fusion + popularity boost | Yes | <300ms |
 
 ---
 
@@ -510,6 +555,7 @@ codixing init . --model snowflake-arctic-l
 | Parallelism | `rayon` 1 | Parallel file processing |
 | File watching | `notify` 8 | Cross-platform fs event monitoring |
 | Serialization | `bitcode` 0.6 | Fast binary persistence |
+| Memory mapping | `memmap2` 0.9 | Optional mmap vector index backend |
 | Content hashing | `xxhash-rust` 0.8 | Change detection (xxh3) |
 | IPC | tokio `UnixListener` | Daemon socket server |
 | CLI | `clap` 4 | Command-line interface |
@@ -534,6 +580,9 @@ codixing init . --model snowflake-arctic-l
 | **Phase 12: Launch Prep** | ✅ Complete | Multi-language benchmarks, code cleanup, binary optimization (thin LTO + strip), website update — 368 tests |
 | **Phase 13a: Session-Aware Retrieval** | ✅ Complete | Track agent interactions, graph-propagated session boost (1-hop 0.3×, 2-hop 0.1×), progressive focus, linear decay, session persistence — 377 tests |
 | **Phase 13b: Temporal Code Context** | ✅ Complete | `get_hotspots`, `search_changes`, `get_blame`, blame-aware `explain`, diff-aware `predict_impact` — 383 tests |
+| **Phase 14: Dead Code Detection** | ✅ Complete | `find_orphans` — zero in-degree graph analysis with confidence scoring (Certain/High/Moderate/Low) |
+| **Phase 15: Cross-Repo Design** | ✅ Complete | FederatedEngine design doc, `get_context_for_task`, asymmetric RRF, query expansion, path-match reranking — 426 tests |
+| **Phase 16: Intelligence & Scale** | ✅ Complete | Focus-aware repo map (PPR), test-to-code mapping, config languages (YAML/TOML/Dockerfile/Makefile), mmap vector index, multi-agent shared sessions, signature-aware truncation, stale index detection, rename validation — **452 tests** |
 
 ---
 
@@ -541,7 +590,7 @@ codixing init . --model snowflake-arctic-l
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 368 tests
+cargo test --workspace        # 452 tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 ```
