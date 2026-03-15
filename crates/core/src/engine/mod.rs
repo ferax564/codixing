@@ -1,4 +1,5 @@
 mod files;
+mod focus_map;
 mod graph;
 mod orphans;
 mod search;
@@ -6,6 +7,7 @@ mod symbol_graph;
 mod sync;
 mod temporal;
 
+pub use focus_map::{FocusMapEntry, FocusMapOptions};
 pub use symbol_graph::SymbolReference;
 
 use std::collections::HashMap;

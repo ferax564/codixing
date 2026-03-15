@@ -220,6 +220,120 @@ pub fn compute_personalized_pagerank(
     }
 }
 
+/// Weighted Personalized PageRank anchored to a set of seed files with
+/// per-seed importance weights.
+///
+/// Unlike [`compute_personalized_pagerank`] which distributes teleportation
+/// probability equally across all seeds, this variant distributes it
+/// proportionally to the supplied weights.  A seed with weight 1.0 receives
+/// twice the teleportation as one with weight 0.5.
+///
+/// `seeds` is a slice of `(file_path, weight)` pairs.  Weights need not sum
+/// to 1 — they are normalized internally.  Falls back to standard
+/// [`compute_pagerank`] when `seeds` is empty.
+pub fn compute_weighted_personalized_pagerank(
+    graph: &CodeGraph,
+    damping: f32,
+    iterations: usize,
+    tolerance: f32,
+    seeds: &[(&str, f32)],
+) -> HashMap<String, f32> {
+    if seeds.is_empty() {
+        return compute_pagerank(graph, damping, iterations);
+    }
+
+    let nodes: Vec<&str> = graph
+        .nodes_by_pagerank()
+        .iter()
+        .map(|n| n.file_path.as_str())
+        .collect();
+
+    let n = nodes.len();
+    if n == 0 {
+        return HashMap::new();
+    }
+
+    // Build seed weight map, filtering to nodes that exist in the graph.
+    let node_set: std::collections::HashSet<&str> = nodes.iter().copied().collect();
+    let valid_seeds: Vec<(&str, f32)> = seeds
+        .iter()
+        .filter(|(path, _)| node_set.contains(path))
+        .map(|&(p, w)| (p, w.max(0.0)))
+        .collect();
+
+    if valid_seeds.is_empty() {
+        return compute_pagerank(graph, damping, iterations);
+    }
+
+    let total_weight: f32 = valid_seeds.iter().map(|(_, w)| w).sum();
+    let seed_weights: HashMap<&str, f32> = valid_seeds
+        .iter()
+        .map(|&(p, w)| (p, w / total_weight))
+        .collect();
+
+    let init = 1.0 / n as f32;
+    let mut rank: HashMap<&str, f32> = nodes.iter().map(|&p| (p, init)).collect();
+
+    // Pre-compute out-edges per node (to real nodes only).
+    let mut out_edges: HashMap<&str, Vec<&str>> = HashMap::new();
+    for &path in &nodes {
+        let callees: Vec<&str> = graph
+            .callees(path)
+            .iter()
+            .filter_map(|c| nodes.iter().find(|&&n| n == c.as_str()).copied())
+            .collect();
+        out_edges.insert(path, callees);
+    }
+
+    for _ in 0..iterations {
+        let mut new_rank: HashMap<&str, f32> = nodes.iter().map(|&p| (p, 0.0)).collect();
+
+        let dangling_sum: f32 = nodes
+            .iter()
+            .filter(|&&p| out_edges.get(p).map(|v| v.is_empty()).unwrap_or(true))
+            .map(|&p| rank.get(p).copied().unwrap_or(0.0))
+            .sum();
+
+        for &from in &nodes {
+            let r = rank.get(from).copied().unwrap_or(0.0);
+            let outs = out_edges.get(from).cloned().unwrap_or_default();
+            if !outs.is_empty() {
+                let share = r / outs.len() as f32;
+                for to in outs {
+                    *new_rank.entry(to).or_insert(0.0) += share;
+                }
+            }
+        }
+
+        // Apply damping with weighted teleportation and dangling redistribution.
+        let mut max_delta = 0.0_f32;
+        for &path in &nodes {
+            let old = rank.get(path).copied().unwrap_or(0.0);
+            let propagated = new_rank.get(path).copied().unwrap_or(0.0);
+            let seed_w = seed_weights.get(path).copied().unwrap_or(0.0);
+            let teleport = (1.0 - damping) * seed_w;
+            let dangling = damping * dangling_sum * seed_w;
+            let updated = teleport + damping * propagated + dangling;
+            *new_rank.entry(path).or_insert(0.0) = updated;
+            max_delta = max_delta.max((updated - old).abs());
+        }
+
+        rank = new_rank;
+        if max_delta < tolerance {
+            break;
+        }
+    }
+
+    let max_score = rank.values().cloned().fold(0.0_f32, f32::max);
+    if max_score > 0.0 {
+        rank.into_iter()
+            .map(|(k, v)| (k.to_string(), v / max_score))
+            .collect()
+    } else {
+        rank.into_iter().map(|(k, v)| (k.to_string(), v)).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +408,116 @@ mod tests {
         assert!(
             (max - 1.0).abs() < 1e-4,
             "expected max score ≈ 1.0, got {max}"
+        );
+    }
+
+    // --- Weighted Personalized PageRank tests ---
+
+    #[test]
+    fn weighted_ppr_empty_seeds_falls_back_to_global() {
+        let mut g = CodeGraph::new();
+        g.add_edge(
+            "src/a.rs",
+            "src/b.rs",
+            "crate::b",
+            Language::Rust,
+            Language::Rust,
+        );
+        let global = compute_pagerank(&g, 0.85, 20);
+        let weighted = compute_weighted_personalized_pagerank(&g, 0.85, 20, 1e-6, &[]);
+        assert_eq!(global.len(), weighted.len());
+    }
+
+    #[test]
+    fn weighted_ppr_empty_graph() {
+        let g = CodeGraph::new();
+        let scores = compute_weighted_personalized_pagerank(
+            &g,
+            0.85,
+            20,
+            1e-6,
+            &[("src/a.rs", 1.0)],
+        );
+        assert!(scores.is_empty());
+    }
+
+    #[test]
+    fn weighted_ppr_single_node_scores_one() {
+        let mut g = CodeGraph::new();
+        g.get_or_insert_node("src/a.rs", Language::Rust);
+        let scores = compute_weighted_personalized_pagerank(
+            &g,
+            0.85,
+            50,
+            1e-6,
+            &[("src/a.rs", 1.0)],
+        );
+        let a_score = scores.get("src/a.rs").copied().unwrap_or(0.0);
+        assert!(
+            (a_score - 1.0).abs() < 1e-4,
+            "single node should score ~1.0, got {a_score}"
+        );
+    }
+
+    #[test]
+    fn weighted_ppr_seed_neighbor_ranks_higher() {
+        // a -> b -> c, seed at a: b should rank higher than c
+        let mut g = CodeGraph::new();
+        g.add_edge("src/a.rs", "src/b.rs", "b", Language::Rust, Language::Rust);
+        g.add_edge("src/b.rs", "src/c.rs", "c", Language::Rust, Language::Rust);
+        let scores = compute_weighted_personalized_pagerank(
+            &g,
+            0.85,
+            50,
+            1e-6,
+            &[("src/a.rs", 1.0)],
+        );
+        let a = scores.get("src/a.rs").copied().unwrap_or(0.0);
+        let b = scores.get("src/b.rs").copied().unwrap_or(0.0);
+        let c = scores.get("src/c.rs").copied().unwrap_or(0.0);
+        assert!(
+            a > 0.0 && b > 0.0 && c > 0.0,
+            "all nodes should have positive scores: a={a}, b={b}, c={c}"
+        );
+    }
+
+    #[test]
+    fn weighted_ppr_higher_weight_gets_more_rank() {
+        let mut g = CodeGraph::new();
+        g.get_or_insert_node("src/a.rs", Language::Rust);
+        g.get_or_insert_node("src/b.rs", Language::Rust);
+        // No edges — scores are pure teleportation
+        let scores = compute_weighted_personalized_pagerank(
+            &g,
+            0.85,
+            50,
+            1e-6,
+            &[("src/a.rs", 3.0), ("src/b.rs", 1.0)],
+        );
+        let a = scores.get("src/a.rs").copied().unwrap_or(0.0);
+        let b = scores.get("src/b.rs").copied().unwrap_or(0.0);
+        assert!(
+            a > b,
+            "seed with weight 3.0 should score higher than 1.0: a={a}, b={b}"
+        );
+    }
+
+    #[test]
+    fn weighted_ppr_convergence() {
+        let mut g = CodeGraph::new();
+        g.add_edge("src/a.rs", "src/b.rs", "b", Language::Rust, Language::Rust);
+        g.add_edge("src/b.rs", "src/a.rs", "a", Language::Rust, Language::Rust);
+        let scores = compute_weighted_personalized_pagerank(
+            &g,
+            0.85,
+            200,
+            1e-6,
+            &[("src/a.rs", 1.0)],
+        );
+        let max = scores.values().cloned().fold(0.0_f32, f32::max);
+        assert!(
+            (max - 1.0).abs() < 1e-4,
+            "max score should be ~1.0 after normalization, got {max}"
         );
     }
 }

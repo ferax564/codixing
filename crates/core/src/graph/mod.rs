@@ -16,7 +16,9 @@ use crate::language::Language;
 
 // Re-export public types from sub-modules.
 pub use extractor::{CallExtractor, ImportExtractor};
-pub use pagerank::{compute_pagerank, compute_personalized_pagerank};
+pub use pagerank::{
+    compute_pagerank, compute_personalized_pagerank, compute_weighted_personalized_pagerank,
+};
 pub use repomap::{RepoMapOptions, generate_repo_map};
 pub use resolver::ImportResolver;
 pub use types::{ReferenceKind, SymbolKind, SymbolNode};
