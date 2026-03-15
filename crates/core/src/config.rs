@@ -122,6 +122,23 @@ pub enum EmbeddingModel {
     Qwen3SmallEmbedding,
 }
 
+/// Which vector storage backend to use for the brute-force / trait-based index.
+///
+/// This controls whether the [`BruteForceVectorIndex`](crate::index::BruteForceVectorIndex)
+/// vectors are kept fully in RAM or backed by a memory-mapped file.
+///
+/// The default is `InMemory`. Use `Mmap` for large repositories (>1000 chunks)
+/// to reduce resident memory usage.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum VectorStorageBackend {
+    /// All vectors are loaded into process memory (default).
+    #[default]
+    InMemory,
+    /// Vectors are stored in a memory-mapped file (`.codixing/vectors.mmap`).
+    /// Only pages accessed during search are loaded into physical RAM.
+    Mmap,
+}
+
 /// Configuration for the vector embedding pipeline.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EmbeddingConfig {
@@ -166,6 +183,13 @@ pub struct EmbeddingConfig {
     /// When disabled (the default) the local usearch HNSW index is used.
     #[serde(default)]
     pub qdrant_enabled: bool,
+
+    /// Which storage backend to use for the brute-force vector index.
+    ///
+    /// `InMemory` (default) keeps all vectors in RAM. `Mmap` uses a memory-mapped
+    /// file to reduce RSS for large repositories.
+    #[serde(default)]
+    pub vector_storage_backend: VectorStorageBackend,
 }
 
 impl Default for EmbeddingConfig {
@@ -179,6 +203,7 @@ impl Default for EmbeddingConfig {
             quantize: default_quantize(),
             reranker_enabled: false,
             qdrant_enabled: false,
+            vector_storage_backend: VectorStorageBackend::default(),
         }
     }
 }

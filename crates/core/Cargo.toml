@@ -67,6 +67,7 @@ tracing.workspace = true
 regex.workspace = true
 glob.workspace = true
 ignore.workspace = true
+memmap2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
