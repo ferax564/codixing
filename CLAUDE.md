@@ -67,7 +67,9 @@ ORT_DYLIB_PATH=~/.local/lib/libonnxruntime.so LD_LIBRARY_PATH=~/.local/lib \
   ./target/release/codixing init . --model bge-small-en
 ```
 
-## Embedding Model Benchmark (86 files, 667 chunks, AMD Rembrandt CPU)
+## Embedding Model Benchmark
+
+**AMD Rembrandt CPU (86 files, 667 chunks):**
 
 | Model        | Init time | Dims | Per-query overhead | Notes |
 |---|---|---|---|---|
@@ -75,6 +77,13 @@ ORT_DYLIB_PATH=~/.local/lib/libonnxruntime.so LD_LIBRARY_PATH=~/.local/lib \
 | **BgeSmallEn** | **76s** | 384  | ~1ms (daemon)      | **Recommended** — best speed/quality tradeoff |
 | BgeBaseEn    | 192s      | 768  | ~1ms (daemon)      | 2.5× slower init, no quality gain on this codebase |
 | Qwen3        | N/A       | 1024 | N/A                | Memory leak in candle — grows to 24GB RSS, OOM killed |
+
+**Apple M4 (127 files, 1054 chunks):**
+
+| Model        | Init time | Dims | Cold start (MCP) | Warm search | Notes |
+|---|---|---|---|---|---|
+| BM25-only    | 0.3s      | —    | ~115ms           | ~35ms       | No ONNX needed |
+| **BgeSmallEn** | **110s** | 384  | ~107ms           | ~35ms       | **Recommended** — hybrid search shines on NL queries |
 
 ONNX Runtime lives at `~/.local/lib/`:
 - macOS: `~/.local/lib/libonnxruntime.dylib` (v1.24.3, installed via pip's `onnxruntime` package)

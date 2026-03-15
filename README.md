@@ -433,6 +433,42 @@ Symbol localization across 5 languages (BM25-only, no GPU needed):
 
 16 languages supported with full AST parsing via tree-sitter, plus 4 config formats (YAML, TOML, Dockerfile, Makefile). Run `python3 benchmarks/multilang_eval.py` to reproduce.
 
+### MCP Server Benchmark (Self-Hosting)
+
+Codixing MCP server running on its own codebase — 127 Rust files, 1054 chunks, 2030 symbols, 1054 vectors (BgeSmallEn 384d), 375 graph nodes. Measured on Apple M4 (macOS ARM64).
+
+**Cold start:** 107ms (process launch + ONNX model load + index open)
+
+**Warm tool latency** (persistent MCP connection, 44 tools available):
+
+| Tool | Latency | Output |
+|------|---------|--------|
+| `index_status` | 0.2ms | 405 chars |
+| `find_symbol` | 0.2ms | 479 chars |
+| `symbol_callees` | 1.4ms | 104 chars |
+| `list_files` | 0.8ms | 4.1 KB |
+| `find_tests` | 1.0ms | 15.1 KB |
+| `get_complexity` | 0.5ms | 1.0 KB |
+| `check_staleness` | 2.2ms | 178 chars |
+| `symbol_callers` | 8.5ms | 190 chars |
+| `search instant` | 35ms | 1.6–5.2 KB |
+| `search fast` (hybrid) | 35ms | 4.6–7.4 KB |
+| `explain` | 37ms | 1.3 KB |
+| `search thorough` | 3.1s | 6.3 KB |
+
+**Hybrid vs BM25 search quality** (warm, same server):
+
+| Query Type | BM25 (`instant`) | Hybrid (`fast`) | Winner |
+|------------|-------------------|-----------------|--------|
+| Exact identifier | Top-1 correct (3 files) | Top-1 correct (2 files) | BM25 (more context) |
+| Concept (NL) | Relevant but scattered | Focused on core engine | **Hybrid** |
+| Semantic ("convergence iterative") | Finds pagerank + noise | All 5 hits = pagerank | **Hybrid** |
+| Cross-domain ("dead code") | Misses orphan module | Still misses (vocab gap) | Tie |
+| Implementation detail | Correct (simd_distance) | Correct (simd_distance) | Tie |
+| Architecture question | Correct (tools/mod.rs) | Correct + VS Code ext | **Hybrid** |
+
+> **Takeaway:** Hybrid search (BgeSmallEn + asymmetric RRF) outperforms BM25-only for natural language and conceptual queries while matching BM25 for exact identifiers. The asymmetric RRF automatically routes identifier queries BM25-dominant and NL queries vector-dominant.
+
 ---
 
 ## Embedding Model Selection
@@ -443,7 +479,7 @@ BM25-only is the default and works well for most codebases. To enable semantic s
 |-----------|----------------|
 | Good identifiers and docstrings | **BM25-only** (default) — fast, no GPU/ONNX needed |
 | Natural-language queries matter | **BgeLarge** or **Snowflake-Arctic-L** — best quality; ~7 min one-time init |
-| Fast init + some semantic search | **BgeSmall** — 73s init, run as daemon to eliminate cold-start |
+| Fast init + some semantic search | **BgeSmall** — 73–110s init (CPU-dependent), run as daemon to eliminate cold-start |
 
 ```bash
 # BM25-only (default — recommended for most codebases)
@@ -529,11 +565,11 @@ codixing init . --model snowflake-arctic-l
 
 ## Retrieval Strategies
 
-| Strategy | Method | Graph boost | Latency |
-|----------|--------|-------------|---------|
-| `instant` | BM25 only (exact match, no query expansion) | No | <10ms |
-| `fast` | BM25 + vector (RRF) | Yes | <50ms |
-| `thorough` | Hybrid + MMR dedup | Yes | <200ms |
+| Strategy | Method | Graph boost | Warm Latency |
+|----------|--------|-------------|--------------|
+| `instant` | BM25 only (exact match, no query expansion) | No | ~35ms |
+| `fast` | BM25 + vector (asymmetric RRF) | Yes | ~35ms |
+| `thorough` | Hybrid + MMR dedup | Yes | ~3s |
 | `explore` | BM25 + graph neighbor expansion | Yes | <100ms |
 | `deep` | Multi-query RRF fusion + popularity boost | Yes | <300ms |
 
