@@ -13,7 +13,7 @@ impl Chunker for LineChunker {
         &self,
         file_path: &str,
         source: &[u8],
-        _tree: &tree_sitter::Tree,
+        _tree: Option<&tree_sitter::Tree>,
         language: Language,
         config: &ChunkConfig,
     ) -> Vec<Chunk> {
@@ -72,7 +72,7 @@ mod tests {
             max_chars,
             min_chars: 0,
         };
-        LineChunker.chunk("test.rs", source.as_bytes(), &tree, Language::Rust, &config)
+        LineChunker.chunk("test.rs", source.as_bytes(), Some(&tree), Language::Rust, &config)
     }
 
     #[test]

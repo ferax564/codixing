@@ -1,16 +1,20 @@
 pub mod c;
 pub mod cpp;
 pub mod csharp;
+pub mod dockerfile;
 pub mod go;
 pub mod java;
 pub mod kotlin;
+pub mod makefile;
 pub mod php;
 pub mod python;
 pub mod ruby;
 pub mod rust;
 pub mod scala;
 pub mod swift;
+pub mod toml_lang;
 pub mod typescript;
+pub mod yaml;
 pub mod zig;
 
 use std::path::Path;
@@ -39,6 +43,11 @@ pub enum Language {
     // Tier 3
     Zig,
     Php,
+    // Config languages (line-based, no tree-sitter)
+    Yaml,
+    Toml,
+    Dockerfile,
+    Makefile,
 }
 
 impl Language {
@@ -61,6 +70,10 @@ impl Language {
             Self::Scala => "Scala",
             Self::Zig => "Zig",
             Self::Php => "PHP",
+            Self::Yaml => "YAML",
+            Self::Toml => "TOML",
+            Self::Dockerfile => "Dockerfile",
+            Self::Makefile => "Makefile",
         }
     }
 
@@ -83,7 +96,22 @@ impl Language {
             Self::Scala => &["scala", "sc"],
             Self::Zig => &["zig"],
             Self::Php => &["php", "phtml", "php3", "php4", "php5", "phps"],
+            Self::Yaml => &["yaml", "yml"],
+            Self::Toml => &["toml"],
+            Self::Dockerfile => &["dockerfile"],
+            Self::Makefile => &["mk"],
         }
+    }
+
+    /// Whether this language uses tree-sitter for parsing.
+    ///
+    /// Config languages (YAML, TOML, Dockerfile, Makefile) use line-based
+    /// parsing instead.
+    pub fn is_tree_sitter(self) -> bool {
+        !matches!(
+            self,
+            Self::Yaml | Self::Toml | Self::Dockerfile | Self::Makefile
+        )
     }
 }
 
@@ -105,6 +133,10 @@ pub const ALL_LANGUAGES: &[Language] = &[
     Language::Scala,
     Language::Zig,
     Language::Php,
+    Language::Yaml,
+    Language::Toml,
+    Language::Dockerfile,
+    Language::Makefile,
 ];
 
 /// The kind of semantic entity extracted from an AST.
@@ -124,6 +156,10 @@ pub enum EntityKind {
     Import,
     Impl,
     Namespace,
+    /// A configuration key, environment variable, or build variable.
+    Variable,
+    /// A type/kind identifier in config files (e.g., Kubernetes `kind: Deployment`).
+    Type,
 }
 
 impl std::fmt::Display for EntityKind {
@@ -143,6 +179,8 @@ impl std::fmt::Display for EntityKind {
             Self::Import => "import",
             Self::Impl => "impl",
             Self::Namespace => "namespace",
+            Self::Variable => "variable",
+            Self::Type => "type",
         })
     }
 }
@@ -181,13 +219,26 @@ pub trait LanguageSupport: Send + Sync {
     fn extract_doc_comment(&self, node: &tree_sitter::Node, source: &[u8]) -> Option<String>;
 }
 
+/// Lightweight entity extraction for config languages (YAML, TOML, Dockerfile, Makefile).
+///
+/// These languages use line-based parsing instead of tree-sitter, so they
+/// implement a simpler trait that operates on raw source bytes.
+pub trait ConfigLanguageSupport: Send + Sync {
+    /// Which language this implementation handles.
+    fn language(&self) -> Language;
+
+    /// Extract semantic entities from source text using line-based parsing.
+    fn extract_entities(&self, source: &[u8]) -> Vec<SemanticEntity>;
+}
+
 /// Registry mapping languages to their `LanguageSupport` implementations.
 pub struct LanguageRegistry {
     impls: Vec<Arc<dyn LanguageSupport>>,
+    config_impls: Vec<Arc<dyn ConfigLanguageSupport>>,
 }
 
 impl LanguageRegistry {
-    /// Build a registry with all supported languages (Tier 1 + Tier 2).
+    /// Build a registry with all supported languages (Tier 1 + Tier 2 + config).
     pub fn new() -> Self {
         let impls: Vec<Arc<dyn LanguageSupport>> = vec![
             Arc::new(rust::RustLanguage),
@@ -207,17 +258,36 @@ impl LanguageRegistry {
             Arc::new(zig::ZigLanguage),
             Arc::new(php::PhpLanguage),
         ];
-        Self { impls }
+        let config_impls: Vec<Arc<dyn ConfigLanguageSupport>> = vec![
+            Arc::new(yaml::YamlLanguage),
+            Arc::new(toml_lang::TomlLanguage),
+            Arc::new(dockerfile::DockerfileLanguage),
+            Arc::new(makefile::MakefileLanguage),
+        ];
+        Self {
+            impls,
+            config_impls,
+        }
     }
 
-    /// Look up the `LanguageSupport` for a given `Language`.
+    /// Look up the `LanguageSupport` for a given tree-sitter-backed `Language`.
     pub fn get(&self, lang: Language) -> Option<Arc<dyn LanguageSupport>> {
         self.impls.iter().find(|i| i.language() == lang).cloned()
     }
 
-    /// All registered languages.
+    /// Look up the `ConfigLanguageSupport` for a given config `Language`.
+    pub fn get_config(&self, lang: Language) -> Option<Arc<dyn ConfigLanguageSupport>> {
+        self.config_impls
+            .iter()
+            .find(|i| i.language() == lang)
+            .cloned()
+    }
+
+    /// All registered languages (both tree-sitter and config).
     pub fn languages(&self) -> Vec<Language> {
-        self.impls.iter().map(|i| i.language()).collect()
+        let mut langs: Vec<Language> = self.impls.iter().map(|i| i.language()).collect();
+        langs.extend(self.config_impls.iter().map(|i| i.language()));
+        langs
     }
 }
 
@@ -227,8 +297,27 @@ impl Default for LanguageRegistry {
     }
 }
 
-/// Detect language from a file path's extension.
+/// Detect language from a file path's extension or filename.
+///
+/// For most languages, detection is extension-based. Dockerfile and Makefile
+/// are also detected by their filename (e.g., `Dockerfile`, `Dockerfile.prod`,
+/// `Makefile`, `GNUmakefile`).
 pub fn detect_language(path: &Path) -> Option<Language> {
+    // First, try filename-based detection for config languages that use
+    // well-known filenames without (or with unusual) extensions.
+    if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+        let lower = file_name.to_lowercase();
+        // Dockerfile, Dockerfile.prod, Dockerfile.dev, etc.
+        if lower == "dockerfile" || lower.starts_with("dockerfile.") {
+            return Some(Language::Dockerfile);
+        }
+        // Makefile, makefile, GNUmakefile
+        if lower == "makefile" || lower == "gnumakefile" {
+            return Some(Language::Makefile);
+        }
+    }
+
+    // Extension-based detection.
     let ext = path.extension()?.to_str()?;
     for lang in ALL_LANGUAGES {
         if lang.extensions().contains(&ext) {
@@ -333,9 +422,52 @@ mod tests {
     }
 
     #[test]
+    fn detect_config_languages() {
+        // YAML
+        assert_eq!(
+            detect_language(Path::new("config.yaml")),
+            Some(Language::Yaml)
+        );
+        assert_eq!(
+            detect_language(Path::new("ci.yml")),
+            Some(Language::Yaml)
+        );
+        // TOML
+        assert_eq!(
+            detect_language(Path::new("Cargo.toml")),
+            Some(Language::Toml)
+        );
+        // Dockerfile (filename-based)
+        assert_eq!(
+            detect_language(Path::new("Dockerfile")),
+            Some(Language::Dockerfile)
+        );
+        assert_eq!(
+            detect_language(Path::new("Dockerfile.prod")),
+            Some(Language::Dockerfile)
+        );
+        assert_eq!(
+            detect_language(Path::new("app.dockerfile")),
+            Some(Language::Dockerfile)
+        );
+        // Makefile (filename-based)
+        assert_eq!(
+            detect_language(Path::new("Makefile")),
+            Some(Language::Makefile)
+        );
+        assert_eq!(
+            detect_language(Path::new("GNUmakefile")),
+            Some(Language::Makefile)
+        );
+        assert_eq!(
+            detect_language(Path::new("rules.mk")),
+            Some(Language::Makefile)
+        );
+    }
+
+    #[test]
     fn detect_unknown_extension() {
         assert_eq!(detect_language(Path::new("foo.xyz")), None);
-        assert_eq!(detect_language(Path::new("no_ext")), None);
     }
 
     #[test]
@@ -344,7 +476,15 @@ mod tests {
         let langs = registry.languages();
         assert_eq!(langs.len(), ALL_LANGUAGES.len());
         for lang in ALL_LANGUAGES {
-            assert!(registry.get(*lang).is_some(), "Missing {:?}", lang);
+            if lang.is_tree_sitter() {
+                assert!(registry.get(*lang).is_some(), "Missing tree-sitter {:?}", lang);
+            } else {
+                assert!(
+                    registry.get_config(*lang).is_some(),
+                    "Missing config {:?}",
+                    lang
+                );
+            }
         }
     }
 }

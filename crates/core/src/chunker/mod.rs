@@ -52,7 +52,7 @@ pub trait Chunker: Send + Sync {
         &self,
         file_path: &str,
         source: &[u8],
-        tree: &tree_sitter::Tree,
+        tree: Option<&tree_sitter::Tree>,
         language: Language,
         config: &ChunkConfig,
     ) -> Vec<Chunk>;

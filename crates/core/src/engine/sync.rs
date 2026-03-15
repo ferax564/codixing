@@ -56,7 +56,7 @@ impl Engine {
         let chunks = chunker.chunk(
             &rel_str,
             &source,
-            &result.tree,
+            result.tree.as_ref(),
             result.language,
             &self.config.chunk,
         );
@@ -117,8 +117,15 @@ impl Engine {
         // PageRank is only recomputed when do_graph_finalize=true (single-file
         // reindex). apply_changes() calls with false and does one pass at the end.
         let file_language = result.language;
-        let raw_imports = ImportExtractor::extract(&result.tree, &source, file_language);
-        let call_names = CallExtractor::extract_calls(&result.tree, &source, file_language);
+        // Config languages have no tree-sitter tree; skip import/call extraction.
+        let raw_imports = match result.tree.as_ref() {
+            Some(tree) => ImportExtractor::extract(tree, &source, file_language),
+            None => Vec::new(),
+        };
+        let call_names = match result.tree.as_ref() {
+            Some(tree) => CallExtractor::extract_calls(tree, &source, file_language),
+            None => Vec::new(),
+        };
         if let Some(ref mut graph) = self.graph {
             graph.remove_file_edges(&rel_str);
             let indexed: std::collections::HashSet<String> =

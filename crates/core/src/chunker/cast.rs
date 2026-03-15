@@ -23,10 +23,24 @@ impl Chunker for CastChunker {
         &self,
         file_path: &str,
         source: &[u8],
-        tree: &tree_sitter::Tree,
+        tree: Option<&tree_sitter::Tree>,
         language: Language,
         config: &ChunkConfig,
     ) -> Vec<Chunk> {
+        // Config languages have no tree-sitter tree; produce a single whole-file chunk.
+        let tree = match tree {
+            Some(t) => t,
+            None => {
+                return vec![make_chunk(
+                    file_path,
+                    source,
+                    language,
+                    0,
+                    source.len(),
+                    &[],
+                )];
+            }
+        };
         let root = tree.root_node();
 
         // If entire file fits in budget, return as single chunk.
@@ -289,6 +303,8 @@ fn extract_entity_names_from_content(content: &str, language: Language) -> Vec<S
         Language::Scala => &["def ", "class ", "object ", "trait ", "val "],
         Language::Zig => &["fn ", "const ", "var ", "pub "],
         Language::Php => &["function ", "class "],
+        // Config languages: no keyword-based entity extraction in chunker.
+        Language::Yaml | Language::Toml | Language::Dockerfile | Language::Makefile => &[],
     };
 
     for line in content.lines() {
@@ -333,6 +349,8 @@ fn extract_signatures_from_content(content: &str, language: Language) -> Vec<Str
             "private function ",
             "protected function ",
         ],
+        // Config languages: no signature extraction in chunker.
+        Language::Yaml | Language::Toml | Language::Dockerfile | Language::Makefile => &[],
     };
 
     let mut sigs = Vec::new();
@@ -371,7 +389,7 @@ mod tests {
             min_chars,
         };
         let chunker = CastChunker;
-        chunker.chunk("test.rs", source.as_bytes(), &tree, Language::Rust, &config)
+        chunker.chunk("test.rs", source.as_bytes(), Some(&tree), Language::Rust, &config)
     }
 
     #[test]
@@ -574,7 +592,7 @@ class Foo:
             min_chars: 20,
         };
         let chunker = CastChunker;
-        let chunks = chunker.chunk("test.py", src.as_bytes(), &tree, Language::Python, &config);
+        let chunks = chunker.chunk("test.py", src.as_bytes(), Some(&tree), Language::Python, &config);
         assert!(!chunks.is_empty());
         // Verify all chunks have correct file path.
         for c in &chunks {

@@ -862,6 +862,8 @@ fn kind_to_lsp(kind: EntityKind) -> SymbolKind {
         EntityKind::Module | EntityKind::Namespace => SymbolKind::MODULE,
         EntityKind::Import => SymbolKind::PACKAGE,
         EntityKind::Impl => SymbolKind::OBJECT,
+        EntityKind::Variable => SymbolKind::VARIABLE,
+        EntityKind::Type => SymbolKind::TYPE_PARAMETER,
     }
 }
 
@@ -990,6 +992,8 @@ fn kind_to_completion_kind(kind: EntityKind) -> CompletionItemKind {
             CompletionItemKind::MODULE
         }
         EntityKind::Impl => CompletionItemKind::CLASS,
+        EntityKind::Variable => CompletionItemKind::VARIABLE,
+        EntityKind::Type => CompletionItemKind::TYPE_PARAMETER,
     }
 }
 

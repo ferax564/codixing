@@ -49,6 +49,8 @@ impl ImportResolver {
             Language::Scala => self.resolve_scala(&raw.path),
             // Tier 3: Zig and PHP import resolution not yet supported.
             Language::Zig | Language::Php => None,
+            // Config languages have no import resolution.
+            Language::Yaml | Language::Toml | Language::Dockerfile | Language::Makefile => None,
         }
     }
 

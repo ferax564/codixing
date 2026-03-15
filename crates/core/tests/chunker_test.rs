@@ -38,7 +38,7 @@ fn chunks_for_file(
         .expect("tree-sitter parse failed");
 
     let chunker = CastChunker;
-    chunker.chunk(file_path, source, &tree, language, config)
+    chunker.chunk(file_path, source, Some(&tree), language, config)
 }
 
 #[test]
