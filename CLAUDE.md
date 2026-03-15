@@ -76,5 +76,9 @@ ORT_DYLIB_PATH=~/.local/lib/libonnxruntime.so LD_LIBRARY_PATH=~/.local/lib \
 | BgeBaseEn    | 192s      | 768  | ~1ms (daemon)      | 2.5× slower init, no quality gain on this codebase |
 | Qwen3        | N/A       | 1024 | N/A                | Memory leak in candle — grows to 24GB RSS, OOM killed |
 
-ONNX Runtime 1.23.2 lives at `~/.local/lib/libonnxruntime.so`. Must be on `LD_LIBRARY_PATH` for
-BgeSmallEn/BgeBaseEn to work. The `.mcp.json` already sets this for the MCP server.
+ONNX Runtime lives at `~/.local/lib/`:
+- macOS: `~/.local/lib/libonnxruntime.dylib` (v1.24.3, installed via pip's `onnxruntime` package)
+- Linux: `~/.local/lib/libonnxruntime.so` (v1.23.2+)
+
+Set `ORT_DYLIB_PATH` (macOS) or `LD_LIBRARY_PATH` (Linux) for BgeSmallEn/BgeBaseEn to work.
+The `.mcp.json` already sets this for the MCP server.
