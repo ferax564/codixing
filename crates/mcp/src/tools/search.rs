@@ -7,7 +7,8 @@ use serde_json::Value;
 use std::time::Instant;
 
 use codixing_core::{
-    Engine, SearchQuery, SessionEventKind, SharedEventType, SharedSessionEvent, Strategy,
+    Engine, SearchQuery, SearchResult, SessionEventKind, SharedEventType, SharedSessionEvent,
+    Strategy,
 };
 
 pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) {
@@ -114,7 +115,7 @@ pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) 
                     "method" => vec!["fn ", "def ", "func "],
                     "interface" => vec!["interface ", "trait ", "protocol "],
                     "type" => vec!["type ", "typedef ", "using "],
-                    "const" | "constant" => vec!["pub const ", "const ", "static ", "lazy_static"],
+                    "const" | "constant" => vec!["pub const ", "const "],
                     "impl" => vec!["impl ", "impl<"],
                     _ => vec![kind.as_str()],
                 };
@@ -144,6 +145,34 @@ pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) 
                         filtered.push(r);
                     }
                 }
+                // If filtering produced no results, retry with a more targeted
+                // BM25 query that includes the kind keyword (e.g., "const boost"
+                // instead of just "boost"). This finds definition chunks that
+                // BM25 missed because the query word appears more in usage contexts.
+                if filtered.is_empty() {
+                    // BM25 didn't return definition chunks. Fall back to the
+                    // symbol table which indexes all definitions by name.
+                    if let Ok(symbols) = engine.symbols(&query_str, None) {
+                        for sym in &symbols {
+                            let sig = sym.signature.as_deref().unwrap_or("");
+                            let sig_lower = sig.to_lowercase();
+                            if prefixes.iter().any(|p| sig_lower.contains(p)) {
+                                let content = sig.to_string();
+                                filtered.push(SearchResult {
+                                    chunk_id: format!("sym-{}", sym.name),
+                                    file_path: sym.file_path.clone(),
+                                    language: format!("{:?}", sym.language),
+                                    score: 100.0,
+                                    line_start: sym.line_start as u64,
+                                    line_end: sym.line_end as u64,
+                                    signature: sig.to_string(),
+                                    scope_chain: sym.scope.clone(),
+                                    content,
+                                });
+                            }
+                        }
+                    }
+                }
                 results = filtered;
                 results.truncate(limit);
             }
@@ -171,7 +200,26 @@ pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) 
             if let Some(focus) = session.focus_directory() {
                 out.push_str(&format!("*focus: {focus}*\n\n"));
             }
-            out.push_str(&engine.format_results(&results, Some(8000)));
+            if kind_filter.is_some() {
+                // Kind-filtered results have already been narrowed to the
+                // declaration site. Render them directly to avoid the formatter's
+                // truncation hiding the declaration line.
+                for r in &results {
+                    out.push_str(&format!(
+                        "// File: {} [L{}-L{}]",
+                        r.file_path, r.line_start, r.line_end
+                    ));
+                    if !r.signature.is_empty() {
+                        out.push_str(&format!(
+                            " ({})",
+                            r.signature.split('\n').next().unwrap_or("")
+                        ));
+                    }
+                    out.push_str(&format!("\n```\n{}\n```\n\n", r.content));
+                }
+            } else {
+                out.push_str(&engine.format_results(&results, Some(8000)));
+            }
             (out, false)
         }
         Err(e) => (format!("Search error: {e}"), true),
