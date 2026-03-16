@@ -61,6 +61,12 @@ struct Args {
     /// recorded and no session-based search boosting is applied.
     #[arg(long)]
     no_session: bool,
+
+    /// Enable compact tool listing: `tools/list` returns only the 2 meta-tools
+    /// (`search_tools`, `get_tool_schema`) instead of all tools. All tools remain
+    /// callable via `tools/call`. Reduces initial token usage by ~90%.
+    #[arg(long)]
+    compact: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +94,8 @@ async fn main() -> Result<()> {
         .socket
         .unwrap_or_else(|| root.join(".codixing/daemon.sock"));
 
+    let compact_listing = args.compact;
+
     if args.daemon {
         // ── Daemon mode ────────────────────────────────────────────────────
         let mut engine = load_engine(&root).await?;
@@ -95,7 +103,7 @@ async fn main() -> Result<()> {
             engine.set_session(Arc::new(SessionState::new(false)));
         }
         let engine = Arc::new(RwLock::new(engine));
-        run_daemon(engine, &socket_path).await
+        run_daemon(engine, &socket_path, compact_listing).await
     } else {
         // ── Normal mode: try proxy, fall back to direct ────────────────────
         if socket_alive(&socket_path).await {
@@ -114,6 +122,7 @@ async fn main() -> Result<()> {
                 engine,
                 BufReader::new(stdin).lines(),
                 BufWriter::new(stdout),
+                compact_listing,
             )
             .await
         }
@@ -157,7 +166,11 @@ async fn load_engine(root: &Path) -> Result<Engine> {
 // Daemon: Unix socket server
 // ---------------------------------------------------------------------------
 
-async fn run_daemon(engine: Arc<RwLock<Engine>>, socket_path: &Path) -> Result<()> {
+async fn run_daemon(
+    engine: Arc<RwLock<Engine>>,
+    socket_path: &Path,
+    compact_listing: bool,
+) -> Result<()> {
     // Remove stale socket file if it exists.
     if socket_path.exists() {
         std::fs::remove_file(socket_path).ok();
@@ -252,7 +265,7 @@ async fn run_daemon(engine: Arc<RwLock<Engine>>, socket_path: &Path) -> Result<(
 
         let engine_clone = Arc::clone(&engine);
         tokio::spawn(async move {
-            if let Err(e) = handle_socket_connection(stream, engine_clone).await {
+            if let Err(e) = handle_socket_connection(stream, engine_clone, compact_listing).await {
                 warn!(error = %e, "daemon: connection error");
             }
         });
@@ -260,12 +273,17 @@ async fn run_daemon(engine: Arc<RwLock<Engine>>, socket_path: &Path) -> Result<(
 }
 
 /// Handle one client connection: run a JSON-RPC loop over the socket stream.
-async fn handle_socket_connection(stream: UnixStream, engine: Arc<RwLock<Engine>>) -> Result<()> {
+async fn handle_socket_connection(
+    stream: UnixStream,
+    engine: Arc<RwLock<Engine>>,
+    compact_listing: bool,
+) -> Result<()> {
     let (read_half, write_half) = stream.into_split();
     run_jsonrpc_loop(
         engine,
         BufReader::new(read_half).lines(),
         BufWriter::new(write_half),
+        compact_listing,
     )
     .await
 }
@@ -341,6 +359,7 @@ async fn run_jsonrpc_loop<R, W>(
     engine: Arc<RwLock<Engine>>,
     mut reader: tokio::io::Lines<BufReader<R>>,
     mut writer: BufWriter<W>,
+    compact_listing: bool,
 ) -> Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -372,7 +391,7 @@ where
             }
         };
 
-        let response = dispatch(&engine, id, &req.method, req.params).await;
+        let response = dispatch(&engine, id, &req.method, req.params, compact_listing).await;
         write_line(&mut writer, &response).await?;
     }
 
@@ -389,11 +408,12 @@ async fn dispatch(
     id: Value,
     method: &str,
     params: Option<Value>,
+    compact_listing: bool,
 ) -> Value {
     match method {
         "initialize" => handle_initialize(id, params),
         "initialized" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
-        "tools/list" => handle_tools_list(id),
+        "tools/list" => handle_tools_list(id, compact_listing),
         "tools/call" => handle_tools_call(engine, id, params).await,
         _ => {
             let err = JsonRpcError::method_not_found(id, method);
@@ -411,8 +431,13 @@ fn handle_initialize(id: Value, _params: Option<Value>) -> Value {
     serde_json::to_value(JsonRpcResponse::new(id, result)).unwrap_or(Value::Null)
 }
 
-fn handle_tools_list(id: Value) -> Value {
-    let result = json!({ "tools": tools::tool_definitions() });
+fn handle_tools_list(id: Value, compact_listing: bool) -> Value {
+    let tool_defs = if compact_listing {
+        tools::compact_tool_definitions()
+    } else {
+        tools::tool_definitions()
+    };
+    let result = json!({ "tools": tool_defs });
     serde_json::to_value(JsonRpcResponse::new(id, result)).unwrap_or(Value::Null)
 }
 
@@ -548,12 +573,13 @@ mod tests {
             client_write.shutdown().await.unwrap();
         });
 
-        // Run the JSON-RPC loop on the server side.
+        // Run the JSON-RPC loop on the server side (compact_listing = false for tests).
         let loop_handle = tokio::spawn(async move {
             run_jsonrpc_loop(
                 engine,
                 BufReader::new(server_read).lines(),
                 BufWriter::new(server_write),
+                false,
             )
             .await
             .unwrap();
@@ -810,7 +836,7 @@ mod tests {
             let listener = UnixListener::bind(&socket_clone).unwrap();
             // Accept exactly one connection.
             let (stream, _) = listener.accept().await.unwrap();
-            handle_socket_connection(stream, engine_clone)
+            handle_socket_connection(stream, engine_clone, false)
                 .await
                 .unwrap();
         });

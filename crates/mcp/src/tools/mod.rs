@@ -437,8 +437,175 @@ pub fn tool_definitions() -> Value {
                 },
                 "required": []
             }
+        },
+        // Meta-tools: dynamic tool discovery
+        {
+            "name": "search_tools",
+            "description": "Search available tools by keyword. Returns matching tool names and descriptions without full schemas. Use this to discover which tools are available before calling get_tool_schema.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query to match against tool names and descriptions (e.g. 'search', 'graph', 'file')"
+                    }
+                },
+                "required": ["query"]
+            }
+        },
+        {
+            "name": "get_tool_schema",
+            "description": "Get the full input schema for one or more tools by name. Call this after search_tools to get the parameters you need.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Tool name(s) to get schemas for (e.g. ['code_search', 'find_symbol'])"
+                    }
+                },
+                "required": ["names"]
+            }
         }
     ])
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic tool discovery helpers
+// ---------------------------------------------------------------------------
+
+/// Return a compact list of `(name, description)` tuples from the full tool
+/// definitions. Used by `search_tools` to return lightweight summaries.
+pub fn tool_summaries() -> Vec<(String, String)> {
+    let defs = tool_definitions();
+    defs.as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .filter_map(|tool| {
+            let name = tool.get("name")?.as_str()?.to_string();
+            let desc = tool.get("description")?.as_str()?.to_string();
+            Some((name, desc))
+        })
+        .collect()
+}
+
+/// Handle the `search_tools` meta-tool: substring-match `query` against tool
+/// names and descriptions, returning a compact list.
+pub fn call_search_tools(args: &Value) -> (String, bool) {
+    let query = args
+        .get("query")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let summaries = tool_summaries();
+    let matches: Vec<&(String, String)> = if query.is_empty() {
+        summaries.iter().collect()
+    } else {
+        summaries
+            .iter()
+            .filter(|(name, desc)| {
+                name.to_lowercase().contains(&query) || desc.to_lowercase().contains(&query)
+            })
+            .collect()
+    };
+
+    if matches.is_empty() {
+        return (
+            format!("No tools match query '{query}'. Try a broader keyword."),
+            false,
+        );
+    }
+
+    let mut out = format!("## Matching tools ({} results)\n\n", matches.len());
+    for (name, desc) in &matches {
+        // Truncate description to first sentence for compact output.
+        let short_desc = desc.split(". ").next().unwrap_or(desc);
+        out.push_str(&format!("- **{name}**: {short_desc}.\n"));
+    }
+    out.push_str("\nUse `get_tool_schema` with the tool name(s) to get full parameter details.");
+
+    (out, false)
+}
+
+/// Handle the `get_tool_schema` meta-tool: return full JSON schemas for the
+/// requested tool name(s).
+pub fn call_get_tool_schema(args: &Value) -> (String, bool) {
+    let names: Vec<&str> = match args.get("names").and_then(|v| v.as_array()) {
+        Some(arr) => arr.iter().filter_map(|v| v.as_str()).collect(),
+        None => {
+            return (
+                "Missing required parameter 'names' (array of tool name strings).".to_string(),
+                true,
+            );
+        }
+    };
+
+    if names.is_empty() {
+        return (
+            "Parameter 'names' must contain at least one tool name.".to_string(),
+            true,
+        );
+    }
+
+    let defs = tool_definitions();
+    let empty = vec![];
+    let all_tools = defs.as_array().unwrap_or(&empty);
+
+    let mut results: Vec<Value> = Vec::new();
+    let mut not_found: Vec<&str> = Vec::new();
+
+    for name in &names {
+        let found = all_tools
+            .iter()
+            .find(|t| t.get("name").and_then(|v| v.as_str()) == Some(name));
+        match found {
+            Some(tool) => results.push(tool.clone()),
+            None => not_found.push(name),
+        }
+    }
+
+    if results.is_empty() {
+        return (
+            format!(
+                "Unknown tool(s): {}. Use search_tools to discover available tools.",
+                not_found.join(", ")
+            ),
+            true,
+        );
+    }
+
+    let mut out = String::new();
+    if !not_found.is_empty() {
+        out.push_str(&format!(
+            "Warning: unknown tool(s): {}\n\n",
+            not_found.join(", ")
+        ));
+    }
+
+    let output_json = json!(results);
+    out.push_str(&serde_json::to_string_pretty(&output_json).unwrap_or_else(|_| "[]".to_string()));
+
+    (out, false)
+}
+
+/// Return the compact tool list for `--compact` mode: only `search_tools` and
+/// `get_tool_schema` with their full schemas.
+pub fn compact_tool_definitions() -> Value {
+    let defs = tool_definitions();
+    let empty = vec![];
+    let all_tools = defs.as_array().unwrap_or(&empty);
+    let meta_tools: Vec<&Value> = all_tools
+        .iter()
+        .filter(|t| {
+            matches!(
+                t.get("name").and_then(|v| v.as_str()),
+                Some("search_tools" | "get_tool_schema")
+            )
+        })
+        .collect();
+    json!(meta_tools)
 }
 
 /// Returns true if the tool only needs read access to the engine.
@@ -482,6 +649,8 @@ pub fn is_read_only_tool(name: &str) -> bool {
             | "git_diff"
             | "find_source_for_test"
             | "focus_map"
+            | "search_tools"
+            | "get_tool_schema"
     )
 }
 
@@ -526,6 +695,8 @@ pub fn dispatch_tool_ref(engine: &Engine, name: &str, args: &Value) -> (String, 
         "get_context_for_task" => context::call_get_context_for_task(engine, args),
         "focus_map" => focus::call_focus_map(engine, args),
         "check_staleness" => analysis::call_check_staleness(engine),
+        "search_tools" => call_search_tools(args),
+        "get_tool_schema" => call_get_tool_schema(args),
         _ => (format!("Unknown read-only tool: {name}"), true),
     };
     (maybe_compact(output, args), is_error)

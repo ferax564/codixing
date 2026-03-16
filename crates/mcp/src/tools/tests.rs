@@ -85,13 +85,13 @@ func TestHandleRequest(t *testing.T) {
 // -------------------------------------------------------------------------
 
 #[test]
-fn tool_definitions_returns_44_tools() {
+fn tool_definitions_returns_46_tools() {
     let defs = tool_definitions();
     let arr = defs.as_array().expect("tool_definitions returns array");
     assert_eq!(
         arr.len(),
-        44,
-        "expected exactly 44 tool definitions, got {}",
+        46,
+        "expected exactly 46 tool definitions (44 + 2 meta-tools), got {}",
         arr.len()
     );
 }
@@ -1253,4 +1253,107 @@ fn find_source_for_test_no_match_for_regular_file() {
         out.contains("No source files found"),
         "regular file should have no test mappings: {out}"
     );
+}
+
+// -------------------------------------------------------------------------
+// search_tools (meta-tool)
+// -------------------------------------------------------------------------
+
+#[test]
+fn search_tools_finds_search_tools() {
+    let (out, err) = call_search_tools(&json!({"query": "search"}));
+    assert!(!err, "search_tools returned error: {out}");
+    assert!(
+        out.contains("code_search"),
+        "should find code_search: {out}"
+    );
+    assert!(
+        out.contains("search_usages") || out.contains("search_changes"),
+        "should find other search-related tools: {out}"
+    );
+}
+
+#[test]
+fn search_tools_empty_query_returns_all() {
+    let (out, err) = call_search_tools(&json!({"query": ""}));
+    assert!(!err, "search_tools returned error: {out}");
+    // Should list all tools (46 total).
+    assert!(
+        out.contains("code_search")
+            && out.contains("find_symbol")
+            && out.contains("get_tool_schema"),
+        "empty query should return all tools: {out}"
+    );
+    assert!(
+        out.contains("46 results"),
+        "should report 46 results for empty query: {out}"
+    );
+}
+
+// -------------------------------------------------------------------------
+// get_tool_schema (meta-tool)
+// -------------------------------------------------------------------------
+
+#[test]
+fn get_tool_schema_returns_schema() {
+    let (out, err) = call_get_tool_schema(&json!({"names": ["code_search"]}));
+    assert!(!err, "get_tool_schema returned error: {out}");
+    assert!(
+        out.contains("code_search"),
+        "should contain tool name: {out}"
+    );
+    assert!(
+        out.contains("inputSchema") || out.contains("query"),
+        "should contain schema details: {out}"
+    );
+}
+
+#[test]
+fn get_tool_schema_unknown_tool() {
+    let (out, err) = call_get_tool_schema(&json!({"names": ["nonexistent_tool_xyz"]}));
+    assert!(err, "unknown tool should return error: {out}");
+    assert!(
+        out.contains("Unknown tool") || out.contains("nonexistent_tool_xyz"),
+        "should mention unknown tool: {out}"
+    );
+}
+
+// -------------------------------------------------------------------------
+// compact_tool_definitions
+// -------------------------------------------------------------------------
+
+#[test]
+fn compact_tool_definitions_returns_only_meta_tools() {
+    let defs = compact_tool_definitions();
+    let arr = defs
+        .as_array()
+        .expect("compact_tool_definitions returns array");
+    assert_eq!(
+        arr.len(),
+        2,
+        "compact mode should return exactly 2 meta-tools, got {}",
+        arr.len()
+    );
+    let names: Vec<&str> = arr
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|v| v.as_str()))
+        .collect();
+    assert!(
+        names.contains(&"search_tools"),
+        "should contain search_tools: {names:?}"
+    );
+    assert!(
+        names.contains(&"get_tool_schema"),
+        "should contain get_tool_schema: {names:?}"
+    );
+}
+
+// -------------------------------------------------------------------------
+// is_read_only_tool — meta-tools
+// -------------------------------------------------------------------------
+
+#[test]
+fn meta_tools_are_read_only() {
+    assert!(is_read_only_tool("search_tools"));
+    assert!(is_read_only_tool("get_tool_schema"));
 }
