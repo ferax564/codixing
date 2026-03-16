@@ -511,7 +511,8 @@ codixing init . --model snowflake-arctic-l
 - **Live index freshness** — Daemon file watcher updates the in-memory engine within 100ms of any file save; no restart needed
 - **`.gitignore`-aware indexing** — File walker respects `.gitignore`, `.ignore`, and global gitignore (same as ripgrep); no manual exclude lists needed
 - **Hash-based incremental sync** — `codixing sync` uses mtime+size pre-filtering then xxh3 content hashes; re-indexes only changed files
-- **MCP server** — 46 tools exposed via JSON-RPC 2.0; Claude Code registers with one command
+- **Cross-repo federation** — `FederatedEngine` wraps multiple `Engine` instances for unified multi-project search via RRF fusion; lazy loading with LRU eviction; per-project boost weights; `--federation config.json` flag
+- **MCP server** — 47 tools exposed via JSON-RPC 2.0; Claude Code registers with one command
 - **Dynamic tool discovery** — `--compact` mode reduces tools/list from ~6,600 to ~220 tokens (96.7% reduction); meta-tools `search_tools` and `get_tool_schema` let LLMs discover tools on demand
 - **Contextual chunk embedding** — Prepends file path, scope chain, and entity names to chunks before embedding; improves semantic retrieval by giving the embedding model positional context
 - **Adaptive result truncation** — Detects score cliffs in search results and truncates where confidence drops, returning fewer but higher-quality results; saves ~23% output tokens
@@ -623,9 +624,9 @@ codixing init . --model snowflake-arctic-l
 | **Phase 13a: Session-Aware Retrieval** | ✅ Complete | Track agent interactions, graph-propagated session boost (1-hop 0.3×, 2-hop 0.1×), progressive focus, linear decay, session persistence — 377 tests |
 | **Phase 13b: Temporal Code Context** | ✅ Complete | `get_hotspots`, `search_changes`, `get_blame`, blame-aware `explain`, diff-aware `predict_impact` — 383 tests |
 | **Phase 14: Dead Code Detection** | ✅ Complete | `find_orphans` — zero in-degree graph analysis with confidence scoring (Certain/High/Moderate/Low) |
-| **Phase 15: Cross-Repo Design** | ✅ Complete | FederatedEngine design doc, `get_context_for_task`, asymmetric RRF, query expansion, path-match reranking — 426 tests |
+| **Phase 15: Cross-Repo Search** | ✅ Complete | FederatedEngine (multi-repo RRF fusion), `--federation` flag, `list_projects` tool, lazy loading with LRU eviction, per-project boost weights, `get_context_for_task`, asymmetric RRF, query expansion, path-match reranking — 426 tests |
 | **Phase 16: Intelligence & Scale** | ✅ Complete | Focus-aware repo map (PPR), test-to-code mapping, config languages (YAML/TOML/Dockerfile/Makefile), mmap vector index, multi-agent shared sessions, signature-aware truncation, stale index detection, rename validation — **452 tests** |
-| **Phase 17: Research-Backed Retrieval** | ✅ Complete | Dynamic tool discovery (`--compact`, 96.7% token reduction), contextual chunk embedding, adaptive result truncation (score cliff detection), query-to-code reformulation (lightweight HyDE), type-filtered search (`kind` param), BGE instruction prefix — **605 tests** |
+| **Phase 17: Research-Backed Retrieval** | ✅ Complete | Dynamic tool discovery (`--compact`, 96.7% token reduction), contextual chunk embedding, adaptive result truncation (score cliff detection), query-to-code reformulation (lightweight HyDE), type-filtered search, BGE instruction prefix, synonym expansion, late chunking — **628 tests** |
 
 ---
 
@@ -633,7 +634,7 @@ codixing init . --model snowflake-arctic-l
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 605 tests
+cargo test --workspace        # 628 tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 ```
