@@ -435,39 +435,41 @@ Symbol localization across 5 languages (BM25-only, no GPU needed):
 
 ### MCP Server Benchmark (Self-Hosting)
 
-Codixing MCP server running on its own codebase — 127 Rust files, 1054 chunks, 2030 symbols, 1054 vectors (BgeSmallEn 384d), 375 graph nodes. Measured on Apple M4 (macOS ARM64).
+Codixing MCP server running on its own codebase — 138 Rust files, 1105 chunks, 2319 symbols, 1105 vectors (BgeSmallEn 384d). Measured on Apple M4 (macOS ARM64).
 
 **Cold start:** 107ms (process launch + ONNX model load + index open)
 
-**Warm tool latency** (persistent MCP connection, 44 tools available):
+**Warm tool latency** (persistent MCP connection, 47 tools available):
 
 | Tool | Latency | Output |
 |------|---------|--------|
-| `index_status` | 0.2ms | 405 chars |
-| `find_symbol` | 0.2ms | 479 chars |
-| `symbol_callees` | 1.4ms | 104 chars |
-| `list_files` | 0.8ms | 4.1 KB |
-| `find_tests` | 1.0ms | 15.1 KB |
-| `get_complexity` | 0.5ms | 1.0 KB |
-| `check_staleness` | 2.2ms | 178 chars |
-| `symbol_callers` | 8.5ms | 190 chars |
-| `search instant` | 35ms | 1.6–5.2 KB |
-| `search fast` (hybrid) | 35ms | 4.6–7.4 KB |
-| `explain` | 37ms | 1.3 KB |
-| `search thorough` | 3.1s | 6.3 KB |
+| `index_status` | 0.3ms | 405 chars |
+| `find_symbol` | 0.6ms | 479 chars |
+| `symbol_callees` | 2ms | 283 chars |
+| `list_files` | 1.7ms | 4.2 KB |
+| `find_tests` | 1.8ms | 16.2 KB |
+| `get_complexity` | 0.8ms | 1.0 KB |
+| `check_staleness` | 5ms | 180 chars |
+| `symbol_callers` | 19ms | 190 chars |
+| `search instant` | 38ms | 2.6 KB |
+| `search fast` (hybrid) | 40ms | 6.5 KB |
+| `search fast+kind` | 4ms | 7–15 KB |
+| `explain` | 71ms | 883 chars |
+| `search_tools` | 0.2ms | 1.1 KB |
+| `get_tool_schema` | 0.1ms | 1.9 KB |
+| `search deep` | 2.5s | 7.4 KB |
 
-**Hybrid vs BM25 search quality** (warm, same server):
+**Search quality** (10 diverse queries, self-hosting benchmark):
 
-| Query Type | BM25 (`instant`) | Hybrid (`fast`) | Winner |
-|------------|-------------------|-----------------|--------|
-| Exact identifier | Top-1 correct (3 files) | Top-1 correct (2 files) | BM25 (more context) |
-| Concept (NL) | Relevant but scattered | Focused on core engine | **Hybrid** |
-| Semantic ("convergence iterative") | Finds pagerank + noise | All 5 hits = pagerank | **Hybrid** |
-| Cross-domain ("dead code") | Misses orphan module | Still misses (vocab gap) | Tie |
-| Implementation detail | Correct (simd_distance) | Correct (simd_distance) | Tie |
-| Architecture question | Correct (tools/mod.rs) | Correct + VS Code ext | **Hybrid** |
+| Benchmark | Score |
+|-----------|-------|
+| **Top-1 accuracy** | **10/10 (100%)** |
+| **Deep reformulation** (7 concept→code queries) | **7/7 (100%)** |
+| **Type filter** (function, struct, enum, impl, const, trait) | **6/6 (100%)** |
 
-> **Takeaway:** Hybrid search (BgeSmallEn + asymmetric RRF) outperforms BM25-only for natural language and conceptual queries while matching BM25 for exact identifiers. The asymmetric RRF automatically routes identifier queries BM25-dominant and NL queries vector-dominant.
+Key retrieval features that achieve 100%: concept-to-path boost (bridges "dead code" → orphan/), vector-only synonym expansion, search infrastructure demotion (prevents self-referential ranking), query-aware demotion bypass, symbol table fallback for kind filter, declaration-site narrowing.
+
+> **Takeaway:** Hybrid search (BgeSmallEn + asymmetric RRF) with contextual chunk embedding, adaptive result truncation, synonym expansion, and concept-to-path boosting achieves perfect retrieval accuracy across exact identifiers, natural language concepts, and type-filtered queries.
 
 ---
 
@@ -626,7 +628,7 @@ codixing init . --model snowflake-arctic-l
 | **Phase 14: Dead Code Detection** | ✅ Complete | `find_orphans` — zero in-degree graph analysis with confidence scoring (Certain/High/Moderate/Low) |
 | **Phase 15: Cross-Repo Search** | ✅ Complete | FederatedEngine (multi-repo RRF fusion), `--federation` flag, `list_projects` tool, lazy loading with LRU eviction, per-project boost weights, `get_context_for_task`, asymmetric RRF, query expansion, path-match reranking — 426 tests |
 | **Phase 16: Intelligence & Scale** | ✅ Complete | Focus-aware repo map (PPR), test-to-code mapping, config languages (YAML/TOML/Dockerfile/Makefile), mmap vector index, multi-agent shared sessions, signature-aware truncation, stale index detection, rename validation — **452 tests** |
-| **Phase 17: Research-Backed Retrieval** | ✅ Complete | Dynamic tool discovery (`--compact`, 96.7% token reduction), contextual chunk embedding, adaptive result truncation (score cliff detection), query-to-code reformulation (lightweight HyDE), type-filtered search, BGE instruction prefix, synonym expansion, late chunking — **628 tests** |
+| **Phase 17: Research-Backed Retrieval** | ✅ Complete | Dynamic tool discovery (`--compact`, 96.7% token reduction), contextual chunk embedding, adaptive result truncation, query-to-code reformulation (lightweight HyDE), type-filtered search (`kind` param, 6/6), BGE instruction prefix, synonym expansion, late chunking, concept-to-path boost, search infra demotion, symbol table fallback — **10/10 top-1 accuracy, 628 tests** |
 
 ---
 

@@ -19,7 +19,10 @@ For broad codebase exploration, always try a Codixing tool first. Fall back to B
 
 - **Understanding a symbol** → `explain` (assembles definition + callers + callees in one call)
 - **Finding where something is defined** → `find_symbol`
-- **Searching by concept / natural language** → `search`
+- **Searching by concept / natural language** → `code_search` (auto-detects strategy; use `kind` param to filter by type)
+- **Searching by symbol type** → `code_search` with `kind` param (`function`, `struct`, `enum`, `trait`, `impl`, `const`)
+- **Discovering available tools** → `search_tools` (keyword search over tool names/descriptions)
+- **Getting tool schemas** → `get_tool_schema` (lazy schema loading, used with `--compact`)
 - **Listing files by glob** → `list_files`
 - **Impact analysis before a change** → `predict_impact`
 - **Seeing all callers of a function** → `symbol_callers`
