@@ -704,6 +704,69 @@ func ServeHTTP(w http.ResponseWriter, r *http.Request) {
         assert!(result.contains("// ..."), "should have elision marker");
     }
 
+    // -----------------------------------------------------------------------
+    // truncate_snippet edge-case tests (Task 2A)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn truncate_empty_content_returns_empty() {
+        let result = truncate_snippet("", "rust", 20);
+        assert!(
+            result.is_empty(),
+            "empty content should produce empty output"
+        );
+    }
+
+    #[test]
+    fn truncate_single_line_function_preserved() {
+        let src = "fn one_liner() -> bool { true }";
+        let result = truncate_snippet(src, "rust", 20);
+        assert_eq!(result, src, "single-line function should be returned as-is");
+    }
+
+    #[test]
+    fn truncate_content_under_max_lines_unchanged() {
+        let src = "let a = 1;\nlet b = 2;\nlet c = 3;";
+        assert_eq!(src.lines().count(), 3);
+        let result = truncate_snippet(src, "rust", 10);
+        assert_eq!(result, src, "content under max_lines should not be changed");
+    }
+
+    #[test]
+    fn truncate_multiline_fn_with_body_preserves_signature() {
+        // 30-line Rust function: should have signature preserved and body elided.
+        let mut lines = vec!["pub fn big_function(x: i32) -> i32 {".to_string()];
+        for i in 0..27 {
+            lines.push(format!("    let v{i} = {i};"));
+        }
+        lines.push("    v0".to_string());
+        lines.push("}".to_string());
+        let src = lines.join("\n");
+        assert_eq!(src.lines().count(), 30);
+
+        let result = truncate_snippet(&src, "rust", 10);
+        // Signature must be preserved.
+        assert!(
+            result.contains("pub fn big_function"),
+            "signature must be present"
+        );
+        // Elision marker must appear.
+        assert!(
+            result.contains("// ...") && result.contains("more lines"),
+            "elision marker must be present, got:\n{result}"
+        );
+        // Closing brace must be present.
+        assert!(
+            result.trim_end().ends_with('}'),
+            "closing brace must be present"
+        );
+        // Must be shorter than original.
+        assert!(
+            result.lines().count() < src.lines().count(),
+            "truncated result must be shorter than original"
+        );
+    }
+
     #[test]
     fn format_context_token_budget_truncates() {
         // Use results from distinct files so band merging doesn't collapse them.

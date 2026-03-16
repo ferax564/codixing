@@ -33,6 +33,21 @@ impl Engine {
             query
         };
 
+        // Expand domain-specific synonyms for non-Instant strategies.
+        // Skip for Instant (exact symbol lookups should not expand synonyms).
+        let query = if query.strategy != Strategy::Instant {
+            if let Some(expanded) = expand_synonyms(&query.query) {
+                SearchQuery {
+                    query: expanded,
+                    ..query
+                }
+            } else {
+                query
+            }
+        } else {
+            query
+        };
+
         let strategy = query.strategy;
         let mut results = match strategy {
             Strategy::Instant => {
@@ -863,6 +878,104 @@ fn reformulate_to_code(query: &str) -> Vec<String> {
     }
 
     patterns
+}
+
+/// Expand query with domain-specific code synonyms.
+///
+/// Bridges vocabulary gaps where users describe concepts differently
+/// than the code names them (e.g. "dead code" -> "orphan", "unused" -> "zero in-degree").
+fn expand_synonyms(query: &str) -> Option<String> {
+    let query_lower = query.to_lowercase();
+    let mut extra_terms = Vec::new();
+
+    let synonym_map: &[(&[&str], &[&str])] = &[
+        // Dead code / unused detection
+        (
+            &["dead code", "unused", "unreachable"],
+            &["orphan", "zero in-degree", "find_orphans"],
+        ),
+        // Error handling
+        (
+            &["error handling", "exception"],
+            &["Result", "Error", "anyhow"],
+        ),
+        // Dependency / import
+        (
+            &["dependency", "dependencies"],
+            &["import", "require", "use"],
+        ),
+        // Callback / handler
+        (
+            &["callback", "handler", "listener"],
+            &["on_", "handle_", "hook"],
+        ),
+        // Cache / memoize
+        (
+            &["cache", "caching", "memoize"],
+            &["LruCache", "HashMap", "memo"],
+        ),
+        // Refactor / rename
+        (
+            &["refactor", "restructure"],
+            &["rename", "extract", "inline"],
+        ),
+        // Performance / optimization
+        (
+            &["performance", "optimize", "speed"],
+            &["benchmark", "perf", "fast"],
+        ),
+        // Authentication / authorization
+        (
+            &["authentication", "authorization", "auth"],
+            &["login", "token", "session", "jwt"],
+        ),
+        // Serialization
+        (
+            &["serialize", "marshal"],
+            &["serde", "Serialize", "Deserialize", "json"],
+        ),
+        // Similarity / matching
+        (
+            &["similar", "duplicate", "clone detection"],
+            &["cosine", "similarity", "find_similar"],
+        ),
+        // Ranking / scoring
+        (
+            &["ranking", "scoring", "relevance"],
+            &["pagerank", "boost", "score", "BM25"],
+        ),
+        // Documentation
+        (
+            &["documentation", "docs", "docstring"],
+            &["doc comment", "///", "enrich_docs"],
+        ),
+        // Coverage / testing
+        (
+            &["coverage", "test coverage"],
+            &["find_tests", "test_mapping", "#[test]"],
+        ),
+        // Complexity
+        (
+            &["complexity", "complex", "complicated"],
+            &["cyclomatic", "get_complexity", "McCabe"],
+        ),
+    ];
+
+    for (triggers, expansions) in synonym_map {
+        if triggers.iter().any(|t| query_lower.contains(t)) {
+            for exp in expansions.iter() {
+                if !query_lower.contains(&exp.to_lowercase()) {
+                    extra_terms.push(exp.to_string());
+                }
+            }
+        }
+    }
+
+    if extra_terms.is_empty() {
+        None
+    } else {
+        Some(format!("{} {}", query, extra_terms.join(" ")))
+    }
 }
 
 /// Generate query reformulations for multi-query search (RRF fusion).
@@ -1697,6 +1810,46 @@ mod tests {
             patterns
                 .iter()
                 .any(|p| p.contains("Result") || p.contains("Err"))
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Synonym expansion tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn expand_synonyms_dead_code() {
+        let result = expand_synonyms("dead code detection").unwrap();
+        assert!(
+            result.contains("orphan"),
+            "expected 'orphan' in expanded query, got: {result}"
+        );
+        assert!(
+            result.contains("find_orphans"),
+            "expected 'find_orphans' in expanded query, got: {result}"
+        );
+    }
+
+    #[test]
+    fn expand_synonyms_no_match() {
+        let result = expand_synonyms("pagerank algorithm");
+        assert!(
+            result.is_none(),
+            "expected None for query with no synonym triggers"
+        );
+    }
+
+    #[test]
+    fn expand_synonyms_existing_terms() {
+        // "orphan" is already in the query, so the standalone "orphan" synonym
+        // should not be added again. "find_orphans" is a different term and
+        // may still be added.
+        let result = expand_synonyms("find unused orphan code").unwrap();
+        // Split into whitespace-delimited tokens and count exact "orphan" tokens.
+        let orphan_token_count = result.split_whitespace().filter(|t| *t == "orphan").count();
+        assert_eq!(
+            orphan_token_count, 1,
+            "should not add standalone 'orphan' when already in query, got: {result}"
         );
     }
 }

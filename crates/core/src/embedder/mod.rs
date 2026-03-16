@@ -1,10 +1,15 @@
 use std::sync::Mutex;
 
-use fastembed::{EmbeddingModel as FastEmbedModel, InitOptions, TextEmbedding};
-use tracing::info;
+use fastembed::{EmbeddingModel as FastEmbedModel, InitOptions, OutputKey, TextEmbedding};
+use tracing::{debug, info, warn};
 
 use crate::config::EmbeddingModel;
 use crate::error::{CodixingError, Result};
+
+/// Maximum token sequence length for the ONNX-based models (BGE / Jina / etc.).
+/// Files whose tokenized form exceeds this limit cannot use late chunking and
+/// must fall back to independent per-chunk embedding.
+const ONNX_MAX_SEQ_LEN: usize = 512;
 
 /// Number of dimensions for BGE Small EN v1.5.
 pub const BGE_SMALL_EN_DIMS: usize = 384;
@@ -464,6 +469,197 @@ impl Embedder {
             }
         }
     }
+
+    /// Return a reference to the ONNX model mutex, if this embedder uses ONNX.
+    fn onnx_model_ref(&self) -> Option<&Mutex<TextEmbedding>> {
+        match &self.backend {
+            EmbedBackend::Onnx(m) => Some(m),
+            #[cfg(feature = "qwen3")]
+            _ => None,
+        }
+    }
+
+    /// Embed a file using late chunking: pass the entire file through the
+    /// transformer once, then mean-pool per-chunk sub-ranges of the
+    /// token-level embeddings.
+    ///
+    /// Late chunking preserves cross-chunk context (e.g. knowing that `self`
+    /// refers to a specific struct) because the full-attention pass sees the
+    /// entire file, not just the isolated chunk.
+    ///
+    /// # Arguments
+    ///
+    /// * `file_text` -- the full file content.
+    /// * `chunk_byte_ranges` -- `(start, end)` byte offsets into `file_text`
+    ///   for each chunk. The caller is responsible for ensuring these are valid
+    ///   byte-offset pairs within `file_text`.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(embeddings))` -- one embedding per chunk (same order).
+    /// * `Ok(None)` -- the file exceeds the model's context window or the
+    ///   backend does not support late chunking. The caller should fall back
+    ///   to independent per-chunk embedding.
+    pub fn embed_file_late_chunking(
+        &self,
+        file_text: &str,
+        chunk_byte_ranges: &[(usize, usize)],
+    ) -> Result<Option<Vec<Vec<f32>>>> {
+        // Late chunking is only supported for ONNX-backed models.
+        let mutex = self.onnx_model_ref();
+        let Some(mutex) = mutex else {
+            return Ok(None);
+        };
+
+        let mut model = mutex
+            .lock()
+            .map_err(|e| CodixingError::Embedding(format!("lock: {e}")))?;
+
+        // ── 1. Tokenize to discover total token count + byte offsets ──────
+        //
+        // We use the model's own tokenizer (which already has truncation and
+        // padding configured) to encode just the file text.  The returned
+        // `Encoding` gives us per-token byte offsets via `get_offsets()`.
+        //
+        // If the tokenized sequence (excluding special tokens) exceeds the
+        // context window the tokenizer will have truncated it, so late
+        // chunking would lose tail content.  Detect this and bail out.
+        let encoding = model
+            .tokenizer
+            .encode(file_text, true)
+            .map_err(|e| CodixingError::Embedding(format!("tokenize: {e}")))?;
+
+        let token_offsets = encoding.get_offsets();
+        let special_mask = encoding.get_special_tokens_mask();
+
+        // Count real (non-special) tokens.  If the tokenizer truncated the
+        // input, the last real token's end offset will be far from the end
+        // of file_text.  A more reliable check: if the encoding hit exactly
+        // ONNX_MAX_SEQ_LEN tokens (the truncation limit), the file is too
+        // long.
+        let real_token_count = special_mask.iter().filter(|&&m| m == 0).count();
+        if encoding.len() >= ONNX_MAX_SEQ_LEN {
+            debug!(
+                tokens = encoding.len(),
+                limit = ONNX_MAX_SEQ_LEN,
+                "file exceeds context window, skipping late chunking"
+            );
+            return Ok(None);
+        }
+
+        if chunk_byte_ranges.is_empty() || real_token_count == 0 {
+            return Ok(Some(Vec::new()));
+        }
+
+        // ── 2. Run the transformer to get raw token-level outputs ─────────
+        let output = model
+            .transform(vec![file_text], None)
+            .map_err(|e| CodixingError::Embedding(format!("transform: {e}")))?;
+
+        let raw_batches = output.into_raw();
+        if raw_batches.is_empty() {
+            return Ok(None);
+        }
+
+        let batch = &raw_batches[0];
+
+        // Try to extract the last_hidden_state tensor [1, seq_len, dims].
+        let precedence = [OutputKey::ByName("last_hidden_state")];
+        let tensor = match batch.select_output(&&precedence[..]) {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("model does not expose last_hidden_state: {e}");
+                return Ok(None);
+            }
+        };
+
+        let shape = tensor.shape();
+        if shape.len() != 3 {
+            debug!(
+                ndim = shape.len(),
+                "unexpected tensor rank, skipping late chunking"
+            );
+            return Ok(None);
+        }
+
+        let seq_len = shape[1];
+        let dims = shape[2];
+
+        // Flatten the tensor to a contiguous slice for fast indexing.
+        // shape is [1, seq_len, dims].
+        let flat = tensor.as_slice().ok_or_else(|| {
+            CodixingError::Embedding("last_hidden_state tensor is not contiguous".to_string())
+        })?;
+
+        // ── 3. Map chunk byte ranges to token index ranges ────────────────
+        //
+        // `token_offsets[t]` is `(byte_start, byte_end)` for token `t`.
+        // Special tokens (CLS, SEP) typically have offset `(0,0)`.
+        //
+        // For each chunk we find the first token whose byte_start >= chunk_start
+        // and the last token whose byte_end <= chunk_end.
+        let mut chunk_embeddings = Vec::with_capacity(chunk_byte_ranges.len());
+
+        for &(chunk_start, chunk_end) in chunk_byte_ranges {
+            // Find the token range that overlaps this chunk.
+            let tok_start = token_offsets
+                .iter()
+                .zip(special_mask.iter())
+                .position(|(&(ts, _te), &sp)| sp == 0 && ts >= chunk_start)
+                .unwrap_or(0);
+
+            // Find the last overlapping token (inclusive).
+            let tok_end_inclusive = token_offsets
+                .iter()
+                .zip(special_mask.iter())
+                .enumerate()
+                .rev()
+                .find(|(_, ((_, te), sp))| **sp == 0 && *te <= chunk_end)
+                .map(|(i, _)| i);
+
+            let tok_end = match tok_end_inclusive {
+                Some(end) if end >= tok_start => end + 1,
+                _ => {
+                    // No tokens map to this chunk -- produce a zero vector.
+                    chunk_embeddings.push(vec![0.0f32; dims]);
+                    continue;
+                }
+            };
+
+            // Ensure we don't exceed the actual sequence length.
+            let tok_start = tok_start.min(seq_len);
+            let tok_end = tok_end.min(seq_len);
+            if tok_start >= tok_end {
+                chunk_embeddings.push(vec![0.0f32; dims]);
+                continue;
+            }
+
+            // Mean pool the token range.
+            let count = (tok_end - tok_start) as f32;
+            let mut embedding = vec![0.0f32; dims];
+            for t in tok_start..tok_end {
+                let base = t * dims;
+                for (d, emb) in embedding.iter_mut().enumerate() {
+                    *emb += flat[base + d];
+                }
+            }
+            for emb in embedding.iter_mut() {
+                *emb /= count;
+            }
+
+            // L2 normalize.
+            let norm = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 1e-12 {
+                for v in &mut embedding {
+                    *v /= norm;
+                }
+            }
+
+            chunk_embeddings.push(embedding);
+        }
+
+        Ok(Some(chunk_embeddings))
+    }
 }
 
 #[cfg(test)]
@@ -526,5 +722,94 @@ mod tests {
             .unwrap();
         assert_eq!(vecs.len(), 2);
         assert_eq!(vecs[0].len(), QWEN3_SMALL_DIMS);
+    }
+
+    #[test]
+    #[cfg(feature = "qwen3")]
+    #[ignore]
+    fn late_chunking_returns_none_for_qwen3() {
+        let embedder = Embedder::new(&EmbeddingModel::Qwen3SmallEmbedding).unwrap();
+        let result = embedder
+            .embed_file_late_chunking("fn main() {}", &[(0, 12)])
+            .unwrap();
+        assert!(result.is_none(), "Qwen3 backend should return None");
+    }
+
+    #[test]
+    #[ignore]
+    fn late_chunking_returns_embeddings_for_bge() {
+        let embedder = Embedder::new(&EmbeddingModel::BgeSmallEn).unwrap();
+
+        let file_text = concat!(
+            "struct Foo {\n",
+            "    bar: u32,\n",
+            "}\n",
+            "\n",
+            "impl Foo {\n",
+            "    fn baz(&self) -> u32 {\n",
+            "        self.bar\n",
+            "    }\n",
+            "}\n",
+        );
+        // Two chunks: the struct definition and the impl block.
+        let ranges = [(0usize, 28usize), (29usize, file_text.len())];
+
+        let result = embedder
+            .embed_file_late_chunking(file_text, &ranges)
+            .unwrap();
+        let embeddings = result.expect("BGE should support late chunking for short files");
+        assert_eq!(embeddings.len(), 2);
+        assert_eq!(embeddings[0].len(), BGE_SMALL_EN_DIMS);
+        assert_eq!(embeddings[1].len(), BGE_SMALL_EN_DIMS);
+
+        // Verify L2 normalization (norm should be ~1.0).
+        let norm0: f32 = embeddings[0].iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (norm0 - 1.0).abs() < 1e-4,
+            "embedding should be L2-normalized, got norm={norm0}"
+        );
+
+        // Late-chunked embeddings for different chunks should differ.
+        let dot: f32 = embeddings[0]
+            .iter()
+            .zip(embeddings[1].iter())
+            .map(|(a, b)| a * b)
+            .sum();
+        assert!(
+            dot < 0.9999,
+            "embeddings for different chunks should differ, cosine={dot}"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn late_chunking_returns_none_for_long_files() {
+        let embedder = Embedder::new(&EmbeddingModel::BgeSmallEn).unwrap();
+
+        // Create a file that exceeds 512 tokens (BGE's context window).
+        // ~4 chars per token on average, so 600 functions should exceed 512 tokens.
+        let long_file: String = (0..600)
+            .map(|i| format!("fn func_{i}() {{ let x_{i} = {i}; }}\n"))
+            .collect();
+        let ranges = [(0, long_file.len())];
+
+        let result = embedder
+            .embed_file_late_chunking(&long_file, &ranges)
+            .unwrap();
+        assert!(
+            result.is_none(),
+            "should return None for files exceeding context window"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn late_chunking_empty_chunks_returns_empty() {
+        let embedder = Embedder::new(&EmbeddingModel::BgeSmallEn).unwrap();
+        let result = embedder
+            .embed_file_late_chunking("fn main() {}", &[])
+            .unwrap();
+        let embeddings = result.expect("should succeed with empty chunks");
+        assert!(embeddings.is_empty());
     }
 }

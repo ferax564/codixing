@@ -305,4 +305,53 @@ mod tests {
         let list = parse_name_list("a.rs\n\nb.rs\n  \nc.rs\n");
         assert_eq!(list, vec!["a.rs", "b.rs", "c.rs"]);
     }
+
+    // -----------------------------------------------------------------------
+    // classify_relationship edge cases (Task 2B)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn classify_both_caller_and_callee_of_seed() {
+        // File "b.rs" is both a direct dependency of seed "a.rs"
+        // AND directly imports seed "a.rs". The function should return
+        // the first match it finds (direct dependency check runs first).
+        let mut deps = HashMap::new();
+        deps.insert("a.rs", vec!["b.rs".to_string()]);
+        let mut callers = HashMap::new();
+        callers.insert("a.rs", vec!["b.rs".to_string()]);
+
+        let rel = classify_relationship("b.rs", &["a.rs"], &deps, &callers);
+        // The function checks deps first, so it should classify as "direct dependency".
+        assert!(
+            rel.contains("direct dependency"),
+            "when file is both caller and callee, deps-check wins; got: {rel}"
+        );
+    }
+
+    #[test]
+    fn classify_no_relationship_to_seed() {
+        // File "z.rs" has no relationship to any seed in deps or callers.
+        let deps = HashMap::new();
+        let callers = HashMap::new();
+        let rel = classify_relationship("z.rs", &["a.rs", "b.rs"], &deps, &callers);
+        assert_eq!(
+            rel, "transitive dependency",
+            "file with no direct relationship should be transitive"
+        );
+    }
+
+    #[test]
+    fn classify_multiple_seeds_first_match_wins() {
+        // "c.rs" is a dep of seed "b.rs" but not of seed "a.rs".
+        let mut deps = HashMap::new();
+        deps.insert("a.rs", vec!["x.rs".to_string()]);
+        deps.insert("b.rs", vec!["c.rs".to_string()]);
+        let callers = HashMap::new();
+
+        let rel = classify_relationship("c.rs", &["a.rs", "b.rs"], &deps, &callers);
+        assert!(
+            rel.contains("direct dependency of b.rs"),
+            "should report which seed; got: {rel}"
+        );
+    }
 }

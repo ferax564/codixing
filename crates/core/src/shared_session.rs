@@ -438,6 +438,88 @@ mod tests {
         assert_eq!(events[0].symbol.as_deref(), Some("Engine"));
     }
 
+    // -----------------------------------------------------------------------
+    // Stress / edge-case tests (Task 2D)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fifo_eviction_600_events_only_500_remain() {
+        let session = SharedSession::new(500, 15.0);
+
+        // Record 600 events — one per file — so each event is unique.
+        for i in 0..600 {
+            session.record(make_event(
+                SharedEventType::FileRead,
+                &format!("file_{i:04}.rs"),
+                "agent-1",
+            ));
+        }
+
+        // Only 500 events should remain (FIFO eviction).
+        assert_eq!(session.event_count(), 500, "FIFO should cap at 500 events");
+
+        // The first 100 files (0..100) should have been evicted.
+        for i in 0..100 {
+            let boost = session.get_file_boost(&format!("file_{i:04}.rs"));
+            assert_eq!(
+                boost, 0.0,
+                "file_{i:04}.rs should have been evicted (boost should be 0)"
+            );
+        }
+
+        // Files 100..600 should still be present.
+        for i in [100, 250, 499, 599] {
+            let boost = session.get_file_boost(&format!("file_{i:04}.rs"));
+            assert!(
+                boost > 0.0,
+                "file_{i:04}.rs should still be present (boost > 0), got {boost}"
+            );
+        }
+    }
+
+    #[test]
+    fn get_hot_files_descending_boost_order() {
+        let session = SharedSession::default_new();
+
+        // Record varying numbers of events per file to create different boost levels.
+        // File "alpha.rs" gets 5 write events (highest boost).
+        for _ in 0..5 {
+            session.record(make_event(
+                SharedEventType::FileWrite,
+                "alpha.rs",
+                "agent-1",
+            ));
+        }
+        // File "beta.rs" gets 2 write events (medium boost).
+        for _ in 0..2 {
+            session.record(make_event(SharedEventType::FileWrite, "beta.rs", "agent-1"));
+        }
+        // File "gamma.rs" gets 1 read event (lowest boost).
+        session.record(make_event(SharedEventType::FileRead, "gamma.rs", "agent-1"));
+
+        let hot = session.get_hot_files(10);
+
+        // Should have 3 files.
+        assert_eq!(hot.len(), 3, "should have 3 hot files");
+
+        // Must be sorted in descending boost order.
+        assert_eq!(hot[0].0, "alpha.rs", "alpha.rs should be hottest");
+        assert_eq!(hot[1].0, "beta.rs", "beta.rs should be second");
+        assert_eq!(hot[2].0, "gamma.rs", "gamma.rs should be third");
+
+        // Verify strict descending order of scores.
+        for w in hot.windows(2) {
+            assert!(
+                w[0].1 >= w[1].1,
+                "hot files must be in descending boost order: {} ({}) should be >= {} ({})",
+                w[0].0,
+                w[0].1,
+                w[1].0,
+                w[1].1
+            );
+        }
+    }
+
     #[test]
     fn empty_session() {
         let session = SharedSession::default_new();

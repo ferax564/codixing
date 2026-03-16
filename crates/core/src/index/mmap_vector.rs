@@ -816,6 +816,73 @@ mod tests {
         assert!(results[0].similarity >= results[1].similarity);
     }
 
+    // -----------------------------------------------------------------------
+    // Edge-case tests (Task 2C)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn remove_chunks_then_search_excludes_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vectors.mmap");
+
+        let mut idx = MmapVectorIndex::create(&path, 3).unwrap();
+        idx.add(10, vec![1.0, 0.0, 0.0]).unwrap();
+        idx.add(20, vec![0.0, 1.0, 0.0]).unwrap();
+        idx.add(30, vec![0.0, 0.0, 1.0]).unwrap();
+
+        // Remove chunk 10, then search for its exact direction.
+        idx.remove_chunks(&[10]).unwrap();
+        let results = idx.search(&[1.0, 0.0, 0.0], 10).unwrap();
+
+        // Chunk 10 must NOT appear in results.
+        assert!(
+            results.iter().all(|r| r.chunk_id != 10),
+            "removed chunk 10 should not appear in search results"
+        );
+        assert_eq!(results.len(), 2, "only 2 chunks should remain");
+    }
+
+    #[test]
+    fn remove_from_mmap_then_search_excludes_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vectors.mmap");
+
+        // Save 3 vectors to disk so they live in the mmap region.
+        {
+            let mut idx = MmapVectorIndex::create(&path, 3).unwrap();
+            idx.add(10, vec![1.0, 0.0, 0.0]).unwrap();
+            idx.add(20, vec![0.0, 1.0, 0.0]).unwrap();
+            idx.add(30, vec![0.0, 0.0, 1.0]).unwrap();
+            idx.save(&path).unwrap();
+        }
+
+        // Reopen, remove chunk 20, search.
+        let mut loaded = MmapVectorIndex::open(&path).unwrap();
+        loaded.remove_chunks(&[20]).unwrap();
+
+        let results = loaded.search(&[0.0, 1.0, 0.0], 10).unwrap();
+        assert!(
+            results.iter().all(|r| r.chunk_id != 20),
+            "removed chunk 20 should not appear in search results after reopen"
+        );
+        assert_eq!(results.len(), 2, "only 2 chunks should remain");
+    }
+
+    #[test]
+    fn empty_index_search_returns_empty_vec() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vectors.mmap");
+
+        let idx = MmapVectorIndex::create(&path, 4).unwrap();
+        assert!(idx.is_empty());
+
+        let results = idx.search(&[1.0, 0.0, 0.0, 0.0], 10).unwrap();
+        assert!(
+            results.is_empty(),
+            "search on empty index must return empty vec"
+        );
+    }
+
     #[test]
     fn file_format_header() {
         let dir = tempfile::tempdir().unwrap();
