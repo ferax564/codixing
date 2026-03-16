@@ -33,20 +33,11 @@ impl Engine {
             query
         };
 
-        // Expand domain-specific synonyms for non-Instant strategies.
-        // Skip for Instant (exact symbol lookups should not expand synonyms).
-        let query = if query.strategy != Strategy::Instant {
-            if let Some(expanded) = expand_synonyms(&query.query) {
-                SearchQuery {
-                    query: expanded,
-                    ..query
-                }
-            } else {
-                query
-            }
-        } else {
-            query
-        };
+        // Note: synonym expansion is applied only in the Deep strategy
+        // (via generate_reformulations) to avoid polluting BM25 results.
+        // Expanding synonyms into the main query causes the synonym definition
+        // code itself to rank highly (e.g., "orphan" matches search.rs 47 times
+        // because it contains the synonym map).
 
         let strategy = query.strategy;
         let mut results = match strategy {
@@ -464,6 +455,13 @@ impl Engine {
                 .collect::<Vec<_>>()
                 .join(" ");
             reformulations.push(code_query);
+        }
+
+        // Append synonym expansion as a separate reformulation query.
+        // Synonyms are kept out of the main query to avoid polluting BM25
+        // (the synonym definitions in search.rs itself would rank highly).
+        if let Some(synonym_query) = expand_synonyms(&query.query) {
+            reformulations.push(synonym_query);
         }
 
         debug!(

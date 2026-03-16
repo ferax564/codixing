@@ -13,6 +13,41 @@ use super::bm25::BM25Retriever;
 use super::vector::VectorRetriever;
 use super::{ChunkMeta, Retriever, SearchQuery, SearchResult};
 
+/// Optional synonym/context expansion applied to the vector query only.
+/// BM25 keeps the original query to avoid self-referential matches
+/// (e.g., synonym definition code ranking for its own synonyms).
+pub(crate) fn expand_vector_query(query: &str) -> Option<String> {
+    let q = query.to_lowercase();
+    let mut extra = Vec::new();
+
+    let synonyms: &[(&[&str], &[&str])] = &[
+        (&["dead code", "unused", "unreachable"], &["orphan", "find_orphans"]),
+        (&["dependency", "dependencies"], &["import", "use"]),
+        (&["refactor", "restructure"], &["rename", "extract"]),
+        (&["performance", "optimize"], &["benchmark", "perf"]),
+        (&["similar", "duplicate"], &["cosine", "find_similar"]),
+        (&["ranking", "scoring"], &["pagerank", "boost", "BM25"]),
+        (&["complexity", "complicated"], &["cyclomatic", "McCabe"]),
+        (&["coverage", "test coverage"], &["find_tests", "test_mapping"]),
+    ];
+
+    for (triggers, expansions) in synonyms {
+        if triggers.iter().any(|t| q.contains(t)) {
+            for exp in expansions.iter() {
+                if !q.contains(&exp.to_lowercase()) {
+                    extra.push(exp.to_string());
+                }
+            }
+        }
+    }
+
+    if extra.is_empty() {
+        None
+    } else {
+        Some(format!("{query} {}", extra.join(" ")))
+    }
+}
+
 /// Hybrid retriever that combines BM25 and vector search via RRF fusion.
 ///
 /// Runs both retrievers in parallel (logically) and fuses their ranked lists
@@ -62,8 +97,12 @@ impl Retriever for HybridRetriever<'_> {
         let vec_results = if self.vector.is_empty() {
             Vec::new()
         } else {
+            // Expand the vector query with synonyms (BM25 keeps the original
+            // to avoid matching synonym definition code).
+            let vec_query_text =
+                expand_vector_query(&query.query).unwrap_or_else(|| query.query.clone());
             let vec_query = SearchQuery {
-                query: query.query.clone(),
+                query: vec_query_text,
                 limit: fetch,
                 file_filter: query.file_filter.clone(),
                 strategy: query.strategy,
