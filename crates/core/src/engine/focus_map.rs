@@ -49,11 +49,7 @@ impl Engine {
     /// The first file in `seed_files` gets weight 1.0, subsequent files
     /// decay geometrically by `options.seed_decay`.  Each result is
     /// annotated with its relationship to the seed set.
-    pub fn focus_map(
-        &self,
-        seed_files: &[&str],
-        options: &FocusMapOptions,
-    ) -> Vec<FocusMapEntry> {
+    pub fn focus_map(&self, seed_files: &[&str], options: &FocusMapOptions) -> Vec<FocusMapEntry> {
         if seed_files.is_empty() {
             return Vec::new();
         }
@@ -91,8 +87,7 @@ impl Engine {
         ranked.truncate(options.max_files);
 
         // Pre-compute seed-related lookups.
-        let seed_set: std::collections::HashSet<&str> =
-            seed_files.iter().copied().collect();
+        let seed_set: std::collections::HashSet<&str> = seed_files.iter().copied().collect();
         let mut direct_deps: HashMap<&str, Vec<String>> = HashMap::new();
         let mut direct_callers: HashMap<&str, Vec<String>> = HashMap::new();
         for &seed in seed_files {

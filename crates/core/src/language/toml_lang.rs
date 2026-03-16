@@ -24,7 +24,8 @@ fn preceding_comment(lines: &[&str], line_idx: usize) -> Option<String> {
         return None;
     }
     let prev = lines[line_idx - 1].trim();
-    prev.strip_prefix('#').map(|comment| comment.trim().to_string())
+    prev.strip_prefix('#')
+        .map(|comment| comment.trim().to_string())
 }
 
 fn extract_toml_entities(text: &str) -> Vec<SemanticEntity> {
@@ -172,7 +173,10 @@ features = ["derive"]
         assert_eq!(pkg_name.kind, EntityKind::Type);
 
         // [dependencies.clap] should be Module.
-        let clap = entities.iter().find(|e| e.name == "dependencies.clap").unwrap();
+        let clap = entities
+            .iter()
+            .find(|e| e.name == "dependencies.clap")
+            .unwrap();
         assert_eq!(clap.kind, EntityKind::Module);
     }
 

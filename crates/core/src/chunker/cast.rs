@@ -389,7 +389,13 @@ mod tests {
             min_chars,
         };
         let chunker = CastChunker;
-        chunker.chunk("test.rs", source.as_bytes(), Some(&tree), Language::Rust, &config)
+        chunker.chunk(
+            "test.rs",
+            source.as_bytes(),
+            Some(&tree),
+            Language::Rust,
+            &config,
+        )
     }
 
     #[test]
@@ -592,7 +598,13 @@ class Foo:
             min_chars: 20,
         };
         let chunker = CastChunker;
-        let chunks = chunker.chunk("test.py", src.as_bytes(), Some(&tree), Language::Python, &config);
+        let chunks = chunker.chunk(
+            "test.py",
+            src.as_bytes(),
+            Some(&tree),
+            Language::Python,
+            &config,
+        );
         assert!(!chunks.is_empty());
         // Verify all chunks have correct file path.
         for c in &chunks {

@@ -364,7 +364,10 @@ mod tests {
 
     #[test]
     fn strip_test_affixes_python() {
-        assert_eq!(strip_test_affixes("test_foo.py"), Some("foo.py".to_string()));
+        assert_eq!(
+            strip_test_affixes("test_foo.py"),
+            Some("foo.py".to_string())
+        );
     }
 
     #[test]
@@ -449,10 +452,7 @@ mod tests {
 
     #[test]
     fn find_best_source_match_no_match() {
-        let files = vec![
-            "src/main.rs".to_string(),
-            "tests/test_foo.py".to_string(),
-        ];
+        let files = vec!["src/main.rs".to_string(), "tests/test_foo.py".to_string()];
         let result = find_best_source_match("tests/test_foo.py", &files);
         // There's no foo.py in the file list.
         assert!(result.is_none());

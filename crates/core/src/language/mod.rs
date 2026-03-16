@@ -428,10 +428,7 @@ mod tests {
             detect_language(Path::new("config.yaml")),
             Some(Language::Yaml)
         );
-        assert_eq!(
-            detect_language(Path::new("ci.yml")),
-            Some(Language::Yaml)
-        );
+        assert_eq!(detect_language(Path::new("ci.yml")), Some(Language::Yaml));
         // TOML
         assert_eq!(
             detect_language(Path::new("Cargo.toml")),
@@ -477,7 +474,11 @@ mod tests {
         assert_eq!(langs.len(), ALL_LANGUAGES.len());
         for lang in ALL_LANGUAGES {
             if lang.is_tree_sitter() {
-                assert!(registry.get(*lang).is_some(), "Missing tree-sitter {:?}", lang);
+                assert!(
+                    registry.get(*lang).is_some(),
+                    "Missing tree-sitter {:?}",
+                    lang
+                );
             } else {
                 assert!(
                     registry.get_config(*lang).is_some(),

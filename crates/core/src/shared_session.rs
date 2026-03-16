@@ -357,21 +357,9 @@ mod tests {
     fn active_agents() {
         let session = SharedSession::default_new();
 
-        session.record(make_event(
-            SharedEventType::FileRead,
-            "a.rs",
-            "agent-alpha",
-        ));
-        session.record(make_event(
-            SharedEventType::FileRead,
-            "b.rs",
-            "agent-beta",
-        ));
-        session.record(make_event(
-            SharedEventType::FileRead,
-            "c.rs",
-            "agent-alpha",
-        ));
+        session.record(make_event(SharedEventType::FileRead, "a.rs", "agent-alpha"));
+        session.record(make_event(SharedEventType::FileRead, "b.rs", "agent-beta"));
+        session.record(make_event(SharedEventType::FileRead, "c.rs", "agent-alpha"));
 
         let agents = session.active_agents();
         assert_eq!(agents.len(), 2);

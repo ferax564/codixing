@@ -32,7 +32,8 @@ fn preceding_comment(lines: &[&str], line_idx: usize) -> Option<String> {
         return None;
     }
     let prev = lines[line_idx - 1].trim();
-    prev.strip_prefix('#').map(|comment| comment.trim().to_string())
+    prev.strip_prefix('#')
+        .map(|comment| comment.trim().to_string())
 }
 
 fn extract_yaml_entities(text: &str) -> Vec<SemanticEntity> {
@@ -142,13 +143,14 @@ fn extract_yaml_entities(text: &str) -> Vec<SemanticEntity> {
         let byte_end = byte_start + line.len();
 
         // Determine entity kind based on format and depth.
-        let entity_kind = if (is_compose && depth == 1 && scope.first().is_some_and(|s| s == "services"))
-            || (is_actions && depth == 1 && scope.first().is_some_and(|s| s == "jobs"))
-        {
-            EntityKind::Module
-        } else {
-            EntityKind::Variable
-        };
+        let entity_kind =
+            if (is_compose && depth == 1 && scope.first().is_some_and(|s| s == "services"))
+                || (is_actions && depth == 1 && scope.first().is_some_and(|s| s == "jobs"))
+            {
+                EntityKind::Module
+            } else {
+                EntityKind::Variable
+            };
 
         let doc_comment = preceding_comment(&lines, i);
         let value_part = trimmed[colon_pos + 1..].trim();
@@ -246,11 +248,18 @@ services:
 "#;
         let entities = extract_yaml_entities(src);
         let names: Vec<&str> = entities.iter().map(|e| e.name.as_str()).collect();
-        assert!(names.contains(&"version"), "missing version, got: {:?}", names);
+        assert!(
+            names.contains(&"version"),
+            "missing version, got: {:?}",
+            names
+        );
         assert!(names.contains(&"services"), "missing services");
         assert!(names.contains(&"services.web"), "missing services.web");
         assert!(names.contains(&"services.db"), "missing services.db");
-        assert!(names.contains(&"services.web.image"), "missing services.web.image");
+        assert!(
+            names.contains(&"services.web.image"),
+            "missing services.web.image"
+        );
 
         // services.web and services.db should be Module kind.
         let web = entities.iter().find(|e| e.name == "services.web").unwrap();
@@ -323,7 +332,10 @@ spec:
             names
         );
         // kind: Deployment should produce a Type entity.
-        let dep = entities.iter().find(|e| e.kind == EntityKind::Type).unwrap();
+        let dep = entities
+            .iter()
+            .find(|e| e.kind == EntityKind::Type)
+            .unwrap();
         assert_eq!(dep.name, "Deployment");
     }
 
@@ -354,9 +366,6 @@ port: 8080
 "#;
         let entities = extract_yaml_entities(src);
         let port = entities.iter().find(|e| e.name == "port").unwrap();
-        assert_eq!(
-            port.doc_comment.as_deref(),
-            Some("The application port")
-        );
+        assert_eq!(port.doc_comment.as_deref(), Some("The application port"));
     }
 }

@@ -58,7 +58,8 @@ fn extract_makefile_entities(text: &str) -> Vec<SemanticEntity> {
         let byte_end = byte_start + line.len();
 
         // `include other.mk` or `-include other.mk`
-        let include_line = trimmed.strip_prefix("include ")
+        let include_line = trimmed
+            .strip_prefix("include ")
             .or_else(|| trimmed.strip_prefix("-include "));
         if let Some(rest) = include_line {
             let path = rest.trim();
@@ -80,10 +81,7 @@ fn extract_makefile_entities(text: &str) -> Vec<SemanticEntity> {
         // contain one of =, :=, ?=, +=, !=
         if !line.starts_with('\t') {
             if let Some((var_name, op)) = parse_variable_assignment(trimmed) {
-                if !var_name.is_empty()
-                    && !var_name.starts_with('.')
-                    && !var_name.contains(':')
-                {
+                if !var_name.is_empty() && !var_name.starts_with('.') && !var_name.contains(':') {
                     let doc_comment = preceding_comment(&lines, i);
                     let value_start = trimmed.find(op).unwrap_or(0) + op.len();
                     let value = trimmed.get(value_start..).unwrap_or("").trim();
@@ -112,7 +110,7 @@ fn extract_makefile_entities(text: &str) -> Vec<SemanticEntity> {
             if let Some(colon_pos) = trimmed.find(':') {
                 // Skip if it looks like a variable assignment (we already handled those above).
                 let after_colon = &trimmed[colon_pos..];
-                if after_colon.starts_with(":=") || after_colon.starts_with("::")  {
+                if after_colon.starts_with(":=") || after_colon.starts_with("::") {
                     continue;
                 }
 
@@ -182,10 +180,7 @@ fn parse_variable_assignment(line: &str) -> Option<(&str, &str)> {
         if let Some(pos) = line.find(op) {
             let name = line[..pos].trim();
             // Validate: name should be a simple identifier (no spaces, no colons).
-            if !name.is_empty()
-                && !name.contains(' ')
-                && !name.contains('\t')
-            {
+            if !name.is_empty() && !name.contains(' ') && !name.contains('\t') {
                 return Some((name, op));
             }
         }
@@ -199,11 +194,7 @@ fn parse_variable_assignment(line: &str) -> Option<(&str, &str)> {
             }
         }
         let name = line[..pos].trim();
-        if !name.is_empty()
-            && !name.contains(' ')
-            && !name.contains('\t')
-            && !name.contains(':')
-        {
+        if !name.is_empty() && !name.contains(' ') && !name.contains('\t') && !name.contains(':') {
             return Some((name, "="));
         }
     }
@@ -232,7 +223,11 @@ clean:
         let entities = extract_makefile_entities(src);
         let names: Vec<&str> = entities.iter().map(|e| e.name.as_str()).collect();
 
-        assert!(names.contains(&"CC"), "missing variable CC, got: {:?}", names);
+        assert!(
+            names.contains(&"CC"),
+            "missing variable CC, got: {:?}",
+            names
+        );
         assert!(names.contains(&"CFLAGS"), "missing variable CFLAGS");
         assert!(names.contains(&"all"), "missing target all");
         assert!(names.contains(&"main.o"), "missing target main.o");
@@ -289,7 +284,11 @@ install: all
         let entities = extract_makefile_entities(src);
         let names: Vec<&str> = entities.iter().map(|e| e.name.as_str()).collect();
 
-        assert!(names.contains(&"VERSION"), "missing VERSION, got: {:?}", names);
+        assert!(
+            names.contains(&"VERSION"),
+            "missing VERSION, got: {:?}",
+            names
+        );
         assert!(names.contains(&"PREFIX"), "missing PREFIX");
         assert!(names.contains(&"INSTALL_DIR"), "missing INSTALL_DIR");
         assert!(names.contains(&"install"), "missing target install");

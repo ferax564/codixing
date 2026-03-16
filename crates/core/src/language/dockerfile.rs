@@ -29,7 +29,8 @@ fn preceding_comment(lines: &[&str], line_idx: usize) -> Option<String> {
         return None;
     }
     let prev = lines[line_idx - 1].trim();
-    prev.strip_prefix('#').map(|comment| comment.trim().to_string())
+    prev.strip_prefix('#')
+        .map(|comment| comment.trim().to_string())
 }
 
 fn extract_dockerfile_entities(text: &str) -> Vec<SemanticEntity> {
@@ -52,10 +53,7 @@ fn extract_dockerfile_entities(text: &str) -> Vec<SemanticEntity> {
         if upper.starts_with("FROM ") {
             let rest = trimmed[5..].trim();
             // Check for AS alias.
-            if let Some(as_pos) = rest
-                .to_uppercase()
-                .find(" AS ")
-            {
+            if let Some(as_pos) = rest.to_uppercase().find(" AS ") {
                 let stage = rest[as_pos + 4..].trim();
                 if !stage.is_empty() {
                     entities.push(SemanticEntity {
@@ -179,7 +177,11 @@ fn extract_dockerfile_entities(text: &str) -> Vec<SemanticEntity> {
         }
 
         // CMD
-        if upper.starts_with("CMD") && (trimmed.len() == 3 || trimmed.as_bytes().get(3) == Some(&b' ') || trimmed.as_bytes().get(3) == Some(&b'[')) {
+        if upper.starts_with("CMD")
+            && (trimmed.len() == 3
+                || trimmed.as_bytes().get(3) == Some(&b' ')
+                || trimmed.as_bytes().get(3) == Some(&b'['))
+        {
             let rest = trimmed.get(3..).unwrap_or("").trim();
             entities.push(SemanticEntity {
                 kind: EntityKind::Function,
@@ -248,7 +250,11 @@ CMD ["--help"]
         let names: Vec<&str> = entities.iter().map(|e| e.name.as_str()).collect();
 
         // Stages.
-        assert!(names.contains(&"builder"), "missing stage builder, got: {:?}", names);
+        assert!(
+            names.contains(&"builder"),
+            "missing stage builder, got: {:?}",
+            names
+        );
         assert!(names.contains(&"runtime"), "missing stage runtime");
 
         let builder = entities.iter().find(|e| e.name == "builder").unwrap();

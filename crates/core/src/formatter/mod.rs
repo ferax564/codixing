@@ -114,8 +114,19 @@ fn truncate_function_body(lines: &[&str], language: &str, max_lines: usize) -> O
     let lang_lower = language.to_lowercase();
     let is_braced = matches!(
         lang_lower.as_str(),
-        "rust" | "javascript" | "typescript" | "go" | "c" | "cpp" | "java" | "c#" | "swift"
-            | "kotlin" | "scala" | "zig" | "php"
+        "rust"
+            | "javascript"
+            | "typescript"
+            | "go"
+            | "c"
+            | "cpp"
+            | "java"
+            | "c#"
+            | "swift"
+            | "kotlin"
+            | "scala"
+            | "zig"
+            | "php"
     );
     let is_indented = matches!(lang_lower.as_str(), "python" | "ruby" | "yaml");
 
@@ -168,7 +179,9 @@ fn truncate_function_body(lines: &[&str], language: &str, max_lines: usize) -> O
                     &l[..l.len() - trimmed.len()]
                 })
                 .unwrap_or("    ");
-            out.push(format!("{indent}{comment_prefix} ... {elided} more lines ..."));
+            out.push(format!(
+                "{indent}{comment_prefix} ... {elided} more lines ..."
+            ));
         }
         // Closing brace.
         if let Some(ci) = closing_idx {
@@ -216,7 +229,9 @@ fn truncate_function_body(lines: &[&str], language: &str, max_lines: usize) -> O
         }
         if elided > 0 {
             let indent = " ".repeat(sig_indent + 4);
-            out.push(format!("{indent}{comment_prefix} ... {elided} more lines ..."));
+            out.push(format!(
+                "{indent}{comment_prefix} ... {elided} more lines ..."
+            ));
         }
 
         Some(out.join("\n"))
@@ -248,7 +263,12 @@ fn find_signature_end(
     if is_braced {
         // Find the opening brace — could be on the same line or a subsequent one.
         // Limit search to the first 8 lines (multi-line signatures + generic bounds).
-        for (i, line) in lines.iter().enumerate().take(lines.len().min(first_meaningful + 8)).skip(first_meaningful) {
+        for (i, line) in lines
+            .iter()
+            .enumerate()
+            .take(lines.len().min(first_meaningful + 8))
+            .skip(first_meaningful)
+        {
             if line.contains('{') {
                 return Some(i);
             }
@@ -256,7 +276,12 @@ fn find_signature_end(
         None
     } else if is_indented {
         // For Python: the signature ends at the `:` line.
-        for (i, line) in lines.iter().enumerate().take(lines.len().min(first_meaningful + 5)).skip(first_meaningful) {
+        for (i, line) in lines
+            .iter()
+            .enumerate()
+            .take(lines.len().min(first_meaningful + 5))
+            .skip(first_meaningful)
+        {
             if line.trim_end().ends_with(':') {
                 return Some(i);
             }
@@ -497,15 +522,24 @@ pub fn compute(data: &[u8]) -> usize {
         // Should contain the signature.
         assert!(result.contains("pub fn compute"), "should keep signature");
         // Should contain the first few body lines.
-        assert!(result.contains("let mut total"), "should keep first body lines");
+        assert!(
+            result.contains("let mut total"),
+            "should keep first body lines"
+        );
         // Should contain an elision marker.
         assert!(
             result.contains("// ..."),
             "should have elision marker, got:\n{result}"
         );
-        assert!(result.contains("more lines"), "should state how many lines elided");
+        assert!(
+            result.contains("more lines"),
+            "should state how many lines elided"
+        );
         // Should contain the closing brace.
-        assert!(result.trim_end().ends_with('}'), "should keep closing brace");
+        assert!(
+            result.trim_end().ends_with('}'),
+            "should keep closing brace"
+        );
         // Should be shorter than the original.
         assert!(
             result.lines().count() < src.lines().count(),
@@ -540,7 +574,10 @@ def process(items):
     return result";
         let result = truncate_snippet(src, "python", 10);
         assert!(result.contains("def process"), "should keep signature");
-        assert!(result.contains("result = []"), "should keep first body lines");
+        assert!(
+            result.contains("result = []"),
+            "should keep first body lines"
+        );
         assert!(result.contains("# ..."), "should have elision marker");
         assert!(
             result.lines().count() < src.lines().count(),
@@ -575,9 +612,15 @@ function handleRequest(req, res) {
     res.send('OK');
 }";
         let result = truncate_snippet(src, "javascript", 10);
-        assert!(result.contains("function handleRequest"), "should keep signature");
+        assert!(
+            result.contains("function handleRequest"),
+            "should keep signature"
+        );
         assert!(result.contains("// ..."), "should have elision marker");
-        assert!(result.trim_end().ends_with('}'), "should keep closing brace");
+        assert!(
+            result.trim_end().ends_with('}'),
+            "should keep closing brace"
+        );
     }
 
     #[test]
@@ -605,14 +648,23 @@ fn short() -> bool {
         }
         let src = lines.join("\n");
         let result = truncate_snippet(&src, "rust", 15);
-        assert!(result.contains("pub fn complex_function"), "should keep signature");
+        assert!(
+            result.contains("pub fn complex_function"),
+            "should keep signature"
+        );
         assert!(result.contains("// ..."), "should have elision marker");
-        assert!(result.trim_end().ends_with('}'), "should keep closing brace");
+        assert!(
+            result.trim_end().ends_with('}'),
+            "should keep closing brace"
+        );
     }
 
     #[test]
     fn truncate_non_function_content() {
-        let src = (0..30).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let src = (0..30)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let result = truncate_snippet(&src, "rust", 10);
         assert!(result.contains("// ..."), "should have truncation marker");
         assert!(result.contains("more lines"), "should state elided count");

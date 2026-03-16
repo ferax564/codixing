@@ -431,13 +431,8 @@ mod tests {
     #[test]
     fn weighted_ppr_empty_graph() {
         let g = CodeGraph::new();
-        let scores = compute_weighted_personalized_pagerank(
-            &g,
-            0.85,
-            20,
-            1e-6,
-            &[("src/a.rs", 1.0)],
-        );
+        let scores =
+            compute_weighted_personalized_pagerank(&g, 0.85, 20, 1e-6, &[("src/a.rs", 1.0)]);
         assert!(scores.is_empty());
     }
 
@@ -445,13 +440,8 @@ mod tests {
     fn weighted_ppr_single_node_scores_one() {
         let mut g = CodeGraph::new();
         g.get_or_insert_node("src/a.rs", Language::Rust);
-        let scores = compute_weighted_personalized_pagerank(
-            &g,
-            0.85,
-            50,
-            1e-6,
-            &[("src/a.rs", 1.0)],
-        );
+        let scores =
+            compute_weighted_personalized_pagerank(&g, 0.85, 50, 1e-6, &[("src/a.rs", 1.0)]);
         let a_score = scores.get("src/a.rs").copied().unwrap_or(0.0);
         assert!(
             (a_score - 1.0).abs() < 1e-4,
@@ -465,13 +455,8 @@ mod tests {
         let mut g = CodeGraph::new();
         g.add_edge("src/a.rs", "src/b.rs", "b", Language::Rust, Language::Rust);
         g.add_edge("src/b.rs", "src/c.rs", "c", Language::Rust, Language::Rust);
-        let scores = compute_weighted_personalized_pagerank(
-            &g,
-            0.85,
-            50,
-            1e-6,
-            &[("src/a.rs", 1.0)],
-        );
+        let scores =
+            compute_weighted_personalized_pagerank(&g, 0.85, 50, 1e-6, &[("src/a.rs", 1.0)]);
         let a = scores.get("src/a.rs").copied().unwrap_or(0.0);
         let b = scores.get("src/b.rs").copied().unwrap_or(0.0);
         let c = scores.get("src/c.rs").copied().unwrap_or(0.0);
@@ -507,13 +492,8 @@ mod tests {
         let mut g = CodeGraph::new();
         g.add_edge("src/a.rs", "src/b.rs", "b", Language::Rust, Language::Rust);
         g.add_edge("src/b.rs", "src/a.rs", "a", Language::Rust, Language::Rust);
-        let scores = compute_weighted_personalized_pagerank(
-            &g,
-            0.85,
-            200,
-            1e-6,
-            &[("src/a.rs", 1.0)],
-        );
+        let scores =
+            compute_weighted_personalized_pagerank(&g, 0.85, 200, 1e-6, &[("src/a.rs", 1.0)]);
         let max = scores.values().cloned().fold(0.0_f32, f32::max);
         assert!(
             (max - 1.0).abs() < 1e-4,

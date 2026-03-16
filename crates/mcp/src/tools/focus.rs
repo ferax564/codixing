@@ -9,10 +9,7 @@ use codixing_core::{Engine, FocusMapOptions};
 /// When `seed_files` is provided, uses those as PPR seeds.
 /// Otherwise auto-detects from git (unstaged + staged + recent commits).
 pub(crate) fn call_focus_map(engine: &Engine, args: &Value) -> (String, bool) {
-    let max_files = args
-        .get("max_files")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(20) as usize;
+    let max_files = args.get("max_files").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
     let include_symbols = args
         .get("include_symbols")
         .and_then(|v| v.as_bool())
@@ -27,12 +24,17 @@ pub(crate) fn call_focus_map(engine: &Engine, args: &Value) -> (String, bool) {
     // Try explicit seed files first, then fall back to git auto-detection.
     let entries = if let Some(seeds_val) = args.get("seed_files") {
         let seeds: Vec<String> = if let Some(arr) = seeds_val.as_array() {
-            arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
         } else if let Some(s) = seeds_val.as_str() {
             // Accept a single string too.
             vec![s.to_string()]
         } else {
-            return ("Invalid seed_files: expected array of strings or a single string".to_string(), true);
+            return (
+                "Invalid seed_files: expected array of strings or a single string".to_string(),
+                true,
+            );
         };
 
         if seeds.is_empty() {
@@ -57,7 +59,10 @@ pub(crate) fn call_focus_map(engine: &Engine, args: &Value) -> (String, bool) {
     }
 
     // Format output.
-    let seed_count = entries.iter().filter(|e| e.relationship.contains("seed")).count();
+    let seed_count = entries
+        .iter()
+        .filter(|e| e.relationship.contains("seed"))
+        .count();
     let mut out = format!(
         "# Focus Map ({} files, {} seed(s))\n\n",
         entries.len(),

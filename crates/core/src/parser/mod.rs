@@ -195,12 +195,11 @@ impl Parser {
         source: &[u8],
         language: Language,
     ) -> Result<ParseResult> {
-        let config_support =
-            self.registry
-                .get_config(language)
-                .ok_or_else(|| CodixingError::UnsupportedLanguage {
-                    path: path.to_path_buf(),
-                })?;
+        let config_support = self.registry.get_config(language).ok_or_else(|| {
+            CodixingError::UnsupportedLanguage {
+                path: path.to_path_buf(),
+            }
+        })?;
 
         let entities = config_support.extract_entities(source);
         let content_hash = xxh3_64(source);
@@ -339,7 +338,10 @@ pub struct Config {
         let src = b"name: my-app\nversion: 1.0\n";
         let result = parser.parse_file(Path::new("config.yaml"), src).unwrap();
         assert_eq!(result.language, Language::Yaml);
-        assert!(result.tree.is_none(), "config languages should have no tree");
+        assert!(
+            result.tree.is_none(),
+            "config languages should have no tree"
+        );
         assert!(!result.entities.is_empty());
     }
 

@@ -723,15 +723,12 @@ impl Engine {
         let deleted = old_hashes.keys().filter(|p| !seen.contains(*p)).count();
 
         // Parse last sync time from stored meta.
-        let last_sync = self
-            .store
-            .load_meta()
-            .ok()
-            .and_then(|meta| {
-                meta.last_indexed.parse::<u64>().ok().map(|secs| {
-                    SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)
-                })
-            });
+        let last_sync = self.store.load_meta().ok().and_then(|meta| {
+            meta.last_indexed
+                .parse::<u64>()
+                .ok()
+                .map(|secs| SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs))
+        });
 
         let is_stale = modified > 0 || new_files > 0 || deleted > 0;
 
@@ -739,9 +736,7 @@ impl Engine {
             "Index is up to date.".to_string()
         } else {
             let total_changes = modified + new_files + deleted;
-            format!(
-                "{total_changes} file(s) changed. Run `codixing sync .` to update the index."
-            )
+            format!("{total_changes} file(s) changed. Run `codixing sync .` to update the index.")
         };
 
         StaleReport {
@@ -777,11 +772,7 @@ impl Engine {
         // Apply file filter.
         let files: Vec<String> = all_files
             .into_iter()
-            .filter(|f| {
-                file_filter
-                    .map(|ff| f.contains(ff))
-                    .unwrap_or(true)
-            })
+            .filter(|f| file_filter.map(|ff| f.contains(ff)).unwrap_or(true))
             .collect();
 
         let mut affected_files = Vec::new();
@@ -849,13 +840,11 @@ impl Engine {
             // Check: does new_name already appear as a defined symbol in
             // files that also contain old_name? (shadowing)
             for sym in &exact_new_matches {
-                if sym.file_path != *file_rel
-                    && affected_files.contains(&sym.file_path)
-                {
+                if sym.file_path != *file_rel && affected_files.contains(&sym.file_path) {
                     // Only add once per file.
-                    let already = conflicts.iter().any(|c| {
-                        c.file_path == sym.file_path && c.kind == ConflictKind::Shadowing
-                    });
+                    let already = conflicts
+                        .iter()
+                        .any(|c| c.file_path == sym.file_path && c.kind == ConflictKind::Shadowing);
                     if !already {
                         conflicts.push(RenameConflict {
                             file_path: sym.file_path.clone(),
@@ -873,14 +862,9 @@ impl Engine {
         }
 
         // Deduplicate conflicts.
-        conflicts.sort_by(|a, b| {
-            a.file_path
-                .cmp(&b.file_path)
-                .then(a.line.cmp(&b.line))
-        });
-        conflicts.dedup_by(|a, b| {
-            a.file_path == b.file_path && a.line == b.line && a.kind == b.kind
-        });
+        conflicts.sort_by(|a, b| a.file_path.cmp(&b.file_path).then(a.line.cmp(&b.line)));
+        conflicts
+            .dedup_by(|a, b| a.file_path == b.file_path && a.line == b.line && a.kind == b.kind);
 
         let is_safe = conflicts.is_empty();
 

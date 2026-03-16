@@ -72,7 +72,13 @@ mod tests {
             max_chars,
             min_chars: 0,
         };
-        LineChunker.chunk("test.rs", source.as_bytes(), Some(&tree), Language::Rust, &config)
+        LineChunker.chunk(
+            "test.rs",
+            source.as_bytes(),
+            Some(&tree),
+            Language::Rust,
+            &config,
+        )
     }
 
     #[test]
