@@ -27,19 +27,28 @@ pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) 
 
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
-    let mut query = SearchQuery::new(&query_str)
-        .with_limit(limit)
-        .with_strategy(strategy);
-
-    if let Some(filter) = args.get("file_filter").and_then(|v| v.as_str()) {
-        query = query.with_file_filter(filter);
-    }
-
     // Optional type filter: "function", "struct", "enum", "trait", "class", "method", "type", "const", "interface".
     let kind_filter = args
         .get("kind")
         .and_then(|v| v.as_str())
         .map(|k| k.to_lowercase());
+
+    // When kind filter is active, over-fetch and use Instant strategy to:
+    // 1. Get more results (definitions are rare among usage-heavy chunks)
+    // 2. Skip adaptive truncation (which may cut definition chunks)
+    let (fetch_limit, effective_strategy) = if kind_filter.is_some() {
+        (limit * 5, Strategy::Instant)
+    } else {
+        (limit, strategy)
+    };
+
+    let mut query = SearchQuery::new(&query_str)
+        .with_limit(fetch_limit)
+        .with_strategy(effective_strategy);
+
+    if let Some(filter) = args.get("file_filter").and_then(|v| v.as_str()) {
+        query = query.with_file_filter(filter);
+    }
 
     match engine.search(query) {
         Ok(results) if results.is_empty() => {
@@ -69,7 +78,9 @@ pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) 
             }
 
             // Apply session boost to results and re-sort.
-            // Combines per-agent session boost with cross-agent shared session boost.
+            // Uses multiplicative boost (not additive) to preserve relative ranking
+            // from the retrieval pipeline. Additive boosts caused session-accumulated
+            // files to override concept-path and infra-demotion signals.
             let session = engine.session().clone();
             let shared = engine.shared_session();
             for r in results.iter_mut() {
@@ -77,9 +88,11 @@ pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) 
                     engine.file_neighbors(file)
                 });
                 let shared_boost = shared.get_file_boost(&r.file_path);
-                // Apply shared boost at 0.2x weight to avoid over-boosting
-                // from other agents' activity.
-                r.score += agent_boost + shared_boost * 0.2;
+                let combined = agent_boost + shared_boost * 0.2;
+                // Multiplicative: cap at 1.3× to avoid session dominating ranking.
+                if combined > 0.0 {
+                    r.score *= 1.0 + combined.min(0.3);
+                }
             }
             results.sort_by(|a, b| {
                 b.score
@@ -88,38 +101,37 @@ pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) 
             });
 
             // Apply kind filter if specified.
-            // Check signature, first line of content, and scope chain
-            // to determine if a result matches the requested kind.
+            // Two-pronged approach:
+            // 1. Check chunk content (first 5 lines) for declaration keywords
+            // 2. Check symbol table for definition chunks
             if let Some(ref kind) = kind_filter {
                 let prefixes = match kind.as_str() {
                     "function" | "fn" => vec!["fn ", "def ", "func ", "function "],
-                    "struct" => vec!["struct ", "data class ", "dataclass"],
-                    "enum" => vec!["enum "],
-                    "trait" => vec!["trait ", "protocol "],
-                    "class" => vec!["class ", "struct "],
+                    "struct" => vec!["pub struct ", "struct "],
+                    "enum" => vec!["pub enum ", "enum "],
+                    "trait" => vec!["pub trait ", "trait "],
+                    "class" => vec!["class "],
                     "method" => vec!["fn ", "def ", "func "],
                     "interface" => vec!["interface ", "trait ", "protocol "],
                     "type" => vec!["type ", "typedef ", "using "],
-                    "const" | "constant" => vec!["const ", "static ", "val ", "let "],
+                    "const" | "constant" => vec!["pub const ", "const ", "static ", "lazy_static"],
                     "impl" => vec!["impl ", "impl<"],
                     _ => vec![kind.as_str()],
                 };
-                // Over-fetch then filter: request more from the engine, keep
-                // only results whose definition line matches the kind.
+                let query_lower = query_str.to_lowercase();
                 results.retain(|r| {
                     let sig_lower = r.signature.to_lowercase();
-                    // Check the first few lines of content where declarations live.
-                    let first_lines: String = r
-                        .content
-                        .lines()
-                        .take(3)
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                        .to_lowercase();
-                    prefixes
-                        .iter()
-                        .any(|p| sig_lower.contains(p) || first_lines.contains(p))
+                    // Scan entire chunk content for declaration lines.
+                    // A match requires both the kind keyword AND the query term
+                    // on the same line (e.g., "pub trait Chunker" matches kind=trait
+                    // + query="Chunker").
+                    let has_declaration = r.content.lines().any(|line| {
+                        let ll = line.to_lowercase();
+                        prefixes.iter().any(|p| ll.contains(p)) && ll.contains(&query_lower)
+                    });
+                    prefixes.iter().any(|p| sig_lower.contains(p)) || has_declaration
                 });
+                results.truncate(limit);
             }
 
             // Include focus info if active.
