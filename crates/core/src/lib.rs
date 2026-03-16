@@ -5,6 +5,7 @@ pub mod context_assembly;
 pub mod embedder;
 pub mod engine;
 pub mod error;
+pub mod federation;
 pub mod formatter;
 pub mod graph;
 pub mod index;
@@ -30,6 +31,9 @@ pub use engine::{
     RenameConflict, RenameValidation, StaleReport, SymbolReference, SyncStats,
 };
 pub use error::{CodixingError, Result};
+pub use federation::{
+    FederatedEngine, FederatedResult, FederatedStats, FederationConfig, ProjectInfo,
+};
 pub use graph::{CodeEdge, CodeGraph, CodeNode, EdgeKind, GraphStats, RepoMapOptions};
 pub use language::EntityKind;
 pub use orphans::{OrphanConfidence, OrphanFile, OrphanOptions};

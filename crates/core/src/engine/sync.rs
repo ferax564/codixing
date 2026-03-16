@@ -329,7 +329,14 @@ impl Engine {
         let pending: DashMap<u64, String> =
             unembedded.iter().map(|&id| (id, String::new())).collect();
         let contextual = self.config.embedding.contextual_embeddings;
-        embed_and_index_chunks(&pending, &self.chunk_meta, &embedder, vec_idx, contextual)?;
+        embed_and_index_chunks(
+            &pending,
+            &self.chunk_meta,
+            &embedder,
+            vec_idx,
+            contextual,
+            self.store.root(),
+        )?;
 
         self.save()?;
         Ok(unembedded.len())

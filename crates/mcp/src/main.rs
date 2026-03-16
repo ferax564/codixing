@@ -30,7 +30,9 @@ use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use codixing_core::{EmbeddingConfig, Engine, IndexConfig, SessionState};
+use codixing_core::{
+    EmbeddingConfig, Engine, FederatedEngine, FederationConfig, IndexConfig, SessionState,
+};
 
 use protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
@@ -67,6 +69,13 @@ struct Args {
     /// callable via `tools/call`. Reduces initial token usage by ~90%.
     #[arg(long)]
     compact: bool,
+
+    /// Path to a `codixing-federation.json` config file for cross-repo
+    /// federation.  When provided, a `FederatedEngine` is created alongside
+    /// the primary engine, enabling the `list_projects` tool and federated
+    /// search across multiple indexed projects.
+    #[arg(long)]
+    federation: Option<PathBuf>,
 }
 
 // ---------------------------------------------------------------------------
@@ -96,6 +105,26 @@ async fn main() -> Result<()> {
 
     let compact_listing = args.compact;
 
+    // Optionally load a federated engine for cross-repo search.
+    let federation: Option<Arc<FederatedEngine>> = match &args.federation {
+        Some(config_path) => {
+            let cfg = FederationConfig::load(config_path).with_context(|| {
+                format!(
+                    "failed to load federation config from {}",
+                    config_path.display()
+                )
+            })?;
+            let fed =
+                FederatedEngine::new(cfg).with_context(|| "failed to create FederatedEngine")?;
+            info!(
+                "federation enabled — {} project(s) registered",
+                fed.projects().len()
+            );
+            Some(Arc::new(fed))
+        }
+        None => None,
+    };
+
     if args.daemon {
         // ── Daemon mode ────────────────────────────────────────────────────
         let mut engine = load_engine(&root).await?;
@@ -103,7 +132,7 @@ async fn main() -> Result<()> {
             engine.set_session(Arc::new(SessionState::new(false)));
         }
         let engine = Arc::new(RwLock::new(engine));
-        run_daemon(engine, &socket_path, compact_listing).await
+        run_daemon(engine, &socket_path, compact_listing, federation).await
     } else {
         // ── Normal mode: try proxy, fall back to direct ────────────────────
         if socket_alive(&socket_path).await {
@@ -123,6 +152,7 @@ async fn main() -> Result<()> {
                 BufReader::new(stdin).lines(),
                 BufWriter::new(stdout),
                 compact_listing,
+                federation,
             )
             .await
         }
@@ -170,6 +200,7 @@ async fn run_daemon(
     engine: Arc<RwLock<Engine>>,
     socket_path: &Path,
     compact_listing: bool,
+    federation: Option<Arc<FederatedEngine>>,
 ) -> Result<()> {
     // Remove stale socket file if it exists.
     if socket_path.exists() {
@@ -264,8 +295,11 @@ async fn run_daemon(
         let (stream, _addr) = listener.accept().await.context("daemon: accept failed")?;
 
         let engine_clone = Arc::clone(&engine);
+        let fed_clone = federation.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_socket_connection(stream, engine_clone, compact_listing).await {
+            if let Err(e) =
+                handle_socket_connection(stream, engine_clone, compact_listing, fed_clone).await
+            {
                 warn!(error = %e, "daemon: connection error");
             }
         });
@@ -277,6 +311,7 @@ async fn handle_socket_connection(
     stream: UnixStream,
     engine: Arc<RwLock<Engine>>,
     compact_listing: bool,
+    federation: Option<Arc<FederatedEngine>>,
 ) -> Result<()> {
     let (read_half, write_half) = stream.into_split();
     run_jsonrpc_loop(
@@ -284,6 +319,7 @@ async fn handle_socket_connection(
         BufReader::new(read_half).lines(),
         BufWriter::new(write_half),
         compact_listing,
+        federation,
     )
     .await
 }
@@ -360,6 +396,7 @@ async fn run_jsonrpc_loop<R, W>(
     mut reader: tokio::io::Lines<BufReader<R>>,
     mut writer: BufWriter<W>,
     compact_listing: bool,
+    federation: Option<Arc<FederatedEngine>>,
 ) -> Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -391,7 +428,15 @@ where
             }
         };
 
-        let response = dispatch(&engine, id, &req.method, req.params, compact_listing).await;
+        let response = dispatch(
+            &engine,
+            id,
+            &req.method,
+            req.params,
+            compact_listing,
+            &federation,
+        )
+        .await;
         write_line(&mut writer, &response).await?;
     }
 
@@ -409,12 +454,13 @@ async fn dispatch(
     method: &str,
     params: Option<Value>,
     compact_listing: bool,
+    federation: &Option<Arc<FederatedEngine>>,
 ) -> Value {
     match method {
         "initialize" => handle_initialize(id, params),
         "initialized" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
-        "tools/list" => handle_tools_list(id, compact_listing),
-        "tools/call" => handle_tools_call(engine, id, params).await,
+        "tools/list" => handle_tools_list(id, compact_listing, federation.is_some()),
+        "tools/call" => handle_tools_call(engine, id, params, federation).await,
         _ => {
             let err = JsonRpcError::method_not_found(id, method);
             serde_json::to_value(err).unwrap_or(Value::Null)
@@ -431,11 +477,11 @@ fn handle_initialize(id: Value, _params: Option<Value>) -> Value {
     serde_json::to_value(JsonRpcResponse::new(id, result)).unwrap_or(Value::Null)
 }
 
-fn handle_tools_list(id: Value, compact_listing: bool) -> Value {
+fn handle_tools_list(id: Value, compact_listing: bool, has_federation: bool) -> Value {
     let tool_defs = if compact_listing {
         tools::compact_tool_definitions()
     } else {
-        tools::tool_definitions()
+        tools::tool_definitions_with_federation(has_federation)
     };
     let result = json!({ "tools": tool_defs });
     serde_json::to_value(JsonRpcResponse::new(id, result)).unwrap_or(Value::Null)
@@ -445,6 +491,7 @@ async fn handle_tools_call(
     engine: &Arc<RwLock<Engine>>,
     id: Value,
     params: Option<Value>,
+    federation: &Option<Arc<FederatedEngine>>,
 ) -> Value {
     let params = match params {
         Some(p) => p,
@@ -470,6 +517,7 @@ async fn handle_tools_call(
     let engine_arc = Arc::clone(engine);
     let tool_name_clone = tool_name.clone();
     let read_only = tools::is_read_only_tool(&tool_name);
+    let fed_clone = federation.clone();
 
     let call_result = tokio::task::spawn_blocking(move || {
         if read_only {
@@ -477,13 +525,13 @@ async fn handle_tools_call(
                 Ok(e) => e,
                 Err(e) => return (format!("Engine lock poisoned: {e}"), true),
             };
-            tools::dispatch_tool_ref(&engine, &tool_name_clone, &args)
+            tools::dispatch_tool_ref(&engine, &tool_name_clone, &args, fed_clone.as_deref())
         } else {
             let mut engine = match engine_arc.write() {
                 Ok(e) => e,
                 Err(e) => return (format!("Engine lock poisoned: {e}"), true),
             };
-            tools::dispatch_tool(&mut engine, &tool_name_clone, &args)
+            tools::dispatch_tool(&mut engine, &tool_name_clone, &args, fed_clone.as_deref())
         }
     })
     .await;
@@ -573,13 +621,14 @@ mod tests {
             client_write.shutdown().await.unwrap();
         });
 
-        // Run the JSON-RPC loop on the server side (compact_listing = false for tests).
+        // Run the JSON-RPC loop on the server side (compact_listing = false, no federation for tests).
         let loop_handle = tokio::spawn(async move {
             run_jsonrpc_loop(
                 engine,
                 BufReader::new(server_read).lines(),
                 BufWriter::new(server_write),
                 false,
+                None,
             )
             .await
             .unwrap();
@@ -836,7 +885,7 @@ mod tests {
             let listener = UnixListener::bind(&socket_clone).unwrap();
             // Accept exactly one connection.
             let (stream, _) = listener.accept().await.unwrap();
-            handle_socket_connection(stream, engine_clone, false)
+            handle_socket_connection(stream, engine_clone, false, None)
                 .await
                 .unwrap();
         });

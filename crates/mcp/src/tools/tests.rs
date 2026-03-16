@@ -150,7 +150,7 @@ fn tool_definitions_phase10_tools_present() {
 fn dispatch_unknown_tool_returns_error() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (msg, is_err) = dispatch_tool(&mut engine, "nonexistent_tool", &json!({}));
+    let (msg, is_err) = dispatch_tool(&mut engine, "nonexistent_tool", &json!({}), None);
     assert!(is_err);
     assert!(msg.contains("Unknown"), "got: {msg}");
 }
@@ -163,7 +163,7 @@ fn dispatch_unknown_tool_returns_error() {
 fn list_files_returns_indexed_files() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (out, err) = dispatch_tool(&mut engine, "list_files", &json!({}));
+    let (out, err) = dispatch_tool(&mut engine, "list_files", &json!({}), None);
     assert!(!err, "list_files returned error: {out}");
     assert!(
         out.contains("main.rs") || out.contains("utils.py") || out.contains("Indexed"),
@@ -175,7 +175,12 @@ fn list_files_returns_indexed_files() {
 fn list_files_pattern_filter_rs() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (out, err) = dispatch_tool(&mut engine, "list_files", &json!({"pattern": "**/*.rs"}));
+    let (out, err) = dispatch_tool(
+        &mut engine,
+        "list_files",
+        &json!({"pattern": "**/*.rs"}),
+        None,
+    );
     assert!(!err, "list_files with *.rs pattern returned error: {out}");
     assert!(
         !out.contains("utils.py"),
@@ -187,7 +192,7 @@ fn list_files_pattern_filter_rs() {
 fn list_files_limit() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (out, err) = dispatch_tool(&mut engine, "list_files", &json!({"limit": 1}));
+    let (out, err) = dispatch_tool(&mut engine, "list_files", &json!({"limit": 1}), None);
     assert!(!err, "list_files with limit=1 returned error: {out}");
     let file_lines = out
         .lines()
@@ -207,7 +212,7 @@ fn list_files_limit() {
 fn outline_file_missing_arg() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (msg, err) = dispatch_tool(&mut engine, "outline_file", &json!({}));
+    let (msg, err) = dispatch_tool(&mut engine, "outline_file", &json!({}), None);
     assert!(err);
     assert!(msg.contains("Missing"), "got: {msg}");
 }
@@ -216,7 +221,12 @@ fn outline_file_missing_arg() {
 fn outline_file_returns_symbols() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (out, err) = dispatch_tool(&mut engine, "outline_file", &json!({"file": "src/main.rs"}));
+    let (out, err) = dispatch_tool(
+        &mut engine,
+        "outline_file",
+        &json!({"file": "src/main.rs"}),
+        None,
+    );
     assert!(!err, "outline_file returned error: {out}");
     assert!(
         out.contains("compute") || out.contains("main") || out.contains("Symbol"),
@@ -232,6 +242,7 @@ fn outline_file_unknown_file() {
         &mut engine,
         "outline_file",
         &json!({"file": "src/does_not_exist.rs"}),
+        None,
     );
     assert!(!err, "should not be error for missing file");
     assert!(out.contains("No symbols"), "got: {out}");
@@ -245,7 +256,7 @@ fn outline_file_unknown_file() {
 fn apply_patch_missing_arg() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (msg, err) = dispatch_tool(&mut engine, "apply_patch", &json!({}));
+    let (msg, err) = dispatch_tool(&mut engine, "apply_patch", &json!({}), None);
     assert!(err);
     assert!(msg.contains("Missing"), "got: {msg}");
 }
@@ -255,7 +266,7 @@ fn apply_patch_no_affected_files_returns_message() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
     let patch = "not a real unified diff\n";
-    let (out, err) = dispatch_tool(&mut engine, "apply_patch", &json!({"patch": patch}));
+    let (out, err) = dispatch_tool(&mut engine, "apply_patch", &json!({"patch": patch}), None);
     assert!(!err, "apply_patch returned unexpected error: {out}");
     assert!(
         out.contains("No files") || out.contains("apply"),
@@ -274,7 +285,7 @@ fn apply_patch_identifies_affected_file() {
                  +// a comment\n\
                   /// Entry point.\n\
                   fn main() {\n";
-    let (out, _err) = dispatch_tool(&mut engine, "apply_patch", &json!({"patch": patch}));
+    let (out, _err) = dispatch_tool(&mut engine, "apply_patch", &json!({"patch": patch}), None);
     assert!(
         out.contains("main.rs") || out.contains("file") || out.contains("reindexed"),
         "unexpected output: {out}"
@@ -303,7 +314,7 @@ fn apply_patch_applies_add_and_remove() {
                  +/// Modified entry point.\n\
                   fn main() {\n\
                       let x = compute(2, 3);\n";
-    let (out, err) = dispatch_tool(&mut engine, "apply_patch", &json!({"patch": patch}));
+    let (out, err) = dispatch_tool(&mut engine, "apply_patch", &json!({"patch": patch}), None);
     assert!(!err, "apply_patch returned error: {out}");
 
     let content = fs::read_to_string(root.join("src/main.rs")).unwrap();
@@ -329,7 +340,7 @@ fn apply_patch_applies_add_and_remove() {
 fn run_tests_missing_command() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (msg, err) = dispatch_tool(&mut engine, "run_tests", &json!({}));
+    let (msg, err) = dispatch_tool(&mut engine, "run_tests", &json!({}), None);
     assert!(err);
     assert!(msg.contains("Missing"), "got: {msg}");
 }
@@ -342,6 +353,7 @@ fn run_tests_echo_succeeds() {
         &mut engine,
         "run_tests",
         &json!({"command": "echo hello_codixing"}),
+        None,
     );
     assert!(!err, "echo should succeed: {out}");
     assert!(out.contains("hello_codixing"), "echo output missing: {out}");
@@ -352,7 +364,12 @@ fn run_tests_echo_succeeds() {
 fn run_tests_failing_command() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (out, err) = dispatch_tool(&mut engine, "run_tests", &json!({"command": "exit 1"}));
+    let (out, err) = dispatch_tool(
+        &mut engine,
+        "run_tests",
+        &json!({"command": "exit 1"}),
+        None,
+    );
     assert!(err, "failing command should set is_error=true: {out}");
     assert!(
         out.contains("FAILED") || out.contains("Exit code"),
@@ -368,7 +385,12 @@ fn run_tests_failing_command() {
 fn rename_symbol_missing_args() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (msg, err) = dispatch_tool(&mut engine, "rename_symbol", &json!({"old_name": "x"}));
+    let (msg, err) = dispatch_tool(
+        &mut engine,
+        "rename_symbol",
+        &json!({"old_name": "x"}),
+        None,
+    );
     assert!(err);
     assert!(msg.contains("Missing"), "got: {msg}");
 }
@@ -383,6 +405,7 @@ fn rename_symbol_renames_across_file() {
         &mut engine,
         "rename_symbol",
         &json!({"old_name": "compute", "new_name": "calculate"}),
+        None,
     );
     assert!(!err, "rename_symbol returned error: {out}");
     assert!(
@@ -411,6 +434,7 @@ fn rename_symbol_with_file_filter() {
         &mut engine,
         "rename_symbol",
         &json!({"old_name": "compute", "new_name": "calc", "file_filter": ".py"}),
+        None,
     );
     assert!(!err, "rename_symbol returned error: {out}");
 
@@ -429,7 +453,7 @@ fn rename_symbol_with_file_filter() {
 fn explain_missing_arg() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (msg, err) = dispatch_tool(&mut engine, "explain", &json!({}));
+    let (msg, err) = dispatch_tool(&mut engine, "explain", &json!({}), None);
     assert!(err);
     assert!(msg.contains("Missing"), "got: {msg}");
 }
@@ -442,6 +466,7 @@ fn explain_unknown_symbol() {
         &mut engine,
         "explain",
         &json!({"symbol": "totally_unknown_xyz"}),
+        None,
     );
     assert!(
         !err,
@@ -457,7 +482,7 @@ fn explain_unknown_symbol() {
 fn explain_known_symbol() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (out, err) = dispatch_tool(&mut engine, "explain", &json!({"symbol": "compute"}));
+    let (out, err) = dispatch_tool(&mut engine, "explain", &json!({"symbol": "compute"}), None);
     assert!(!err, "explain for known symbol returned error: {out}");
     assert!(
         out.contains("Explanation") && out.contains("compute"),
@@ -473,7 +498,7 @@ fn explain_known_symbol() {
 fn symbol_callers_missing_arg() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (msg, err) = dispatch_tool(&mut engine, "symbol_callers", &json!({}));
+    let (msg, err) = dispatch_tool(&mut engine, "symbol_callers", &json!({}), None);
     assert!(err);
     assert!(msg.contains("Missing"), "got: {msg}");
 }
@@ -482,7 +507,12 @@ fn symbol_callers_missing_arg() {
 fn symbol_callers_returns_output() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (out, err) = dispatch_tool(&mut engine, "symbol_callers", &json!({"symbol": "compute"}));
+    let (out, err) = dispatch_tool(
+        &mut engine,
+        "symbol_callers",
+        &json!({"symbol": "compute"}),
+        None,
+    );
     assert!(!err, "symbol_callers returned error: {out}");
     assert!(!out.is_empty(), "output should not be empty");
 }
@@ -495,7 +525,7 @@ fn symbol_callers_returns_output() {
 fn symbol_callees_missing_arg() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (msg, err) = dispatch_tool(&mut engine, "symbol_callees", &json!({}));
+    let (msg, err) = dispatch_tool(&mut engine, "symbol_callees", &json!({}), None);
     assert!(err);
     assert!(msg.contains("Missing"), "got: {msg}");
 }
@@ -504,7 +534,12 @@ fn symbol_callees_missing_arg() {
 fn symbol_callees_detects_calls() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (out, err) = dispatch_tool(&mut engine, "symbol_callees", &json!({"symbol": "main"}));
+    let (out, err) = dispatch_tool(
+        &mut engine,
+        "symbol_callees",
+        &json!({"symbol": "main"}),
+        None,
+    );
     assert!(!err, "symbol_callees returned error: {out}");
     assert!(
         out.contains("compute") || out.contains("Callees") || out.contains("No callees"),
@@ -520,7 +555,7 @@ fn symbol_callees_detects_calls() {
 fn predict_impact_missing_arg() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (msg, err) = dispatch_tool(&mut engine, "predict_impact", &json!({}));
+    let (msg, err) = dispatch_tool(&mut engine, "predict_impact", &json!({}), None);
     assert!(err);
     assert!(msg.contains("Missing"), "got: {msg}");
 }
@@ -533,6 +568,7 @@ fn predict_impact_no_files_in_patch() {
         &mut engine,
         "predict_impact",
         &json!({"patch": "not a diff\n"}),
+        None,
     );
     assert!(
         err,
@@ -546,7 +582,12 @@ fn predict_impact_with_valid_patch() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
     let patch = "+++ b/src/main.rs\n@@ -1,1 +1,2 @@\n+// new line\n fn main() {}\n";
-    let (out, err) = dispatch_tool(&mut engine, "predict_impact", &json!({"patch": patch}));
+    let (out, err) = dispatch_tool(
+        &mut engine,
+        "predict_impact",
+        &json!({"patch": patch}),
+        None,
+    );
     assert!(!err, "predict_impact returned error: {out}");
     assert!(
         out.contains("Impact Prediction") || out.contains("changed file"),
@@ -562,7 +603,7 @@ fn predict_impact_with_valid_patch() {
 fn stitch_context_missing_arg() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (msg, err) = dispatch_tool(&mut engine, "stitch_context", &json!({}));
+    let (msg, err) = dispatch_tool(&mut engine, "stitch_context", &json!({}), None);
     assert!(err);
     assert!(msg.contains("Missing"), "got: {msg}");
 }
@@ -571,7 +612,12 @@ fn stitch_context_missing_arg() {
 fn stitch_context_returns_results() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (out, err) = dispatch_tool(&mut engine, "stitch_context", &json!({"query": "compute"}));
+    let (out, err) = dispatch_tool(
+        &mut engine,
+        "stitch_context",
+        &json!({"query": "compute"}),
+        None,
+    );
     assert!(!err, "stitch_context returned error: {out}");
     assert!(
         out.contains("Stitched context") || out.contains("compute") || out.contains("No results"),
@@ -587,7 +633,7 @@ fn stitch_context_returns_results() {
 fn enrich_docs_missing_arg() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (msg, err) = dispatch_tool(&mut engine, "enrich_docs", &json!({}));
+    let (msg, err) = dispatch_tool(&mut engine, "enrich_docs", &json!({}), None);
     assert!(err);
     assert!(msg.contains("Missing"), "got: {msg}");
 }
@@ -600,6 +646,7 @@ fn enrich_docs_unknown_symbol() {
         &mut engine,
         "enrich_docs",
         &json!({"symbol": "totally_unknown_abc"}),
+        None,
     );
     assert!(err, "unknown symbol should produce is_error=true: {out}");
     assert!(out.contains("not found"), "unexpected: {out}");
@@ -614,13 +661,23 @@ fn enrich_docs_generates_stub_without_api_key() {
         std::env::remove_var("ANTHROPIC_API_KEY");
         std::env::remove_var("OLLAMA_HOST");
     }
-    let (out, err) = dispatch_tool(&mut engine, "enrich_docs", &json!({"symbol": "compute"}));
+    let (out, err) = dispatch_tool(
+        &mut engine,
+        "enrich_docs",
+        &json!({"symbol": "compute"}),
+        None,
+    );
     assert!(!err, "enrich_docs returned error: {out}");
     assert!(
         out.contains("compute"),
         "expected symbol name in output: {out}"
     );
-    let (out2, err2) = dispatch_tool(&mut engine, "enrich_docs", &json!({"symbol": "compute"}));
+    let (out2, err2) = dispatch_tool(
+        &mut engine,
+        "enrich_docs",
+        &json!({"symbol": "compute"}),
+        None,
+    );
     assert!(!err2, "cached enrich_docs returned error: {out2}");
     assert!(
         out2.contains("cached") || out2.contains("compute"),
@@ -636,11 +693,17 @@ fn enrich_docs_force_regenerates() {
         std::env::remove_var("ANTHROPIC_API_KEY");
         std::env::remove_var("OLLAMA_HOST");
     }
-    dispatch_tool(&mut engine, "enrich_docs", &json!({"symbol": "compute"}));
+    dispatch_tool(
+        &mut engine,
+        "enrich_docs",
+        &json!({"symbol": "compute"}),
+        None,
+    );
     let (out, err) = dispatch_tool(
         &mut engine,
         "enrich_docs",
         &json!({"symbol": "compute", "force": true}),
+        None,
     );
     assert!(!err, "enrich_docs force returned error: {out}");
     assert!(!out.contains("cached"), "force should bypass cache: {out}");
@@ -654,9 +717,9 @@ fn enrich_docs_force_regenerates() {
 fn remember_missing_args() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (msg, err) = dispatch_tool(&mut engine, "remember", &json!({"key": "k"}));
+    let (msg, err) = dispatch_tool(&mut engine, "remember", &json!({"key": "k"}), None);
     assert!(err);
-    let (msg2, err2) = dispatch_tool(&mut engine, "remember", &json!({"value": "v"}));
+    let (msg2, err2) = dispatch_tool(&mut engine, "remember", &json!({"value": "v"}), None);
     assert!(err2);
     assert!(
         msg.contains("Missing") && msg2.contains("Missing"),
@@ -673,11 +736,12 @@ fn remember_stores_and_recall_retrieves() {
         &mut engine,
         "remember",
         &json!({"key": "auth_flow", "value": "JWT-based, 24h expiry", "tags": ["auth", "security"]}),
+        None,
     );
     assert!(!err, "remember returned error: {out}");
     assert!(out.contains("auth_flow"), "unexpected: {out}");
 
-    let (out2, err2) = dispatch_tool(&mut engine, "recall", &json!({}));
+    let (out2, err2) = dispatch_tool(&mut engine, "recall", &json!({}), None);
     assert!(!err2, "recall returned error: {out2}");
     assert!(
         out2.contains("auth_flow"),
@@ -698,14 +762,16 @@ fn recall_query_filter() {
         &mut engine,
         "remember",
         &json!({"key": "db_schema", "value": "PostgreSQL tables"}),
+        None,
     );
     dispatch_tool(
         &mut engine,
         "remember",
         &json!({"key": "auth_flow", "value": "JWT tokens"}),
+        None,
     );
 
-    let (out, err) = dispatch_tool(&mut engine, "recall", &json!({"query": "postgres"}));
+    let (out, err) = dispatch_tool(&mut engine, "recall", &json!({"query": "postgres"}), None);
     assert!(!err, "recall query returned error: {out}");
     assert!(
         out.contains("db_schema"),
@@ -726,14 +792,16 @@ fn recall_tag_filter() {
         &mut engine,
         "remember",
         &json!({"key": "auth_flow", "value": "JWT", "tags": ["auth"]}),
+        None,
     );
     dispatch_tool(
         &mut engine,
         "remember",
         &json!({"key": "db_schema", "value": "Postgres", "tags": ["database"]}),
+        None,
     );
 
-    let (out, err) = dispatch_tool(&mut engine, "recall", &json!({"tags": ["auth"]}));
+    let (out, err) = dispatch_tool(&mut engine, "recall", &json!({"tags": ["auth"]}), None);
     assert!(!err, "recall with tag filter returned error: {out}");
     assert!(
         out.contains("auth_flow"),
@@ -749,7 +817,7 @@ fn recall_tag_filter() {
 fn recall_empty_returns_message() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (out, err) = dispatch_tool(&mut engine, "recall", &json!({}));
+    let (out, err) = dispatch_tool(&mut engine, "recall", &json!({}), None);
     assert!(!err, "recall on empty store returned error: {out}");
     assert!(
         out.contains("No memories") || out.contains("No matching"),
@@ -766,12 +834,13 @@ fn forget_removes_entry() {
         &mut engine,
         "remember",
         &json!({"key": "to_delete", "value": "temp"}),
+        None,
     );
-    let (out, err) = dispatch_tool(&mut engine, "forget", &json!({"key": "to_delete"}));
+    let (out, err) = dispatch_tool(&mut engine, "forget", &json!({"key": "to_delete"}), None);
     assert!(!err, "forget returned error: {out}");
     assert!(out.contains("to_delete"), "unexpected: {out}");
 
-    let (out2, _) = dispatch_tool(&mut engine, "recall", &json!({}));
+    let (out2, _) = dispatch_tool(&mut engine, "recall", &json!({}), None);
     assert!(
         !out2.contains("to_delete"),
         "entry should be removed: {out2}"
@@ -782,7 +851,12 @@ fn forget_removes_entry() {
 fn forget_missing_key_graceful() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (out, err) = dispatch_tool(&mut engine, "forget", &json!({"key": "nonexistent_key"}));
+    let (out, err) = dispatch_tool(
+        &mut engine,
+        "forget",
+        &json!({"key": "nonexistent_key"}),
+        None,
+    );
     assert!(
         !err,
         "forget of missing key should not be an error flag: {out}"
@@ -794,7 +868,7 @@ fn forget_missing_key_graceful() {
 fn forget_missing_arg() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (msg, err) = dispatch_tool(&mut engine, "forget", &json!({}));
+    let (msg, err) = dispatch_tool(&mut engine, "forget", &json!({}), None);
     assert!(err);
     assert!(msg.contains("Missing"), "got: {msg}");
 }
@@ -807,7 +881,7 @@ fn forget_missing_arg() {
 fn find_tests_discovers_test_functions() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (out, err) = dispatch_tool(&mut engine, "find_tests", &json!({}));
+    let (out, err) = dispatch_tool(&mut engine, "find_tests", &json!({}), None);
     assert!(!err, "find_tests returned error: {out}");
     assert!(
         out.contains("test_compute")
@@ -821,7 +895,7 @@ fn find_tests_discovers_test_functions() {
 fn find_tests_pattern_filter() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (out, err) = dispatch_tool(&mut engine, "find_tests", &json!({"pattern": "zero"}));
+    let (out, err) = dispatch_tool(&mut engine, "find_tests", &json!({"pattern": "zero"}), None);
     assert!(!err, "find_tests pattern returned error: {out}");
     if out.contains("Test functions") {
         assert!(
@@ -835,7 +909,7 @@ fn find_tests_pattern_filter() {
 fn find_tests_file_filter() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (out, err) = dispatch_tool(&mut engine, "find_tests", &json!({"file": "tests/"}));
+    let (out, err) = dispatch_tool(&mut engine, "find_tests", &json!({"file": "tests/"}), None);
     assert!(!err, "find_tests file filter returned error: {out}");
     assert!(!err, "output: {out}");
 }
@@ -848,6 +922,7 @@ fn find_tests_no_match() {
         &mut engine,
         "find_tests",
         &json!({"pattern": "zzz_no_such_test_zzz"}),
+        None,
     );
     assert!(!err, "find_tests no match returned error: {out}");
     assert!(out.contains("No test functions"), "unexpected: {out}");
@@ -861,7 +936,7 @@ fn find_tests_no_match() {
 fn find_similar_missing_arg() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (msg, err) = dispatch_tool(&mut engine, "find_similar", &json!({}));
+    let (msg, err) = dispatch_tool(&mut engine, "find_similar", &json!({}), None);
     assert!(err);
     assert!(msg.contains("Missing"), "got: {msg}");
 }
@@ -874,6 +949,7 @@ fn find_similar_unknown_symbol() {
         &mut engine,
         "find_similar",
         &json!({"symbol": "zzz_no_such_symbol_zzz"}),
+        None,
     );
     assert!(err, "unknown symbol should produce error: {out}");
     assert!(out.contains("not found"), "unexpected: {out}");
@@ -887,6 +963,7 @@ fn find_similar_known_symbol() {
         &mut engine,
         "find_similar",
         &json!({"symbol": "compute", "limit": 3}),
+        None,
     );
     assert!(!err, "find_similar returned error: {out}");
     assert!(
@@ -903,7 +980,7 @@ fn find_similar_known_symbol() {
 fn get_complexity_missing_arg() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (msg, err) = dispatch_tool(&mut engine, "get_complexity", &json!({}));
+    let (msg, err) = dispatch_tool(&mut engine, "get_complexity", &json!({}), None);
     assert!(err);
     assert!(msg.contains("Missing"), "got: {msg}");
 }
@@ -916,6 +993,7 @@ fn get_complexity_nonexistent_file() {
         &mut engine,
         "get_complexity",
         &json!({"file": "src/does_not_exist.rs"}),
+        None,
     );
     assert!(err, "nonexistent file should be an error: {out}");
     assert!(out.contains("Cannot read"), "unexpected: {out}");
@@ -929,6 +1007,7 @@ fn get_complexity_computes_for_functions() {
         &mut engine,
         "get_complexity",
         &json!({"file": "src/main.rs"}),
+        None,
     );
     assert!(!err, "get_complexity returned error: {out}");
     assert!(
@@ -948,6 +1027,7 @@ fn get_complexity_min_complexity_filter() {
         &mut engine,
         "get_complexity",
         &json!({"file": "src/main.rs", "min_complexity": 100}),
+        None,
     );
     assert!(!err, "get_complexity min filter returned error: {out}");
     assert!(
@@ -964,7 +1044,7 @@ fn get_complexity_min_complexity_filter() {
 fn review_context_missing_arg() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (msg, err) = dispatch_tool(&mut engine, "review_context", &json!({}));
+    let (msg, err) = dispatch_tool(&mut engine, "review_context", &json!({}), None);
     assert!(err);
     assert!(msg.contains("Missing"), "got: {msg}");
 }
@@ -977,7 +1057,12 @@ fn review_context_with_valid_patch() {
                  @@ -8,6 +8,8 @@\n\
                  +/// Compute the sum.\n\
                   pub fn compute(a: i32, b: i32) -> i32 {\n";
-    let (out, err) = dispatch_tool(&mut engine, "review_context", &json!({"patch": patch}));
+    let (out, err) = dispatch_tool(
+        &mut engine,
+        "review_context",
+        &json!({"patch": patch}),
+        None,
+    );
     assert!(!err, "review_context returned error: {out}");
     assert!(
         out.contains("Code Review Context") || out.contains("Changed files"),
@@ -997,6 +1082,7 @@ fn review_context_empty_patch() {
         &mut engine,
         "review_context",
         &json!({"patch": "no diff here\n"}),
+        None,
     );
     assert!(!err, "review_context returned error: {out}");
     assert!(
@@ -1014,7 +1100,7 @@ fn generate_onboarding_creates_file() {
     let dir = tempdir().unwrap();
     let root = dir.path();
     let mut engine = make_engine(root);
-    let (out, err) = dispatch_tool(&mut engine, "generate_onboarding", &json!({}));
+    let (out, err) = dispatch_tool(&mut engine, "generate_onboarding", &json!({}), None);
     assert!(!err, "generate_onboarding returned error: {out}");
 
     let onboarding_path = root.join(".codixing/ONBOARDING.md");
@@ -1039,7 +1125,7 @@ fn generate_onboarding_creates_file() {
 fn generate_onboarding_output_preview() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (out, err) = dispatch_tool(&mut engine, "generate_onboarding", &json!({}));
+    let (out, err) = dispatch_tool(&mut engine, "generate_onboarding", &json!({}), None);
     assert!(!err, "generate_onboarding returned error: {out}");
     assert!(
         out.contains("ONBOARDING.md"),
@@ -1065,6 +1151,7 @@ fn memory_persists_to_disk() {
         &mut engine,
         "remember",
         &json!({"key": "persistent_key", "value": "disk_value"}),
+        None,
     );
 
     let memory_file = root.join(".codixing/memory.json");
@@ -1092,19 +1179,22 @@ fn multiple_memories_recall_sorted() {
         &mut engine,
         "remember",
         &json!({"key": "z_last", "value": "last"}),
+        None,
     );
     dispatch_tool(
         &mut engine,
         "remember",
         &json!({"key": "a_first", "value": "first"}),
+        None,
     );
     dispatch_tool(
         &mut engine,
         "remember",
         &json!({"key": "m_middle", "value": "middle"}),
+        None,
     );
 
-    let (out, err) = dispatch_tool(&mut engine, "recall", &json!({}));
+    let (out, err) = dispatch_tool(&mut engine, "recall", &json!({}), None);
     assert!(!err, "recall returned error: {out}");
     let a_pos = out.find("a_first").unwrap_or(usize::MAX);
     let m_pos = out.find("m_middle").unwrap_or(usize::MAX);
@@ -1157,7 +1247,7 @@ fn dispatch_tool_ref_handles_read_only_tools() {
     let dir = tempdir().unwrap();
     let engine = make_engine(dir.path());
     // dispatch_tool_ref takes &Engine (not &mut).
-    let (out, err) = dispatch_tool_ref(&engine, "code_search", &json!({"query": "hello"}));
+    let (out, err) = dispatch_tool_ref(&engine, "code_search", &json!({"query": "hello"}), None);
     assert!(!err, "dispatch_tool_ref code_search returned error: {out}");
 }
 
@@ -1165,7 +1255,7 @@ fn dispatch_tool_ref_handles_read_only_tools() {
 fn dispatch_tool_ref_unknown_tool_returns_error() {
     let dir = tempdir().unwrap();
     let engine = make_engine(dir.path());
-    let (msg, is_err) = dispatch_tool_ref(&engine, "nonexistent_tool", &json!({}));
+    let (msg, is_err) = dispatch_tool_ref(&engine, "nonexistent_tool", &json!({}), None);
     assert!(is_err);
     assert!(msg.contains("Unknown"), "got: {msg}");
 }
@@ -1178,11 +1268,13 @@ fn dispatch_tool_ref_unknown_tool_returns_error() {
 fn compact_mode_shortens_output() {
     let dir = tempdir().unwrap();
     let engine = make_engine(dir.path());
-    let (normal_out, _) = dispatch_tool_ref(&engine, "read_file", &json!({"file": "src/main.rs"}));
+    let (normal_out, _) =
+        dispatch_tool_ref(&engine, "read_file", &json!({"file": "src/main.rs"}), None);
     let (compact_out, _) = dispatch_tool_ref(
         &engine,
         "read_file",
         &json!({"file": "src/main.rs", "compact": true}),
+        None,
     );
     // Compact output should be shorter (code blocks are trimmed).
     assert!(
@@ -1197,11 +1289,13 @@ fn compact_mode_shortens_output() {
 fn compact_false_preserves_full_output() {
     let dir = tempdir().unwrap();
     let engine = make_engine(dir.path());
-    let (normal_out, _) = dispatch_tool_ref(&engine, "read_file", &json!({"file": "src/main.rs"}));
+    let (normal_out, _) =
+        dispatch_tool_ref(&engine, "read_file", &json!({"file": "src/main.rs"}), None);
     let (explicit_out, _) = dispatch_tool_ref(
         &engine,
         "read_file",
         &json!({"file": "src/main.rs", "compact": false}),
+        None,
     );
     assert_eq!(
         normal_out, explicit_out,
@@ -1217,7 +1311,7 @@ fn compact_false_preserves_full_output() {
 fn find_source_for_test_missing_arg() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
-    let (msg, err) = dispatch_tool(&mut engine, "find_source_for_test", &json!({}));
+    let (msg, err) = dispatch_tool(&mut engine, "find_source_for_test", &json!({}), None);
     assert!(err);
     assert!(msg.contains("Missing"), "got: {msg}");
 }
@@ -1230,6 +1324,7 @@ fn find_source_for_test_returns_output_for_test_file() {
         &engine,
         "find_source_for_test",
         &json!({"file": "tests/server_test.go"}),
+        None,
     );
     assert!(!err, "find_source_for_test returned error: {out}");
     // Should either find a source mapping or report none found gracefully.
@@ -1247,6 +1342,7 @@ fn find_source_for_test_no_match_for_regular_file() {
         &engine,
         "find_source_for_test",
         &json!({"file": "src/main.rs"}),
+        None,
     );
     assert!(!err, "find_source_for_test returned error: {out}");
     assert!(

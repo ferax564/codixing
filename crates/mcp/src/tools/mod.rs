@@ -16,7 +16,7 @@ mod tests;
 
 use serde_json::{Value, json};
 
-use codixing_core::Engine;
+use codixing_core::{Engine, FederatedEngine};
 
 /// Return the JSON-Schema definitions for all MCP tools.
 pub fn tool_definitions() -> Value {
@@ -471,6 +471,30 @@ pub fn tool_definitions() -> Value {
     ])
 }
 
+/// Return tool definitions, optionally including federation-only tools.
+pub fn tool_definitions_with_federation(has_federation: bool) -> Value {
+    let mut defs = tool_definitions();
+    if has_federation {
+        if let Some(arr) = defs.as_array_mut() {
+            arr.push(list_projects_tool_definition());
+        }
+    }
+    defs
+}
+
+/// JSON-Schema definition for the `list_projects` tool.
+fn list_projects_tool_definition() -> Value {
+    json!({
+        "name": "list_projects",
+        "description": "List all projects registered in the federation with their load status, file count, and root path. Only available when the server is started with --federation.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Dynamic tool discovery helpers
 // ---------------------------------------------------------------------------
@@ -651,6 +675,7 @@ pub fn is_read_only_tool(name: &str) -> bool {
             | "focus_map"
             | "search_tools"
             | "get_tool_schema"
+            | "list_projects"
     )
 }
 
@@ -659,8 +684,16 @@ pub fn is_read_only_tool(name: &str) -> bool {
 /// Takes `&Engine` (shared reference) so multiple read-only calls can run
 /// concurrently under a `RwLock::read()` guard.
 ///
+/// The optional `federation` parameter provides access to the federated engine
+/// for cross-repo tools like `list_projects`.
+///
 /// Returns `(text_output, is_error)`.
-pub fn dispatch_tool_ref(engine: &Engine, name: &str, args: &Value) -> (String, bool) {
+pub fn dispatch_tool_ref(
+    engine: &Engine,
+    name: &str,
+    args: &Value,
+    federation: Option<&FederatedEngine>,
+) -> (String, bool) {
     let (output, is_error) = match name {
         "code_search" => search::call_code_search(engine, args),
         "find_symbol" => search::call_find_symbol(engine, args),
@@ -697,6 +730,7 @@ pub fn dispatch_tool_ref(engine: &Engine, name: &str, args: &Value) -> (String, 
         "check_staleness" => analysis::call_check_staleness(engine),
         "search_tools" => call_search_tools(args),
         "get_tool_schema" => call_get_tool_schema(args),
+        "list_projects" => call_list_projects(federation),
         _ => (format!("Unknown read-only tool: {name}"), true),
     };
     (maybe_compact(output, args), is_error)
@@ -708,7 +742,12 @@ pub fn dispatch_tool_ref(engine: &Engine, name: &str, args: &Value) -> (String, 
 /// etc.) can mutate the index inline.
 ///
 /// Returns `(text_output, is_error)`.
-pub fn dispatch_tool(engine: &mut Engine, name: &str, args: &Value) -> (String, bool) {
+pub fn dispatch_tool(
+    engine: &mut Engine,
+    name: &str,
+    args: &Value,
+    federation: Option<&FederatedEngine>,
+) -> (String, bool) {
     let (output, is_error) = match name {
         // Write tools — require exclusive access.
         "write_file" => files::call_write_file(engine, args),
@@ -724,7 +763,7 @@ pub fn dispatch_tool(engine: &mut Engine, name: &str, args: &Value) -> (String, 
         "session_reset_focus" => call_session_reset_focus(engine),
         // Fallback: if a read-only tool is accidentally dispatched through the
         // write path, handle it rather than returning an error.
-        other => dispatch_tool_ref(engine, other, args),
+        other => dispatch_tool_ref(engine, other, args, federation),
     };
     (maybe_compact(output, args), is_error)
 }
@@ -871,4 +910,49 @@ fn call_session_reset_focus(engine: &Engine) -> (String, bool) {
         "Progressive focus cleared. Search results will no longer be narrowed to a specific directory.".to_string(),
         false,
     )
+}
+
+// ---------------------------------------------------------------------------
+// Federation helpers
+// ---------------------------------------------------------------------------
+
+fn call_list_projects(federation: Option<&FederatedEngine>) -> (String, bool) {
+    let fed = match federation {
+        Some(f) => f,
+        None => {
+            return (
+                "Federation is not enabled. Start the server with --federation <config.json> to use cross-repo features.".to_string(),
+                true,
+            );
+        }
+    };
+
+    let projects = fed.projects();
+    let stats = fed.stats();
+
+    let mut out = String::from("## Federated Projects\n\n");
+    out.push_str(&format!(
+        "**Registered:** {} | **Loaded:** {} | **Total files:** {} | **Total chunks:** {} | **Total symbols:** {}\n\n",
+        stats.project_count, stats.loaded_count, stats.total_files, stats.total_chunks, stats.total_symbols,
+    ));
+
+    if projects.is_empty() {
+        out.push_str("No projects registered.\n");
+    } else {
+        out.push_str("| # | Project | Root | Loaded | Files |\n");
+        out.push_str("|---|---------|------|--------|-------|\n");
+        for (i, proj) in projects.iter().enumerate() {
+            let status = if proj.loaded { "yes" } else { "no" };
+            out.push_str(&format!(
+                "| {} | {} | {} | {} | {} |\n",
+                i + 1,
+                proj.name,
+                proj.root.display(),
+                status,
+                proj.file_count,
+            ));
+        }
+    }
+
+    (out, false)
 }
