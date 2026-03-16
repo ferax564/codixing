@@ -119,18 +119,32 @@ pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) 
                     _ => vec![kind.as_str()],
                 };
                 let query_lower = query_str.to_lowercase();
-                results.retain(|r| {
+                // Filter results AND narrow content to the declaration site.
+                // This ensures the declaration line is visible in the output
+                // even for large chunks where it would be truncated.
+                let mut filtered = Vec::new();
+                for mut r in results {
                     let sig_lower = r.signature.to_lowercase();
-                    // Scan entire chunk content for declaration lines.
-                    // A match requires both the kind keyword AND the query term
-                    // on the same line (e.g., "pub trait Chunker" matches kind=trait
-                    // + query="Chunker").
-                    let has_declaration = r.content.lines().any(|line| {
+                    if prefixes.iter().any(|p| sig_lower.contains(p)) {
+                        filtered.push(r);
+                        continue;
+                    }
+                    // Find the declaration line and extract ±5 lines of context.
+                    let lines: Vec<&str> = r.content.lines().collect();
+                    let decl_idx = lines.iter().position(|line| {
                         let ll = line.to_lowercase();
                         prefixes.iter().any(|p| ll.contains(p)) && ll.contains(&query_lower)
                     });
-                    prefixes.iter().any(|p| sig_lower.contains(p)) || has_declaration
-                });
+                    if let Some(idx) = decl_idx {
+                        let start = idx.saturating_sub(2);
+                        let end = (idx + 8).min(lines.len());
+                        r.content = lines[start..end].join("\n");
+                        r.line_start += start as u64;
+                        r.line_end = r.line_start + (end - start) as u64;
+                        filtered.push(r);
+                    }
+                }
+                results = filtered;
                 results.truncate(limit);
             }
 
