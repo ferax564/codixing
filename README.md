@@ -511,7 +511,13 @@ codixing init . --model snowflake-arctic-l
 - **Live index freshness** — Daemon file watcher updates the in-memory engine within 100ms of any file save; no restart needed
 - **`.gitignore`-aware indexing** — File walker respects `.gitignore`, `.ignore`, and global gitignore (same as ripgrep); no manual exclude lists needed
 - **Hash-based incremental sync** — `codixing sync` uses mtime+size pre-filtering then xxh3 content hashes; re-indexes only changed files
-- **MCP server** — 44 tools exposed via JSON-RPC 2.0; Claude Code registers with one command
+- **MCP server** — 46 tools exposed via JSON-RPC 2.0; Claude Code registers with one command
+- **Dynamic tool discovery** — `--compact` mode reduces tools/list from ~6,600 to ~220 tokens (96.7% reduction); meta-tools `search_tools` and `get_tool_schema` let LLMs discover tools on demand
+- **Contextual chunk embedding** — Prepends file path, scope chain, and entity names to chunks before embedding; improves semantic retrieval by giving the embedding model positional context
+- **Adaptive result truncation** — Detects score cliffs in search results and truncates where confidence drops, returning fewer but higher-quality results; saves ~23% output tokens
+- **Query-to-code reformulation** — Lightweight HyDE: maps natural language concepts to hypothetical code patterns (18 mappings) for improved retrieval in Deep strategy
+- **Type-filtered search** — `kind` parameter on `code_search` filters by symbol type (function, struct, enum, trait, class, method, interface, type, const, impl)
+- **BGE query prefix** — Instruction-tuned query embedding (`"Represent this sentence: "`) for BGE models, improving cosine similarity for hybrid search
 - **Concurrent symbol table** — DashMap-backed with exact, prefix, and substring matching
 - **Single binary, zero runtime deps** — No JVM, no Docker, no external databases
 
@@ -571,7 +577,7 @@ codixing init . --model snowflake-arctic-l
 | `fast` | BM25 + vector (asymmetric RRF) | Yes | ~35ms |
 | `thorough` | Hybrid + MMR dedup | Yes | ~3s |
 | `explore` | BM25 + graph neighbor expansion | Yes | <100ms |
-| `deep` | Multi-query RRF fusion + popularity boost | Yes | <300ms |
+| `deep` | Multi-query RRF fusion + code reformulation + popularity boost | Yes | ~1.5s |
 
 ---
 
@@ -619,6 +625,7 @@ codixing init . --model snowflake-arctic-l
 | **Phase 14: Dead Code Detection** | ✅ Complete | `find_orphans` — zero in-degree graph analysis with confidence scoring (Certain/High/Moderate/Low) |
 | **Phase 15: Cross-Repo Design** | ✅ Complete | FederatedEngine design doc, `get_context_for_task`, asymmetric RRF, query expansion, path-match reranking — 426 tests |
 | **Phase 16: Intelligence & Scale** | ✅ Complete | Focus-aware repo map (PPR), test-to-code mapping, config languages (YAML/TOML/Dockerfile/Makefile), mmap vector index, multi-agent shared sessions, signature-aware truncation, stale index detection, rename validation — **452 tests** |
+| **Phase 17: Research-Backed Retrieval** | ✅ Complete | Dynamic tool discovery (`--compact`, 96.7% token reduction), contextual chunk embedding, adaptive result truncation (score cliff detection), query-to-code reformulation (lightweight HyDE), type-filtered search (`kind` param), BGE instruction prefix — **605 tests** |
 
 ---
 
@@ -626,7 +633,7 @@ codixing init . --model snowflake-arctic-l
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 452 tests
+cargo test --workspace        # 605 tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --all
 ```
