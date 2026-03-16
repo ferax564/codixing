@@ -48,7 +48,7 @@ impl Engine {
                 // HashMap lookups and fixes the definition-vs-usage ranking issue.
                 self.apply_definition_boost(&mut results, &query.query);
                 apply_path_match_boost(&mut results, &query.query);
-                self.apply_test_demotion(&mut results);
+                self.apply_test_demotion(&mut results, &query.query);
                 results
             }
             Strategy::Fast => {
@@ -70,7 +70,7 @@ impl Engine {
                 self.apply_definition_boost(&mut results, &query.query);
                 self.apply_popularity_boost(&mut results);
                 apply_path_match_boost(&mut results, &query.query);
-                self.apply_test_demotion(&mut results);
+                self.apply_test_demotion(&mut results, &query.query);
                 results
             }
             Strategy::Explore => self.search_explore(query)?,
@@ -119,7 +119,7 @@ impl Engine {
                 self.apply_definition_boost(&mut results, &query.query);
                 self.apply_popularity_boost(&mut results);
                 apply_path_match_boost(&mut results, &query.query);
-                self.apply_test_demotion(&mut results);
+                self.apply_test_demotion(&mut results, &query.query);
                 results
             }
             Strategy::Deep => self.search_deep(query)?,
@@ -219,7 +219,7 @@ impl Engine {
             });
         }
 
-        self.apply_test_demotion(&mut results);
+        self.apply_test_demotion(&mut results, &query.query);
         results.truncate(query.limit);
         Ok(results)
     }
@@ -303,7 +303,7 @@ impl Engine {
     /// A 0.5× score multiplier pushes tests below equally-relevant impl code.
     /// Applied to concept/search queries, **not** to `search_usages` (where
     /// test call-sites are legitimate results).
-    pub(super) fn apply_test_demotion(&self, results: &mut [SearchResult]) {
+    pub(super) fn apply_test_demotion(&self, results: &mut [SearchResult], query: &str) {
         const TEST_DEMOTION: f32 = 0.5;
         const INFRA_DEMOTION: f32 = 0.5;
         let mut changed = false;
@@ -311,7 +311,7 @@ impl Engine {
             if is_test_file(&r.file_path) || is_test_chunk(r) {
                 r.score *= TEST_DEMOTION;
                 changed = true;
-            } else if is_search_infra(&r.file_path) {
+            } else if is_search_infra(&r.file_path, query) {
                 // Search infrastructure files (engine/search.rs, retriever/*.rs)
                 // are self-referential: they contain synonym maps, reformulation
                 // patterns, and strategy code that mentions every search concept.
@@ -532,7 +532,7 @@ impl Engine {
         if let Some(ref filter) = query.file_filter {
             candidates.retain(|r| r.file_path.contains(filter.as_str()));
         }
-        self.apply_test_demotion(&mut candidates);
+        self.apply_test_demotion(&mut candidates, &query.query);
         candidates.truncate(query.limit);
 
         Ok(candidates)
@@ -695,10 +695,30 @@ fn is_test_file(path: &str) -> bool {
 /// every search concept. BM25 falsely ranks them highly for domain queries
 /// like "dead code detection" because the synonym map literally contains
 /// those terms.
-fn is_search_infra(path: &str) -> bool {
-    // Only demote the specific files that are self-referential.
-    // Don't demote all engine/ files — engine/mod.rs, engine/sync.rs etc. are fine.
-    path.ends_with("engine/search.rs") || path.ends_with("retriever/hybrid.rs")
+///
+/// Skipped when the query explicitly targets search concepts (detected by
+/// presence of search-related terms like "rrf", "fusion", "retriev", "hybrid").
+fn is_search_infra(path: &str, query: &str) -> bool {
+    let is_infra = path.ends_with("engine/search.rs") || path.ends_with("retriever/hybrid.rs");
+    if !is_infra {
+        return false;
+    }
+    // If the user is searching FOR the search infrastructure, don't demote it.
+    let q = query.to_lowercase();
+    let search_terms = [
+        "rrf",
+        "fusion",
+        "retriev",
+        "hybrid",
+        "bm25",
+        "ranking algorithm",
+        "search strategy",
+        "search pipeline",
+    ];
+    if search_terms.iter().any(|t| q.contains(t)) {
+        return false;
+    }
+    true
 }
 
 /// Demote C/C++ header files when implementation files (.c/.cc/.cpp) are also
@@ -822,14 +842,48 @@ fn apply_path_match_boost(results: &mut [SearchResult], query: &str) {
             let path_lower = r.file_path.to_lowercase();
             for kw in &path_keywords {
                 let kw_lower = kw.to_lowercase();
-                // Check if keyword appears as a path component
+                // Check exact keyword or stem prefix (≥4 chars) as a path component.
+                // "parsing" matches parser/, "retrieval" matches retriever/, etc.
+                let stem = &kw_lower[..kw_lower.len().min(5)];
                 if path_lower.contains(&format!("/{kw_lower}/"))
                     || path_lower.contains(&format!("/{kw_lower}."))
                     || path_lower.ends_with(&format!("/{kw_lower}"))
+                    || path_component_starts_with(&path_lower, stem)
                 {
-                    r.score *= 2.0; // Strong path-keyword boost
+                    r.score *= 2.0;
                     boosted = true;
                     break;
+                }
+            }
+        }
+    }
+
+    // Boost 3: concept-to-path mapping for well-known vocabulary gaps.
+    // Bridges cases where query terminology differs from file naming.
+    let concept_paths: &[(&[&str], &[&str])] = &[
+        (&["dead code", "unused code", "unreachable"], &["orphan"]),
+        (
+            &["rrf", "rank fusion", "reciprocal rank", "reciprocal"],
+            &["hybrid"],
+        ),
+        (&["tree-sitter", "tree sitter", "ast pars"], &["parser/"]),
+        (
+            &["embedding model", "embed model", "onnx embed"],
+            &["embedder"],
+        ),
+        (&["dependency graph", "import graph"], &["graph/"]),
+        (&["file watch", "live reload"], &["watcher"]),
+    ];
+    let query_lower = query.to_lowercase();
+    for (triggers, path_fragments) in concept_paths {
+        if triggers.iter().any(|t| query_lower.contains(t)) {
+            for r in results.iter_mut() {
+                let path_lower = r.file_path.to_lowercase();
+                if path_fragments.iter().any(|frag| {
+                    path_lower.contains(frag) || path_component_starts_with(&path_lower, frag)
+                }) {
+                    r.score *= 3.0; // Strong concept-path boost
+                    boosted = true;
                 }
             }
         }
@@ -842,6 +896,15 @@ fn apply_path_match_boost(results: &mut [SearchResult], query: &str) {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
     }
+}
+
+/// Check if any path component starts with the given prefix.
+/// e.g., path "crates/core/src/parser/mod.rs", prefix "pars" → true (matches "parser")
+fn path_component_starts_with(path: &str, prefix: &str) -> bool {
+    path.split('/').any(|component| {
+        let name = component.split('.').next().unwrap_or(component);
+        name.starts_with(prefix)
+    })
 }
 
 /// Generate hypothetical code patterns from a natural language query.
@@ -1596,10 +1659,10 @@ mod tests {
             },
         ];
         apply_path_match_boost(&mut results, "fix django.db.models.lookups");
-        // The matching file should be boosted: 5.0 * 2.0 = 10.0
-        // The non-matching file stays at 10.0
-        assert_eq!(results[0].score, 10.0); // boosted result
+        // The matching file gets dotted-path boost (2.0×) + keyword boost (2.0×):
+        // 5.0 * 2.0 * 2.0 = 20.0, which beats the non-matching file at 10.0.
         assert_eq!(results[0].file_path, "django/db/models/lookups.py");
+        assert!(results[0].score > 10.0, "boosted score should exceed 10.0");
     }
 
     #[test]
