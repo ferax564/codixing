@@ -88,6 +88,8 @@ pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) 
             });
 
             // Apply kind filter if specified.
+            // Check signature, first line of content, and scope chain
+            // to determine if a result matches the requested kind.
             if let Some(ref kind) = kind_filter {
                 let prefixes = match kind.as_str() {
                     "function" | "fn" => vec!["fn ", "def ", "func ", "function "],
@@ -99,15 +101,20 @@ pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) 
                     "interface" => vec!["interface ", "trait ", "protocol "],
                     "type" => vec!["type ", "typedef ", "using "],
                     "const" | "constant" => vec!["const ", "static ", "val ", "let "],
-                    "impl" => vec!["impl "],
+                    "impl" => vec!["impl ", "impl<"],
                     _ => vec![kind.as_str()],
                 };
+                // Over-fetch then filter: request more from the engine, keep
+                // only results whose definition line matches the kind.
                 results.retain(|r| {
                     let sig_lower = r.signature.to_lowercase();
-                    let content_lower = r.content.to_lowercase();
-                    prefixes
-                        .iter()
-                        .any(|p| sig_lower.contains(p) || content_lower.contains(p))
+                    // Check the first few lines of content where declarations live.
+                    let first_lines: String = r.content.lines().take(3)
+                        .collect::<Vec<_>>().join(" ").to_lowercase();
+                    prefixes.iter().any(|p| {
+                        sig_lower.contains(p)
+                            || first_lines.contains(p)
+                    })
                 });
             }
 
