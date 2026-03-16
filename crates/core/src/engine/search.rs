@@ -96,7 +96,7 @@ impl Engine {
                             })
                             .unzip();
 
-                    let query_vec = emb.embed_one(&query.query)?;
+                    let query_vec = emb.embed_query(&query.query)?;
                     mmr_select(
                         results_with_meta,
                         &query_vec,

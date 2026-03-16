@@ -131,17 +131,30 @@ pub(crate) fn call_list_files(engine: &Engine, args: &Value) -> (String, bool) {
 
     let mut filtered: Vec<String> = match pattern {
         Some(pat) => {
-            let g = glob::Pattern::new(pat).ok();
-            all_files
-                .into_iter()
-                .filter(|f| {
-                    if let Some(ref g) = g {
-                        g.matches(f)
-                    } else {
-                        f.contains(pat)
+            match glob::Pattern::new(pat) {
+                Ok(g) => all_files.into_iter().filter(|f| g.matches(f)).collect(),
+                Err(_) => {
+                    // Invalid glob — fall back to substring match but warn the user.
+                    let mut note = format!(
+                        "**Note:** `{pat}` is not a valid glob pattern; using substring match instead.\n\n"
+                    );
+                    let matched: Vec<String> =
+                        all_files.into_iter().filter(|f| f.contains(pat)).collect();
+                    if matched.is_empty() {
+                        note.push_str("No indexed files found matching the filter.");
+                        return (note, false);
                     }
-                })
-                .collect()
+                    let mut out = format!(
+                        "{note}Indexed files ({} total, {} shown):\n\n",
+                        stats.file_count,
+                        matched.len().min(limit)
+                    );
+                    for f in matched.iter().take(limit) {
+                        out.push_str(&format!("  {f}\n"));
+                    }
+                    return (out, false);
+                }
+            }
         }
         None => all_files,
     };

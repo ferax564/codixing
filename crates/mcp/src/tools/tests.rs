@@ -534,7 +534,10 @@ fn predict_impact_no_files_in_patch() {
         "predict_impact",
         &json!({"patch": "not a diff\n"}),
     );
-    assert!(!err, "predict_impact returned error: {out}");
+    assert!(
+        err,
+        "predict_impact should return error for invalid patches"
+    );
     assert!(out.contains("No file changes"), "unexpected: {out}");
 }
 

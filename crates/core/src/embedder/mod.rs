@@ -240,6 +240,12 @@ pub struct Embedder {
     backend: EmbedBackend,
     /// Embedding vector dimensions (model-dependent).
     pub dims: usize,
+    /// Optional prefix prepended to queries at search time.
+    ///
+    /// BGE models are trained with `"Represent this sentence: "` for queries
+    /// but no prefix for passages. Adding this prefix improves cosine similarity
+    /// between search queries and indexed code chunks.
+    query_prefix: Option<&'static str>,
 }
 
 impl Embedder {
@@ -288,6 +294,14 @@ impl Embedder {
             EmbeddingModel::Qwen3SmallEmbedding => unreachable!(),
         };
 
+        // BGE models are trained with an instruction prefix for queries.
+        let query_prefix = match model_cfg {
+            EmbeddingModel::BgeSmallEn | EmbeddingModel::BgeBaseEn | EmbeddingModel::BgeLargeEn => {
+                Some("Represent this sentence: ")
+            }
+            _ => None,
+        };
+
         info!(?fastembed_model, dims, "loading ONNX embedding model");
 
         let model = TextEmbedding::try_new(
@@ -298,6 +312,7 @@ impl Embedder {
         Ok(Self {
             backend: EmbedBackend::Onnx(Mutex::new(model)),
             dims,
+            query_prefix,
         })
     }
 
@@ -348,6 +363,7 @@ impl Embedder {
         Ok(Self {
             backend: EmbedBackend::Onnx(Mutex::new(model)),
             dims: NOMIC_EMBED_CODE_DIMS,
+            query_prefix: None,
         })
     }
 
@@ -371,6 +387,7 @@ impl Embedder {
         Ok(Self {
             backend: EmbedBackend::Qwen3(Mutex::new(session)),
             dims: QWEN3_SMALL_DIMS,
+            query_prefix: None,
         })
     }
 
@@ -406,7 +423,21 @@ impl Embedder {
         }
     }
 
-    /// Embed a single text string.
+    /// Embed a single query string, prepending the model-specific instruction
+    /// prefix if applicable (e.g. `"Represent this sentence: "` for BGE).
+    ///
+    /// Use this for **search queries**. Use [`embed_one`] for documents/passages.
+    pub fn embed_query(&self, query: &str) -> Result<Vec<f32>> {
+        match self.query_prefix {
+            Some(prefix) => {
+                let prefixed = format!("{prefix}{query}");
+                self.embed_one(&prefixed)
+            }
+            None => self.embed_one(query),
+        }
+    }
+
+    /// Embed a single text string (document/passage — no instruction prefix).
     pub fn embed_one(&self, text: &str) -> Result<Vec<f32>> {
         match &self.backend {
             EmbedBackend::Onnx(m) => {

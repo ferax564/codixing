@@ -202,7 +202,7 @@ pub(crate) fn call_predict_impact(engine: &Engine, args: &Value) -> (String, boo
     if changed_files.is_empty() {
         return (
             "No file changes detected in the patch. Ensure it is a valid unified diff.".to_string(),
-            false,
+            true,
         );
     }
 

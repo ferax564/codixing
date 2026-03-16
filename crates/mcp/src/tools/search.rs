@@ -6,7 +6,9 @@ use serde_json::Value;
 
 use std::time::Instant;
 
-use codixing_core::{Engine, SearchQuery, SessionEventKind, SharedEventType, SharedSessionEvent, Strategy};
+use codixing_core::{
+    Engine, SearchQuery, SessionEventKind, SharedEventType, SharedSessionEvent, Strategy,
+};
 
 pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) {
     let query_str = match args.get("query").and_then(|v| v.as_str()) {
@@ -32,6 +34,12 @@ pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) 
     if let Some(filter) = args.get("file_filter").and_then(|v| v.as_str()) {
         query = query.with_file_filter(filter);
     }
+
+    // Optional type filter: "function", "struct", "enum", "trait", "class", "method", "type", "const", "interface".
+    let kind_filter = args
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .map(|k| k.to_lowercase());
 
     match engine.search(query) {
         Ok(results) if results.is_empty() => {
@@ -78,6 +86,30 @@ pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) 
                     .partial_cmp(&a.score)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
+
+            // Apply kind filter if specified.
+            if let Some(ref kind) = kind_filter {
+                let prefixes = match kind.as_str() {
+                    "function" | "fn" => vec!["fn ", "def ", "func ", "function "],
+                    "struct" => vec!["struct ", "data class ", "dataclass"],
+                    "enum" => vec!["enum "],
+                    "trait" => vec!["trait ", "protocol "],
+                    "class" => vec!["class ", "struct "],
+                    "method" => vec!["fn ", "def ", "func "],
+                    "interface" => vec!["interface ", "trait ", "protocol "],
+                    "type" => vec!["type ", "typedef ", "using "],
+                    "const" | "constant" => vec!["const ", "static ", "val ", "let "],
+                    "impl" => vec!["impl "],
+                    _ => vec![kind.as_str()],
+                };
+                results.retain(|r| {
+                    let sig_lower = r.signature.to_lowercase();
+                    let content_lower = r.content.to_lowercase();
+                    prefixes
+                        .iter()
+                        .any(|p| sig_lower.contains(p) || content_lower.contains(p))
+                });
+            }
 
             // Include focus info if active.
             let mut out = String::new();

@@ -43,6 +43,11 @@ pub fn tool_definitions() -> Value {
                     "file_filter": {
                         "type": "string",
                         "description": "Optional substring to restrict results to files whose path contains this string (e.g. 'engine', 'src/graph')"
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["function", "struct", "enum", "trait", "class", "method", "interface", "type", "const", "impl"],
+                        "description": "Filter results by symbol kind (e.g. 'function' for fn/def/func, 'struct' for structs/data classes, 'trait' for traits/protocols)"
                     }
                 },
                 "required": ["query"]
@@ -153,7 +158,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "symbol_callers",
-            "description": "Return all functions in the codebase that directly call the given symbol. Uses the symbol-level call graph built at index time.",
+            "description": "Return all functions in the codebase that directly call the given symbol. Uses the symbol-level call graph built at index time. Falls back to BM25 search if the graph has no results for this symbol.",
             "inputSchema": { "type": "object", "properties": { "symbol": { "type": "string", "description": "Symbol name to look up callers for (e.g. 'compute_pagerank')" }, "limit": { "type": "integer", "description": "Maximum call sites to return (default: 20)" } }, "required": ["symbol"] }
         },
         {
@@ -173,7 +178,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "enrich_docs",
-            "description": "Fetch a symbol's source and generate a documentation comment for it, storing the result in .codixing/symbol_docs.json. Subsequent calls return the cached doc. Requires ANTHROPIC_API_KEY or OLLAMA_HOST environment variable.",
+            "description": "Fetch a symbol's source and generate a stub documentation comment, storing the result in .codixing/symbol_docs.json. Returns cached doc on subsequent calls. Currently generates a template stub — full LLM enrichment planned for a future release.",
             "inputSchema": { "type": "object", "properties": { "symbol": { "type": "string", "description": "Symbol name to generate documentation for" }, "force": { "type": "boolean", "description": "Regenerate even if a cached doc already exists (default: false)" } }, "required": ["symbol"] }
         },
         {
@@ -193,7 +198,7 @@ pub fn tool_definitions() -> Value {
         },
         {
             "name": "find_tests",
-            "description": "Discover test functions across the indexed codebase by naming conventions (test_*, *_test, TestXxx) and annotations (#[test], @Test, @pytest.mark.*). Works across all supported languages.",
+            "description": "Discover test functions across the indexed codebase by naming conventions (test_*, *_test, TestXxx) and annotations (#[test], @Test, @pytest.mark.*). When 'file' points to a source file, first tries test-to-code mapping; falls back to name/convention-based discovery if no mapping found.",
             "inputSchema": { "type": "object", "properties": { "pattern": { "type": "string", "description": "Optional name/file substring filter (e.g. 'auth', 'login')" }, "file": { "type": "string", "description": "Optional file path substring to restrict search (e.g. 'tests/')" } }, "required": [] }
         },
         {
@@ -654,10 +659,7 @@ fn call_get_session_summary(engine: &Engine, args: &Value) -> (String, bool) {
 }
 
 fn call_session_status(engine: &Engine, args: &Value) -> (String, bool) {
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(10) as usize;
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
     let shared = engine.shared_session();
     let agents = shared.active_agents();

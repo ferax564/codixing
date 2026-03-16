@@ -39,8 +39,8 @@ impl Retriever for VectorRetriever<'_> {
             return Ok(Vec::new());
         }
 
-        // Embed the query.
-        let query_vec = self.embedder.embed_one(&query.query)?;
+        // Embed the query (with model-specific instruction prefix for BGE).
+        let query_vec = self.embedder.embed_query(&query.query)?;
 
         // Find nearest neighbours (fetch more than needed to allow file filtering).
         let fetch_limit = if query.file_filter.is_some() {
@@ -88,7 +88,7 @@ impl Retriever for VectorRetriever<'_> {
 
 /// Return the query embedding for a string (convenience helper used by hybrid).
 pub fn embed_query(embedder: &Embedder, query: &str) -> Result<Vec<f32>> {
-    embedder.embed_one(query)
+    embedder.embed_query(query)
 }
 
 /// Compute cosine similarity between two equal-length float vectors.
