@@ -124,6 +124,13 @@ pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) 
                 ));
             }
 
+            if results.len() < limit {
+                out.push_str(&format!(
+                    "*Showing {} results (adaptively truncated at confidence boundary)*\n\n",
+                    results.len()
+                ));
+            }
+
             if let Some(focus) = session.focus_directory() {
                 out.push_str(&format!("*focus: {focus}*\n\n"));
             }

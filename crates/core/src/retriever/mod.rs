@@ -125,6 +125,9 @@ pub struct ChunkMeta {
     pub signature: String,
     /// AST scope chain elements.
     pub scope_chain: Vec<String>,
+    /// Names of entities contained in this chunk.
+    #[serde(default)]
+    pub entity_names: Vec<String>,
     /// Source code content.
     pub content: String,
 }

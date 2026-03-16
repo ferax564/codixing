@@ -75,6 +75,7 @@ impl Engine {
                     line_end: chunk.line_end as u64,
                     signature: chunk.signatures.join("\n"),
                     scope_chain: chunk.scope_chain.clone(),
+                    entity_names: chunk.entity_names.clone(),
                     content: chunk.content.clone(),
                 },
             );

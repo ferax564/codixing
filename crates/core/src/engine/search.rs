@@ -33,7 +33,8 @@ impl Engine {
             query
         };
 
-        let mut results = match query.strategy {
+        let strategy = query.strategy;
+        let mut results = match strategy {
             Strategy::Instant => {
                 let retriever = BM25Retriever::new(&self.tantivy);
                 let mut results = retriever.search(&query)?;
@@ -117,6 +118,13 @@ impl Engine {
             }
             Strategy::Deep => self.search_deep(query)?,
         };
+
+        // Apply adaptive truncation for non-Instant strategies.
+        // Instant = exact symbol lookups, should return all matches.
+        if strategy != Strategy::Instant {
+            adaptive_truncate(&mut results, 3, 0.35);
+        }
+
         dedup_overlapping(&mut results);
         Ok(results)
     }
@@ -428,7 +436,20 @@ impl Engine {
 
         // Phase 0 & 1: multi-query retrieval with RRF fusion.
         let candidate_limit = (query.limit * 3).max(30);
-        let reformulations = generate_reformulations(&query.query);
+        let mut reformulations = generate_reformulations(&query.query);
+
+        // Append code-pattern reformulation (lightweight HyDE): join the top 3
+        // patterns into a single query string so they participate in RRF fusion.
+        let code_patterns = reformulate_to_code(&query.query);
+        if !code_patterns.is_empty() {
+            let code_query: String = code_patterns
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" ");
+            reformulations.push(code_query);
+        }
 
         debug!(
             reformulations = ?reformulations,
@@ -519,6 +540,41 @@ impl Engine {
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
             }
+        }
+    }
+}
+
+/// Truncate search results at the natural score boundary.
+///
+/// Detects "score cliffs" -- points where the relevance score drops
+/// significantly compared to the previous result -- and truncates
+/// there instead of at the hard limit.
+///
+/// Algorithm:
+/// 1. If fewer than `min_results` results, return as-is
+/// 2. Compute relative score drops between consecutive results
+/// 3. If any drop exceeds `cliff_threshold` of the top score, truncate at that point
+/// 4. Always keep at least `min_results`
+/// 5. Never exceed the original length
+fn adaptive_truncate(results: &mut Vec<SearchResult>, min_results: usize, cliff_threshold: f32) {
+    if results.len() <= min_results {
+        return;
+    }
+
+    let top_score = results[0].score;
+    if top_score <= 0.0 {
+        return;
+    }
+
+    for i in 1..results.len() {
+        if i < min_results {
+            continue;
+        }
+
+        let relative_drop = (results[i - 1].score - results[i].score) / top_score;
+        if relative_drop > cliff_threshold {
+            results.truncate(i);
+            return;
         }
     }
 }
@@ -693,6 +749,120 @@ fn apply_path_match_boost(results: &mut [SearchResult], query: &str) {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
     }
+}
+
+/// Generate hypothetical code patterns from a natural language query.
+///
+/// This is a lightweight HyDE (Hypothetical Document Embedding) approach:
+/// maps common programming concepts to code patterns that would appear
+/// in implementations. Used to improve retrieval for conceptual queries.
+///
+/// Example: "how to sort a list" -> ["fn sort", ".sort(", "sort_by", "Ord", "cmp"]
+fn reformulate_to_code(query: &str) -> Vec<String> {
+    let query_lower = query.to_lowercase();
+    let mut patterns = Vec::new();
+
+    // Map common programming concepts to code patterns.
+    let concept_map: &[(&[&str], &[&str])] = &[
+        // Sorting
+        (
+            &["sort", "order", "arrange"],
+            &["fn sort", ".sort(", "sort_by", "Ord", "cmp"],
+        ),
+        // Searching
+        (
+            &["search", "find", "lookup", "locate"],
+            &["fn search", "fn find", ".find(", "filter", "contains"],
+        ),
+        // Iteration
+        (
+            &["iterate", "loop", "traverse", "walk"],
+            &["for ", ".iter()", ".map(", "while ", "Iterator"],
+        ),
+        // Error handling
+        (
+            &["error", "exception", "handle error", "failure"],
+            &["Result<", "Err(", "unwrap", "anyhow", "?;"],
+        ),
+        // Parsing
+        (
+            &["parse", "parsing", "tokenize", "lex"],
+            &["fn parse", "Parser", "Token", "from_str"],
+        ),
+        // Serialization
+        (
+            &["serialize", "deserialize", "json", "encode", "decode"],
+            &["Serialize", "Deserialize", "serde", "to_string", "from_str"],
+        ),
+        // Concurrency
+        (
+            &["concurrent", "parallel", "thread", "async", "mutex"],
+            &["Arc<", "Mutex<", "async fn", "tokio", "rayon", "RwLock"],
+        ),
+        // Testing
+        (
+            &["test", "assert", "verify", "check"],
+            &["#[test]", "assert!", "assert_eq!", "fn test_"],
+        ),
+        // Caching
+        (
+            &["cache", "memoize", "store"],
+            &["HashMap", "cache", "LruCache", "memo"],
+        ),
+        // Configuration
+        (
+            &["config", "setting", "option", "preference"],
+            &["Config", "Settings", "Options", "Default"],
+        ),
+        // Networking/HTTP
+        (
+            &["http", "request", "endpoint", "api", "rest"],
+            &["fn get", "fn post", "Handler", "Router", "axum"],
+        ),
+        // File I/O
+        (
+            &["file", "read file", "write file", "io"],
+            &["File::open", "read_to_string", "BufReader", "std::fs"],
+        ),
+        // Graph/tree
+        (
+            &["graph", "tree", "node", "edge"],
+            &["Graph", "Node", "Edge", "petgraph", "DiGraph"],
+        ),
+        // Database
+        (
+            &["database", "query", "sql", "store"],
+            &["Connection", "execute", "query", "INSERT", "SELECT"],
+        ),
+        // Authentication
+        (
+            &["auth", "login", "password", "token", "jwt"],
+            &["authenticate", "verify_token", "Bearer", "Session"],
+        ),
+        // Hashing
+        (
+            &["hash", "digest", "checksum"],
+            &["Hash", "Hasher", "sha256", "xxh3", "digest"],
+        ),
+        // Embedding/vector
+        (
+            &["embed", "vector", "similarity", "cosine"],
+            &["embed", "Vec<f32>", "cosine_similarity", "dot_product"],
+        ),
+        // Indexing
+        (
+            &["index", "inverted", "full text", "bm25"],
+            &["Index", "Tantivy", "BM25", "tokenizer"],
+        ),
+    ];
+
+    for (keywords, code_patterns) in concept_map {
+        if keywords.iter().any(|kw| query_lower.contains(kw)) {
+            patterns.extend(code_patterns.iter().map(|p| p.to_string()));
+        }
+    }
+
+    patterns
 }
 
 /// Generate query reformulations for multi-query search (RRF fusion).
@@ -1384,6 +1554,96 @@ mod tests {
         assert_eq!(result[0].chunk_id, "a");
     }
 
+    // -----------------------------------------------------------------------
+    // Adaptive truncation tests
+    // -----------------------------------------------------------------------
+
+    fn make_result(id: &str) -> SearchResult {
+        SearchResult {
+            chunk_id: id.into(),
+            file_path: format!("src/{id}.rs"),
+            language: "Rust".into(),
+            score: 0.0,
+            line_start: 0,
+            line_end: 10,
+            signature: String::new(),
+            scope_chain: vec![],
+            content: String::new(),
+        }
+    }
+
+    #[test]
+    fn adaptive_truncate_detects_cliff() {
+        let mut results = vec![
+            SearchResult {
+                score: 10.0,
+                ..make_result("a")
+            },
+            SearchResult {
+                score: 9.5,
+                ..make_result("b")
+            },
+            SearchResult {
+                score: 9.0,
+                ..make_result("c")
+            },
+            SearchResult {
+                score: 3.0,
+                ..make_result("d")
+            }, // cliff!
+            SearchResult {
+                score: 2.5,
+                ..make_result("e")
+            },
+        ];
+        adaptive_truncate(&mut results, 3, 0.35);
+        assert_eq!(results.len(), 3); // truncated at cliff
+    }
+
+    #[test]
+    fn adaptive_truncate_keeps_min() {
+        let mut results = vec![
+            SearchResult {
+                score: 10.0,
+                ..make_result("a")
+            },
+            SearchResult {
+                score: 1.0,
+                ..make_result("b")
+            }, // huge cliff but min=3
+            SearchResult {
+                score: 0.5,
+                ..make_result("c")
+            },
+        ];
+        adaptive_truncate(&mut results, 3, 0.35);
+        assert_eq!(results.len(), 3); // kept min
+    }
+
+    #[test]
+    fn adaptive_truncate_no_cliff() {
+        let mut results = vec![
+            SearchResult {
+                score: 10.0,
+                ..make_result("a")
+            },
+            SearchResult {
+                score: 9.0,
+                ..make_result("b")
+            },
+            SearchResult {
+                score: 8.0,
+                ..make_result("c")
+            },
+            SearchResult {
+                score: 7.0,
+                ..make_result("d")
+            },
+        ];
+        adaptive_truncate(&mut results, 3, 0.35);
+        assert_eq!(results.len(), 4); // no cliff, all kept
+    }
+
     #[test]
     fn rrf_fuse_multi_promotes_shared_results() {
         // Result "shared" appears in all 3 lists → should rank highest.
@@ -1408,6 +1668,35 @@ mod tests {
         assert_eq!(
             fused[0].chunk_id, "shared",
             "result appearing in all lists should rank first"
+        );
+    }
+
+    #[test]
+    fn reformulate_to_code_sorting() {
+        let patterns = reformulate_to_code("how to sort a list");
+        assert!(patterns.iter().any(|p| p.contains("sort")));
+        assert!(patterns.iter().any(|p| p.contains("Ord")));
+    }
+
+    #[test]
+    fn reformulate_to_code_no_match() {
+        let patterns = reformulate_to_code("quantum physics theory");
+        assert!(patterns.is_empty());
+    }
+
+    #[test]
+    fn reformulate_to_code_multiple_concepts() {
+        let patterns = reformulate_to_code("async file parsing with error handling");
+        assert!(patterns.iter().any(|p| p.contains("async")));
+        assert!(
+            patterns
+                .iter()
+                .any(|p| p.contains("parse") || p.contains("Parser"))
+        );
+        assert!(
+            patterns
+                .iter()
+                .any(|p| p.contains("Result") || p.contains("Err"))
         );
     }
 }

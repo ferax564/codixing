@@ -936,6 +936,7 @@ fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
                 line_end: chunk.line_end as u64,
                 signature: chunk.signatures.join("\n"),
                 scope_chain: chunk.scope_chain.clone(),
+                entity_names: chunk.entity_names.clone(),
                 content: chunk.content.clone(),
             },
         );
@@ -981,21 +982,34 @@ fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
 
 /// Build the text string to embed for a chunk.
 ///
-/// When `contextual` is `true`, prepends the file path, language, and AST
-/// scope chain — the "contextual embeddings" technique from Sourcegraph Cody
-/// that reduces retrieval failure rate by ~35 %.
+/// When `contextual` is `true`, prepends a single-line context prefix with
+/// file path, language, scope chain, and entity names — the "contextual
+/// chunk embedding" technique that gives the embedding model positional and
+/// semantic context, improving retrieval quality by ~35 %.
 fn make_embed_text(meta: &ChunkMeta, contextual: bool) -> String {
     if !contextual {
         return meta.content.clone();
     }
-    let mut header = format!("File: {}\nLanguage: {}", meta.file_path, meta.language);
+    let prefix = build_context_prefix(meta);
+    format!("{prefix}{}", meta.content)
+}
+
+/// Build a context prefix for a chunk to improve embedding quality.
+///
+/// Produces a single-line header with file path, language, scope chain, and
+/// entity names so the embedding model knows the chunk's location in the
+/// codebase. The prefix is prepended to chunk content before embedding but
+/// is **not** stored in the index — only the raw content is persisted.
+fn build_context_prefix(meta: &ChunkMeta) -> String {
+    let mut header = format!("File: {} | Language: {}", meta.file_path, meta.language);
     if !meta.scope_chain.is_empty() {
-        header.push_str(&format!("\nScope: {}", meta.scope_chain.join(" > ")));
+        header.push_str(&format!(" | Scope: {}", meta.scope_chain.join(" > ")));
     }
-    if !meta.signature.is_empty() {
-        header.push_str(&format!("\nSignature: {}", meta.signature));
+    if !meta.entity_names.is_empty() {
+        header.push_str(&format!(" | Entities: {}", meta.entity_names.join(", ")));
     }
-    format!("{header}\n\n{}", meta.content)
+    header.push('\n');
+    header
 }
 
 /// Batch-embed all pending chunks and add them to the vector index.
@@ -1470,5 +1484,127 @@ pub fn unique_new_function() -> bool {
         let stats = engine.stats();
         // embeddings disabled → vector_count = 0.
         assert_eq!(stats.vector_count, 0);
+    }
+
+    #[test]
+    fn test_build_context_prefix() {
+        let meta = ChunkMeta {
+            chunk_id: 42,
+            file_path: "crates/core/src/engine/search.rs".to_string(),
+            language: "rust".to_string(),
+            line_start: 10,
+            line_end: 30,
+            signature: "fn search(&self) -> Result<Vec<SearchResult>>".to_string(),
+            scope_chain: vec!["Engine".to_string(), "search".to_string()],
+            entity_names: vec!["search".to_string(), "apply_graph_boost".to_string()],
+            content: "fn search(&self) { }".to_string(),
+        };
+        let prefix = build_context_prefix(&meta);
+        assert_eq!(
+            prefix,
+            "File: crates/core/src/engine/search.rs | Language: rust | Scope: Engine > search | Entities: search, apply_graph_boost\n"
+        );
+    }
+
+    #[test]
+    fn test_context_prefix_empty_scope() {
+        let meta = ChunkMeta {
+            chunk_id: 1,
+            file_path: "src/main.rs".to_string(),
+            language: "rust".to_string(),
+            line_start: 0,
+            line_end: 5,
+            signature: String::new(),
+            scope_chain: vec![],
+            entity_names: vec!["main".to_string()],
+            content: "fn main() {}".to_string(),
+        };
+        let prefix = build_context_prefix(&meta);
+        assert_eq!(
+            prefix,
+            "File: src/main.rs | Language: rust | Entities: main\n"
+        );
+        // No " | Scope:" segment when scope_chain is empty.
+        assert!(!prefix.contains("Scope:"));
+    }
+
+    #[test]
+    fn test_context_prefix_with_entities() {
+        let meta = ChunkMeta {
+            chunk_id: 7,
+            file_path: "lib/parser.py".to_string(),
+            language: "python".to_string(),
+            line_start: 0,
+            line_end: 50,
+            signature: String::new(),
+            scope_chain: vec!["Parser".to_string()],
+            entity_names: vec![
+                "parse".to_string(),
+                "tokenize".to_string(),
+                "validate".to_string(),
+            ],
+            content: "class Parser: ...".to_string(),
+        };
+        let prefix = build_context_prefix(&meta);
+        assert!(prefix.contains("Entities: parse, tokenize, validate"));
+        assert!(prefix.contains("Scope: Parser"));
+        assert!(prefix.ends_with('\n'));
+    }
+
+    #[test]
+    fn test_context_prefix_no_entities_no_scope() {
+        let meta = ChunkMeta {
+            chunk_id: 99,
+            file_path: "config.toml".to_string(),
+            language: "toml".to_string(),
+            line_start: 0,
+            line_end: 10,
+            signature: String::new(),
+            scope_chain: vec![],
+            entity_names: vec![],
+            content: "[package]\nname = \"foo\"".to_string(),
+        };
+        let prefix = build_context_prefix(&meta);
+        assert_eq!(prefix, "File: config.toml | Language: toml\n");
+        assert!(!prefix.contains("Scope:"));
+        assert!(!prefix.contains("Entities:"));
+    }
+
+    #[test]
+    fn test_make_embed_text_contextual() {
+        let meta = ChunkMeta {
+            chunk_id: 42,
+            file_path: "src/lib.rs".to_string(),
+            language: "rust".to_string(),
+            line_start: 0,
+            line_end: 5,
+            signature: String::new(),
+            scope_chain: vec!["Foo".to_string()],
+            entity_names: vec!["bar".to_string()],
+            content: "fn bar() {}".to_string(),
+        };
+        let text = make_embed_text(&meta, true);
+        assert!(text.starts_with("File: src/lib.rs | Language: rust"));
+        assert!(text.contains("Scope: Foo"));
+        assert!(text.contains("Entities: bar"));
+        assert!(text.ends_with("fn bar() {}"));
+    }
+
+    #[test]
+    fn test_make_embed_text_non_contextual() {
+        let meta = ChunkMeta {
+            chunk_id: 42,
+            file_path: "src/lib.rs".to_string(),
+            language: "rust".to_string(),
+            line_start: 0,
+            line_end: 5,
+            signature: String::new(),
+            scope_chain: vec!["Foo".to_string()],
+            entity_names: vec!["bar".to_string()],
+            content: "fn bar() {}".to_string(),
+        };
+        let text = make_embed_text(&meta, false);
+        // Non-contextual mode returns raw content only.
+        assert_eq!(text, "fn bar() {}");
     }
 }
