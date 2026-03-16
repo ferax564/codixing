@@ -21,14 +21,20 @@ pub(crate) fn expand_vector_query(query: &str) -> Option<String> {
     let mut extra = Vec::new();
 
     let synonyms: &[(&[&str], &[&str])] = &[
-        (&["dead code", "unused", "unreachable"], &["orphan", "find_orphans"]),
+        (
+            &["dead code", "unused", "unreachable"],
+            &["orphan", "find_orphans"],
+        ),
         (&["dependency", "dependencies"], &["import", "use"]),
         (&["refactor", "restructure"], &["rename", "extract"]),
         (&["performance", "optimize"], &["benchmark", "perf"]),
         (&["similar", "duplicate"], &["cosine", "find_similar"]),
         (&["ranking", "scoring"], &["pagerank", "boost", "BM25"]),
         (&["complexity", "complicated"], &["cyclomatic", "McCabe"]),
-        (&["coverage", "test coverage"], &["find_tests", "test_mapping"]),
+        (
+            &["coverage", "test coverage"],
+            &["find_tests", "test_mapping"],
+        ),
     ];
 
     for (triggers, expansions) in synonyms {

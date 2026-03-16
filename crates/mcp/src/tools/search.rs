@@ -109,12 +109,16 @@ pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) 
                 results.retain(|r| {
                     let sig_lower = r.signature.to_lowercase();
                     // Check the first few lines of content where declarations live.
-                    let first_lines: String = r.content.lines().take(3)
-                        .collect::<Vec<_>>().join(" ").to_lowercase();
-                    prefixes.iter().any(|p| {
-                        sig_lower.contains(p)
-                            || first_lines.contains(p)
-                    })
+                    let first_lines: String = r
+                        .content
+                        .lines()
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .to_lowercase();
+                    prefixes
+                        .iter()
+                        .any(|p| sig_lower.contains(p) || first_lines.contains(p))
                 });
             }
 

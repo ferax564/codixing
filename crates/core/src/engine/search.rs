@@ -305,10 +305,18 @@ impl Engine {
     /// test call-sites are legitimate results).
     pub(super) fn apply_test_demotion(&self, results: &mut [SearchResult]) {
         const TEST_DEMOTION: f32 = 0.5;
+        const INFRA_DEMOTION: f32 = 0.5;
         let mut changed = false;
         for r in results.iter_mut() {
             if is_test_file(&r.file_path) || is_test_chunk(r) {
                 r.score *= TEST_DEMOTION;
+                changed = true;
+            } else if is_search_infra(&r.file_path) {
+                // Search infrastructure files (engine/search.rs, retriever/*.rs)
+                // are self-referential: they contain synonym maps, reformulation
+                // patterns, and strategy code that mentions every search concept.
+                // Demote them so domain-specific results rank higher.
+                r.score *= INFRA_DEMOTION;
                 changed = true;
             }
         }
@@ -636,6 +644,14 @@ fn is_test_file(path: &str) -> bool {
     {
         return true;
     }
+    // Benchmark/evaluation files: benchmarks/, bench/, *.bench.*, *_bench.*
+    if path.contains("/benchmarks/")
+        || path.contains("/bench/")
+        || path.starts_with("benchmarks/")
+        || path.starts_with("bench/")
+    {
+        return true;
+    }
     // Rust: *_test.rs
     if path.ends_with("_test.rs") {
         return true;
@@ -648,8 +664,12 @@ fn is_test_file(path: &str) -> bool {
     {
         return true;
     }
-    // File-name patterns (case-insensitive basename check)
+    // File named "tests.rs" or "tests.py" etc. — test module files
     let basename = path.rsplit('/').next().unwrap_or(path);
+    if basename.starts_with("tests.") || basename == "tests" {
+        return true;
+    }
+    // File-name patterns (case-insensitive basename check)
     let lower = basename.to_ascii_lowercase();
     // Python: test_*.py, *_test.py
     if (lower.starts_with("test_") || lower.ends_with("_test.py")) && lower.ends_with(".py") {
@@ -666,6 +686,19 @@ fn is_test_file(path: &str) -> bool {
         return true;
     }
     false
+}
+
+/// Check if a file is part of the search/retrieval infrastructure.
+///
+/// These files are self-referential: they contain synonym maps, reformulation
+/// patterns, query expansion code, and strategy dispatch logic that mentions
+/// every search concept. BM25 falsely ranks them highly for domain queries
+/// like "dead code detection" because the synonym map literally contains
+/// those terms.
+fn is_search_infra(path: &str) -> bool {
+    // Only demote the specific files that are self-referential.
+    // Don't demote all engine/ files — engine/mod.rs, engine/sync.rs etc. are fine.
+    path.ends_with("engine/search.rs") || path.ends_with("retriever/hybrid.rs")
 }
 
 /// Demote C/C++ header files when implementation files (.c/.cc/.cpp) are also
@@ -741,20 +774,67 @@ fn extract_dotted_paths(query: &str) -> Vec<String> {
 /// whose `file_path` contains `django/db/models/lookups` get a 2× score boost.
 /// This is a zero-cost post-retrieval heuristic — no ML compute involved.
 fn apply_path_match_boost(results: &mut [SearchResult], query: &str) {
-    let dotted = extract_dotted_paths(query);
-    if dotted.is_empty() {
-        return;
-    }
     let mut boosted = false;
+
+    // Boost 1: dotted module paths (e.g., "django.db.models" → file path match)
+    let dotted = extract_dotted_paths(query);
     for r in results.iter_mut() {
         for d in &dotted {
             if r.file_path.contains(d.as_str()) {
-                r.score *= 2.0; // Strong boost for path match
+                r.score *= 2.0;
                 boosted = true;
                 break;
             }
         }
     }
+
+    // Boost 2: query keywords matching file/directory names.
+    // If the query mentions "parser" and a file is in parser/, boost it.
+    // Only applies to words ≥4 chars that aren't common stop words.
+    let path_keywords: Vec<&str> = query
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| w.len() >= 4)
+        .filter(|w| {
+            !matches!(
+                w.to_lowercase().as_str(),
+                "how"
+                    | "does"
+                    | "what"
+                    | "with"
+                    | "from"
+                    | "this"
+                    | "that"
+                    | "have"
+                    | "been"
+                    | "code"
+                    | "file"
+                    | "function"
+                    | "method"
+                    | "class"
+                    | "struct"
+            )
+        })
+        .collect();
+
+    if !path_keywords.is_empty() {
+        for r in results.iter_mut() {
+            let path_lower = r.file_path.to_lowercase();
+            for kw in &path_keywords {
+                let kw_lower = kw.to_lowercase();
+                // Check if keyword appears as a path component
+                if path_lower.contains(&format!("/{kw_lower}/"))
+                    || path_lower.contains(&format!("/{kw_lower}."))
+                    || path_lower.ends_with(&format!("/{kw_lower}"))
+                {
+                    r.score *= 2.0; // Strong path-keyword boost
+                    boosted = true;
+                    break;
+                }
+            }
+        }
+    }
+
     if boosted {
         results.sort_by(|a, b| {
             b.score
