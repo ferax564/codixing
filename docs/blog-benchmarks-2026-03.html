@@ -247,7 +247,7 @@
     <h1>100% search accuracy,<br>24ms cold start,<br>zero external APIs</h1>
 
     <p class="subtitle">
-      We benchmarked Codixing on two real codebases&mdash;its own Rust codebase (138 files) and OpenClaw, a 269K-line C++ game engine (757 files). Here's what we found, and why it matters for AI coding agents.
+      We benchmarked Codixing on two real codebases&mdash;its own Rust codebase (138 files) and OpenClaw, OpenClaw, a 269K-line C++ game reimplementation (757 files). Here's what we found, and why it matters for AI coding agents.
     </p>
 
     <div class="stat-grid">
@@ -271,7 +271,7 @@
 
     <h2>The problem with grep for AI agents</h2>
 
-    <p>When Claude Code runs <code>rg b2Vec2</code> on a C++ game engine, it gets <strong>2,240 hits and 196 KB</strong> of raw text. Most of it is noise&mdash;usage sites, comments, includes. The agent burns tokens parsing results it can't use, and still doesn't know which file <em>defines</em> the type.</p>
+    <p>When Claude Code runs <code>rg b2Vec2</code> on a 269K-line C++ codebase, it gets <strong>2,240 hits and 196 KB</strong> of raw text. Most of it is noise&mdash;usage sites, comments, includes. The agent burns tokens parsing results it can't use, and still doesn't know which file <em>defines</em> the type.</p>
 
     <p>It gets worse with natural language. When an agent needs to find "how collision detection works," grep returns either <strong>0 results</strong> (the exact phrase doesn't appear in code) or thousands of irrelevant matches. We tested 10 domain-specific queries on OpenClaw:</p>
 
@@ -328,7 +328,7 @@
 
     <h2>OpenClaw: the large codebase test</h2>
 
-    <p>OpenClaw is a C++ game engine&mdash;757 files, 269,293 lines, 17,602 symbols. It tests Codixing on a language and codebase it wasn't optimized for.</p>
+    <p>OpenClaw is a from-scratch C++ reimplementation of Captain Claw (1997 platformer)&mdash;757 files, 269,293 lines, 17,602 symbols. It uses SDL2, Box2D, and TinyXML. It tests Codixing on a language and codebase it wasn't optimized for.</p>
 
     <pre><span class="cmt"># BM25-only, no ONNX, no external API</span>
 <span class="cmd">$ codixing init /path/to/OpenClaw</span>
