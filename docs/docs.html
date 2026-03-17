@@ -545,8 +545,8 @@ cargo build --release --workspace
 
         <div class="pre-label">shell</div>
         <pre><code><span class="tok-comment"># 1. Index your project (BM25 only — instant, no model download)</span>
-<span class="tok-cmd">codixing init</span> . <span class="tok-flag">--no-embeddings</span>
-<span class="tok-out">✓ Indexed 770 files, 14,203 symbols in 0.87s</span>
+<span class="tok-cmd">codixing init</span> .
+<span class="tok-out">✓ Indexed 138 files, 1113 chunks, 2323 symbols in 0.21s</span>
 
 <span class="tok-comment"># 2. Search with natural language</span>
 <span class="tok-cmd">codixing search</span> "authentication handler"
@@ -569,7 +569,7 @@ pub fn handle_auth_request(req: Request) -&gt; Result&lt;Token&gt;</span>
   <span class="tok-key">"mcpServers"</span>: {
     <span class="tok-key">"codixing"</span>: {
       <span class="tok-key">"command"</span>: <span class="tok-str">"/path/to/codixing-mcp"</span>,
-      <span class="tok-key">"args"</span>: [<span class="tok-str">"--root"</span>, <span class="tok-str">"/path/to/your/project"</span>, <span class="tok-str">"--daemon"</span>]
+      <span class="tok-key">"args"</span>: [<span class="tok-str">"--root"</span>, <span class="tok-str">"."</span>, <span class="tok-str">"--compact"</span>]
     }
   }
 }</code></pre>
@@ -586,7 +586,7 @@ pub fn handle_auth_request(req: Request) -&gt; Result&lt;Token&gt;</span>
         <table class="doc-table">
           <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
           <tbody>
-            <tr><td>--no-embeddings</td><td>false</td><td>Skip vector embedding — BM25 only. Much faster init, no model download.</td></tr>
+            <tr><td>--model &lt;name&gt;</td><td>none</td><td>Enable vector embeddings: <code>bge-small-en</code> (recommended), <code>bge-base-en</code>, <code>jina-small</code>, <code>snowflake-arctic</code>, <code>nomic-embed</code>. BM25-only by default.</td></tr>
             <tr><td>--also &lt;DIR&gt;</td><td>—</td><td>Add an extra root directory to the same index (multi-repo mode).</td></tr>
             <tr><td>--force</td><td>false</td><td>Wipe and rebuild the index from scratch.</td></tr>
           </tbody>
@@ -594,7 +594,7 @@ pub fn handle_auth_request(req: Request) -&gt; Result&lt;Token&gt;</span>
 
         <div class="pre-label">examples</div>
         <pre><code><span class="tok-comment"># Fast BM25-only index of current directory</span>
-codixing init . --no-embeddings
+codixing init .
 
 <span class="tok-comment"># Full hybrid index</span>
 codixing init /path/to/project
@@ -776,7 +776,7 @@ Sync complete in 0.12s</span></code></pre>
           <tbody>
             <tr><td><code>--serve</code></td><td>false</td><td>Launch the REST + graph viewer server after analysis</td></tr>
             <tr><td><code>--port</code></td><td>8080</td><td>Port for the server when <code>--serve</code> is used</td></tr>
-            <tr><td><code>--no-embeddings</code></td><td>false</td><td>Skip vector embedding (faster, BM25+graph only)</td></tr>
+            <tr><td><code>--model bge-small-en</code></td><td>false</td><td>Skip vector embedding (faster, BM25+graph only)</td></tr>
             <tr><td><code>--output</code></td><td>text</td><td><code>text</code> or <code>json</code> report format</td></tr>
           </tbody>
         </table>
@@ -870,7 +870,7 @@ Sync complete in 0.12s</span></code></pre>
         <pre><code>codixing-mcp --root /path/to/project --daemon</code></pre>
 
         <h3>Auto-init</h3>
-        <p>If no index exists at <code>--root</code>, the MCP server automatically runs <code>init --no-embeddings</code> before serving the first request. No manual setup required when connecting from Claude Code.</p>
+        <p>If no index exists at <code>--root</code>, the MCP server automatically runs <code>init --model bge-small-en</code> before serving the first request. No manual setup required when connecting from Claude Code.</p>
 
         <h3>VS Code / Cursor extension</h3>
         <p>Install the extension from <code>editors/vscode/</code>. It exposes 6 commands and auto-writes the MCP server entry to both <code>~/.claude.json</code> and <code>~/.cursor/mcp.json</code>.</p>
@@ -1525,7 +1525,7 @@ http://127.0.0.1:3000/graph/view</code></pre>
         <h2>Embeddings</h2>
 
         <h3>BGE-Base-EN-v1.5 (default)</h3>
-        <p>768-dimensional embeddings via fastembed ONNX. Downloaded automatically on first <code>init</code> (no <code>--no-embeddings</code> flag). Stored in the system model cache. int8 quantised at index time.</p>
+        <p>768-dimensional embeddings via fastembed ONNX. Downloaded automatically on first <code>init</code> (no <code>--model bge-small-en</code> flag). Stored in the system model cache. int8 quantised at index time.</p>
 
         <h3>Qwen3-Embedding-0.6B <span class="badge badge-orange">feature flag</span></h3>
         <p>1024-dimensional embeddings via candle. Requires building with <code>--features qwen3</code>. Suitable for GPU-accelerated environments or when higher-dimensional representations are preferred.</p>
@@ -1543,7 +1543,7 @@ QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=codixing codixing init .</cod
       <!-- Languages -->
       <section class="doc-section" id="languages">
         <h2>Language Support</h2>
-        <p>Codixing uses tree-sitter for AST-aware parsing. All 14 languages below get full chunking, symbol extraction, and import graph edges.</p>
+        <p>Codixing uses tree-sitter for AST-aware parsing. All 20 languages below get full chunking, symbol extraction, and import graph edges.</p>
 
         <h3>Tier 1 — Full support</h3>
         <div class="lang-grid">

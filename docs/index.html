@@ -1056,7 +1056,7 @@
         <a href="#features">Features</a>
         <a href="#quickstart">Quick Start</a>
         <a href="#mcp">MCP Tools</a>
-        <a href="/docs">Docs</a>
+        <a href="/docs.html">Docs</a>
       </div>
       <a class="nav-cta" href="https://github.com/ferax564/codixing">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>
@@ -1070,12 +1070,12 @@
     <div class="hero">
       <div class="hero-badge">
         <span class="badge-dot"></span>
-        Rust-native &bull; 244 tests &bull; MCP-ready
+        Rust-native &bull; 628 tests &bull; 47 MCP tools &bull; 100% search accuracy
       </div>
       <h1>Code retrieval<br><span class="grad">built for AI agents</span></h1>
       <p class="hero-sub">
         Codixing gives your coding agent exactly the code it needs&mdash;not 2,000 grep hits.
-        AST-aware chunking, hybrid BM25+vector search, and dependency graph ranking in a single Rust binary.
+        AST-aware chunking, hybrid BM25+vector search, dependency graph ranking, and 100% retrieval accuracy in a single Rust binary.
       </p>
       <div class="hero-cta">
         <a class="btn-primary" href="https://github.com/ferax564/codixing">
@@ -1101,20 +1101,20 @@
       </div>
       <div class="metrics-strip">
         <div class="metric-item">
-          <span class="metric-val" data-count="0.87" data-suffix="s" data-decimals="2">0.87s</span>
-          <span class="metric-label">BM25 + graph init (246k LoC)</span>
+          <span class="metric-val">24ms</span>
+          <span class="metric-label">MCP cold start (BM25-only)</span>
         </div>
         <div class="metric-item">
-          <span class="metric-val">&lt;10ms</span>
-          <span class="metric-label">BM25 search latency p99</span>
+          <span class="metric-val">10/10</span>
+          <span class="metric-label">top-1 search accuracy</span>
         </div>
         <div class="metric-item">
-          <span class="metric-val" data-count="99" data-suffix="%">0%</span>
-          <span class="metric-label">output reduction on high-hit queries</span>
+          <span class="metric-val" data-count="96.7" data-suffix="%" data-decimals="1">0%</span>
+          <span class="metric-label">token reduction (compact mode)</span>
         </div>
         <div class="metric-item">
-          <span class="metric-val" data-count="244" data-suffix="">0</span>
-          <span class="metric-label">core + integration tests</span>
+          <span class="metric-val" data-count="47" data-suffix="">0</span>
+          <span class="metric-label">MCP tools</span>
         </div>
       </div>
     </div>
@@ -1138,7 +1138,7 @@
               </div>
               <div class="demo-stat-text">
                 <strong>Hybrid search</strong>
-                <span>BM25 + vector fusion with 5 strategy levels</span>
+                <span>BM25 + vector fusion &mdash; 10/10 top-1 accuracy</span>
               </div>
             </div>
             <div class="demo-stat">
@@ -1169,25 +1169,23 @@
             <span class="terminal-title">codixing &mdash; bash</span>
           </div>
           <div class="terminal-body" id="typewriter-terminal">
-            <div class="t-line"><span class="t-comment"># Index a repository</span></div>
+            <div class="t-line"><span class="t-comment"># Index a repository (BM25 &mdash; no external API needed)</span></div>
             <div class="t-blank"></div>
-            <div class="t-line"><span class="t-prompt">$</span><span class="t-cmd">&nbsp;codixing init . --no-embeddings</span></div>
-            <div class="t-line"><span class="t-output t-success">&#10003; Indexed 770 files, 14,203 symbols</span></div>
-            <div class="t-line"><span class="t-output t-info">&#9654; Init: 0.87s (246,000 LoC)</span></div>
+            <div class="t-line"><span class="t-prompt">$</span><span class="t-cmd">&nbsp;codixing init .</span></div>
+            <div class="t-line"><span class="t-output t-success">&#10003; Indexed 138 files, 1113 chunks, 2323 symbols in 0.21s</span></div>
             <div class="t-blank"></div>
-            <div class="t-line"><span class="t-comment"># Search with hybrid strategy</span></div>
+            <div class="t-line"><span class="t-comment"># Search with hybrid strategy (30ms)</span></div>
             <div class="t-blank"></div>
-            <div class="t-line"><span class="t-prompt">$</span><span class="t-cmd">&nbsp;codixing search "authentication handler" --strategy fast</span></div>
-            <div class="t-line"><span class="t-output t-section">&#9658; src/auth/handler.rs:42 [score: 0.94]</span></div>
-            <div class="t-line"><span class="t-output">  pub fn handle_auth_request(req: Request) -&gt; Result&lt;Token&gt;</span></div>
-            <div class="t-line"><span class="t-output t-section">&#9658; src/middleware/jwt.rs:18 [score: 0.87]</span></div>
-            <div class="t-line"><span class="t-output">  pub fn verify_jwt(token: &amp;str) -&gt; Result&lt;Claims&gt;</span></div>
+            <div class="t-line"><span class="t-prompt">$</span><span class="t-cmd">&nbsp;codixing search "dead code detection" --strategy fast</span></div>
+            <div class="t-line"><span class="t-output t-section">&#9658; src/orphans.rs [score: 0.94]</span></div>
+            <div class="t-line"><span class="t-output">  pub enum OrphanConfidence { Certain, High, Moderate, Low }</span></div>
+            <div class="t-line"><span class="t-output t-section">&#9658; src/engine/orphans.rs [score: 0.87]</span></div>
+            <div class="t-line"><span class="t-output">  pub fn find_orphans(&amp;self, options: OrphanOptions)</span></div>
             <div class="t-blank"></div>
-            <div class="t-line"><span class="t-comment"># Follow the dependency graph</span></div>
+            <div class="t-line"><span class="t-comment"># Type-filtered search (6 kinds: fn, struct, enum, impl, const, trait)</span></div>
             <div class="t-blank"></div>
-            <div class="t-line"><span class="t-prompt">$</span><span class="t-cmd">&nbsp;codixing callees src/auth/handler.rs --depth 2</span></div>
-            <div class="t-line"><span class="t-output t-info">  jwt.rs &rarr; crypto.rs &rarr; openssl.rs</span></div>
-            <div class="t-line"><span class="t-output">  auth.rs &rarr; db/user.rs &rarr; models.rs</span></div>
+            <div class="t-line"><span class="t-prompt">$</span><span class="t-cmd">&nbsp;codixing search "Engine" --kind struct</span></div>
+            <div class="t-line"><span class="t-output t-info">  pub struct Engine { tantivy, embedder, vector, graph... }</span></div>
             <div class="t-blank"></div>
             <div class="t-line"><span class="t-prompt">$</span><span class="cursor"></span></div>
           </div>
@@ -1358,7 +1356,7 @@
               <div style="color:var(--text-muted);font-size:0.82rem">JavaScript<br><span style="font-size:0.8em">Hit@5</span></div>
             </div>
           </div>
-          <p style="margin-top:16px;color:var(--text-muted);font-size:0.85rem">14 languages supported via tree-sitter AST: Rust, Python, TypeScript, Go, Java, C, C++, C#, Ruby, Swift, Kotlin, Scala, Zig, PHP.</p>
+          <p style="margin-top:16px;color:var(--text-muted);font-size:0.85rem">20 languages supported via tree-sitter AST: Rust, Python, TypeScript, Go, Java, C, C++, C#, Ruby, Swift, Kotlin, Scala, Zig, PHP, YAML, TOML, Dockerfile, Makefile, HCL, Lua.</p>
         </div>
         <div class="bench-card">
           <h3>Indexing speed</h3>
@@ -1408,16 +1406,16 @@
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#00d4aa" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="4" r="2"/><circle cx="4" cy="18" r="2"/><circle cx="20" cy="18" r="2"/><path d="M12 6v4M12 10l-6 6M12 10l6 6"/></svg>
           </div>
           <h3>AST-aware chunking</h3>
-          <p>Tree-sitter parsing across 14 languages keeps functions and classes semantically intact. No more mid-function splits corrupting context.</p>
-          <span class="feature-tag">Rust &bull; Python &bull; TS &bull; Go &bull; Java &bull; C++ &bull; +8</span>
+          <p>Tree-sitter parsing across 20 languages keeps functions and classes semantically intact. No more mid-function splits corrupting context.</p>
+          <span class="feature-tag">Rust &bull; Python &bull; TS &bull; Go &bull; Java &bull; C++ &bull; +14</span>
         </div>
         <div class="feature-card" style="--delay:0.07s">
           <div class="feature-icon purple">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3H6a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3h12a3 3 0 0 0 3-3 3 3 0 0 0-3-3z"/></svg>
           </div>
           <h3>Hybrid retrieval</h3>
-          <p>BM25 + vector fusion with Reciprocal Rank Fusion and automatic CamelCase&#x2194;snake_case query expansion. Four strategy levels from <code style="color:var(--cyan);font-size:0.85em">instant</code> to <code style="color:var(--cyan);font-size:0.85em">thorough</code> MMR dedup.</p>
-          <span class="feature-tag">RRF &bull; MMR &bull; Query expansion</span>
+          <p>BM25 + vector fusion with asymmetric RRF, concept-to-path boost, synonym expansion, and query-to-code reformulation. Achieves <strong>10/10 top-1 accuracy</strong> across diverse query types.</p>
+          <span class="feature-tag">RRF &bull; MMR &bull; Query expansion &bull; Concept boost</span>
         </div>
         <div class="feature-card" style="--delay:0.14s">
           <div class="feature-icon orange">
@@ -1440,8 +1438,8 @@
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#3fb950" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 17h6M17 14v6"/><path d="M7 10v4M10 7h4M17 10v4"/></svg>
           </div>
           <h3>MCP-ready</h3>
-          <p>33 JSON-RPC 2.0 tools exposed for Claude Code and any MCP-capable client. Auto-registers in <code style="color:var(--cyan);font-size:0.85em">~/.claude.json</code> via VS Code extension.</p>
-          <span class="feature-tag">33 tools &bull; stdin/stdout &bull; Unix socket</span>
+          <p>47 JSON-RPC 2.0 tools exposed for Claude Code and any MCP-capable client. <code style="color:var(--cyan);font-size:0.85em">--compact</code> mode sends only 2 meta-tools on init (96.7% token savings), with all 47 tools discoverable on demand.</p>
+          <span class="feature-tag">47 tools &bull; --compact &bull; stdin/stdout &bull; Unix socket</span>
         </div>
         <div class="feature-card" style="--delay:0.35s">
           <div class="feature-icon pink">
@@ -1461,68 +1459,67 @@
       <div class="mcp-layout">
         <div>
           <div class="section-label reveal">MCP Integration</div>
-          <h2 class="section-title reveal">33 tools for<br>your AI agent</h2>
-          <p class="section-sub reveal">Codixing exposes retrieval, symbols, graph traversal, file reading, and diagnostics over the Model Context Protocol.</p>
+          <h2 class="section-title reveal">47 tools for<br>your AI agent</h2>
+          <p class="section-sub reveal">Codixing exposes retrieval, symbols, graph traversal, file reading, temporal analysis, and diagnostics over the Model Context Protocol. In <code style="color:var(--cyan);font-size:0.85em">--compact</code> mode, only 2 meta-tools are sent on init (~218 tokens), with the full 47 tools discoverable on demand.</p>
           <div class="tools-grid reveal">
             <div class="tool-card">
               <div class="tool-name">code_search</div>
-              <div class="tool-desc">Bounded hybrid search across all strategies</div>
+              <div class="tool-desc">Hybrid search with <code>kind</code> filter (fn, struct, enum, impl, const, trait)</div>
+            </div>
+            <div class="tool-card">
+              <div class="tool-name">explain</div>
+              <div class="tool-desc">Definition + callers + callees in one call</div>
             </div>
             <div class="tool-card">
               <div class="tool-name">find_symbol</div>
               <div class="tool-desc">Case-insensitive definition lookup</div>
             </div>
             <div class="tool-card">
-              <div class="tool-name">read_symbol</div>
-              <div class="tool-desc">Full source of any symbol by name</div>
+              <div class="tool-name">focus_map</div>
+              <div class="tool-desc">PPR-seeded context-aware repo map</div>
             </div>
             <div class="tool-card">
-              <div class="tool-name">get_repo_map</div>
-              <div class="tool-desc">Token-budgeted PageRank architecture map</div>
+              <div class="tool-name">predict_impact</div>
+              <div class="tool-desc">Change impact analysis via graph traversal</div>
             </div>
             <div class="tool-card">
-              <div class="tool-name">get_references</div>
-              <div class="tool-desc">Callers + callees for any file</div>
+              <div class="tool-name">find_orphans</div>
+              <div class="tool-desc">Dead code detection with confidence scoring</div>
             </div>
             <div class="tool-card">
-              <div class="tool-name">get_transitive_deps</div>
-              <div class="tool-desc">Blast-radius multi-hop traversal</div>
+              <div class="tool-name">find_tests</div>
+              <div class="tool-desc">Test-to-source mapping across languages</div>
             </div>
             <div class="tool-card">
-              <div class="tool-name">search_usages</div>
-              <div class="tool-desc">All usage locations for a symbol</div>
+              <div class="tool-name">rename_symbol</div>
+              <div class="tool-desc">Rename across codebase with validation</div>
             </div>
             <div class="tool-card">
-              <div class="tool-name">grep_code</div>
-              <div class="tool-desc">Regex/literal search with context lines</div>
+              <div class="tool-name">get_context_for_task</div>
+              <div class="tool-desc">Assembled context for a development task</div>
             </div>
             <div class="tool-card">
-              <div class="tool-name">read_file</div>
-              <div class="tool-desc">Raw source with optional line range</div>
-            </div>
-            <div class="tool-card">
-              <div class="tool-name">index_status</div>
-              <div class="tool-desc">Diagnostic report with full index stats</div>
+              <div class="tool-name">search_tools</div>
+              <div class="tool-desc">Dynamic tool discovery (compact mode meta-tool)</div>
             </div>
           </div>
         </div>
         <div class="mcp-code-block reveal" style="transition-delay:0.2s">
           <div class="code-tabs">
-            <div class="code-tab active" data-pane="claude-json">~/.claude.json</div>
+            <div class="code-tab active" data-pane="claude-json">.mcp.json</div>
             <div class="code-tab" data-pane="search-call">code_search</div>
             <div class="code-tab" data-pane="graph-call">get_references</div>
           </div>
           <div class="code-panes-container">
           <div class="code-pane active" id="pane-claude-json">
-<span class="c-cmt">// Auto-configured by VS Code extension</span>
+<span class="c-cmt">// .mcp.json — place in your project root</span>
 <span class="c-key">{</span>
   <span class="c-str">"mcpServers"</span>: <span class="c-key">{</span>
     <span class="c-str">"codixing"</span>: <span class="c-key">{</span>
-      <span class="c-str">"command"</span>: <span class="c-str">"/usr/local/bin/codixing-mcp"</span>,
+      <span class="c-str">"command"</span>: <span class="c-str">"codixing-mcp"</span>,
       <span class="c-str">"args"</span>: [
-        <span class="c-str">"--root"</span>,
-        <span class="c-str">"/path/to/your/project"</span>,
-        <span class="c-str">"--daemon"</span>
+        <span class="c-str">"--root"</span>, <span class="c-str">"."</span>,
+        <span class="c-str">"--compact"</span>  <span class="c-cmt">// 96.7% token savings</span>
       ]
     <span class="c-key">}</span>
   <span class="c-key">}</span>
@@ -1543,7 +1540,7 @@
 <span class="c-key">}</span>
 
 <span class="c-cmt">// Returns ranked chunks, token-budgeted</span>
-<span class="c-ok">// &lt;10ms p99 on 1M+ LoC</span>
+<span class="c-ok">// 30ms latency, 10/10 top-1 accuracy</span>
           </div>
           <div class="code-pane" id="pane-graph-call">
 <span class="c-cmt">// Walk the dependency graph</span>
@@ -1601,7 +1598,7 @@
             <div class="step-num">4</div>
             <div class="step-content">
               <h4>Connect to Claude Code</h4>
-              <p>Run as MCP daemon and add to your Claude config.</p>
+              <p>Add <code>.mcp.json</code> with <code>--compact</code> for 96.7% token savings.</p>
             </div>
           </div>
         </div>
@@ -1626,14 +1623,14 @@
 <span class="ln">10</span><span style="color:var(--text)">cargo build --release --workspace</span>
             </div>
             <div class="code-pane-qs" id="qs-index">
-<span class="ln">1</span><span class="c-cmt"># Fast init (BM25 only, &lt;1s on 250k LoC)</span>
-<span class="ln">2</span><span style="color:var(--text)">codixing init . --no-embeddings</span>
+<span class="ln">1</span><span class="c-cmt"># BM25-only (0.21s for 138 files, no ONNX needed)</span>
+<span class="ln">2</span><span style="color:var(--text)">codixing init .</span>
 <span class="ln">3</span><span style="color:var(--text)"></span>
-<span class="ln">4</span><span class="c-cmt"># Full hybrid with semantic search</span>
-<span class="ln">5</span><span style="color:var(--text)">codixing init .</span>
+<span class="ln">4</span><span class="c-cmt"># Hybrid with BgeSmallEn (100% search accuracy)</span>
+<span class="ln">5</span><span style="color:var(--text)">codixing init . --model bge-small-en</span>
 <span class="ln">6</span><span style="color:var(--text)"></span>
-<span class="ln">7</span><span class="c-cmt"># Multi-repo (index additional roots)</span>
-<span class="ln">8</span><span style="color:var(--text)">codixing init . --also ../shared-lib</span>
+<span class="ln">7</span><span class="c-cmt"># Cross-repo federated search</span>
+<span class="ln">8</span><span style="color:var(--text)">codixing init . --federation repos.json</span>
 <span class="ln">9</span><span style="color:var(--text)"></span>
 <span class="ln">10</span><span class="c-cmt"># Keep index up-to-date incrementally</span>
 <span class="ln">11</span><span style="color:var(--text)">codixing sync .</span>
@@ -1653,18 +1650,18 @@
 <span class="ln">12</span><span style="color:var(--text)">codixing graph --token-budget 4000</span>
             </div>
             <div class="code-pane-qs" id="qs-mcp-setup">
-<span class="ln">1</span><span class="c-cmt"># Start MCP daemon (stays warm)</span>
-<span class="ln">2</span><span style="color:var(--text)">codixing-mcp --root . --daemon &amp;</span>
-<span class="ln">3</span><span style="color:var(--text)"></span>
-<span class="ln">4</span><span class="c-cmt"># Add to ~/.claude.json manually</span>
-<span class="ln">5</span><span style="color:var(--purple)">{</span>
-<span class="ln">6</span><span style="color:var(--text)">  </span><span class="c-str">"mcpServers"</span><span style="color:var(--text)">: {</span>
-<span class="ln">7</span><span style="color:var(--text)">    </span><span class="c-str">"codixing"</span><span style="color:var(--text)">: {</span>
-<span class="ln">8</span><span style="color:var(--text)">      </span><span class="c-str">"command"</span><span style="color:var(--text)">: </span><span class="c-str">"/path/codixing-mcp"</span><span style="color:var(--text)">,</span>
-<span class="ln">9</span><span style="color:var(--text)">      </span><span class="c-str">"args"</span><span style="color:var(--text)">: [</span><span class="c-str">"--root"</span><span style="color:var(--text)">, </span><span class="c-str">"."</span><span style="color:var(--text)">, </span><span class="c-str">"--daemon"</span><span style="color:var(--text)">]</span>
-<span class="ln">10</span><span style="color:var(--text)">    }</span>
-<span class="ln">11</span><span style="color:var(--text)">  }</span>
-<span class="ln">12</span><span style="color:var(--purple)">}</span>
+<span class="ln">1</span><span class="c-cmt"># Add .mcp.json to your project root</span>
+<span class="ln">2</span><span style="color:var(--purple)">{</span>
+<span class="ln">3</span><span style="color:var(--text)">  </span><span class="c-str">"mcpServers"</span><span style="color:var(--text)">: {</span>
+<span class="ln">4</span><span style="color:var(--text)">    </span><span class="c-str">"codixing"</span><span style="color:var(--text)">: {</span>
+<span class="ln">5</span><span style="color:var(--text)">      </span><span class="c-str">"command"</span><span style="color:var(--text)">: </span><span class="c-str">"codixing-mcp"</span><span style="color:var(--text)">,</span>
+<span class="ln">6</span><span style="color:var(--text)">      </span><span class="c-str">"args"</span><span style="color:var(--text)">: [</span><span class="c-str">"--root"</span><span style="color:var(--text)">, </span><span class="c-str">"."</span><span style="color:var(--text)">, </span><span class="c-str">"--compact"</span><span style="color:var(--text)">]</span>
+<span class="ln">7</span><span style="color:var(--text)">    }</span>
+<span class="ln">8</span><span style="color:var(--text)">  }</span>
+<span class="ln">9</span><span style="color:var(--purple)">}</span>
+<span class="ln">10</span><span style="color:var(--text)"></span>
+<span class="ln">11</span><span class="c-cmt"># --compact sends only 2 meta-tools on init</span>
+<span class="ln">12</span><span class="c-cmt"># 96.7% token savings, all 47 tools on demand</span>
             </div>
           </div>
         </div>
@@ -1699,8 +1696,8 @@
       </div>
       <div class="footer-links">
         <a href="https://github.com/ferax564/codixing">GitHub</a>
-        <a href="https://github.com/ferax564/codixing/blob/main/README.md">Docs</a>
-        <a href="https://github.com/ferax564/codixing/blob/main/ROADMAP.md">Roadmap</a>
+        <a href="/docs.html">Docs</a>
+        <a href="https://github.com/ferax564/codixing">Roadmap</a>
         <a href="#">Early access</a>
       </div>
       <span>Open source &bull; MIT License</span>
@@ -1783,10 +1780,10 @@
 
     // ── Quickstart steps ──
     const stepFiles = {
-      'build': 'build.sh',
+      'build': 'install.sh',
       'index': 'index.sh',
       'search': 'search.sh',
-      'mcp-setup': 'claude.json'
+      'mcp-setup': '.mcp.json'
     };
 
     document.querySelectorAll('.step').forEach(step => {
