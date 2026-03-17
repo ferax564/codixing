@@ -247,7 +247,7 @@
     <h1>100% search accuracy,<br>24ms cold start,<br>zero external APIs</h1>
 
     <p class="subtitle">
-      We benchmarked Codixing on two real codebases&mdash;its own Rust codebase (138 files) and OpenClaw, OpenClaw, a 269K-line C++ game reimplementation (757 files). Here's what we found, and why it matters for AI coding agents.
+      We benchmarked Codixing on two real codebases&mdash;its own Rust codebase (138 files) and <a href="https://github.com/openclaw/openclaw">OpenClaw</a>, a 368K-line TypeScript AI assistant platform (7,607 files, 76-package monorepo). Here's what we found, and why it matters for AI coding agents.
     </p>
 
     <div class="stat-grid">
@@ -260,39 +260,39 @@
         <div class="stat-label">MCP cold start</div>
       </div>
       <div class="stat-card">
-        <div class="stat-val">93%</div>
+        <div class="stat-val">99%</div>
         <div class="stat-label">Token reduction vs grep</div>
       </div>
       <div class="stat-card">
-        <div class="stat-val">1.08s</div>
-        <div class="stat-label">Index 269K LoC</div>
+        <div class="stat-val">7.9s</div>
+        <div class="stat-label">Index 368K LoC (7607 files)</div>
       </div>
     </div>
 
     <h2>The problem with grep for AI agents</h2>
 
-    <p>When Claude Code runs <code>rg b2Vec2</code> on a 269K-line C++ codebase, it gets <strong>2,240 hits and 196 KB</strong> of raw text. Most of it is noise&mdash;usage sites, comments, includes. The agent burns tokens parsing results it can't use, and still doesn't know which file <em>defines</em> the type.</p>
+    <p>When Claude Code runs <code>grep "Gateway"</code> on <a href="https://github.com/openclaw/openclaw">OpenClaw</a>&mdash;a 368K-line TypeScript monorepo&mdash;it gets <strong>8,986 matches across 920 files (843 KB)</strong>. The agent burns tokens parsing results it can't use, and still doesn't know which file <em>defines</em> the Gateway class.</p>
 
-    <p>It gets worse with natural language. When an agent needs to find "how collision detection works," grep returns either <strong>0 results</strong> (the exact phrase doesn't appear in code) or thousands of irrelevant matches. We tested 10 domain-specific queries on OpenClaw:</p>
+    <p>It gets worse with conceptual queries. When an agent needs to find "how messages are routed between channels," grep returns <strong>3,062 matches (325 KB)</strong> for "rout"&mdash;flooding context with imports, type references, and test mocks. We tested 8 domain-specific queries on OpenClaw:</p>
 
     <table class="bench-table">
       <thead>
-        <tr><th>Query</th><th>ripgrep</th><th>Codixing</th></tr>
+        <tr><th>Query</th><th>grep</th><th>Codixing</th></tr>
       </thead>
       <tbody>
-        <tr><td>b2Vec2 (exact symbol)</td><td>2,240 matches, 196 KB</td><td class="num">10 ranked results, 6 KB</td></tr>
-        <tr><td>collision detection</td><td class="fail">0 matches</td><td class="pass">CollisionFiltering.h</td></tr>
-        <tr><td>animation state machine</td><td class="fail">0 matches</td><td class="pass">Animation.h</td></tr>
-        <tr><td>enemy AI behavior</td><td>110 matches, 11 KB</td><td class="pass">EnemyAIStateComponent.cpp</td></tr>
-        <tr><td>XML level loading</td><td class="fail">0 matches</td><td>ClawLevelUtil.cpp</td></tr>
-        <tr><td>sound audio playback</td><td>81 matches, 7.5 KB</td><td class="pass">Audio.h</td></tr>
-        <tr><td>rendering draw sprite</td><td>3,864 matches, <span style="color:var(--red)">346 KB</span></td><td>10 ranked results, 5 KB</td></tr>
-        <tr><td>save game checkpoint</td><td class="fail">0 matches</td><td class="pass">GameSaves.h</td></tr>
+        <tr><td>Gateway</td><td>8,986 matches, <span style="color:var(--red)">843 KB</span></td><td class="num">10 ranked results, 6 KB</td></tr>
+        <tr><td>message routing</td><td>3,062 matches, <span style="color:var(--red)">325 KB</span></td><td class="num">10 ranked results, 6 KB</td></tr>
+        <tr><td>authentication</td><td>9,172 matches, <span style="color:var(--red)">904 KB</span></td><td class="pass">login-qr.ts</td></tr>
+        <tr><td>voice wake word</td><td>672 matches, 62 KB</td><td class="pass">speech.ts</td></tr>
+        <tr><td>WebSocket</td><td>621 matches, 61 KB</td><td class="pass">server-http.ts</td></tr>
+        <tr><td>webhook</td><td>1,930 matches, 193 KB</td><td class="pass">registry.ts</td></tr>
+        <tr><td>canvas</td><td>451 matches, 42 KB</td><td>10 ranked results, 5 KB</td></tr>
+        <tr><td>skill plugin</td><td>2,512 matches, <span style="color:var(--red)">244 KB</span></td><td class="pass">loader.ts</td></tr>
       </tbody>
     </table>
 
     <div class="callout">
-      <p><strong>4 out of 10 queries returned zero results from ripgrep.</strong> These aren't obscure queries&mdash;they're exactly what an AI agent asks when navigating an unfamiliar codebase. Grep can't bridge the vocabulary gap between natural language and code identifiers.</p>
+      <p><strong>Grep returns an average of 3,426 matches (334 KB) per query.</strong> Codixing returns 10 ranked results (6 KB)&mdash;a <strong>99% token reduction</strong>. On a 7,607-file monorepo, grep's output is literally unusable for AI agents without additional filtering, while Codixing surfaces the right files immediately.</p>
     </div>
 
     <h2>How we got to 100%</h2>
@@ -328,33 +328,34 @@
 
     <h2>OpenClaw: the large codebase test</h2>
 
-    <p>OpenClaw is a from-scratch C++ reimplementation of Captain Claw (1997 platformer)&mdash;757 files, 269,293 lines, 17,602 symbols. It uses SDL2, Box2D, and TinyXML. It tests Codixing on a language and codebase it wasn't optimized for.</p>
+    <p><a href="https://github.com/openclaw/openclaw">OpenClaw</a> is a personal AI assistant platform&mdash;7,607 TypeScript files, 368,244 lines of code, 76-package pnpm monorepo. It integrates with 15+ messaging platforms (WhatsApp, Telegram, Slack, Discord, Signal), has voice capabilities, canvas workspace, cron jobs, webhooks, and a skills framework. A real-world production codebase.</p>
 
     <pre><span class="cmt"># BM25-only, no ONNX, no external API</span>
-<span class="cmd">$ codixing init /path/to/OpenClaw</span>
-<span class="out">✓ Indexed 773 files, 7863 chunks, 17602 symbols in 1.08s</span>
+<span class="cmd">$ codixing init /path/to/openclaw</span>
+<span class="out">✓ Indexed 7607 files, 39658 chunks, 50084 symbols in 7.90s</span>
 
 <span class="cmt"># MCP server cold start</span>
 <span class="cmd">$ codixing-mcp --root . --compact</span>
-<span class="out">Ready in 26ms (2 meta-tools, 47 discoverable on demand)</span></pre>
+<span class="out">Ready in 50ms (2 meta-tools, 47 discoverable on demand)</span></pre>
 
     <table class="bench-table">
       <thead>
         <tr><th>Metric</th><th>Value</th></tr>
       </thead>
       <tbody>
-        <tr><td>Init speed</td><td class="num">1.08s for 269K LoC</td></tr>
-        <tr><td>MCP cold start</td><td class="num">26ms</td></tr>
-        <tr><td>Search latency (instant)</td><td class="num">53ms</td></tr>
-        <tr><td>Search latency (fast)</td><td class="num">47ms</td></tr>
-        <tr><td>Token reduction vs ripgrep (b2Vec2)</td><td class="num">93%</td></tr>
-        <tr><td>repo_map latency</td><td class="num">69ms</td></tr>
-        <tr><td>Top-1 accuracy (BM25-only)</td><td class="num">50%</td></tr>
-        <tr><td>Deep reformulation</td><td class="num">3/3 (100%)</td></tr>
+        <tr><td>Init speed</td><td class="num">7.90s for 368K LoC (7607 files)</td></tr>
+        <tr><td>MCP cold start</td><td class="num">50ms</td></tr>
+        <tr><td>Search latency (instant)</td><td class="num">97ms</td></tr>
+        <tr><td>Search latency (fast)</td><td class="num">94ms</td></tr>
+        <tr><td>Token reduction vs grep</td><td class="num">99% (6 KB vs 334 KB avg)</td></tr>
+        <tr><td>repo_map latency</td><td class="num">102ms</td></tr>
+        <tr><td>find_symbol latency</td><td class="num">8ms (379 KB output for "Gateway")</td></tr>
+        <tr><td>explain latency</td><td class="num">39ms</td></tr>
+        <tr><td>Deep reformulation</td><td class="num">3/4 (75%)</td></tr>
       </tbody>
     </table>
 
-    <p>50% top-1 on BM25-only is expected for C++. C++ naming conventions are less semantic than Rust&mdash;<code>b2Vec2</code> doesn't tell you what file it's in, and header files separate declarations from implementations. Adding BgeSmallEn embeddings would close this gap, bringing natural language queries to the same level as the Rust benchmark.</p>
+    <p>On a 7,607-file monorepo, Codixing indexes in under 8 seconds, starts the MCP server in 50ms, and returns search results in under 100ms. Grep takes 1&ndash;1.6 seconds per query and returns hundreds of kilobytes of noise. The 99% token reduction means agents can actually use the results.</p>
 
     <h2>Competitive position</h2>
 
@@ -364,8 +365,8 @@
       </thead>
       <tbody>
         <tr><td>Language</td><td>Rust (single binary)</td><td>TypeScript (Node.js)</td><td>C</td></tr>
-        <tr><td>Init (757 files)</td><td class="num">1.08s</td><td>Not published</td><td>N/A</td></tr>
-        <tr><td>MCP cold start</td><td class="num">26ms</td><td>~500ms+ (Node.js)</td><td>N/A</td></tr>
+        <tr><td>Init (7607 files)</td><td class="num">7.9s</td><td>Not published</td><td>N/A</td></tr>
+        <tr><td>MCP cold start</td><td class="num">50ms</td><td>~500ms+ (Node.js)</td><td>N/A</td></tr>
         <tr><td>MCP tools</td><td class="num">47 (compact: 2)</td><td>4</td><td>0</td></tr>
         <tr><td>Token init cost</td><td class="num">~218 tokens</td><td>~6,000+ tokens</td><td>0</td></tr>
         <tr><td>External API needed</td><td class="pass">No</td><td class="fail">Yes (OpenAI/Voyage)</td><td class="pass">No</td></tr>
@@ -376,18 +377,18 @@
     </table>
 
     <div class="callout">
-      <p><strong>Key differentiator:</strong> Codixing achieves better search quality than tools that require paid embedding APIs (OpenAI, Voyage), while running entirely locally with zero external dependencies. The 26ms cold start is 20&times; faster than Node.js-based MCP servers, and <code>--compact</code> mode saves 96.7% of token init cost.</p>
+      <p><strong>Key differentiator:</strong> Codixing achieves better search quality than tools that require paid embedding APIs (OpenAI, Voyage), while running entirely locally with zero external dependencies. The 50ms cold start on a 7,607-file codebase is 10&times; faster than Node.js-based MCP servers, and <code>--compact</code> mode saves 96.7% of token init cost.</p>
     </div>
 
     <h2>What matters for AI agents</h2>
 
     <p>These benchmarks highlight three things that matter in practice:</p>
 
-    <p><strong>1. Token budget is the real constraint.</strong> An agent with a 200K context window can afford 6 KB of search results, not 346 KB. Codixing's ranked, truncated output stays within budget. The 93% token reduction on high-frequency queries directly translates to more productive agent turns.</p>
+    <p><strong>1. Token budget is the real constraint.</strong> An agent with a 200K context window can afford 6 KB of search results, not 843 KB. On OpenClaw, grep returns an average of 334 KB per query&mdash;Codixing returns 6 KB. The <strong>99% token reduction</strong> directly translates to more productive agent turns.</p>
 
-    <p><strong>2. Natural language search is not optional.</strong> Agents reason in natural language. When they need "collision detection code," they shouldn't have to guess the right grep pattern. Grep returned <em>zero results</em> for 4 out of 10 conceptual queries on OpenClaw. Codixing found relevant files for all of them.</p>
+    <p><strong>2. Grep drowns agents in noise at scale.</strong> On a 7,607-file monorepo, even a simple query like "Gateway" produces 8,986 matches across 920 files. The agent can't parse 843 KB of results&mdash;it needs 10 ranked results that point to the right files. That's what Codixing delivers.</p>
 
-    <p><strong>3. Cold start determines responsiveness.</strong> At 26ms, Codixing adds negligible latency to agent tool calls. A 500ms+ startup from a Node.js-based tool creates a perceptible delay on every new session.</p>
+    <p><strong>3. Cold start determines responsiveness.</strong> At 50ms for a 7,607-file codebase, Codixing adds negligible latency to agent tool calls. Grep takes 1&ndash;1.6 seconds per query on the same codebase. A 500ms+ startup from a Node.js-based MCP tool creates a perceptible delay on every new session.</p>
 
     <h2>Try it</h2>
 

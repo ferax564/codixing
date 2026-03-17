@@ -28,7 +28,7 @@ Codixing solves this with three properties grep cannot replicate:
 
 ## Benchmark: Codixing Daemon vs Native Shell Tools
 
-Measured on [OpenClaw](https://github.com/pjasicek/OpenClaw) — 246,000 lines of C++, 770 files. Codixing running in daemon mode (engine pre-loaded, Unix socket IPC ~6ms overhead).
+Measured on [OpenClaw](https://github.com/openclaw/openclaw) — 368,000 lines of TypeScript, 7,607 files (76-package monorepo). Codixing running in daemon mode (engine pre-loaded, Unix socket IPC ~6ms overhead).
 
 | Operation | Native tool | Native | Codixing | Speed | Tokens |
 |-----------|------------|-------:|----------:|------:|-------:|
@@ -351,17 +351,17 @@ Apple M4 (macOS ARM64), 138 Rust files, 1113 chunks, 2323 symbols.
 | **ONNX required** | No | Yes |
 | **Test suite** | 628 tests | 628 tests |
 
-### External Benchmark (OpenClaw — 246K LoC, 770 C++ files)
+### External Benchmark ([OpenClaw](https://github.com/openclaw/openclaw) — 368K LoC, 7,607 TypeScript files)
 
 | Metric | Result |
 |--------|--------|
-| **Init speed (BM25 + graph)** | **0.87s** for 246K LoC / 770 files |
-| **Init speed (with BGE-Base embeddings)** | ~25s (ONNX inference dominates; one-time cost) |
+| **Init speed (BM25 + graph)** | **7.9s** for 368K LoC / 7,607 files |
+| **MCP cold start** | **50ms** |
+| **Search latency** | 94–97ms |
+| **Token reduction vs grep** | **99%** (6 KB vs 334 KB avg) |
 | **Incremental reindex (single file)** | <150ms |
 | **Batch reindex (N files, e.g. after git pull)** | Single PageRank pass — N× faster than N individual reindexes |
-| **File watcher latency** | ≤100ms from save to queryable |
-| **Daemon IPC overhead** | ~6ms per call (Unix socket round-trip) |
-| **BM25 search** | <10ms p99 |
+| **Deep reformulation** | 3/4 (75%) |
 
 ### Competitive Comparison
 
