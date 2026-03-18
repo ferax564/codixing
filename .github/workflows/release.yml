@@ -43,6 +43,7 @@ jobs:
           cp target/${{ matrix.target }}/release/codixing staging/codixing-${{ matrix.artifact_suffix }}
           cp target/${{ matrix.target }}/release/codixing-mcp staging/codixing-mcp-${{ matrix.artifact_suffix }}
           cp target/${{ matrix.target }}/release/codixing-server staging/codixing-server-${{ matrix.artifact_suffix }}
+          cp target/${{ matrix.target }}/release/codixing-lsp staging/codixing-lsp-${{ matrix.artifact_suffix }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

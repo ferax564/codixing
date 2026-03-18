@@ -32,10 +32,11 @@ claude mcp add codixing -- npx -y codixing-mcp --root .
 
 ## Features
 
-- 33 MCP tools for code navigation, search, and analysis
-- 14 languages via tree-sitter AST parsing
-- BM25 full-text search with structural awareness
+- 47 MCP tools for code navigation, search, and analysis
+- 20 languages via tree-sitter AST parsing
+- Hybrid BM25 + vector search with 100% top-1 accuracy
 - Code dependency graph with PageRank scoring
+- `--compact` mode: 96.7% token reduction (2 meta-tools on init, 47 on demand)
 - Token-budgeted output (never overflows context)
 - Zero-config — auto-indexes any git repo
 

@@ -17,5 +17,5 @@
   },
   "keywords": ["mcp", "code-search", "ai", "claude", "cursor", "ast", "bm25"],
   "homepage": "https://codixing.com",
-  "files": ["index.js", "package.json", "README.md"]
+  "files": ["index.js", "package.json", "README.md", "LICENSE"]
 }

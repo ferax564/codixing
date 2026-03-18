@@ -12,11 +12,11 @@ ARCH="$(uname -m)"
 case "${OS}-${ARCH}" in
   Linux-x86_64)   SUFFIX="linux-x86_64" ;;
   Darwin-arm64)   SUFFIX="macos-aarch64" ;;
-  Darwin-x86_64)  SUFFIX="macos-x86_64" ;;
+  Darwin-x86_64)  echo "Intel Mac not supported (ONNX Runtime limitation). Use Rosetta: arch -arm64 $0"; exit 1 ;;
   *) echo "Unsupported platform: ${OS}-${ARCH}"; exit 1 ;;
 esac
 
-BINARIES="codixing codixing-mcp codixing-lsp codixing-server"
+BINARIES="codixing codixing-mcp codixing-server"
 BASE_URL="https://github.com/${REPO}/releases/download/v${VERSION}"
 
 echo "Installing Codixing v${VERSION} for ${OS}/${ARCH}..."

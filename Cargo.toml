@@ -3,10 +3,12 @@ members = ["crates/core", "crates/cli", "crates/server", "crates/mcp", "crates/l
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.12.0"
 edition = "2024"
 license = "LicenseRef-Codixing"
 rust-version = "1.85"
+repository = "https://github.com/ferax564/codixing"
+homepage = "https://codixing.com"
 
 [workspace.dependencies]
 # AST parsing
