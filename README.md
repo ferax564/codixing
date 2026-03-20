@@ -6,6 +6,17 @@ Ultra-fast code retrieval engine for AI agents — beats `grep` at its own game.
 
 ## Install
 
+### Claude Code (recommended)
+
+```bash
+claude plugin marketplace add ferax564/codixing
+claude plugin install codixing@codixing
+```
+
+This installs the MCP server (48 tools) plus three slash commands: `/codixing-setup`, `/codixing-explore`, `/codixing-review`. Restart Claude Code after installing.
+
+### Binary install (CLI + MCP + LSP)
+
 ```sh
 curl -fsSL https://codixing.com/install.sh | sh
 ```
