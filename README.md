@@ -15,6 +15,12 @@ claude plugin install codixing@codixing
 
 This installs the MCP server (48 tools) plus three slash commands: `/codixing-setup`, `/codixing-explore`, `/codixing-review`. Restart Claude Code after installing.
 
+### OpenAI Codex CLI
+
+```bash
+codex mcp add codixing -- npx -y codixing-mcp --root . --compact
+```
+
 ### Binary install (CLI + MCP + LSP)
 
 ```sh
@@ -84,6 +90,20 @@ Installs the MCP server plus three slash commands:
 
 ```bash
 claude mcp add codixing -- npx -y codixing-mcp --root .
+```
+
+### OpenAI Codex CLI
+
+```bash
+codex mcp add codixing -- npx -y codixing-mcp --root . --compact
+```
+
+Or add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.codixing]
+command = "npx"
+args = ["-y", "codixing-mcp", "--root", ".", "--compact"]
 ```
 
 ### Cursor / Windsurf / other MCP clients
