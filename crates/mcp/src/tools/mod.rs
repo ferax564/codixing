@@ -483,7 +483,7 @@ pub fn tool_definitions_with_federation(has_federation: bool) -> Value {
 }
 
 /// JSON-Schema definition for the `list_projects` tool.
-fn list_projects_tool_definition() -> Value {
+pub fn list_projects_tool_definition() -> Value {
     json!({
         "name": "list_projects",
         "description": "List all projects registered in the federation with their load status, file count, and root path. Only available when the server is started with --federation.",
@@ -654,6 +654,8 @@ pub const MEDIUM_TOOLS: &[&str] = &[
     "find_tests",
     "index_status",
     "get_context_for_task",
+    "search_tools",
+    "get_tool_schema",
 ];
 
 /// Return the medium tool list for `--medium` mode: a curated subset of

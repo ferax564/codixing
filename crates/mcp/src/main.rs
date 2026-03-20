@@ -510,7 +510,16 @@ fn handle_initialize(id: Value, _params: Option<Value>) -> Value {
 fn handle_tools_list(id: Value, listing_mode: ListingMode, has_federation: bool) -> Value {
     let tool_defs = match listing_mode {
         ListingMode::Compact => tools::compact_tool_definitions(),
-        ListingMode::Medium => tools::medium_tool_definitions(),
+        ListingMode::Medium => {
+            let mut defs = tools::medium_tool_definitions();
+            // When federation is active, include the list_projects tool.
+            if has_federation {
+                if let Some(arr) = defs.as_array_mut() {
+                    arr.push(tools::list_projects_tool_definition());
+                }
+            }
+            defs
+        }
         ListingMode::Full => tools::tool_definitions_with_federation(has_federation),
     };
     let result = json!({ "tools": tool_defs });
