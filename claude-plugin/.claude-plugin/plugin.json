@@ -1,0 +1,23 @@
+{
+  "name": "codixing",
+  "description": "Code retrieval engine for AI agents — AST-aware search, dependency graph, and 48 MCP tools for Claude Code",
+  "version": "0.12.1",
+  "author": {
+    "name": "ferax564",
+    "url": "https://codixing.com"
+  },
+  "homepage": "https://codixing.com",
+  "repository": "https://github.com/ferax564/codixing",
+  "license": "LicenseRef-Codixing",
+  "keywords": ["code-search", "mcp", "ast", "bm25", "dependency-graph", "ai-agents"],
+  "mcpServers": {
+    "codixing": {
+      "command": "npx",
+      "args": ["-y", "codixing-mcp", "--root", ".", "--compact"],
+      "env": {
+        "ORT_DYLIB_PATH": "${HOME}/.local/lib/libonnxruntime.dylib",
+        "DYLD_LIBRARY_PATH": "${HOME}/.local/lib"
+      }
+    }
+  }
+}
