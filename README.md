@@ -17,8 +17,10 @@ This installs the MCP server (48 tools) plus three slash commands: `/codixing-se
 
 ### OpenAI Codex CLI
 
+First [install the binary](#binary-install-cli--mcp--lsp), then:
+
 ```bash
-codex mcp add codixing -- npx -y codixing-mcp --root . --compact
+codex mcp add codixing -- codixing-mcp --root .
 ```
 
 ### Binary install (CLI + MCP + LSP)
@@ -95,15 +97,15 @@ claude mcp add codixing -- npx -y codixing-mcp --root .
 ### OpenAI Codex CLI
 
 ```bash
-codex mcp add codixing -- npx -y codixing-mcp --root . --compact
+codex mcp add codixing -- codixing-mcp --root .
 ```
 
 Or add to `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.codixing]
-command = "npx"
-args = ["-y", "codixing-mcp", "--root", ".", "--compact"]
+command = "codixing-mcp"
+args = ["--root", "."]
 ```
 
 ### Cursor / Windsurf / other MCP clients

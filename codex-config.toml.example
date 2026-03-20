@@ -1,6 +1,9 @@
 # Codixing MCP server for OpenAI Codex CLI
 # Copy to ~/.codex/config.toml (global) or .codex/config.toml (project)
+#
+# Requires: install codixing-mcp first via
+#   curl -fsSL https://codixing.com/install.sh | sh
 
 [mcp_servers.codixing]
-command = "npx"
-args = ["-y", "codixing-mcp", "--root", ".", "--compact"]
+command = "codixing-mcp"
+args = ["--root", "."]
