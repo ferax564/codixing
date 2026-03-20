@@ -3,7 +3,7 @@ members = ["crates/core", "crates/cli", "crates/mcp", "crates/lsp"]
 resolver = "3"
 
 [workspace.package]
-version = "0.12.0"
+version = "0.12.1"
 edition = "2024"
 license = "LicenseRef-Codixing"
 rust-version = "1.85"
