@@ -1438,7 +1438,7 @@
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#3fb950" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 17h6M17 14v6"/><path d="M7 10v4M10 7h4M17 10v4"/></svg>
           </div>
           <h3>MCP-ready</h3>
-          <p>47 JSON-RPC 2.0 tools exposed for Claude Code and any MCP-capable client. <code style="color:var(--cyan);font-size:0.85em">--compact</code> mode sends only 2 meta-tools on init (96.7% token savings), with all 48 tools discoverable on demand.</p>
+          <p>48 JSON-RPC 2.0 tools exposed for Claude Code and any MCP-capable client. <code style="color:var(--cyan);font-size:0.85em">--compact</code> mode sends only 2 meta-tools on init (96.7% token savings), with all 48 tools discoverable on demand.</p>
           <span class="feature-tag">48 tools &bull; --compact &bull; stdin/stdout &bull; Unix socket</span>
         </div>
         <div class="feature-card" style="--delay:0.35s">
@@ -1617,7 +1617,7 @@
 <span class="ln">4</span><span class="c-cmt"># Installs three binaries to /usr/local/bin:</span>
 <span class="ln">5</span><span class="c-ok">✓ codixing</span>
 <span class="ln">6</span><span class="c-ok">✓ codixing-mcp</span>
-<span class="ln">7</span><span class="c-ok">✓ codixing-server</span>
+<span class="ln">7</span><span class="c-ok">✓ codixing-lsp</span>
 <span class="ln">8</span><span style="color:var(--text)"></span>
 <span class="ln">9</span><span class="c-cmt"># Or build from source (requires Rust)</span>
 <span class="ln">10</span><span style="color:var(--text)">cargo build --release --workspace</span>
@@ -1650,18 +1650,16 @@
 <span class="ln">12</span><span style="color:var(--text)">codixing graph --token-budget 4000</span>
             </div>
             <div class="code-pane-qs" id="qs-mcp-setup">
-<span class="ln">1</span><span class="c-cmt"># Add .mcp.json to your project root</span>
-<span class="ln">2</span><span style="color:var(--purple)">{</span>
-<span class="ln">3</span><span style="color:var(--text)">  </span><span class="c-str">"mcpServers"</span><span style="color:var(--text)">: {</span>
-<span class="ln">4</span><span style="color:var(--text)">    </span><span class="c-str">"codixing"</span><span style="color:var(--text)">: {</span>
-<span class="ln">5</span><span style="color:var(--text)">      </span><span class="c-str">"command"</span><span style="color:var(--text)">: </span><span class="c-str">"codixing-mcp"</span><span style="color:var(--text)">,</span>
-<span class="ln">6</span><span style="color:var(--text)">      </span><span class="c-str">"args"</span><span style="color:var(--text)">: [</span><span class="c-str">"--root"</span><span style="color:var(--text)">, </span><span class="c-str">"."</span><span style="color:var(--text)">, </span><span class="c-str">"--compact"</span><span style="color:var(--text)">]</span>
-<span class="ln">7</span><span style="color:var(--text)">    }</span>
-<span class="ln">8</span><span style="color:var(--text)">  }</span>
-<span class="ln">9</span><span style="color:var(--purple)">}</span>
-<span class="ln">10</span><span style="color:var(--text)"></span>
-<span class="ln">11</span><span class="c-cmt"># --compact sends only 2 meta-tools on init</span>
-<span class="ln">12</span><span class="c-cmt"># 96.7% token savings, all 48 tools on demand</span>
+<span class="ln">1</span><span class="c-cmt"># Claude Code — plugin (recommended)</span>
+<span class="ln">2</span><span style="color:var(--text)">claude plugin install codixing</span>
+<span class="ln">3</span><span style="color:var(--text)"></span>
+<span class="ln">4</span><span class="c-cmt"># Includes 3 slash commands:</span>
+<span class="ln">5</span><span class="c-ok">/codixing-setup</span><span style="color:var(--text-muted)">    — index + register MCP</span>
+<span class="ln">6</span><span class="c-ok">/codixing-explore</span><span style="color:var(--text-muted)">  — architecture deep-dive</span>
+<span class="ln">7</span><span class="c-ok">/codixing-review</span><span style="color:var(--text-muted)">   — code review with context</span>
+<span class="ln">8</span><span style="color:var(--text)"></span>
+<span class="ln">9</span><span class="c-cmt"># Or MCP only (any MCP client)</span>
+<span class="ln">10</span><span style="color:var(--text)">claude mcp add codixing -- npx -y codixing-mcp --root .</span>
             </div>
           </div>
         </div>

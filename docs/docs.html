@@ -551,18 +551,20 @@ pub fn handle_auth_request(req: Request) -&gt; Result&lt;Token&gt;</span>
 <span class="tok-cmd">codixing search</span> "authentication handler" <span class="tok-flag">--strategy fast</span></code></pre>
 
         <h3>Connect to Claude Code</h3>
-        <div class="pre-label">shell</div>
-        <pre><code><span class="tok-comment"># Start MCP daemon (keeps engine warm in memory)</span>
-<span class="tok-cmd">codixing-mcp</span> <span class="tok-flag">--root</span> /path/to/your/project <span class="tok-flag">--daemon</span></code></pre>
 
-        <p>Then add to your <code>~/.claude.json</code>:</p>
+        <div class="pre-label">Plugin (recommended)</div>
+        <pre><code><span class="tok-cmd">claude plugin install</span> codixing</code></pre>
+        <p>Installs the MCP server plus three slash commands: <code>/codixing-setup</code> (index + register), <code>/codixing-explore</code> (architecture deep-dive), <code>/codixing-review</code> (code review with impact analysis).</p>
 
-        <div class="pre-label">~/.claude.json</div>
+        <div class="pre-label">MCP only</div>
+        <pre><code><span class="tok-cmd">claude mcp add</span> codixing -- npx -y codixing-mcp --root .</code></pre>
+
+        <div class="pre-label">Manual (.mcp.json)</div>
         <pre><code>{
   <span class="tok-key">"mcpServers"</span>: {
     <span class="tok-key">"codixing"</span>: {
-      <span class="tok-key">"command"</span>: <span class="tok-str">"/path/to/codixing-mcp"</span>,
-      <span class="tok-key">"args"</span>: [<span class="tok-str">"--root"</span>, <span class="tok-str">"."</span>, <span class="tok-str">"--compact"</span>]
+      <span class="tok-key">"command"</span>: <span class="tok-str">"npx"</span>,
+      <span class="tok-key">"args"</span>: [<span class="tok-str">"-y"</span>, <span class="tok-str">"codixing-mcp"</span>, <span class="tok-str">"--root"</span>, <span class="tok-str">"."</span>, <span class="tok-str">"--compact"</span>]
     }
   }
 }</code></pre>

@@ -90,7 +90,21 @@ codixing sync
 
 Codixing exposes all its tools via the [Model Context Protocol](https://modelcontextprotocol.io) — any MCP-compatible client picks them up automatically.
 
-### Claude Code (one command)
+### Claude Code — Plugin (recommended)
+
+```bash
+claude plugin install codixing
+```
+
+This installs the MCP server plus three slash commands:
+
+| Command | What it does |
+|---------|-------------|
+| `/codixing-setup` | Index the current project and register the MCP server |
+| `/codixing-explore` | Deep architecture overview — PageRank-sorted modules, dependencies, key symbols |
+| `/codixing-review` | Code review with impact analysis, caller tracking, and test coverage |
+
+### Claude Code — MCP only
 
 ```bash
 claude mcp add codixing -- npx -y codixing-mcp --root .
