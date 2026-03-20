@@ -1453,3 +1453,88 @@ fn meta_tools_are_read_only() {
     assert!(is_read_only_tool("search_tools"));
     assert!(is_read_only_tool("get_tool_schema"));
 }
+
+// -------------------------------------------------------------------------
+// medium mode
+// -------------------------------------------------------------------------
+
+#[test]
+fn medium_mode_returns_subset() {
+    let defs = medium_tool_definitions();
+    let arr = defs
+        .as_array()
+        .expect("medium_tool_definitions returns array");
+
+    // Should return exactly the MEDIUM_TOOLS set.
+    assert_eq!(
+        arr.len(),
+        MEDIUM_TOOLS.len(),
+        "medium mode should return {} tools, got {}",
+        MEDIUM_TOOLS.len(),
+        arr.len()
+    );
+
+    let names: Vec<&str> = arr
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|v| v.as_str()))
+        .collect();
+
+    // Every MEDIUM_TOOLS entry should be present.
+    for expected in MEDIUM_TOOLS {
+        assert!(
+            names.contains(expected),
+            "medium mode missing tool '{expected}', got: {names:?}"
+        );
+    }
+
+    // Each tool should have a description and inputSchema.
+    for tool in arr {
+        let name = tool["name"].as_str().unwrap();
+        assert!(
+            tool.get("description").and_then(|v| v.as_str()).is_some(),
+            "medium tool '{name}' missing 'description'"
+        );
+        assert!(
+            tool.get("inputSchema").is_some(),
+            "medium tool '{name}' missing 'inputSchema'"
+        );
+    }
+
+    // Should be strictly fewer than the full set.
+    let full = tool_definitions();
+    assert!(
+        arr.len() < full.as_array().unwrap().len(),
+        "medium set should be smaller than full set"
+    );
+}
+
+#[test]
+fn medium_mode_still_callable() {
+    // Verify that a tool NOT in the medium listing can still be dispatched
+    // via tools/call (the dispatch functions accept any valid tool name).
+    let dir = tempdir().unwrap();
+    let mut engine = make_engine(dir.path());
+
+    // "remember" is not in MEDIUM_TOOLS.
+    assert!(
+        !MEDIUM_TOOLS.contains(&"remember"),
+        "remember should not be in MEDIUM_TOOLS for this test to be meaningful"
+    );
+
+    // "remember" is a write tool — use dispatch_tool (which handles both
+    // read and write tools, mirroring what tools/call does at runtime).
+    let (out, is_err) = dispatch_tool(
+        &mut engine,
+        "remember",
+        &json!({"key": "test_key", "value": "test_value"}),
+        None,
+    );
+    assert!(
+        !is_err,
+        "remember should succeed even in medium mode, got error: {out}"
+    );
+    assert!(
+        out.contains("test_key") || out.contains("Stored") || out.contains("stored"),
+        "remember should acknowledge storage, got: {out}"
+    );
+}

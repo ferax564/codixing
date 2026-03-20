@@ -632,6 +632,47 @@ pub fn compact_tool_definitions() -> Value {
     json!(meta_tools)
 }
 
+/// Curated set of tool names exposed in `--medium` mode.
+///
+/// These are the ~15 most commonly used tools, covering search, navigation,
+/// graph analysis, and context assembly.  All other tools remain callable
+/// via `tools/call` — they are simply omitted from `tools/list` to reduce
+/// token usage for clients that cannot do dynamic discovery.
+pub const MEDIUM_TOOLS: &[&str] = &[
+    "code_search",
+    "find_symbol",
+    "grep_code",
+    "read_file",
+    "outline_file",
+    "list_files",
+    "get_repo_map",
+    "symbol_callers",
+    "symbol_callees",
+    "explain",
+    "get_references",
+    "predict_impact",
+    "find_tests",
+    "index_status",
+    "get_context_for_task",
+];
+
+/// Return the medium tool list for `--medium` mode: a curated subset of
+/// ~15 most-used tools with their full schemas.
+pub fn medium_tool_definitions() -> Value {
+    let defs = tool_definitions();
+    let empty = vec![];
+    let all_tools = defs.as_array().unwrap_or(&empty);
+    let subset: Vec<&Value> = all_tools
+        .iter()
+        .filter(|t| {
+            t.get("name")
+                .and_then(|v| v.as_str())
+                .is_some_and(|name| MEDIUM_TOOLS.contains(&name))
+        })
+        .collect();
+    json!(subset)
+}
+
 /// Returns true if the tool only needs read access to the engine.
 ///
 /// Read-only tools can acquire a shared `RwLock::read()` lock, allowing

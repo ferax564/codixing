@@ -37,6 +37,23 @@ use codixing_core::{
 use protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
 // ---------------------------------------------------------------------------
+// Tool listing mode
+// ---------------------------------------------------------------------------
+
+/// Controls which tools are returned by `tools/list`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ListingMode {
+    /// Return all tools (~48 definitions, ~6600 tokens).
+    Full,
+    /// Return a curated subset of ~15 most-used tools.
+    /// All tools remain callable via `tools/call`.
+    Medium,
+    /// Return only the 2 meta-tools (`search_tools`, `get_tool_schema`).
+    /// All tools remain callable via `tools/call`.
+    Compact,
+}
+
+// ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
@@ -67,8 +84,15 @@ struct Args {
     /// Enable compact tool listing: `tools/list` returns only the 2 meta-tools
     /// (`search_tools`, `get_tool_schema`) instead of all tools. All tools remain
     /// callable via `tools/call`. Reduces initial token usage by ~90%.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "medium")]
     compact: bool,
+
+    /// Enable medium tool listing: `tools/list` returns a curated set of ~15
+    /// most-used tools instead of all tools. All tools remain callable via
+    /// `tools/call`. Useful for MCP clients that cannot do dynamic tool
+    /// discovery (e.g. Codex CLI).
+    #[arg(long, conflicts_with = "compact")]
+    medium: bool,
 
     /// Path to a `codixing-federation.json` config file for cross-repo
     /// federation.  When provided, a `FederatedEngine` is created alongside
@@ -103,7 +127,13 @@ async fn main() -> Result<()> {
         .socket
         .unwrap_or_else(|| root.join(".codixing/daemon.sock"));
 
-    let compact_listing = args.compact;
+    let listing_mode = if args.compact {
+        ListingMode::Compact
+    } else if args.medium {
+        ListingMode::Medium
+    } else {
+        ListingMode::Full
+    };
 
     // Optionally load a federated engine for cross-repo search.
     let federation: Option<Arc<FederatedEngine>> = match &args.federation {
@@ -132,7 +162,7 @@ async fn main() -> Result<()> {
             engine.set_session(Arc::new(SessionState::new(false)));
         }
         let engine = Arc::new(RwLock::new(engine));
-        run_daemon(engine, &socket_path, compact_listing, federation).await
+        run_daemon(engine, &socket_path, listing_mode, federation).await
     } else {
         // ── Normal mode: try proxy, fall back to direct ────────────────────
         if socket_alive(&socket_path).await {
@@ -151,7 +181,7 @@ async fn main() -> Result<()> {
                 engine,
                 BufReader::new(stdin).lines(),
                 BufWriter::new(stdout),
-                compact_listing,
+                listing_mode,
                 federation,
             )
             .await
@@ -199,7 +229,7 @@ async fn load_engine(root: &Path) -> Result<Engine> {
 async fn run_daemon(
     engine: Arc<RwLock<Engine>>,
     socket_path: &Path,
-    compact_listing: bool,
+    listing_mode: ListingMode,
     federation: Option<Arc<FederatedEngine>>,
 ) -> Result<()> {
     // Remove stale socket file if it exists.
@@ -298,7 +328,7 @@ async fn run_daemon(
         let fed_clone = federation.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                handle_socket_connection(stream, engine_clone, compact_listing, fed_clone).await
+                handle_socket_connection(stream, engine_clone, listing_mode, fed_clone).await
             {
                 warn!(error = %e, "daemon: connection error");
             }
@@ -310,7 +340,7 @@ async fn run_daemon(
 async fn handle_socket_connection(
     stream: UnixStream,
     engine: Arc<RwLock<Engine>>,
-    compact_listing: bool,
+    listing_mode: ListingMode,
     federation: Option<Arc<FederatedEngine>>,
 ) -> Result<()> {
     let (read_half, write_half) = stream.into_split();
@@ -318,7 +348,7 @@ async fn handle_socket_connection(
         engine,
         BufReader::new(read_half).lines(),
         BufWriter::new(write_half),
-        compact_listing,
+        listing_mode,
         federation,
     )
     .await
@@ -395,7 +425,7 @@ async fn run_jsonrpc_loop<R, W>(
     engine: Arc<RwLock<Engine>>,
     mut reader: tokio::io::Lines<BufReader<R>>,
     mut writer: BufWriter<W>,
-    compact_listing: bool,
+    listing_mode: ListingMode,
     federation: Option<Arc<FederatedEngine>>,
 ) -> Result<()>
 where
@@ -433,7 +463,7 @@ where
             id,
             &req.method,
             req.params,
-            compact_listing,
+            listing_mode,
             &federation,
         )
         .await;
@@ -453,13 +483,13 @@ async fn dispatch(
     id: Value,
     method: &str,
     params: Option<Value>,
-    compact_listing: bool,
+    listing_mode: ListingMode,
     federation: &Option<Arc<FederatedEngine>>,
 ) -> Value {
     match method {
         "initialize" => handle_initialize(id, params),
         "initialized" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
-        "tools/list" => handle_tools_list(id, compact_listing, federation.is_some()),
+        "tools/list" => handle_tools_list(id, listing_mode, federation.is_some()),
         "tools/call" => handle_tools_call(engine, id, params, federation).await,
         _ => {
             let err = JsonRpcError::method_not_found(id, method);
@@ -477,11 +507,11 @@ fn handle_initialize(id: Value, _params: Option<Value>) -> Value {
     serde_json::to_value(JsonRpcResponse::new(id, result)).unwrap_or(Value::Null)
 }
 
-fn handle_tools_list(id: Value, compact_listing: bool, has_federation: bool) -> Value {
-    let tool_defs = if compact_listing {
-        tools::compact_tool_definitions()
-    } else {
-        tools::tool_definitions_with_federation(has_federation)
+fn handle_tools_list(id: Value, listing_mode: ListingMode, has_federation: bool) -> Value {
+    let tool_defs = match listing_mode {
+        ListingMode::Compact => tools::compact_tool_definitions(),
+        ListingMode::Medium => tools::medium_tool_definitions(),
+        ListingMode::Full => tools::tool_definitions_with_federation(has_federation),
     };
     let result = json!({ "tools": tool_defs });
     serde_json::to_value(JsonRpcResponse::new(id, result)).unwrap_or(Value::Null)
@@ -621,13 +651,13 @@ mod tests {
             client_write.shutdown().await.unwrap();
         });
 
-        // Run the JSON-RPC loop on the server side (compact_listing = false, no federation for tests).
+        // Run the JSON-RPC loop on the server side (Full listing mode, no federation for tests).
         let loop_handle = tokio::spawn(async move {
             run_jsonrpc_loop(
                 engine,
                 BufReader::new(server_read).lines(),
                 BufWriter::new(server_write),
-                false,
+                ListingMode::Full,
                 None,
             )
             .await
@@ -885,7 +915,7 @@ mod tests {
             let listener = UnixListener::bind(&socket_clone).unwrap();
             // Accept exactly one connection.
             let (stream, _) = listener.accept().await.unwrap();
-            handle_socket_connection(stream, engine_clone, false, None)
+            handle_socket_connection(stream, engine_clone, ListingMode::Full, None)
                 .await
                 .unwrap();
         });
