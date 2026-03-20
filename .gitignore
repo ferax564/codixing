@@ -29,6 +29,10 @@ GTM_Strategy.md
 
 # Internal research / strategy documents
 research/
+docs/research/
+
+# Release staging binaries
+linux-staging/
 
 # Screenshot / marketing assets (not part of the source tree)
 *.png
