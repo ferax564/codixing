@@ -553,7 +553,8 @@ pub fn handle_auth_request(req: Request) -&gt; Result&lt;Token&gt;</span>
         <h3>Connect to Claude Code</h3>
 
         <div class="pre-label">Plugin (recommended)</div>
-        <pre><code><span class="tok-cmd">claude plugin install</span> codixing</code></pre>
+        <pre><code><span class="tok-cmd">claude plugin marketplace add</span> ferax564/codixing
+<span class="tok-cmd">claude plugin install</span> codixing@codixing</code></pre>
         <p>Installs the MCP server plus three slash commands: <code>/codixing-setup</code> (index + register), <code>/codixing-explore</code> (architecture deep-dive), <code>/codixing-review</code> (code review with impact analysis).</p>
 
         <div class="pre-label">MCP only</div>

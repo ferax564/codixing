@@ -1,0 +1,29 @@
+{
+  "name": "codixing",
+  "owner": {
+    "name": "ferax564"
+  },
+  "metadata": {
+    "description": "Code retrieval engine for AI agents — AST-aware search, dependency graph, 48 MCP tools",
+    "version": "0.12.1"
+  },
+  "plugins": [
+    {
+      "name": "codixing",
+      "source": {
+        "source": "git-subdir",
+        "url": "https://github.com/ferax564/codixing.git",
+        "path": "claude-plugin",
+        "ref": "main"
+      },
+      "description": "Code retrieval engine with 48 MCP tools, 3 slash commands (/codixing-setup, /codixing-explore, /codixing-review), and daemon mode",
+      "version": "0.12.1",
+      "author": {
+        "name": "ferax564"
+      },
+      "homepage": "https://codixing.com",
+      "license": "LicenseRef-Codixing",
+      "tags": ["code-search", "mcp", "ast", "bm25", "dependency-graph", "ai-agents"]
+    }
+  ]
+}

@@ -57,7 +57,8 @@ Codixing exposes 48 tools via the [Model Context Protocol](https://modelcontextp
 ### Claude Code — Plugin (recommended)
 
 ```bash
-claude plugin install codixing
+claude plugin marketplace add ferax564/codixing
+claude plugin install codixing@codixing
 ```
 
 Installs the MCP server plus three slash commands:
