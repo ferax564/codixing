@@ -6,34 +6,79 @@ Ultra-fast code retrieval engine for AI agents — beats `grep` at its own game.
 
 ## Install
 
-### Claude Code (recommended)
+### Claude Code
 
 ```bash
+# Plugin — includes MCP server + 3 slash commands (recommended)
 claude plugin marketplace add ferax564/codixing
 claude plugin install codixing@codixing
 ```
 
-This installs the MCP server (48 tools) plus three slash commands: `/codixing-setup`, `/codixing-explore`, `/codixing-review`. Restart Claude Code after installing.
+Restart Claude Code after installing. You get 48 MCP tools plus `/codixing-setup`, `/codixing-explore`, and `/codixing-review`.
+
+Alternatively, register just the MCP server without the plugin:
+
+```bash
+claude mcp add codixing -- npx -y codixing-mcp --root .
+```
 
 ### OpenAI Codex CLI
 
-First [install the binary](#binary-install-cli--mcp--lsp), then:
+Install the binary first, then register the MCP server:
 
 ```bash
+curl -fsSL https://codixing.com/install.sh | sh
 codex mcp add codixing -- codixing-mcp --root .
 ```
 
-### Binary install (CLI + MCP + LSP)
+> **Note:** Codex requires the binary installed locally — `npx` is not supported. Do not use `--compact` with Codex as it needs all 48 tools visible in the tool list.
+
+### Cursor / Windsurf
+
+Add to your project's `.mcp.json` (or global MCP settings):
+
+```json
+{
+  "mcpServers": {
+    "codixing": {
+      "command": "npx",
+      "args": ["-y", "codixing-mcp", "--root", "."]
+    }
+  }
+}
+```
+
+### Continue.dev
+
+Add to `~/.continue/config.json` under `mcpServers`:
+
+```json
+{
+  "mcpServers": [
+    {
+      "name": "codixing",
+      "command": "npx",
+      "args": ["-y", "codixing-mcp", "--root", "."]
+    }
+  ]
+}
+```
+
+### Binary install
+
+For CLI usage or when `npx` isn't available:
 
 ```sh
 curl -fsSL https://codixing.com/install.sh | sh
 ```
 
-Installs `codixing`, `codixing-mcp`, and `codixing-lsp` to `/usr/local/bin`. macOS (Apple Silicon) and Linux (x86_64). Binaries also available on the [releases page](https://github.com/ferax564/codixing/releases).
+Installs `codixing`, `codixing-mcp`, and `codixing-lsp` to `/usr/local/bin`. macOS (Apple Silicon) and Linux (x86_64). Binaries also on the [releases page](https://github.com/ferax564/codixing/releases).
+
+---
 
 ## Why Not Just Grep?
 
-AI coding agents currently use `grep`, `find`, and `cat` for code navigation. These tools return **everything, always** — a single `rg b2Vec2` on a real codebase returns 2,240 hits (225 KB), burning context before any reasoning happens.
+AI coding agents use `grep`, `find`, and `cat` for code navigation. These tools return **everything, always** — a single `rg b2Vec2` on a real codebase returns 2,240 hits (225 KB), burning context before any reasoning happens.
 
 Codixing returns the top 20 results in 1.3 KB — same signal, **99% less waste**.
 
@@ -69,73 +114,31 @@ codixing sync
 
 ---
 
-## MCP Integration
+## MCP Tools
 
-Codixing exposes 48 tools via the [Model Context Protocol](https://modelcontextprotocol.io) — any MCP-compatible client picks them up automatically.
+48 tools across 7 categories:
 
-### Claude Code — Plugin (recommended)
+| Category | Tools |
+|----------|-------|
+| **Search** | code_search, find_symbol, grep_code, search_usages, read_symbol, find_similar, stitch_context |
+| **Graph** | get_repo_map, focus_map, get_references, get_transitive_deps, symbol_callers, symbol_callees, predict_impact, find_orphans, explain |
+| **Files** | read_file, write_file, edit_file, delete_file, apply_patch, list_files, outline_file |
+| **Analysis** | find_tests, find_source_for_test, get_complexity, review_context, rename_symbol, run_tests, get_context_for_task, check_staleness, generate_onboarding |
+| **Git** | git_diff, get_hotspots, search_changes, get_blame |
+| **Session** | remember, recall, forget, get_session_summary, session_status, session_reset_focus |
+| **Meta** | index_status, search_tools, get_tool_schema, enrich_docs |
 
-```bash
-claude plugin marketplace add ferax564/codixing
-claude plugin install codixing@codixing
-```
-
-Installs the MCP server plus three slash commands:
-
-| Command | What it does |
-|---------|-------------|
-| `/codixing-setup` | Index the current project and register the MCP server |
-| `/codixing-explore` | Deep architecture overview — PageRank-sorted modules, dependencies, key symbols |
-| `/codixing-review` | Code review with impact analysis, caller tracking, and test coverage |
-
-### Claude Code — MCP only
-
-```bash
-claude mcp add codixing -- npx -y codixing-mcp --root .
-```
-
-### OpenAI Codex CLI
-
-```bash
-codex mcp add codixing -- codixing-mcp --root .
-```
-
-Or add to `~/.codex/config.toml`:
-
-```toml
-[mcp_servers.codixing]
-command = "codixing-mcp"
-args = ["--root", "."]
-```
-
-### Cursor / Windsurf / other MCP clients
-
-```json
-{
-  "mcpServers": {
-    "codixing": {
-      "command": "npx",
-      "args": ["-y", "codixing-mcp", "--root", "."]
-    }
-  }
-}
-```
+Full reference: [codixing.com/docs](https://codixing.com/docs)
 
 ### Daemon mode
 
-Daemon mode loads the engine once and serves all calls over a Unix socket — **4-5x faster** for cheap operations:
+Daemon mode loads the engine once and serves calls over a Unix socket — **4-5x faster**:
 
 ```bash
 codixing-mcp --root /path/to/project --daemon &
 ```
 
 The daemon auto-updates the index within ~100ms of any file save.
-
-### MCP tools
-
-48 tools across 7 categories: **Search** (code_search, find_symbol, grep_code, explain, stitch_context), **Graph** (get_repo_map, symbol_callers, symbol_callees, predict_impact, find_orphans), **Files** (read_file, write_file, edit_file, apply_patch), **Analysis** (find_tests, get_complexity, review_context, rename_symbol), **Git** (git_diff, get_hotspots, get_blame), **Session** (remember, recall, session_status), **Meta** (index_status, search_tools).
-
-Full reference: [codixing.com/docs](https://codixing.com/docs)
 
 ---
 
@@ -147,11 +150,15 @@ Full reference: [codixing.com/docs](https://codixing.com/docs)
 
 ```bash
 codixing-lsp --root /path/to/project
+```
 
-# Neovim
+**Neovim:**
+```lua
 { cmd = { "codixing-lsp", "--root", vim.fn.getcwd() } }
+```
 
-# Emacs (eglot)
+**Emacs (eglot):**
+```elisp
 (add-to-list 'eglot-server-programs
   '((rust-mode python-mode) . ("codixing-lsp" "--root" "/your/project")))
 ```

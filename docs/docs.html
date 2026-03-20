@@ -550,24 +550,55 @@ pub fn handle_auth_request(req: Request) -&gt; Result&lt;Token&gt;</span>
 <span class="tok-cmd">codixing init</span> .
 <span class="tok-cmd">codixing search</span> "authentication handler" <span class="tok-flag">--strategy fast</span></code></pre>
 
-        <h3>Connect to Claude Code</h3>
+        <h3>Claude Code</h3>
 
         <div class="pre-label">Plugin (recommended)</div>
         <pre><code><span class="tok-cmd">claude plugin marketplace add</span> ferax564/codixing
 <span class="tok-cmd">claude plugin install</span> codixing@codixing</code></pre>
-        <p>Installs the MCP server plus three slash commands: <code>/codixing-setup</code> (index + register), <code>/codixing-explore</code> (architecture deep-dive), <code>/codixing-review</code> (code review with impact analysis).</p>
+        <p>Installs the MCP server (48 tools) plus three slash commands: <code>/codixing-setup</code> (index + register), <code>/codixing-explore</code> (architecture deep-dive), <code>/codixing-review</code> (code review with impact analysis). Restart Claude Code after installing.</p>
 
+        <p>Alternatively, register just the MCP server without the plugin:</p>
         <div class="pre-label">MCP only</div>
         <pre><code><span class="tok-cmd">claude mcp add</span> codixing -- npx -y codixing-mcp --root .</code></pre>
 
-        <div class="pre-label">Manual (.mcp.json)</div>
+        <h3>OpenAI Codex CLI</h3>
+
+        <p>Install the binary first, then register the MCP server. Codex requires the local binary &mdash; <code>npx</code> is not supported. Do not use <code>--compact</code> with Codex.</p>
+        <div class="pre-label">shell</div>
+        <pre><code><span class="tok-cmd">curl -fsSL</span> https://codixing.com/install.sh | sh
+<span class="tok-cmd">codex mcp add</span> codixing -- codixing-mcp --root .</code></pre>
+
+        <p>Or add to <code>~/.codex/config.toml</code>:</p>
+        <div class="pre-label">~/.codex/config.toml</div>
+        <pre><code>[mcp_servers.codixing]
+command = "codixing-mcp"
+args = ["--root", "."]</code></pre>
+
+        <h3>Cursor / Windsurf</h3>
+
+        <p>Add to your project's <code>.mcp.json</code> or global MCP settings:</p>
+        <div class="pre-label">.mcp.json</div>
         <pre><code>{
   <span class="tok-key">"mcpServers"</span>: {
     <span class="tok-key">"codixing"</span>: {
       <span class="tok-key">"command"</span>: <span class="tok-str">"npx"</span>,
-      <span class="tok-key">"args"</span>: [<span class="tok-str">"-y"</span>, <span class="tok-str">"codixing-mcp"</span>, <span class="tok-str">"--root"</span>, <span class="tok-str">"."</span>, <span class="tok-str">"--compact"</span>]
+      <span class="tok-key">"args"</span>: [<span class="tok-str">"-y"</span>, <span class="tok-str">"codixing-mcp"</span>, <span class="tok-str">"--root"</span>, <span class="tok-str">"."</span>]
     }
   }
+}</code></pre>
+
+        <h3>Continue.dev</h3>
+
+        <p>Add to <code>~/.continue/config.json</code> under <code>mcpServers</code>:</p>
+        <div class="pre-label">~/.continue/config.json</div>
+        <pre><code>{
+  <span class="tok-key">"mcpServers"</span>: [
+    {
+      <span class="tok-key">"name"</span>: <span class="tok-str">"codixing"</span>,
+      <span class="tok-key">"command"</span>: <span class="tok-str">"npx"</span>,
+      <span class="tok-key">"args"</span>: [<span class="tok-str">"-y"</span>, <span class="tok-str">"codixing-mcp"</span>, <span class="tok-str">"--root"</span>, <span class="tok-str">"."</span>]
+    }
+  ]
 }</code></pre>
       </section>
 
