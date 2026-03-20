@@ -825,10 +825,10 @@ mod tests {
     #[test]
     fn parse_git_history_handles_renames_and_merges() {
         let sample = concat!(
-            "abcdef\x1fabc123\x1fAndrea\x1f2026-03-06T10:00:00+00:00\x1fMerge feature atlas\x1fparent1 parent2\n",
+            "abcdef\x1fabc123\x1fAlice\x1f2026-03-06T10:00:00+00:00\x1fMerge feature atlas\x1fparent1 parent2\n",
             "R100\told.rs\tnew.rs\n",
             "M\tcrates/server/src/routes/graph.rs\n",
-            "123456\x1f1234567\x1fAndrea\x1f2026-03-05T10:00:00+00:00\x1fFollow-up\x1fparent1\n",
+            "123456\x1f1234567\x1fAlice\x1f2026-03-05T10:00:00+00:00\x1fFollow-up\x1fparent1\n",
             "A\tcrates/server/src/main.rs\n"
         );
 

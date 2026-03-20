@@ -8,14 +8,33 @@
   "scripts": {
     "postinstall": "node index.js --install"
   },
-  "os": ["darwin", "linux"],
-  "cpu": ["x64", "arm64"],
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
   "license": "SEE LICENSE IN LICENSE",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ferax564/codixing"
+    "url": "git+https://github.com/ferax564/codixing.git"
   },
-  "keywords": ["mcp", "code-search", "ai", "claude", "cursor", "ast", "bm25"],
+  "keywords": [
+    "mcp",
+    "code-search",
+    "ai",
+    "claude",
+    "cursor",
+    "ast",
+    "bm25"
+  ],
   "homepage": "https://codixing.com",
-  "files": ["index.js", "package.json", "README.md", "LICENSE"]
+  "files": [
+    "index.js",
+    "package.json",
+    "README.md",
+    "LICENSE"
+  ]
 }

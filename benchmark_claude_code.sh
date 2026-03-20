@@ -24,7 +24,7 @@
 set -euo pipefail
 
 CODIXING="./target/release/codixing"
-PROJECT_ROOT="./"
+PROJECT_ROOT="$(cd "$(dirname "$0")" && pwd)"
 RESULTS_DIR="$PROJECT_ROOT/.benchmark_results"
 REPORT="$RESULTS_DIR/claude_code_benchmark.md"
 

@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "codixing": {
+      "type": "stdio",
+      "command": "./target/release/codixing-mcp",
+      "args": [
+        "--root",
+        ".",
+        "--compact"
+      ],
+      "env": {
+        "ORT_DYLIB_PATH": "~/.local/lib/libonnxruntime.dylib",
+        "DYLD_LIBRARY_PATH": "~/.local/lib"
+      }
+    }
+  }
+}

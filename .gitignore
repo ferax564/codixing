@@ -24,6 +24,12 @@ benchmarks/repos/
 .playwright-mcp/
 GTM_Strategy.md
 
+# Machine-specific MCP config (use .mcp.json.example as template)
+.mcp.json
+
+# Internal research / strategy documents
+research/
+
 # Screenshot / marketing assets (not part of the source tree)
 *.png
 *.jpg

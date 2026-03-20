@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 
-ROOT = "./"
+ROOT = os.path.dirname(os.path.abspath(__file__))
 CODIXING = f"{ROOT}/target/release/codixing"
 RESULTS_DIR = f"{ROOT}/.benchmark_results"
 os.makedirs(RESULTS_DIR, exist_ok=True)

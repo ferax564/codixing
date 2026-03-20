@@ -24,7 +24,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 MODELS_DIR = ROOT / "benchmarks" / "models"
-LLAMA_EMB = Path("~/code/llama.cpp/build/bin/llama-embedding")
+LLAMA_EMB = Path(os.environ.get("LLAMA_EMB_PATH", "llama-embedding"))
 
 # ── Retrieval test: (query, expected file substring in top-10) ──
 QUERIES = [

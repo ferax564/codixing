@@ -24,7 +24,7 @@ from pathlib import Path
 REPOS_DIR = Path("benchmarks/repos")
 DATA_DIR = Path("benchmarks/reranker_data")
 MODEL_DIR = Path("benchmarks/models/swe-reranker")
-CODIXING = Path(".//target/release/codixing")
+CODIXING = Path(__file__).resolve().parent.parent / "target" / "release" / "codixing"
 ENV = {
     **os.environ,
     "ORT_DYLIB_PATH": os.path.expanduser("~/.local/lib/libonnxruntime.so"),
