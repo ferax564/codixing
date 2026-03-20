@@ -16,7 +16,7 @@ case "${OS}-${ARCH}" in
   *) echo "Unsupported platform: ${OS}-${ARCH}"; exit 1 ;;
 esac
 
-BINARIES="codixing codixing-mcp codixing-server"
+BINARIES="codixing codixing-mcp codixing-lsp"
 BASE_URL="https://github.com/${REPO}/releases/download/v${VERSION}"
 
 echo "Installing Codixing v${VERSION} for ${OS}/${ARCH}..."

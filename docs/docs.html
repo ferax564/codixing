@@ -468,13 +468,6 @@
         <a href="#lsp">LSP Server</a>
       </div>
       <div class="sidebar-group">
-        <div class="sidebar-group-label">REST API</div>
-        <a href="#api-search">Search & Symbols</a>
-        <a href="#api-graph">Graph</a>
-        <a href="#api-atlas">Graph Atlas</a>
-        <a href="#api-index">Index</a>
-      </div>
-      <div class="sidebar-group">
         <div class="sidebar-group-label">Configuration</div>
         <a href="#config">Index Config</a>
         <a href="#embeddings">Embeddings</a>
@@ -500,7 +493,7 @@
         <div class="pre-label">shell</div>
         <pre><code>curl -fsSL https://codixing.com/install.sh | sh</code></pre>
 
-        <p>Installs three binaries: <code>codixing</code> (CLI), <code>codixing-mcp</code> (MCP server), <code>codixing-server</code> (REST API).</p>
+        <p>Installs three binaries: <code>codixing</code> (CLI), <code>codixing-mcp</code> (MCP server), <code>codixing-lspr</code> (REST API).</p>
 
         <div class="callout callout-info">
           <span class="callout-icon">ℹ</span>
@@ -521,7 +514,7 @@ cargo build --release --workspace
 <span class="tok-comment"># Binaries are now at:</span>
 ./target/release/codixing       <span class="tok-comment"># CLI</span>
 ./target/release/codixing-mcp   <span class="tok-comment"># MCP server</span>
-./target/release/codixing-server <span class="tok-comment"># REST API server</span></code></pre>
+./target/release/codixing-lsp   <span class="tok-comment"># LSP server</span></code></pre>
 
         <h3>Optional features</h3>
         <table class="doc-table">
@@ -1386,112 +1379,9 @@ Sync complete in 0.12s</span></code></pre>
     . (<span class="tok-str">"codixing-lsp"</span> <span class="tok-str">"--root"</span> <span class="tok-str">"/your/project"</span>)))</code></pre>
       </section>
 
-      <!-- API: Search -->
-      <section class="doc-section" id="api-search">
-        <h2>REST API — Search &amp; Symbols</h2>
-        <p>Start the server with <code>codixing-server --root /path/to/project</code>. Defaults to <code>http://localhost:3000</code>.</p>
 
-        <h4>POST /search</h4>
-        <div class="pre-label">request</div>
-        <pre><code>{
-  <span class="tok-key">"query"</span>:    <span class="tok-str">"authentication middleware"</span>,
-  <span class="tok-key">"strategy"</span>: <span class="tok-str">"fast"</span>,
-  <span class="tok-key">"limit"</span>:    <span class="tok-num">20</span>,
-  <span class="tok-key">"tokens"</span>:   <span class="tok-num">8000</span>
-}</code></pre>
-
-        <h4>GET /symbols?name=&lt;NAME&gt;&amp;kind=&lt;KIND&gt;</h4>
-        <div class="pre-label">example</div>
-        <pre><code>GET /symbols?name=authenticate&kind=function</code></pre>
-
-        <h4>GET /health</h4>
-        <p>Returns <code>200 OK</code> with <code>{"status":"ok"}</code> when the engine is ready.</p>
-
-        <h4>GET /status</h4>
-        <p>Returns full index statistics: file count, symbol count, vector count, graph stats.</p>
-      </section>
-
-      <!-- API: Graph -->
-      <section class="doc-section" id="api-graph">
-        <h2>REST API — Graph</h2>
-
-        <h4>POST /graph/repo-map</h4>
-        <div class="pre-label">request</div>
-        <pre><code>{
-  <span class="tok-key">"tokens"</span>:     <span class="tok-num">4000</span>,
-  <span class="tok-key">"seed_files"</span>: [<span class="tok-str">"src/engine.rs"</span>]
-}</code></pre>
-
-        <h4>GET /graph/callers?file=&lt;PATH&gt;&amp;depth=&lt;N&gt;</h4>
-        <h4>GET /graph/callees?file=&lt;PATH&gt;&amp;depth=&lt;N&gt;</h4>
-        <h4>GET /graph/stats</h4>
-        <p>Returns node count, edge count, and the top 10 files by PageRank score.</p>
-      </section>
-
-      <!-- API: Graph Atlas -->
-      <section class="doc-section" id="api-atlas">
-        <h2>REST API — Graph Atlas</h2>
-        <p>The server ships with a browser-based graph atlas for exploring crate-level clusters, file-level relationships, and recent git activity in one view. The atlas supports both a 3D orbit mode and a flat 2D layout, switchable at runtime.</p>
-
-        <h4>GET /graph/view</h4>
-        <p>Returns the atlas UI. The viewer renders a live force-directed graph with two levels of detail: a <strong>group atlas</strong> (one node per cluster) and a <strong>file lens</strong> (individual files, accessed by drilling into any group). Overlay controls, commit history, pan/frame buttons, and a file detail panel sit on top of the scene.</p>
-
-        <div class="pre-label">example</div>
-        <pre><code>codixing-server --host 127.0.0.1 --port 3000 /path/to/project
-
-# open in a browser
-http://127.0.0.1:3000/graph/view</code></pre>
-
-        <p>Left-panel controls:</p>
-        <ul>
-          <li><strong>Refresh mode</strong> — <code>sync</code> (full filesystem diff), <code>git</code> (commit-driven), or <code>none</code> (manual)</li>
-          <li><strong>Include external</strong> — show or hide external library dependency nodes</li>
-          <li><strong>Polling / Poll interval</strong> — auto-refresh every 5 s, 15 s, or 60 s</li>
-          <li><strong>3D mode</strong> — toggle between 3D orbit and flat 2D layout</li>
-          <li><strong>Call Graph Layer</strong> — overlay symbol-level call edges (cyan, curved) on the import graph; automatically raises <code>symbol_limit</code> to 12 for better call resolution</li>
-          <li><strong>Search</strong> — jump to any file or symbol by name</li>
-          <li><strong>Edge filter</strong> — all / imports / calls / external</li>
-        </ul>
-
-        <h4>GET /graph/export?refresh=&lt;MODE&gt;&amp;include_external=&lt;BOOL&gt;&amp;symbol_limit=&lt;N&gt;</h4>
-        <p>Returns the graph snapshot consumed by the atlas. Nodes include cluster labels, PageRank, degree counts, and symbol previews. The cluster assignment is path-aware: generic top-level directories (<code>src/</code>, <code>lib/</code>, <code>pkg/</code>) are treated as transparent and the second path segment is used instead, so flat repos get meaningful grouping.</p>
-
-        <div class="pre-label">example</div>
-        <pre><code>GET /graph/export?refresh=sync&amp;include_external=true&amp;symbol_limit=4</code></pre>
-
-        <ul>
-          <li><strong><code>refresh</code></strong> — <code>none</code>, <code>sync</code>, or <code>git</code></li>
-          <li><strong><code>include_external</code></strong> — include external library nodes and edges</li>
-          <li><strong><code>symbol_limit</code></strong> — symbol previews per node (default 4, capped at 12; the atlas raises this automatically when the Call Graph Layer is enabled)</li>
-        </ul>
-
-        <h4>GET /graph/history?limit=&lt;N&gt;&amp;include_files=&lt;BOOL&gt;</h4>
-        <p>Returns recent git commits for the atlas timeline, including touched files, rename metadata, and derived cluster labels so the viewer can highlight change hotspots directly on the graph.</p>
-
-        <div class="pre-label">example</div>
-        <pre><code>GET /graph/history?limit=18&amp;include_files=true</code></pre>
-
-        <h4>GET /graph/call-graph</h4>
-        <p>Returns symbol-level call edges (<code>caller_file</code>, <code>caller_name</code>, <code>callee_name</code>). Used by the Call Graph Layer overlay. Requires graph support to be enabled at index time; returns <code>available: false</code> otherwise.</p>
-
-        <p>The recommended atlas workflow: frame the full graph, pick a subsystem from <code>Topology Groups</code> to enter the file lens, then click individual files or commits to inspect symbols, PageRank, and cross-cluster edges. Use the 2D toggle for clearer import DAG layouts.</p>
-      </section>
-
-      <!-- API: Index -->
-      <section class="doc-section" id="api-index">
-        <h2>REST API — Index</h2>
-
-        <h4>POST /index/reindex</h4>
-        <p>Triggers a full incremental sync (equivalent to <code>codixing sync</code>).</p>
-
-        <h4>POST /index/file</h4>
-        <div class="pre-label">request</div>
-        <pre><code>{
-  <span class="tok-key">"path"</span>: <span class="tok-str">"src/auth/handler.rs"</span>
-}</code></pre>
-        <p>Re-indexes a single file. Used by editor integrations on save.</p>
-      </section>
-
+      <!-- REST API sections (Graph, Atlas, Index) removed — server is on feat/graph-atlas branch -->
+      <!-- Keeping only: Config section below -->
       <!-- Config -->
       <section class="doc-section" id="config">
         <h2>Configuration</h2>

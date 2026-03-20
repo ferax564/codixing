@@ -10,7 +10,7 @@ Ultra-fast code retrieval engine for AI agents — beats `grep` at its own game.
 curl -fsSL https://codixing.com/install.sh | sh
 ```
 
-Installs `codixing`, `codixing-mcp`, and `codixing-server` to `/usr/local/bin`. macOS and Linux only. Windows binaries are on the [releases page](https://github.com/ferax564/codixing/releases).
+Installs `codixing`, `codixing-mcp`, and `codixing-lsp` to `/usr/local/bin`. macOS and Linux only. Windows binaries are on the [releases page](https://github.com/ferax564/codixing/releases).
 
 Codixing is a Rust-native engine that gives AI coding agents precisely the right context from any codebase, regardless of size. It combines structure-aware AST parsing (tree-sitter), hybrid search (BM25 + vector), a live code dependency graph with PageRank scoring, and AI-optimized token-budgeted output into a single, blazing-fast binary.
 
@@ -86,40 +86,6 @@ codixing init . --also ../shared-lib --also ../api-server
 codixing sync
 ```
 
-### Graph Atlas Viewer
-
-Start the HTTP server to inspect the live graph atlas in a browser:
-
-```bash
-# Serve the atlas UI and graph endpoints
-codixing-server --host 127.0.0.1 --port 3000 /path/to/project
-
-# Then open:
-# http://127.0.0.1:3000/graph/view
-```
-
-The atlas opens at subsystem scale (cluster nodes) and lets you drill into individual files via the `Topology Groups` panel. Recent git commits are overlaid on the same graph. Controls in the left panel:
-
-| Control | Description |
-|---|---|
-| **Refresh mode** | `sync` (filesystem), `git` (commits only), or `manual` |
-| **Include external** | Toggle external library nodes on/off |
-| **Polling** | Auto-refresh every N seconds |
-| **Poll interval** | 5 s / 15 s / 60 s |
-| **3D mode** | Toggle between 3D orbit and flat 2D layout |
-| **Call Graph Layer** | Overlay symbol-level call edges (cyan) on the import graph |
-| **Search** | Jump to a file or symbol by name |
-| **Edge filter** | Show all / imports only / calls only / external only |
-
-The viewer reads from:
-
-- `GET /graph/view` — browser UI
-- `GET /graph/export?refresh=none|sync|git&include_external=true&symbol_limit=4` — graph snapshot with clusters, edges, and symbol previews (auto-raises to `symbol_limit=12` when the Call Graph Layer is active)
-- `GET /graph/history?limit=18&include_files=true` — recent commits and touched indexed files
-- `GET /graph/call-graph` — symbol-level call edges (requires graph support at index time)
-
----
-
 ## MCP Integration
 
 Codixing exposes all its tools via the [Model Context Protocol](https://modelcontextprotocol.io) — any MCP-compatible client picks them up automatically.
@@ -191,7 +157,7 @@ codixing-mcp --root /path/to/project --daemon &
 
 The daemon runs a background file watcher. When you save a file, the index updates within ~100ms. Claude Code always queries a fresh index.
 
-### Available MCP tools (44)
+### Available MCP tools (48)
 
 #### Search & Navigation
 | Tool | What it does |
@@ -349,7 +315,7 @@ Apple M4 (macOS ARM64), 138 Rust files, 1113 chunks, 2323 symbols.
 | **Top-1 accuracy** | 7/10 (70%) | **10/10 (100%)** |
 | **Token init cost** | ~218 tokens (compact) | ~218 tokens (compact) |
 | **ONNX required** | No | Yes |
-| **Test suite** | 628 tests | 628 tests |
+| **Test suite** | 625 tests | 625 tests |
 
 ### External Benchmark ([OpenClaw](https://github.com/openclaw/openclaw) — 368K LoC, 7,607 TypeScript files)
 
@@ -371,7 +337,7 @@ Apple M4 (macOS ARM64), 138 Rust files, 1113 chunks, 2323 symbols.
 | **Init speed (138 files)** | **0.21s** | Not published | N/A | ~2s |
 | **MCP cold start** | **24ms** (BM25) | ~500ms+ (Node.js) | N/A | N/A |
 | **Search latency** | **30ms** | Not published | 48ms | N/A |
-| **MCP tools** | **47** (compact: 2) | 4 | 0 | 0 |
+| **MCP tools** | **48** (compact: 2) | 4 | 0 | 0 |
 | **Token reduction** | **96.7%** (compact) | ~40% | 0% | 0% |
 | **Search quality** | **10/10** (100%) | Not benchmarked | 3/10* | N/A |
 | **Dependency graph** | Yes (PageRank + PPR) | No | No | Yes (PageRank) |
@@ -474,7 +440,7 @@ Codixing MCP server running on its own codebase — 138 Rust files, 1105 chunks,
 
 **Cold start:** 107ms (process launch + ONNX model load + index open)
 
-**Warm tool latency** (persistent MCP connection, 47 tools available):
+**Warm tool latency** (persistent MCP connection, 48 tools available):
 
 | Tool | Latency | Output |
 |------|---------|--------|
@@ -549,7 +515,7 @@ codixing init . --model snowflake-arctic-l
 - **`.gitignore`-aware indexing** — File walker respects `.gitignore`, `.ignore`, and global gitignore (same as ripgrep); no manual exclude lists needed
 - **Hash-based incremental sync** — `codixing sync` uses mtime+size pre-filtering then xxh3 content hashes; re-indexes only changed files
 - **Cross-repo federation** — `FederatedEngine` wraps multiple `Engine` instances for unified multi-project search via RRF fusion; lazy loading with LRU eviction; per-project boost weights; `--federation config.json` flag
-- **MCP server** — 47 tools exposed via JSON-RPC 2.0; Claude Code registers with one command
+- **MCP server** — 48 tools exposed via JSON-RPC 2.0; Claude Code registers with one command
 - **Dynamic tool discovery** — `--compact` mode reduces tools/list from ~6,600 to ~220 tokens (96.7% reduction); meta-tools `search_tools` and `get_tool_schema` let LLMs discover tools on demand
 - **Contextual chunk embedding** — Prepends file path, scope chain, and entity names to chunks before embedding; improves semantic retrieval by giving the embedding model positional context
 - **Adaptive result truncation** — Detects score cliffs in search results and truncates where confidence drops, returning fewer but higher-quality results; saves ~23% output tokens
@@ -599,8 +565,8 @@ codixing init . --model snowflake-arctic-l
 │  └──────────────────┘  └───────────────┘  └────────────────────────────┘   │
 │                                                                             │
 │  ┌─────────────────────────────────────────────────────────────────────────┐ │
-│  │ API Layer: CLI (clap) · REST (axum) · MCP 44 tools (JSON-RPC 2.0)      │ │
-│  │            + Daemon (Unix socket) · File Watcher · LSP Server           │ │
+│  │ API Layer: CLI (clap) · MCP 48 tools (JSON-RPC 2.0) · LSP Server       │ │
+│  │            + Daemon (Unix socket) · File Watcher                        │ │
 │  └─────────────────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -630,7 +596,6 @@ codixing init . --model snowflake-arctic-l
 | Vector index (Qdrant) | `qdrant-client` 1 | Optional distributed backend; enable with `--features qdrant` |
 | Code graph | `petgraph` 0.8 | `DiGraph` + PageRank |
 | Token counting | `tiktoken-rs` 0.9 | cl100k_base budget enforcement |
-| HTTP server | `axum` 0.8 | Async REST API |
 | Symbol table | `dashmap` 6 | Lock-free concurrent hash map |
 | Parallelism | `rayon` 1 | Parallel file processing |
 | File watching | `notify` 8 | Cross-platform fs event monitoring |
@@ -663,7 +628,7 @@ codixing init . --model snowflake-arctic-l
 | **Phase 14: Dead Code Detection** | ✅ Complete | `find_orphans` — zero in-degree graph analysis with confidence scoring (Certain/High/Moderate/Low) |
 | **Phase 15: Cross-Repo Search** | ✅ Complete | FederatedEngine (multi-repo RRF fusion), `--federation` flag, `list_projects` tool, lazy loading with LRU eviction, per-project boost weights, `get_context_for_task`, asymmetric RRF, query expansion, path-match reranking — 426 tests |
 | **Phase 16: Intelligence & Scale** | ✅ Complete | Focus-aware repo map (PPR), test-to-code mapping, config languages (YAML/TOML/Dockerfile/Makefile), mmap vector index, multi-agent shared sessions, signature-aware truncation, stale index detection, rename validation — **452 tests** |
-| **Phase 17: Research-Backed Retrieval** | ✅ Complete | Dynamic tool discovery (`--compact`, 96.7% token reduction), contextual chunk embedding, adaptive result truncation, query-to-code reformulation (lightweight HyDE), type-filtered search (`kind` param, 6/6), BGE instruction prefix, synonym expansion, late chunking, concept-to-path boost, search infra demotion, symbol table fallback — **10/10 top-1 accuracy, 628 tests** |
+| **Phase 17: Research-Backed Retrieval** | ✅ Complete | Dynamic tool discovery (`--compact`, 96.7% token reduction), contextual chunk embedding, adaptive result truncation, query-to-code reformulation (lightweight HyDE), type-filtered search (`kind` param, 6/6), BGE instruction prefix, synonym expansion, late chunking, concept-to-path boost, search infra demotion, symbol table fallback — **10/10 top-1 accuracy, 625 tests** |
 
 ---
 
