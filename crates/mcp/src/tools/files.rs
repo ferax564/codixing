@@ -251,6 +251,13 @@ fn resolve_safe_path(engine: &Engine, rel: &str) -> Result<PathBuf, String> {
 }
 
 pub(crate) fn call_write_file(engine: &mut Engine, args: &Value) -> (String, bool) {
+    if engine.is_read_only() {
+        return (
+            "Cannot write file: index is open in read-only mode.".to_string(),
+            true,
+        );
+    }
+
     let file = match args.get("file").and_then(|v| v.as_str()) {
         Some(f) => f,
         None => return ("Missing required argument: file".to_string(), true),
@@ -315,6 +322,13 @@ pub(crate) fn call_write_file(engine: &mut Engine, args: &Value) -> (String, boo
 }
 
 pub(crate) fn call_edit_file(engine: &mut Engine, args: &Value) -> (String, bool) {
+    if engine.is_read_only() {
+        return (
+            "Cannot edit file: index is open in read-only mode.".to_string(),
+            true,
+        );
+    }
+
     let file = match args.get("file").and_then(|v| v.as_str()) {
         Some(f) => f,
         None => return ("Missing required argument: file".to_string(), true),
@@ -407,6 +421,13 @@ pub(crate) fn call_edit_file(engine: &mut Engine, args: &Value) -> (String, bool
 }
 
 pub(crate) fn call_delete_file(engine: &mut Engine, args: &Value) -> (String, bool) {
+    if engine.is_read_only() {
+        return (
+            "Cannot delete file: index is open in read-only mode.".to_string(),
+            true,
+        );
+    }
+
     let file = match args.get("file").and_then(|v| v.as_str()) {
         Some(f) => f,
         None => return ("Missing required argument: file".to_string(), true),
@@ -512,6 +533,13 @@ pub(crate) fn call_git_diff(engine: &Engine, args: &Value) -> (String, bool) {
 }
 
 pub(crate) fn call_apply_patch(engine: &mut Engine, args: &Value) -> (String, bool) {
+    if engine.is_read_only() {
+        return (
+            "Cannot apply patch: index is open in read-only mode.".to_string(),
+            true,
+        );
+    }
+
     let patch = match args.get("patch").and_then(|v| v.as_str()) {
         Some(p) => p,
         None => return ("Missing required argument: patch".to_string(), true),
