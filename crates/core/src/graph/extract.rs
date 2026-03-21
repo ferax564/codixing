@@ -138,11 +138,71 @@ fn collect_rust_definitions(
         }
     }
 
+    // For `impl Trait for Type`, also extract the trait name so that
+    // trait methods defined in the impl block can be linked back to the trait.
+    if kind_str == "impl_item" {
+        if let Some(trait_name) = rust_impl_trait_name(node, source) {
+            // Extract each method inside the impl block with a qualified name
+            // "TraitName::method" so the symbol graph can link trait method calls
+            // through the impl to the concrete definition.
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "declaration_list" {
+                    let mut inner_cursor = child.walk();
+                    for item in child.children(&mut inner_cursor) {
+                        if item.kind() == "function_item" {
+                            if let Some(name_node) = item.child_by_field_name("name") {
+                                let method_name = node_text(&name_node, source);
+                                // Add a qualified "Trait::method" definition so that
+                                // callers searching for "Trait::method" can find it.
+                                defs.push(DefinitionInfo {
+                                    name: format!("{}::{}", trait_name, method_name),
+                                    kind: SymbolKind::Function,
+                                    file: file_path.to_string(),
+                                    line: item.start_position().row,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Recurse into children
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         collect_rust_definitions(&child, source, file_path, defs);
     }
+}
+
+/// Extract the trait name from `impl Trait for Type { ... }`.
+///
+/// Returns `Some("Trait")` for `impl Trait for Type`, `None` for `impl Type`.
+fn rust_impl_trait_name(node: &tree_sitter::Node, source: &[u8]) -> Option<String> {
+    // In tree-sitter-rust, `impl Trait for Type` has a "trait" field.
+    if let Some(trait_node) = node.child_by_field_name("trait") {
+        return Some(node_text(&trait_node, source));
+    }
+    // Fallback: look for a `for` keyword, which only appears in trait impls.
+    let mut found_for = false;
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "for" || node_text(&child, source) == "for" {
+            found_for = true;
+        }
+        // The first type_identifier before "for" is the trait name.
+        if !found_for && child.kind() == "type_identifier" {
+            let text = node_text(&child, source);
+            // Check that the next sibling is "for"
+            if let Some(next) = child.next_sibling() {
+                if next.kind() == "for" || node_text(&next, source) == "for" {
+                    return Some(text);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Map a tree-sitter-rust node kind to our SymbolKind.
@@ -250,6 +310,23 @@ fn collect_rust_references(
                 });
             }
             // No need to recurse into use declarations
+        }
+        "impl_item" => {
+            // For `impl Trait for Type { ... }`, emit an Inherit reference
+            // from Type to Trait so the call graph knows about the relationship.
+            if let Some(trait_name) = rust_impl_trait_name(node, source) {
+                refs.push(ReferenceInfo {
+                    target_name: trait_name,
+                    kind: ReferenceKind::Inherit,
+                    file: file_path.to_string(),
+                    line: node.start_position().row,
+                });
+            }
+            // Recurse into the impl body to find call references.
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                collect_rust_references(&child, source, file_path, refs);
+            }
         }
         _ => {
             // Recurse into children
@@ -377,6 +454,45 @@ fn collect_python_references(
                 collect_python_references(&child, source, file_path, refs);
             }
         }
+        "class_definition" => {
+            // Extract Inherit references from `class Dog(Animal):` superclass list.
+            if let Some(bases) = node.child_by_field_name("superclasses") {
+                let mut cursor = bases.walk();
+                for child in bases.children(&mut cursor) {
+                    match child.kind() {
+                        "identifier" => {
+                            let base_name = node_text(&child, source);
+                            if !base_name.is_empty() {
+                                refs.push(ReferenceInfo {
+                                    target_name: base_name,
+                                    kind: ReferenceKind::Inherit,
+                                    file: file_path.to_string(),
+                                    line: node.start_position().row,
+                                });
+                            }
+                        }
+                        "attribute" => {
+                            // e.g. `module.BaseClass`
+                            let base_name = node_text(&child, source);
+                            if !base_name.is_empty() {
+                                refs.push(ReferenceInfo {
+                                    target_name: base_name,
+                                    kind: ReferenceKind::Inherit,
+                                    file: file_path.to_string(),
+                                    line: node.start_position().row,
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // Recurse into the class body for call references.
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                collect_python_references(&child, source, file_path, refs);
+            }
+        }
         "import_statement" | "import_from_statement" => {
             let text = node_text(node, source);
             if !text.is_empty() {
@@ -455,6 +571,49 @@ fn collect_typescript_definitions(
                 });
             }
         }
+        "interface_declaration" => {
+            // Extract interface as Trait kind (analogous to Rust traits).
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let iface_name = node_text(&name_node, source);
+                defs.push(DefinitionInfo {
+                    name: iface_name.clone(),
+                    kind: SymbolKind::Trait,
+                    file: file_path.to_string(),
+                    line: node.start_position().row,
+                });
+                // Also extract method signatures from the interface body.
+                if let Some(body) = node.child_by_field_name("body") {
+                    let mut cursor = body.walk();
+                    for child in body.children(&mut cursor) {
+                        // Interface method signatures appear as various node types
+                        // depending on the tree-sitter-typescript grammar version.
+                        // Common types: "method_signature", "property_signature".
+                        if child.kind() == "method_signature" || child.kind() == "method_definition"
+                        {
+                            if let Some(method_name_node) = child.child_by_field_name("name") {
+                                let method_name = node_text(&method_name_node, source);
+                                defs.push(DefinitionInfo {
+                                    name: method_name.clone(),
+                                    kind: SymbolKind::Function,
+                                    file: file_path.to_string(),
+                                    line: child.start_position().row,
+                                });
+                                // Also add a qualified "Interface::method" definition
+                                // for precise trait-dispatch linking.
+                                defs.push(DefinitionInfo {
+                                    name: format!("{}::{}", iface_name, method_name),
+                                    kind: SymbolKind::Function,
+                                    file: file_path.to_string(),
+                                    line: child.start_position().row,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            // Don't recurse — we already handled the body above.
+            return;
+        }
         "method_definition" => {
             if let Some(name_node) = node.child_by_field_name("name") {
                 defs.push(DefinitionInfo {
@@ -500,6 +659,45 @@ fn collect_typescript_references(
             // Recurse into children (calls can be nested)
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
+                collect_typescript_references(&child, source, file_path, refs);
+            }
+        }
+        "class_declaration" => {
+            // Extract Inherit references from `implements` and `extends` clauses.
+            // e.g. `class ConsoleLogger implements Logger { ... }`
+            // e.g. `class Dog extends Animal { ... }`
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "class_heritage" {
+                    let mut inner_cursor = child.walk();
+                    for clause in child.children(&mut inner_cursor) {
+                        // `implements_clause` or `extends_clause`
+                        if clause.kind() == "implements_clause" || clause.kind() == "extends_clause"
+                        {
+                            let mut clause_cursor = clause.walk();
+                            for type_node in clause.children(&mut clause_cursor) {
+                                // Type identifiers in the clause
+                                if type_node.kind() == "type_identifier"
+                                    || type_node.kind() == "identifier"
+                                {
+                                    let name = node_text(&type_node, source);
+                                    if !name.is_empty() {
+                                        refs.push(ReferenceInfo {
+                                            target_name: name,
+                                            kind: ReferenceKind::Inherit,
+                                            file: file_path.to_string(),
+                                            line: node.start_position().row,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Recurse into the class body for call references.
+            let mut cursor2 = node.walk();
+            for child in node.children(&mut cursor2) {
                 collect_typescript_references(&child, source, file_path, refs);
             }
         }

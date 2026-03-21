@@ -98,20 +98,27 @@ pub struct ProgressNotification {
     pub progress: u32,
     pub total: u32,
     pub message: String,
+    /// Optional structured data (e.g. partial search results) attached to
+    /// the progress notification.
+    pub data: Option<Value>,
 }
 
 impl ProgressNotification {
     /// Serialize to the JSON-RPC wire format.
     pub fn to_json(&self) -> Value {
+        let mut params = json!({
+            "progressToken": self.progress_token,
+            "progress": self.progress,
+            "total": self.total,
+            "message": self.message,
+        });
+        if let Some(ref data) = self.data {
+            params["data"] = data.clone();
+        }
         json!({
             "jsonrpc": "2.0",
             "method": "notifications/progress",
-            "params": {
-                "progressToken": self.progress_token,
-                "progress": self.progress,
-                "total": self.total,
-                "message": self.message,
-            }
+            "params": params,
         })
     }
 }

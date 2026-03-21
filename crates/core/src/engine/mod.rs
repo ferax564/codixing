@@ -59,6 +59,10 @@ pub struct IndexStats {
     pub graph_node_count: usize,
     /// Number of edges in the dependency graph (0 if graph not built).
     pub graph_edge_count: usize,
+    /// Number of nodes in the symbol-level call graph (0 if not built).
+    pub symbol_node_count: usize,
+    /// Number of edges in the symbol-level call graph (0 if not built).
+    pub symbol_edge_count: usize,
 }
 
 /// Statistics returned by [`Engine::sync`].
@@ -254,6 +258,12 @@ pub struct Engine {
     /// All search / read operations work; write operations return
     /// [`CodixingError::ReadOnly`].
     read_only: bool,
+    /// When this engine was last loaded/reloaded from disk (mtime of `meta.json`).
+    last_load_time: Option<std::time::SystemTime>,
+    /// Minimum interval between reload checks (default: 30s).
+    reload_interval: std::time::Duration,
+    /// Last time we checked for staleness.
+    last_staleness_check: Option<std::time::Instant>,
 }
 
 impl Engine {
@@ -475,6 +485,9 @@ impl Engine {
             session,
             shared_session: SharedSession::default_new(),
             read_only: false,
+            last_load_time: None,
+            reload_interval: std::time::Duration::from_secs(30),
+            last_staleness_check: None,
         })
     }
 
@@ -630,6 +643,14 @@ impl Engine {
             info!("engine opened in read-only mode — search works, writes disabled");
         }
 
+        // Record the on-disk mtime of meta.json for read-only staleness detection.
+        let meta_mtime = store
+            .codixing_dir()
+            .join("meta.json")
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok());
+
         Ok(Self {
             config,
             store,
@@ -645,6 +666,9 @@ impl Engine {
             session,
             shared_session: SharedSession::default_new(),
             read_only,
+            last_load_time: meta_mtime,
+            reload_interval: std::time::Duration::from_secs(30),
+            last_staleness_check: None,
         })
     }
 
@@ -780,6 +804,14 @@ impl Engine {
         let session = Arc::new(SessionState::with_root(true, &root));
         session.cleanup_old_sessions();
 
+        // Record the on-disk mtime of meta.json for read-only staleness detection.
+        let meta_mtime = store
+            .codixing_dir()
+            .join("meta.json")
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok());
+
         Ok(Self {
             config,
             store,
@@ -795,6 +827,9 @@ impl Engine {
             session,
             shared_session: SharedSession::default_new(),
             read_only: true,
+            last_load_time: meta_mtime,
+            reload_interval: std::time::Duration::from_secs(30),
+            last_staleness_check: None,
         })
     }
 
@@ -807,16 +842,138 @@ impl Engine {
         self.read_only
     }
 
+    /// Set the minimum interval between reload-staleness checks.
+    ///
+    /// Only meaningful for read-only instances; ignored otherwise.
+    pub fn set_reload_interval(&mut self, interval: std::time::Duration) {
+        self.reload_interval = interval;
+    }
+
+    /// Check if the on-disk index has been updated since this read-only
+    /// instance was loaded, and reload if so.
+    ///
+    /// Returns `Ok(true)` if data was reloaded, `Ok(false)` if no reload
+    /// was needed (or this is a read-write instance). No-op if this instance
+    /// holds the write lock.
+    pub fn reload_if_stale(&mut self) -> Result<bool> {
+        if !self.read_only {
+            return Ok(false);
+        }
+
+        // Rate-limit checks.
+        if let Some(last_check) = self.last_staleness_check {
+            if last_check.elapsed() < self.reload_interval {
+                return Ok(false);
+            }
+        }
+        self.last_staleness_check = Some(std::time::Instant::now());
+
+        let meta_path = self.store.codixing_dir().join("meta.json");
+        let disk_mtime = std::fs::metadata(&meta_path)
+            .ok()
+            .and_then(|m| m.modified().ok());
+
+        match (disk_mtime, self.last_load_time) {
+            (Some(disk), Some(loaded)) if disk > loaded => {
+                info!("read-only index stale — reloading from disk");
+                self.reload_from_disk()?;
+                self.last_load_time = Some(disk);
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Re-read all persistent state from the `.codixing/` directory.
+    ///
+    /// Reloads symbols, chunk metadata, the dependency graph, the vector
+    /// index (if present), and refreshes the Tantivy reader.
+    fn reload_from_disk(&mut self) -> Result<()> {
+        // Reload symbols.
+        if self.store.symbols_path().exists() {
+            let bytes = self.store.load_symbols_bytes()?;
+            self.symbols = deserialize_symbols(&bytes)?;
+        }
+
+        // Reload chunk_meta.
+        if self.store.chunk_meta_path().exists() {
+            let bytes = self.store.load_chunk_meta_bytes()?;
+            let pairs: Vec<(u64, ChunkMeta)> = bitcode::deserialize(&bytes).map_err(|e| {
+                CodixingError::Serialization(format!("failed to deserialize chunk_meta: {e}"))
+            })?;
+            self.chunk_meta.clear();
+            for (k, v) in pairs {
+                self.chunk_meta.insert(k, v);
+            }
+        }
+
+        // Rebuild file_chunk_counts from chunk_meta.
+        self.file_chunk_counts.clear();
+        for entry in self.chunk_meta.iter() {
+            *self
+                .file_chunk_counts
+                .entry(entry.value().file_path.clone())
+                .or_insert(0) += 1;
+        }
+
+        // Reload graph.
+        self.graph = match self.store.load_graph() {
+            Ok(Some(data)) => {
+                let mut g = CodeGraph::from_flat(data);
+                match self.store.load_symbol_graph() {
+                    Ok(Some(sym_graph)) => {
+                        g.inner = sym_graph.inner;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        warn!(error = %e, "failed to load symbol graph during reload");
+                    }
+                }
+                Some(g)
+            }
+            Ok(None) => None,
+            Err(e) => {
+                warn!(error = %e, "failed to reload graph");
+                self.graph.take()
+            }
+        };
+
+        // Reload vector index if it exists and we have an embedder.
+        if let Some(ref emb) = self.embedder {
+            if self.store.vector_index_path().exists() && self.store.file_chunks_path().exists() {
+                match VectorIndex::load(
+                    &self.store.vector_index_path(),
+                    &self.store.file_chunks_path(),
+                    emb.dims,
+                    self.config.embedding.quantize,
+                ) {
+                    Ok(vec_idx) => {
+                        self.vector = Some(vec_idx);
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "failed to reload vector index");
+                    }
+                }
+            }
+        }
+
+        // Refresh the Tantivy reader so it picks up new segments.
+        self.tantivy.refresh_reader()?;
+
+        info!("read-only engine reloaded from disk");
+        Ok(())
+    }
+
     /// Return summary statistics about the current index.
     pub fn stats(&self) -> IndexStats {
-        let (graph_node_count, graph_edge_count) = self
+        let (graph_node_count, graph_edge_count, symbol_node_count, symbol_edge_count) = self
             .graph
             .as_ref()
             .map(|g| {
                 let s = g.stats();
-                (s.node_count, s.edge_count)
+                (s.node_count, s.edge_count, s.symbol_nodes, s.symbol_edges)
             })
-            .unwrap_or((0, 0));
+            .unwrap_or((0, 0, 0, 0));
         IndexStats {
             file_count: self.file_chunk_counts.len(),
             chunk_count: self.file_chunk_counts.values().sum(),
@@ -824,6 +981,8 @@ impl Engine {
             vector_count: self.vector.as_ref().map(|v| v.len()).unwrap_or(0),
             graph_node_count,
             graph_edge_count,
+            symbol_node_count,
+            symbol_edge_count,
         }
     }
 
@@ -2233,6 +2392,88 @@ pub fn unique_new_function() -> bool {
         assert!(
             !results.is_empty(),
             "search should work in fallback read-only mode"
+        );
+
+        drop(dir);
+    }
+
+    #[test]
+    fn read_only_reload_if_stale_no_op_for_writer() {
+        let (_dir, mut engine) = setup_engine_bm25_only();
+        // A read-write engine should always return false.
+        assert!(!engine.reload_if_stale().unwrap());
+    }
+
+    #[test]
+    fn read_only_reload_if_stale_rate_limits() {
+        let (dir, root) = setup_project();
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+
+        // Build the index.
+        {
+            let _engine = Engine::init(&root, config).unwrap();
+        }
+
+        let mut engine = Engine::open_read_only(&root).unwrap();
+        assert!(engine.is_read_only());
+        engine.set_reload_interval(std::time::Duration::from_secs(60));
+
+        // First call should check (no reload needed since nothing changed).
+        assert!(!engine.reload_if_stale().unwrap());
+
+        // Second call within the interval should be rate-limited (return false immediately).
+        assert!(!engine.reload_if_stale().unwrap());
+
+        drop(dir);
+    }
+
+    #[test]
+    fn read_only_engine_reloads_after_writer_update() {
+        let (dir, root) = setup_project();
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+
+        // Build the index with the writer engine.
+        let mut engine_rw = Engine::init(&root, config).unwrap();
+
+        // Open a read-only copy.
+        let mut engine_ro = Engine::open(&root).unwrap();
+        assert!(
+            engine_ro.is_read_only(),
+            "second engine should be read-only when write lock is held"
+        );
+        engine_ro.set_reload_interval(std::time::Duration::from_secs(0));
+
+        // The reader should not find "unique_reload_function" yet.
+        let syms = engine_ro.symbols("unique_reload_function", None).unwrap();
+        assert!(syms.is_empty(), "reader should not yet see the new symbol");
+
+        // Add a new file via the writer and persist.
+        fs::write(
+            root.join("src/new_file.rs"),
+            r#"
+/// A unique function for reload testing.
+pub fn unique_reload_function() -> bool {
+    true
+}
+"#,
+        )
+        .unwrap();
+        engine_rw
+            .reindex_file(Path::new("src/new_file.rs"))
+            .unwrap();
+        engine_rw.save().unwrap();
+
+        // Now the reader should detect staleness and reload.
+        let reloaded = engine_ro.reload_if_stale().unwrap();
+        assert!(reloaded, "reader should have reloaded");
+
+        // The reader should now find the new symbol.
+        let syms = engine_ro.symbols("unique_reload_function", None).unwrap();
+        assert!(
+            !syms.is_empty(),
+            "reader should find the new symbol after reload"
         );
 
         drop(dir);

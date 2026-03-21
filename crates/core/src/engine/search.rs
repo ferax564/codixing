@@ -135,6 +135,53 @@ impl Engine {
         Ok(results)
     }
 
+    /// Like [`search()`](Self::search), but calls `on_progress` after each
+    /// retrieval phase so callers can stream partial results to the client.
+    ///
+    /// Phase names reported:
+    /// - `"bm25"` — BM25-only results (always reported first)
+    /// - `"fused"` — hybrid BM25 + vector results (for `Fast`/`Thorough`/`Deep`)
+    /// - `"reranked"` — cross-encoder re-ranked results (for `Deep` only)
+    ///
+    /// For `Instant` strategy only the `"bm25"` phase fires and the returned
+    /// results are identical to [`search()`](Self::search).
+    pub fn search_with_progress<F>(
+        &self,
+        query: SearchQuery,
+        mut on_progress: F,
+    ) -> Result<Vec<SearchResult>>
+    where
+        F: FnMut(&str, &[SearchResult]),
+    {
+        let strategy = query.strategy;
+
+        // Phase 1: quick BM25-only pass — always runs, gives near-instant
+        // partial results regardless of the final strategy.
+        let bm25_query = SearchQuery {
+            strategy: Strategy::Instant,
+            ..query.clone()
+        };
+        let bm25_results = self.search(bm25_query)?;
+        on_progress("bm25", &bm25_results);
+
+        // For Instant, BM25 is the only phase — return directly.
+        if strategy == Strategy::Instant {
+            return Ok(bm25_results);
+        }
+
+        // Phase 2+: run the full strategy which internally performs BM25 again
+        // (redundant but safe — avoids refactoring the monolithic search path).
+        let full_results = self.search(query)?;
+
+        // Report the appropriate phase name based on strategy.
+        match strategy {
+            Strategy::Deep => on_progress("reranked", &full_results),
+            _ => on_progress("fused", &full_results),
+        }
+
+        Ok(full_results)
+    }
+
     /// Graph-expanded search (RepoHyper "Search-then-Expand" pattern).
     ///
     /// Phase 1: broad BM25 retrieval identifies anchor files.

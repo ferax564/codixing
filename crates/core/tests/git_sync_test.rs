@@ -6,10 +6,12 @@
 //!
 //! **Note on Tantivy locking**: Tantivy acquires a file-level lock on the
 //! index writer.  Tests that init + re-open the same directory must run
-//! sequentially; we enforce this with `--test-threads 1` in the test
-//! harness or by restructuring tests to avoid the double-open pattern.
+//! sequentially; we enforce this with the `serial_test` crate — tests that
+//! share a Tantivy writer are annotated with `#[serial]` to prevent
+//! concurrent lock contention.
 
 use codixing_core::{Engine, IndexConfig, SearchQuery, Strategy};
+use serial_test::serial;
 use tempfile::tempdir;
 
 /// Helper: run a git command in `cwd`; panics on failure.
@@ -184,6 +186,7 @@ fn git_sync_handles_renamed_files() {
 }
 
 #[test]
+#[serial]
 fn git_sync_no_op_when_already_current() {
     if !git_available() {
         eprintln!("git_sync_no_op_when_already_current: skipped (git not in PATH)");
@@ -217,6 +220,7 @@ fn git_sync_no_op_when_already_current() {
 }
 
 #[test]
+#[serial]
 fn git_sync_no_op_without_git() {
     // When the project is not in a git repo, git_sync must return
     // unchanged=true without panicking.
@@ -238,4 +242,20 @@ fn git_sync_no_op_without_git() {
         stats.unchanged,
         "git_sync should be a no-op for non-git directories"
     );
+}
+
+#[test]
+#[serial]
+fn serial_engine_open_no_lock_contention() {
+    let dir1 = tempdir().unwrap();
+    let root1 = dir1.path();
+    std::fs::write(root1.join("a.rs"), "fn a() {}").unwrap();
+    drop(Engine::init(root1, bm25_config(root1)).unwrap());
+    let _e1 = Engine::open(root1).unwrap();
+
+    let dir2 = tempdir().unwrap();
+    let root2 = dir2.path();
+    std::fs::write(root2.join("b.rs"), "fn b() {}").unwrap();
+    drop(Engine::init(root2, bm25_config(root2)).unwrap());
+    let _e2 = Engine::open(root2).unwrap();
 }

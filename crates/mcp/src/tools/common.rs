@@ -2,6 +2,8 @@
 
 use std::sync::LazyLock;
 
+use serde_json::Value;
+
 use crate::protocol::ProgressNotification;
 
 /// Regex matching function-call patterns in source code: `identifier(`.
@@ -48,6 +50,19 @@ impl ProgressReporter {
             progress,
             total: self.total,
             message: message.to_string(),
+            data: None,
+        });
+    }
+
+    /// Send a progress notification with attached structured data (e.g. partial
+    /// search results).  Best-effort: silently ignores send errors.
+    pub fn report_with_data(&self, progress: u32, message: &str, data: Value) {
+        let _ = self.sender.send(ProgressNotification {
+            progress_token: self.token.clone(),
+            progress,
+            total: self.total,
+            message: message.to_string(),
+            data: Some(data),
         });
     }
 }

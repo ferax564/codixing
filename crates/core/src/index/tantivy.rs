@@ -477,6 +477,15 @@ impl TantivyIndex {
         Ok(())
     }
 
+    /// Reload the reader to pick up changes made by another writer process.
+    ///
+    /// Useful for read-only instances that want to see new segments committed
+    /// by a concurrent writer.
+    pub fn refresh_reader(&self) -> Result<()> {
+        self.reader.reload()?;
+        Ok(())
+    }
+
     /// Search the index using BM25 ranking.
     ///
     /// Returns up to `limit` results as `(chunk_id, score)` pairs sorted by

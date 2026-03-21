@@ -69,6 +69,7 @@ impl LanguageServer for CodixingBackend {
                     retrigger_characters: Some(vec![",".to_string()]),
                     ..Default::default()
                 }),
+                call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -582,6 +583,186 @@ impl LanguageServer for CodixingBackend {
             active_signature: Some(0),
             active_parameter: Some(active_param),
         }))
+    }
+
+    // -----------------------------------------------------------------------
+    // Call hierarchy — cross-language callers/callees
+    // -----------------------------------------------------------------------
+
+    async fn prepare_call_hierarchy(
+        &self,
+        params: CallHierarchyPrepareParams,
+    ) -> Result<Option<Vec<CallHierarchyItem>>> {
+        let pos = &params.text_document_position_params;
+        let uri = &pos.text_document.uri;
+        let abs = match uri.to_file_path() {
+            Ok(p) => p,
+            Err(_) => return Ok(None),
+        };
+
+        let engine = self.engine.read().unwrap();
+        let rel = match engine.config().normalize_path(&abs) {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        let symbols = engine.symbols("", Some(&rel)).unwrap_or_default();
+
+        // Find the symbol whose range contains the cursor position.
+        let cursor_line = pos.position.line as usize;
+        let sym = match symbols
+            .iter()
+            .find(|s| s.line_start <= cursor_line && cursor_line <= s.line_end)
+        {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        let sym_abs = engine
+            .config()
+            .resolve_path(&sym.file_path)
+            .unwrap_or_else(|| PathBuf::from(&sym.file_path));
+        let sym_uri = match Url::from_file_path(&sym_abs) {
+            Ok(u) => u,
+            Err(_) => return Ok(None),
+        };
+
+        let range = line_range(sym.line_start, sym.line_end);
+        let selection_range = line_range(sym.line_start, sym.line_start);
+
+        Ok(Some(vec![CallHierarchyItem {
+            name: sym.name.clone(),
+            kind: kind_to_lsp(sym.kind.clone()),
+            tags: None,
+            detail: Some(sym.file_path.clone()),
+            uri: sym_uri,
+            range,
+            selection_range,
+            data: None,
+        }]))
+    }
+
+    async fn incoming_calls(
+        &self,
+        params: CallHierarchyIncomingCallsParams,
+    ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
+        let item = &params.item;
+        let engine = self.engine.read().unwrap();
+        let callers = engine.symbol_callers_precise(&item.name, 50);
+
+        if callers.is_empty() {
+            return Ok(Some(vec![]));
+        }
+
+        let mut results = Vec::new();
+        for caller in &callers {
+            let abs = engine
+                .config()
+                .resolve_path(&caller.file_path)
+                .unwrap_or_else(|| PathBuf::from(&caller.file_path));
+            let uri = match Url::from_file_path(&abs) {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+
+            // Try to find the enclosing symbol for this caller reference so we
+            // can report a proper CallHierarchyItem with a full range.
+            let caller_rel = &caller.file_path;
+            let file_syms = engine.symbols("", Some(caller_rel)).unwrap_or_default();
+            let enclosing = file_syms
+                .iter()
+                .find(|s| s.line_start <= caller.line && caller.line <= s.line_end);
+
+            let (name, kind, range, selection_range) = if let Some(enc) = enclosing {
+                (
+                    enc.name.clone(),
+                    kind_to_lsp(enc.kind.clone()),
+                    line_range(enc.line_start, enc.line_end),
+                    line_range(enc.line_start, enc.line_start),
+                )
+            } else {
+                // Fallback: use context as the name, Function as kind.
+                let display_name = if caller.context.is_empty() {
+                    format!("{}:{}", caller.file_path, caller.line)
+                } else {
+                    caller.context.clone()
+                };
+                let r = line_range(caller.line, caller.line);
+                (display_name, SymbolKind::FUNCTION, r, r)
+            };
+
+            let call_range = line_range(caller.line, caller.line);
+
+            results.push(CallHierarchyIncomingCall {
+                from: CallHierarchyItem {
+                    name,
+                    kind,
+                    tags: None,
+                    detail: Some(caller.file_path.clone()),
+                    uri,
+                    range,
+                    selection_range,
+                    data: None,
+                },
+                from_ranges: vec![call_range],
+            });
+        }
+
+        Ok(Some(results))
+    }
+
+    async fn outgoing_calls(
+        &self,
+        params: CallHierarchyOutgoingCallsParams,
+    ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
+        let item = &params.item;
+        let engine = self.engine.read().unwrap();
+        let callees = engine.symbol_callees_precise(&item.name, item.detail.as_deref());
+
+        if callees.is_empty() {
+            return Ok(Some(vec![]));
+        }
+
+        let mut results = Vec::new();
+        for callee_name in &callees {
+            // Resolve the callee to a Symbol for location info.
+            let syms = engine.symbols(callee_name, None).unwrap_or_default();
+            let sym = match syms.iter().find(|s| s.name == *callee_name) {
+                Some(s) => s,
+                None => continue,
+            };
+
+            let abs = engine
+                .config()
+                .resolve_path(&sym.file_path)
+                .unwrap_or_else(|| PathBuf::from(&sym.file_path));
+            let uri = match Url::from_file_path(&abs) {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+
+            let range = line_range(sym.line_start, sym.line_end);
+            let selection_range = line_range(sym.line_start, sym.line_start);
+
+            results.push(CallHierarchyOutgoingCall {
+                to: CallHierarchyItem {
+                    name: sym.name.clone(),
+                    kind: kind_to_lsp(sym.kind.clone()),
+                    tags: None,
+                    detail: Some(sym.file_path.clone()),
+                    uri,
+                    range,
+                    selection_range,
+                    data: None,
+                },
+                from_ranges: vec![line_range(
+                    item.selection_range.start.line as usize,
+                    item.selection_range.start.line as usize,
+                )],
+            });
+        }
+
+        Ok(Some(results))
     }
 }
 

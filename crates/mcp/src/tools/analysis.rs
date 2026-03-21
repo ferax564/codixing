@@ -24,9 +24,17 @@ pub(crate) fn call_index_status(engine: &Engine) -> (String, bool) {
     };
 
     let graph_status = if stats.graph_node_count > 0 {
+        let symbol_part = if stats.symbol_node_count > 0 {
+            format!(
+                ", symbol graph: {} nodes, {} edges",
+                stats.symbol_node_count, stats.symbol_edge_count
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "{} nodes, {} edges (PageRank graph active)",
-            stats.graph_node_count, stats.graph_edge_count
+            "{} nodes, {} edges (PageRank graph active){}",
+            stats.graph_node_count, stats.graph_edge_count, symbol_part
         )
     } else {
         "not available".to_string()

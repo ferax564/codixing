@@ -68,7 +68,41 @@ pub(crate) fn call_code_search(
         }
     }
 
-    match engine.search(query) {
+    // When a progress reporter is available and the strategy is non-trivial,
+    // use search_with_progress to stream BM25 partial results immediately
+    // via a progress notification, then deliver the full results at the end.
+    let search_result = if let (true, Some(p)) = (report_progress, progress) {
+        engine.search_with_progress(query, |phase, partial_results| {
+            if phase == "bm25" && !partial_results.is_empty() {
+                // Send BM25 partial results so the client can display them
+                // while waiting for the full hybrid/reranked results.
+                let partial: Vec<serde_json::Value> = partial_results
+                    .iter()
+                    .take(fetch_limit)
+                    .map(|r| {
+                        serde_json::json!({
+                            "file_path": r.file_path,
+                            "line_start": r.line_start,
+                            "line_end": r.line_end,
+                            "score": r.score,
+                            "signature": r.signature,
+                        })
+                    })
+                    .collect();
+                p.report_with_data(
+                    25,
+                    &format!("BM25 phase: {} partial results", partial.len()),
+                    serde_json::json!({ "partialResults": partial, "phase": "bm25" }),
+                );
+            } else if phase == "fused" || phase == "reranked" {
+                p.report(75, &format!("{} phase complete", phase));
+            }
+        })
+    } else {
+        engine.search(query)
+    };
+
+    match search_result {
         Ok(results) if results.is_empty() => {
             engine.session().record(SessionEventKind::Search {
                 query: query_str,
@@ -79,7 +113,7 @@ pub(crate) fn call_code_search(
         Ok(mut results) => {
             if report_progress {
                 if let Some(p) = progress {
-                    p.report(50, "Reranking...");
+                    p.report(80, "Post-processing results...");
                 }
             }
 
@@ -202,7 +236,7 @@ pub(crate) fn call_code_search(
 
             if report_progress {
                 if let Some(p) = progress {
-                    p.report(75, "Formatting results...");
+                    p.report(90, "Formatting results...");
                 }
             }
 

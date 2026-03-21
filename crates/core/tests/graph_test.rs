@@ -8,6 +8,7 @@ use std::path::Path;
 use codixing_core::graph::{CallExtractor, ImportExtractor, ImportResolver};
 use codixing_core::language::Language;
 use codixing_core::{Engine, IndexConfig};
+use serial_test::serial;
 use tempfile::tempdir;
 
 fn no_embed_config(root: &std::path::Path) -> IndexConfig {
@@ -243,6 +244,7 @@ impl Parser {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial]
 fn graph_persists_across_open() {
     let dir = tempdir().unwrap();
     let root = dir.path();
