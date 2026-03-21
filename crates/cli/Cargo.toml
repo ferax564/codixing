@@ -11,10 +11,12 @@ name = "codixing"
 path = "src/main.rs"
 
 [features]
+default = ["usearch"]
+usearch = ["codixing-core/usearch"]
 qwen3 = ["codixing-core/qwen3"]
 
 [dependencies]
-codixing-core = { path = "../core" }
+codixing-core = { path = "../core", default-features = false }
 clap.workspace = true
 anyhow.workspace = true
 tracing.workspace = true

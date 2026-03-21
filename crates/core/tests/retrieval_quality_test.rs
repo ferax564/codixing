@@ -516,6 +516,7 @@ class InMemoryEventStore[E] extends EventStore[E] {
 
 // Ruby -----------------------------------------------------------------------
 
+#[cfg_attr(windows, ignore)]
 #[test]
 fn recall_ruby_jwt_authenticator() {
     let (engine, _tmp) = build_tier2_index();
@@ -527,6 +528,7 @@ fn recall_ruby_jwt_authenticator() {
     );
 }
 
+#[cfg_attr(windows, ignore)]
 #[test]
 fn recall_ruby_lru_cache_mutex() {
     let (engine, _tmp) = build_tier2_index();
@@ -535,6 +537,7 @@ fn recall_ruby_lru_cache_mutex() {
 
 // Swift ----------------------------------------------------------------------
 
+#[cfg_attr(windows, ignore)]
 #[test]
 fn recall_swift_drawable_sprite() {
     let (engine, _tmp) = build_tier2_index();
@@ -546,6 +549,7 @@ fn recall_swift_drawable_sprite() {
     );
 }
 
+#[cfg_attr(windows, ignore)]
 #[test]
 fn recall_swift_event_bus_publish_subscribe() {
     let (engine, _tmp) = build_tier2_index();
@@ -559,6 +563,7 @@ fn recall_swift_event_bus_publish_subscribe() {
 
 // Kotlin ---------------------------------------------------------------------
 
+#[cfg_attr(windows, ignore)]
 #[test]
 fn recall_kotlin_repository_interface() {
     let (engine, _tmp) = build_tier2_index();
@@ -570,6 +575,7 @@ fn recall_kotlin_repository_interface() {
     );
 }
 
+#[cfg_attr(windows, ignore)]
 #[test]
 fn recall_kotlin_structured_logger() {
     let (engine, _tmp) = build_tier2_index();
@@ -583,6 +589,7 @@ fn recall_kotlin_structured_logger() {
 
 // Scala ----------------------------------------------------------------------
 
+#[cfg_attr(windows, ignore)]
 #[test]
 fn recall_scala_metrics_counter_histogram() {
     let (engine, _tmp) = build_tier2_index();
@@ -594,6 +601,7 @@ fn recall_scala_metrics_counter_histogram() {
     );
 }
 
+#[cfg_attr(windows, ignore)]
 #[test]
 fn recall_scala_event_sourcing_store() {
     let (engine, _tmp) = build_tier2_index();

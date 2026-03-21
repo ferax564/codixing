@@ -11,7 +11,7 @@ name = "codixing-mcp"
 path = "src/main.rs"
 
 [dependencies]
-codixing-core = { path = "../core" }
+codixing-core = { path = "../core", default-features = false }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -21,6 +21,10 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 regex.workspace = true
 glob.workspace = true
+
+[features]
+default = ["usearch"]
+usearch = ["codixing-core/usearch"]
 
 [dev-dependencies]
 tempfile.workspace = true
