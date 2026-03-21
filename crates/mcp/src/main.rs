@@ -465,6 +465,7 @@ where
             req.params,
             listing_mode,
             &federation,
+            &mut writer,
         )
         .await;
         write_line(&mut writer, &response).await?;
@@ -478,19 +479,23 @@ where
 // Dispatch
 // ---------------------------------------------------------------------------
 
-async fn dispatch(
+async fn dispatch<W>(
     engine: &Arc<RwLock<Engine>>,
     id: Value,
     method: &str,
     params: Option<Value>,
     listing_mode: ListingMode,
     federation: &Option<Arc<FederatedEngine>>,
-) -> Value {
+    writer: &mut BufWriter<W>,
+) -> Value
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
     match method {
         "initialize" => handle_initialize(id, params),
         "initialized" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
         "tools/list" => handle_tools_list(id, listing_mode, federation.is_some()),
-        "tools/call" => handle_tools_call(engine, id, params, federation).await,
+        "tools/call" => handle_tools_call(engine, id, params, federation, writer).await,
         _ => {
             let err = JsonRpcError::method_not_found(id, method);
             serde_json::to_value(err).unwrap_or(Value::Null)
@@ -526,12 +531,16 @@ fn handle_tools_list(id: Value, listing_mode: ListingMode, has_federation: bool)
     serde_json::to_value(JsonRpcResponse::new(id, result)).unwrap_or(Value::Null)
 }
 
-async fn handle_tools_call(
+async fn handle_tools_call<W>(
     engine: &Arc<RwLock<Engine>>,
     id: Value,
     params: Option<Value>,
     federation: &Option<Arc<FederatedEngine>>,
-) -> Value {
+    writer: &mut BufWriter<W>,
+) -> Value
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
     let params = match params {
         Some(p) => p,
         None => {
@@ -558,23 +567,133 @@ async fn handle_tools_call(
     let read_only = tools::is_read_only_tool(&tool_name);
     let fed_clone = federation.clone();
 
+    // Create a progress channel if the caller provided a progressToken in _meta.
+    // Per MCP spec, the progressToken comes from `params._meta.progressToken`
+    // on each tools/call request, not from initialize capabilities.
+    let caller_progress_token = params
+        .get("_meta")
+        .and_then(|m| m.get("progressToken"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let progress_reporter = if let Some(token) = caller_progress_token {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reporter = tools::ProgressReporter::new(token, tx, 100);
+
+        // Spawn a task that drains the receiver and writes progress
+        // notifications to the output stream. We use a tokio::sync::mpsc
+        // bridge so we can await in the async world.
+        let (bridge_tx, mut bridge_rx) = tokio::sync::mpsc::unbounded_channel();
+        std::thread::spawn(move || {
+            while let Ok(notification) = rx.recv() {
+                if bridge_tx.send(notification).is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Drain any progress notifications that arrived before the tool finished.
+        while let Ok(notification) = bridge_rx.try_recv() {
+            let json_val = notification.to_json();
+            if let Err(e) = futures_lite_write_line(writer, &json_val).await {
+                debug!(error = %e, "failed to write progress notification");
+            }
+        }
+
+        // Keep the bridge_rx alive through the tool call by storing it.
+        Some((reporter, bridge_rx))
+    } else {
+        None
+    };
+
+    let reporter_for_blocking = progress_reporter.as_ref().map(|(r, _)| r.clone());
+
     let call_result = tokio::task::spawn_blocking(move || {
+        let progress_ref = reporter_for_blocking.as_ref();
         if read_only {
             let engine = match engine_arc.read() {
                 Ok(e) => e,
                 Err(e) => return (format!("Engine lock poisoned: {e}"), true),
             };
-            tools::dispatch_tool_ref(&engine, &tool_name_clone, &args, fed_clone.as_deref())
+            tools::dispatch_tool_ref_with_progress(
+                &engine,
+                &tool_name_clone,
+                &args,
+                fed_clone.as_deref(),
+                progress_ref,
+            )
         } else {
             let mut engine = match engine_arc.write() {
                 Ok(e) => e,
                 Err(e) => return (format!("Engine lock poisoned: {e}"), true),
             };
-            tools::dispatch_tool(&mut engine, &tool_name_clone, &args, fed_clone.as_deref())
+            tools::dispatch_tool_with_progress(
+                &mut engine,
+                &tool_name_clone,
+                &args,
+                fed_clone.as_deref(),
+                progress_ref,
+            )
         }
-    })
-    .await;
+    });
 
+    // While the tool call is running, drain progress notifications from the
+    // bridge channel and write them to the output stream.
+    if let Some((_, mut bridge_rx)) = progress_reporter {
+        tokio::pin!(call_result);
+        let call_result = loop {
+            tokio::select! {
+                result = &mut call_result => break result,
+                // This branch drains progress notifications while the tool runs.
+                // It can complete when the sender is dropped (tool finished and
+                // ProgressReporter was dropped before we polled call_result).
+                msg = bridge_rx.recv() => {
+                    match msg {
+                        Some(notification) => {
+                            let json_val = notification.to_json();
+                            if let Err(e) = futures_lite_write_line(writer, &json_val).await {
+                                debug!(error = %e, "failed to write progress notification");
+                            }
+                        }
+                        None => {
+                            // Sender dropped — drain branch completed normally.
+                            // Continue the loop; next iteration will pick up
+                            // call_result since bridge_rx is exhausted.
+                        }
+                    }
+                }
+            }
+        };
+
+        // Drain any remaining progress notifications after the tool call finishes.
+        bridge_rx.close();
+        while let Some(notification) = bridge_rx.recv().await {
+            let json_val = notification.to_json();
+            let _ = futures_lite_write_line(writer, &json_val).await;
+        }
+
+        return build_tool_response(id, tool_name, call_result);
+    }
+
+    let call_result = call_result.await;
+    build_tool_response(id, tool_name, call_result)
+}
+
+/// Write a serialized JSON value as a line to the writer.
+async fn futures_lite_write_line<W, T>(writer: &mut BufWriter<W>, value: &T) -> Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+    T: serde::Serialize,
+{
+    write_line(writer, value).await
+}
+
+/// Build the final JSON-RPC response for a tools/call result.
+fn build_tool_response(
+    id: Value,
+    tool_name: String,
+    call_result: std::result::Result<(String, bool), tokio::task::JoinError>,
+) -> Value {
     let (text, is_error) = match call_result {
         Ok(result) => result,
         Err(e) => {
@@ -967,5 +1086,178 @@ mod tests {
         assert!(tools.len() >= 10);
 
         daemon_handle.await.unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // Progress notification tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: send JSON-RPC request lines into the loop and collect ALL output
+    /// lines (both responses and progress notifications).
+    async fn run_requests_raw(engine: Engine, requests: &[Value]) -> Vec<Value> {
+        let mut input = Vec::new();
+        for req in requests {
+            serde_json::to_writer(&mut input, req).unwrap();
+            input.push(b'\n');
+        }
+
+        let engine = Arc::new(RwLock::new(engine));
+
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+        let (server_read, server_write) = tokio::io::split(server_stream);
+        let (mut client_read, mut client_write) = tokio::io::split(client_stream);
+
+        tokio::spawn(async move {
+            client_write.write_all(&input).await.unwrap();
+            client_write.shutdown().await.unwrap();
+        });
+
+        let loop_handle = tokio::spawn(async move {
+            run_jsonrpc_loop(
+                engine,
+                BufReader::new(server_read).lines(),
+                BufWriter::new(server_write),
+                ListingMode::Full,
+                None,
+            )
+            .await
+            .unwrap();
+        });
+
+        let mut output = Vec::new();
+        client_read.read_to_end(&mut output).await.unwrap();
+        loop_handle.await.unwrap();
+
+        output
+            .split(|&b| b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).expect("output should be valid JSON"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn progress_notifications_sent_for_deep_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_test_engine(dir.path());
+
+        // Send an initialize, then a deep code_search with a progressToken in _meta.
+        let all_output = run_requests_raw(
+            engine,
+            &[
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "capabilities": {}
+                    }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "_meta": { "progressToken": "test-progress-1" },
+                        "name": "code_search",
+                        "arguments": { "query": "hello", "strategy": "deep" }
+                    }
+                }),
+            ],
+        )
+        .await;
+
+        // There should be at least the 2 responses (initialize + tools/call).
+        assert!(
+            all_output.len() >= 2,
+            "expected at least 2 output lines, got {}",
+            all_output.len()
+        );
+
+        // Separate progress notifications from responses.
+        let progress_msgs: Vec<&Value> = all_output
+            .iter()
+            .filter(|v| v.get("method").and_then(|m| m.as_str()) == Some("notifications/progress"))
+            .collect();
+
+        let responses: Vec<&Value> = all_output
+            .iter()
+            .filter(|v| v.get("id").is_some())
+            .collect();
+
+        // We should have at least one progress notification.
+        assert!(
+            !progress_msgs.is_empty(),
+            "expected progress notifications for deep search, got none. All output: {all_output:?}"
+        );
+
+        // Verify progress notification structure.
+        for p in &progress_msgs {
+            assert_eq!(p["jsonrpc"], "2.0");
+            assert!(p["params"]["progressToken"].is_string());
+            assert!(p["params"]["progress"].is_number());
+            assert!(p["params"]["total"].is_number());
+            assert!(p["params"]["message"].is_string());
+        }
+
+        // Verify we still got the actual tool response.
+        assert_eq!(
+            responses.len(),
+            2,
+            "expected 2 responses (init + tool call)"
+        );
+        let tool_response = responses[1];
+        assert_eq!(tool_response["result"]["isError"], false);
+    }
+
+    #[tokio::test]
+    async fn no_progress_when_no_progress_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_test_engine(dir.path());
+
+        // Initialize, then do a deep search WITHOUT _meta.progressToken.
+        let all_output = run_requests_raw(
+            engine,
+            &[
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "capabilities": {}
+                    }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "code_search",
+                        "arguments": { "query": "hello", "strategy": "deep" }
+                    }
+                }),
+            ],
+        )
+        .await;
+
+        // Should have exactly 2 output lines (initialize response + tool call response).
+        let progress_msgs: Vec<&Value> = all_output
+            .iter()
+            .filter(|v| v.get("method").and_then(|m| m.as_str()) == Some("notifications/progress"))
+            .collect();
+
+        assert!(
+            progress_msgs.is_empty(),
+            "expected no progress notifications without progressToken, got: {progress_msgs:?}"
+        );
+
+        let responses: Vec<&Value> = all_output
+            .iter()
+            .filter(|v| v.get("id").is_some())
+            .collect();
+        assert_eq!(
+            responses.len(),
+            2,
+            "expected 2 responses (init + tool call)"
+        );
     }
 }

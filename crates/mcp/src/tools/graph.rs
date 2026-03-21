@@ -6,6 +6,8 @@ use serde_json::Value;
 
 use codixing_core::{Engine, RepoMapOptions};
 
+use super::common::ProgressReporter;
+
 pub(crate) fn call_get_references(engine: &Engine, args: &Value) -> (String, bool) {
     let file = match args.get("file").and_then(|v| v.as_str()) {
         Some(f) => f.to_string(),
@@ -185,12 +187,20 @@ pub(crate) fn call_symbol_callees(engine: &Engine, args: &Value) -> (String, boo
     (out, false)
 }
 
-pub(crate) fn call_predict_impact(engine: &Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_predict_impact(
+    engine: &Engine,
+    args: &Value,
+    progress: Option<&ProgressReporter>,
+) -> (String, bool) {
     let patch = match args.get("patch").and_then(|v| v.as_str()) {
         Some(p) => p,
         None => return ("Missing required argument: patch".to_string(), true),
     };
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(15) as usize;
+
+    if let Some(p) = progress {
+        p.report(0, "Parsing diff...");
+    }
 
     let mut changed_files: Vec<String> = Vec::new();
     for line in patch.lines() {
@@ -204,6 +214,10 @@ pub(crate) fn call_predict_impact(engine: &Engine, args: &Value) -> (String, boo
             "No file changes detected in the patch. Ensure it is a valid unified diff.".to_string(),
             true,
         );
+    }
+
+    if let Some(p) = progress {
+        p.report(33, "Computing graph impact...");
     }
 
     let mut impact: HashMap<String, usize> = HashMap::new();

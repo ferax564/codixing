@@ -11,7 +11,13 @@ use codixing_core::{
     Strategy,
 };
 
-pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) {
+use super::common::ProgressReporter;
+
+pub(crate) fn call_code_search(
+    engine: &Engine,
+    args: &Value,
+    progress: Option<&ProgressReporter>,
+) -> (String, bool) {
     let query_str = match args.get("query").and_then(|v| v.as_str()) {
         Some(q) => q.to_string(),
         None => return ("Missing required argument: query".to_string(), true),
@@ -51,6 +57,17 @@ pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) 
         query = query.with_file_filter(filter);
     }
 
+    // Report progress for deep/thorough strategies that take longer.
+    let report_progress = matches!(
+        effective_strategy,
+        Strategy::Deep | Strategy::Thorough | Strategy::Explore
+    );
+    if report_progress {
+        if let Some(p) = progress {
+            p.report(0, "Searching...");
+        }
+    }
+
     match engine.search(query) {
         Ok(results) if results.is_empty() => {
             engine.session().record(SessionEventKind::Search {
@@ -60,6 +77,12 @@ pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) 
             ("No results found.".to_string(), false)
         }
         Ok(mut results) => {
+            if report_progress {
+                if let Some(p) = progress {
+                    p.report(50, "Reranking...");
+                }
+            }
+
             let agent_id = engine.session().session_id().to_string();
             engine.session().record(SessionEventKind::Search {
                 query: query_str.clone(),
@@ -175,6 +198,12 @@ pub(crate) fn call_code_search(engine: &Engine, args: &Value) -> (String, bool) 
                 }
                 results = filtered;
                 results.truncate(limit);
+            }
+
+            if report_progress {
+                if let Some(p) = progress {
+                    p.report(75, "Formatting results...");
+                }
             }
 
             // Include focus info if active.
@@ -423,12 +452,20 @@ pub(crate) fn call_stitch_context(engine: &Engine, args: &Value) -> (String, boo
     (stitched, false)
 }
 
-pub(crate) fn call_explain(engine: &Engine, args: &Value) -> (String, bool) {
+pub(crate) fn call_explain(
+    engine: &Engine,
+    args: &Value,
+    progress: Option<&ProgressReporter>,
+) -> (String, bool) {
     let symbol = match args.get("symbol").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => return ("Missing required argument: symbol".to_string(), true),
     };
     let file_hint = args.get("file").and_then(|v| v.as_str());
+
+    if let Some(p) = progress {
+        p.report(0, "Finding definition...");
+    }
 
     let definition = match engine.read_symbol_source(&symbol, file_hint) {
         Ok(Some(src)) => src,
@@ -456,8 +493,16 @@ pub(crate) fn call_explain(engine: &Engine, args: &Value) -> (String, bool) {
         });
     }
 
+    if let Some(p) = progress {
+        p.report(33, "Searching callers...");
+    }
+
     // Find actual call sites via BM25 search (symbol-level, not file-level).
     let usages = engine.search_usages(&symbol, 8).unwrap_or_default();
+
+    if let Some(p) = progress {
+        p.report(66, "Extracting callees...");
+    }
 
     // Extract callees from the symbol's source code (functions it calls).
     let callees: Vec<String> = {

@@ -1,7 +1,7 @@
 //! JSON-RPC 2.0 wire types for the MCP protocol.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// An incoming JSON-RPC 2.0 request or notification.
 #[derive(Debug, Deserialize)]
@@ -83,5 +83,35 @@ impl JsonRpcError {
                 message: msg.to_string(),
             },
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Progress notifications (MCP `notifications/progress`)
+// ---------------------------------------------------------------------------
+
+/// A progress notification sent from server to client during a long-running
+/// tool call.  This is a JSON-RPC notification (no `id` field).
+#[derive(Debug, Clone)]
+pub struct ProgressNotification {
+    pub progress_token: String,
+    pub progress: u32,
+    pub total: u32,
+    pub message: String,
+}
+
+impl ProgressNotification {
+    /// Serialize to the JSON-RPC wire format.
+    pub fn to_json(&self) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/progress",
+            "params": {
+                "progressToken": self.progress_token,
+                "progress": self.progress,
+                "total": self.total,
+                "message": self.message,
+            }
+        })
     }
 }
