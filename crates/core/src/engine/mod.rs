@@ -59,6 +59,10 @@ pub struct IndexStats {
     pub graph_node_count: usize,
     /// Number of edges in the dependency graph (0 if graph not built).
     pub graph_edge_count: usize,
+    /// Number of nodes in the symbol-level call graph (0 if not built).
+    pub symbol_node_count: usize,
+    /// Number of edges in the symbol-level call graph (0 if not built).
+    pub symbol_edge_count: usize,
 }
 
 /// Statistics returned by [`Engine::sync`].
@@ -809,14 +813,14 @@ impl Engine {
 
     /// Return summary statistics about the current index.
     pub fn stats(&self) -> IndexStats {
-        let (graph_node_count, graph_edge_count) = self
+        let (graph_node_count, graph_edge_count, symbol_node_count, symbol_edge_count) = self
             .graph
             .as_ref()
             .map(|g| {
                 let s = g.stats();
-                (s.node_count, s.edge_count)
+                (s.node_count, s.edge_count, s.symbol_nodes, s.symbol_edges)
             })
-            .unwrap_or((0, 0));
+            .unwrap_or((0, 0, 0, 0));
         IndexStats {
             file_count: self.file_chunk_counts.len(),
             chunk_count: self.file_chunk_counts.values().sum(),
@@ -824,6 +828,8 @@ impl Engine {
             vector_count: self.vector.as_ref().map(|v| v.len()).unwrap_or(0),
             graph_node_count,
             graph_edge_count,
+            symbol_node_count,
+            symbol_edge_count,
         }
     }
 
