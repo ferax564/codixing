@@ -5,7 +5,7 @@
   },
   "metadata": {
     "description": "Code retrieval engine for AI agents — AST-aware search, dependency graph, 48 MCP tools",
-    "version": "0.12.1"
+    "version": "0.13.0"
   },
   "plugins": [
     {
@@ -17,7 +17,7 @@
         "ref": "main"
       },
       "description": "Code retrieval engine with 48 MCP tools, 3 slash commands (/codixing-setup, /codixing-explore, /codixing-review), and daemon mode",
-      "version": "0.12.1",
+      "version": "0.13.0",
       "author": {
         "name": "ferax564"
       },

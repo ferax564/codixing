@@ -197,12 +197,17 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 - **20 languages** — Full AST parsing via tree-sitter (Rust, Python, TypeScript, Go, Java, C, C++, C#, Ruby, Swift, Kotlin, Scala, Zig, PHP + config formats)
 - **Hybrid search** — BM25 + optional vector embeddings, fused with Reciprocal Rank Fusion
+- **Symbol-level call graph** — Function-to-function call edges extracted from AST, pre-built during indexing for O(1) caller/callee lookups
 - **Dependency graph** — Import + call extraction, PageRank scoring, Personalized PageRank for focus-aware maps
 - **48 MCP tools** — Search, graph traversal, file operations, code review, git analysis, session memory
 - **Daemon mode** — Engine stays in memory, Unix socket IPC, file watcher for live index updates
+- **Read-only concurrent access** — Multiple instances share the same index; automatic fallback when the write lock is held
+- **Incremental embedding** — `sync` skips re-embedding unchanged chunks (content hash comparison)
+- **Progress notifications** — Long-running MCP tools emit `notifications/progress` so agents see live status
+- **Windows support** — Brute-force vector fallback when usearch (POSIX-only) is unavailable
 - **Token budgets** — All output respects token limits; adaptive truncation at score cliffs
 - **Cross-repo federation** — Unified search across multiple indexed projects
-- **Single binary** — No JVM, no Docker, no external databases, no API keys
+- **Single binary** — No JVM, no Docker, no external databases, no API keys. macOS, Linux, and Windows
 
 ---
 
@@ -242,7 +247,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 625 tests
+cargo test --workspace        # 649 tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```
