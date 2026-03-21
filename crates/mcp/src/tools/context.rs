@@ -5,7 +5,13 @@ use serde_json::Value;
 use codixing_core::context_assembly::IntelligentContextAssembler;
 use codixing_core::{Engine, SearchQuery};
 
-pub(crate) fn call_get_context_for_task(engine: &Engine, args: &Value) -> (String, bool) {
+use super::common::ProgressReporter;
+
+pub(crate) fn call_get_context_for_task(
+    engine: &Engine,
+    args: &Value,
+    progress: Option<&ProgressReporter>,
+) -> (String, bool) {
     let task = match args.get("task").and_then(|v| v.as_str()) {
         Some(t) => t.to_string(),
         None => return ("Missing required argument: task".to_string(), true),
@@ -17,6 +23,10 @@ pub(crate) fn call_get_context_for_task(engine: &Engine, args: &Value) -> (Strin
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
     // 1. Search with the task description
+    if let Some(p) = progress {
+        p.report(0, "Searching relevant code...");
+    }
+
     let strategy = engine.detect_strategy(&task);
     let query = SearchQuery::new(&task)
         .with_limit(limit)
@@ -31,6 +41,10 @@ pub(crate) fn call_get_context_for_task(engine: &Engine, args: &Value) -> (Strin
             format!("No relevant code found for task: \"{task}\""),
             false,
         );
+    }
+
+    if let Some(p) = progress {
+        p.report(50, "Assembling context...");
     }
 
     // 2. Assemble context with IntelligentContextAssembler
@@ -53,6 +67,10 @@ pub(crate) fn call_get_context_for_task(engine: &Engine, args: &Value) -> (Strin
             ),
             false,
         );
+    }
+
+    if let Some(p) = progress {
+        p.report(90, "Formatting output...");
     }
 
     // 3. Format output

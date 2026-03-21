@@ -18,6 +18,8 @@ use serde_json::{Value, json};
 
 use codixing_core::{Engine, FederatedEngine};
 
+pub use common::ProgressReporter;
+
 /// Return the JSON-Schema definitions for all MCP tools.
 pub fn tool_definitions() -> Value {
     json!([
@@ -731,14 +733,30 @@ pub fn is_read_only_tool(name: &str) -> bool {
 /// for cross-repo tools like `list_projects`.
 ///
 /// Returns `(text_output, is_error)`.
+/// Convenience wrapper for `dispatch_tool_ref_with_progress` without progress.
+///
+/// Used by unit tests in `tools/tests.rs` which don't need progress reporting.
+#[allow(dead_code)]
 pub fn dispatch_tool_ref(
     engine: &Engine,
     name: &str,
     args: &Value,
     federation: Option<&FederatedEngine>,
 ) -> (String, bool) {
+    dispatch_tool_ref_with_progress(engine, name, args, federation, None)
+}
+
+/// Dispatch a read-only `tools/call` invocation, optionally with progress
+/// reporting for long-running operations.
+pub fn dispatch_tool_ref_with_progress(
+    engine: &Engine,
+    name: &str,
+    args: &Value,
+    federation: Option<&FederatedEngine>,
+    progress: Option<&ProgressReporter>,
+) -> (String, bool) {
     let (output, is_error) = match name {
-        "code_search" => search::call_code_search(engine, args),
+        "code_search" => search::call_code_search(engine, args, progress),
         "find_symbol" => search::call_find_symbol(engine, args),
         "get_references" => graph::call_get_references(engine, args),
         "get_repo_map" => graph::call_get_repo_map(engine, args),
@@ -750,10 +768,10 @@ pub fn dispatch_tool_ref(
         "grep_code" => files::call_grep_code(engine, args),
         "list_files" => files::call_list_files(engine, args),
         "outline_file" => files::call_outline_file(engine, args),
-        "explain" => search::call_explain(engine, args),
+        "explain" => search::call_explain(engine, args, progress),
         "symbol_callers" => graph::call_symbol_callers(engine, args),
         "symbol_callees" => graph::call_symbol_callees(engine, args),
-        "predict_impact" => graph::call_predict_impact(engine, args),
+        "predict_impact" => graph::call_predict_impact(engine, args, progress),
         "stitch_context" => search::call_stitch_context(engine, args),
         "recall" => memory::call_recall(engine, args),
         "find_tests" => analysis::call_find_tests(engine, args),
@@ -768,7 +786,7 @@ pub fn dispatch_tool_ref(
         "get_blame" => temporal::call_get_blame(engine, args),
         "find_orphans" => orphans::call_find_orphans(engine, args),
         "find_source_for_test" => analysis::call_find_source_for_test(engine, args),
-        "get_context_for_task" => context::call_get_context_for_task(engine, args),
+        "get_context_for_task" => context::call_get_context_for_task(engine, args, progress),
         "focus_map" => focus::call_focus_map(engine, args),
         "check_staleness" => analysis::call_check_staleness(engine),
         "search_tools" => call_search_tools(args),
@@ -785,11 +803,27 @@ pub fn dispatch_tool_ref(
 /// etc.) can mutate the index inline.
 ///
 /// Returns `(text_output, is_error)`.
+/// Convenience wrapper for `dispatch_tool_with_progress` without progress.
+///
+/// Used by unit tests in `tools/tests.rs` which don't need progress reporting.
+#[allow(dead_code)]
 pub fn dispatch_tool(
     engine: &mut Engine,
     name: &str,
     args: &Value,
     federation: Option<&FederatedEngine>,
+) -> (String, bool) {
+    dispatch_tool_with_progress(engine, name, args, federation, None)
+}
+
+/// Dispatch a `tools/call` invocation to the appropriate engine method,
+/// optionally with progress reporting.
+pub fn dispatch_tool_with_progress(
+    engine: &mut Engine,
+    name: &str,
+    args: &Value,
+    federation: Option<&FederatedEngine>,
+    progress: Option<&ProgressReporter>,
 ) -> (String, bool) {
     let (output, is_error) = match name {
         // Write tools — require exclusive access.
@@ -806,7 +840,7 @@ pub fn dispatch_tool(
         "session_reset_focus" => call_session_reset_focus(engine),
         // Fallback: if a read-only tool is accidentally dispatched through the
         // write path, handle it rather than returning an error.
-        other => dispatch_tool_ref(engine, other, args, federation),
+        other => dispatch_tool_ref_with_progress(engine, other, args, federation, progress),
     };
     (maybe_compact(output, args), is_error)
 }
