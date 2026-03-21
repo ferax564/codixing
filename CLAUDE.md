@@ -43,7 +43,7 @@ For broad codebase exploration, always try a Codixing tool first. Fall back to B
 - `crates/cli/` — `codixing` CLI binary
 - `crates/mcp/` — MCP server (`codixing-mcp`), 48 tools in `src/tools/` (use `--compact` or `--medium` for token reduction)
 - `crates/core/src/federation/` — cross-repo federated search (`--federation config.json`)
-- `crates/lsp/` — LSP server (`codixing-lsp`), hover/go-to-def/refs/symbols/complexity diagnostics
+- `crates/lsp/` — LSP server (`codixing-lsp`), hover/go-to-def/refs/symbols/call hierarchy/complexity diagnostics
 - `claude-plugin/` — Claude Code plugin with 3 skills + MCP server config
 - `.codixing/` — index data (do not edit manually)
 
@@ -51,7 +51,7 @@ For broad codebase exploration, always try a Codixing tool first. Fall back to B
 
 ```bash
 cargo build --release --workspace          # build all binaries
-cargo test --workspace                      # run all tests (649)
+cargo test --workspace                      # run all tests (678)
 cargo clippy --workspace -- -D warnings     # lint (must pass)
 cargo fmt --check                           # format check (must pass)
 
@@ -109,13 +109,13 @@ When rewriting git history (e.g. before going public):
 
 ### Known flaky tests
 
-These tests occasionally fail on CI due to file locking, not code bugs:
-- `git_sync_no_op_when_already_current` — Tantivy lock race on macOS
-- `git_sync_no_op_without_git` — same issue
-- `graph_persists_across_open` — Windows temp directory locking
+These tests previously flaked due to file locking. The first three are now serialized via `serial_test`:
+- `git_sync_no_op_when_already_current` — fixed with `#[serial]`
+- `git_sync_no_op_without_git` — fixed with `#[serial]`
+- `graph_persists_across_open` — fixed with `#[serial]`
 - Tier 2 retrieval tests — Windows `Access is denied` (marked `#[cfg_attr(windows, ignore)]`)
 
-Re-run failed CI if these are the only failures.
+Re-run failed CI if Tier 2 retrieval tests are the only failures.
 
 ## MCP Index Maintenance
 
