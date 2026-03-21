@@ -6,8 +6,9 @@
 //!
 //! **Note on Tantivy locking**: Tantivy acquires a file-level lock on the
 //! index writer.  Tests that init + re-open the same directory must run
-//! sequentially; we enforce this with `--test-threads 1` in the test
-//! harness or by restructuring tests to avoid the double-open pattern.
+//! sequentially; we enforce this with the `serial_test` crate — tests that
+//! share a Tantivy writer are annotated with `#[serial]` to prevent
+//! concurrent lock contention.
 
 use codixing_core::{Engine, IndexConfig, SearchQuery, Strategy};
 use serial_test::serial;
