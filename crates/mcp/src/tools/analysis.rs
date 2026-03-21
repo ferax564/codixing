@@ -126,6 +126,13 @@ pub(crate) fn call_check_staleness(engine: &Engine) -> (String, bool) {
 }
 
 pub(crate) fn call_rename_symbol(engine: &mut Engine, args: &Value) -> (String, bool) {
+    if engine.is_read_only() {
+        return (
+            "Cannot rename symbol: index is open in read-only mode.".to_string(),
+            true,
+        );
+    }
+
     let old_name = match args.get("old_name").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => return ("Missing required argument: old_name".to_string(), true),

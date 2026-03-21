@@ -248,6 +248,10 @@ pub struct Engine {
     session: Arc<SessionState>,
     /// Shared session store for multi-agent context sharing.
     shared_session: SharedSession,
+    /// `true` when the index was opened without the Tantivy write lock.
+    /// All search / read operations work; write operations return
+    /// [`CodixingError::ReadOnly`].
+    read_only: bool,
 }
 
 impl Engine {
@@ -463,11 +467,16 @@ impl Engine {
             reranker,
             session,
             shared_session: SharedSession::default_new(),
+            read_only: false,
         })
     }
 
     /// Open an existing index from the `.codixing/` directory.
     ///
+    /// If another process holds the Tantivy write lock, the engine
+    /// automatically falls back to **read-only mode** so that concurrent
+    /// instances can still serve search queries. Write operations will
+    /// return [`CodixingError::ReadOnly`] in that case.
     /// Restores the Tantivy index, symbol table, chunk metadata, and optional
     /// vector index from disk.
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
@@ -478,7 +487,21 @@ impl Engine {
 
         let store = IndexStore::open(&root)?;
         let config = store.load_config()?;
-        let tantivy = TantivyIndex::open_in_dir(&store.tantivy_dir())?;
+
+        // Try read-write first; fall back to read-only on lock conflict.
+        let (tantivy, read_only) = match TantivyIndex::open_in_dir(&store.tantivy_dir()) {
+            Ok(idx) => (idx, false),
+            Err(CodixingError::Tantivy(ref e))
+                if e.to_string().contains("lock")
+                    || e.to_string().contains("Lock")
+                    || e.to_string().contains("already") =>
+            {
+                info!("write lock held by another process — falling back to read-only mode");
+                let idx = TantivyIndex::open_read_only(&store.tantivy_dir())?;
+                (idx, true)
+            }
+            Err(e) => return Err(e),
+        };
 
         // Restore symbols.
         let symbols = if store.symbols_path().exists() {
@@ -583,6 +606,10 @@ impl Engine {
         let session = Arc::new(SessionState::with_root(true, &root));
         session.cleanup_old_sessions();
 
+        if read_only {
+            info!("engine opened in read-only mode — search works, writes disabled");
+        }
+
         Ok(Self {
             config,
             store,
@@ -597,7 +624,154 @@ impl Engine {
             reranker,
             session,
             shared_session: SharedSession::default_new(),
+            read_only,
         })
+    }
+
+    /// Open an existing index in **read-only mode**.
+    ///
+    /// This is useful when another process holds the Tantivy write lock.
+    /// All search and read operations work normally; write operations
+    /// (`reindex_file`, `remove_file`, `sync`, `apply_changes`) return
+    /// [`CodixingError::ReadOnly`].
+    pub fn open_read_only(root: impl AsRef<Path>) -> Result<Self> {
+        let root = root
+            .as_ref()
+            .canonicalize()
+            .map_err(|e| CodixingError::Config(format!("cannot resolve root path: {e}")))?;
+
+        let store = IndexStore::open(&root)?;
+        let config = store.load_config()?;
+        let tantivy = TantivyIndex::open_read_only(&store.tantivy_dir())?;
+
+        // Restore symbols.
+        let symbols = if store.symbols_path().exists() {
+            let bytes = store.load_symbols_bytes()?;
+            deserialize_symbols(&bytes)?
+        } else {
+            SymbolTable::new()
+        };
+
+        let parser = Parser::new();
+        let meta = store.load_meta()?;
+
+        // Restore chunk_meta.
+        let chunk_meta: DashMap<u64, ChunkMeta> = if store.chunk_meta_path().exists() {
+            let bytes = store.load_chunk_meta_bytes()?;
+            let pairs: Vec<(u64, ChunkMeta)> = bitcode::deserialize(&bytes).map_err(|e| {
+                CodixingError::Serialization(format!("failed to deserialize chunk_meta: {e}"))
+            })?;
+            let map = DashMap::new();
+            for (k, v) in pairs {
+                map.insert(k, v);
+            }
+            map
+        } else {
+            DashMap::new()
+        };
+
+        // Rebuild file_chunk_counts from chunk_meta.
+        let mut file_chunk_counts: HashMap<String, usize> = HashMap::new();
+        for entry in chunk_meta.iter() {
+            *file_chunk_counts
+                .entry(entry.value().file_path.clone())
+                .or_insert(0) += 1;
+        }
+
+        // Restore vector index if it exists.
+        let (embedder, vector) = if config.embedding.enabled
+            && store.vector_index_path().exists()
+            && store.file_chunks_path().exists()
+        {
+            match Embedder::new(&config.embedding.model) {
+                Ok(e) => {
+                    let dims = e.dims;
+                    let vec_idx = VectorIndex::load(
+                        &store.vector_index_path(),
+                        &store.file_chunks_path(),
+                        dims,
+                        config.embedding.quantize,
+                    )?;
+                    (Some(Arc::new(e)), Some(vec_idx))
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to load embedding model; running BM25-only");
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        };
+
+        // Restore graph.
+        let graph = match store.load_graph() {
+            Ok(Some(data)) => Some(CodeGraph::from_flat(data)),
+            Ok(None) => None,
+            Err(e) => {
+                warn!(error = %e, "failed to load graph; running without graph intelligence");
+                None
+            }
+        };
+
+        let (graph_nodes, graph_edges) = graph
+            .as_ref()
+            .map(|g| {
+                let s = g.stats();
+                (s.node_count, s.edge_count)
+            })
+            .unwrap_or((0, 0));
+
+        info!(
+            files = meta.file_count,
+            chunks = meta.chunk_count,
+            symbols = meta.symbol_count,
+            vectors = vector.as_ref().map(|v| v.len()).unwrap_or(0),
+            graph_nodes,
+            graph_edges,
+            "index opened in read-only mode"
+        );
+
+        // Load reranker if requested.
+        let reranker = if config.embedding.reranker_enabled {
+            match Reranker::new() {
+                Ok(r) => Some(Arc::new(r)),
+                Err(e) => {
+                    warn!(error = %e, "failed to load reranker; deep strategy will fall back to thorough");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let session = Arc::new(SessionState::with_root(true, &root));
+        session.cleanup_old_sessions();
+
+        Ok(Self {
+            config,
+            store,
+            parser,
+            tantivy,
+            symbols,
+            file_chunk_counts,
+            embedder,
+            vector,
+            chunk_meta,
+            graph,
+            reranker,
+            session,
+            shared_session: SharedSession::default_new(),
+            read_only: true,
+        })
+    }
+
+    /// Return `true` if this engine was opened in read-only mode.
+    ///
+    /// In read-only mode, all search and read operations work normally but
+    /// write operations (`reindex_file`, `remove_file`, `sync`, etc.) return
+    /// [`CodixingError::ReadOnly`].
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     /// Return summary statistics about the current index.
@@ -1730,5 +1904,124 @@ pub fn unique_new_function() -> bool {
         let text = make_embed_text(&meta, false);
         // Non-contextual mode returns raw content only.
         assert_eq!(text, "fn bar() {}");
+    }
+
+    #[test]
+    fn read_only_search_works() {
+        let (dir, root) = setup_project();
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+
+        // Build the index first.
+        {
+            let _engine = Engine::init(&root, config).unwrap();
+        }
+
+        // Open in explicit read-only mode.
+        let engine = Engine::open_read_only(&root).unwrap();
+        assert!(engine.is_read_only());
+
+        // Search should work normally.
+        let results = engine
+            .search(
+                SearchQuery::new("add")
+                    .with_limit(5)
+                    .with_strategy(Strategy::Instant),
+            )
+            .unwrap();
+        assert!(
+            !results.is_empty(),
+            "expected search results in read-only mode"
+        );
+
+        // Symbol lookup should also work.
+        let syms = engine.symbols("Config", None).unwrap();
+        assert!(!syms.is_empty(), "expected symbols in read-only mode");
+
+        drop(dir);
+    }
+
+    #[test]
+    fn read_only_write_fails_gracefully() {
+        let (dir, root) = setup_project();
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+
+        // Build the index first.
+        {
+            let _engine = Engine::init(&root, config).unwrap();
+        }
+
+        // Open in explicit read-only mode.
+        let mut engine = Engine::open_read_only(&root).unwrap();
+        assert!(engine.is_read_only());
+
+        // reindex_file should fail with ReadOnly.
+        let err = engine.reindex_file(Path::new("src/main.rs")).unwrap_err();
+        assert!(
+            matches!(err, CodixingError::ReadOnly),
+            "expected ReadOnly error, got: {err}"
+        );
+
+        // remove_file should fail with ReadOnly.
+        let err = engine.remove_file(Path::new("src/main.rs")).unwrap_err();
+        assert!(
+            matches!(err, CodixingError::ReadOnly),
+            "expected ReadOnly error, got: {err}"
+        );
+
+        // sync should fail with ReadOnly.
+        let err = engine.sync().unwrap_err();
+        assert!(
+            matches!(err, CodixingError::ReadOnly),
+            "expected ReadOnly error, got: {err}"
+        );
+
+        // apply_changes should fail with ReadOnly.
+        let err = engine
+            .apply_changes(&[crate::watcher::FileChange {
+                path: root.join("src/main.rs"),
+                kind: crate::watcher::ChangeKind::Modified,
+            }])
+            .unwrap_err();
+        assert!(
+            matches!(err, CodixingError::ReadOnly),
+            "expected ReadOnly error, got: {err}"
+        );
+
+        drop(dir);
+    }
+
+    #[test]
+    fn fallback_to_read_only_on_lock() {
+        let (dir, root) = setup_project();
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+
+        // Build the index and keep the engine alive (holds the write lock).
+        let _engine_rw = Engine::init(&root, config).unwrap();
+        assert!(!_engine_rw.is_read_only());
+
+        // Opening a second engine should fall back to read-only mode.
+        let engine_ro = Engine::open(&root).unwrap();
+        assert!(
+            engine_ro.is_read_only(),
+            "second engine should be read-only when write lock is held"
+        );
+
+        // Verify search works on the read-only instance.
+        let results = engine_ro
+            .search(
+                SearchQuery::new("add")
+                    .with_limit(5)
+                    .with_strategy(Strategy::Instant),
+            )
+            .unwrap();
+        assert!(
+            !results.is_empty(),
+            "search should work in fallback read-only mode"
+        );
+
+        drop(dir);
     }
 }

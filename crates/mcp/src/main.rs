@@ -196,13 +196,20 @@ async fn main() -> Result<()> {
 async fn load_engine(root: &Path) -> Result<Engine> {
     if Engine::index_exists(root) {
         info!(root = %root.display(), "opening existing Codixing index");
-        Engine::open(root).with_context(|| {
+        let engine = Engine::open(root).with_context(|| {
             format!(
                 "failed to open index at {} — index may be corrupt; \
                  delete .codixing/ and restart to rebuild",
                 root.display()
             )
-        })
+        })?;
+        if engine.is_read_only() {
+            warn!(
+                "engine opened in read-only mode — another instance holds the write lock; \
+                 search tools work, write tools (edit_file, write_file, etc.) will return errors"
+            );
+        }
+        Ok(engine)
     } else {
         info!(
             root = %root.display(),

@@ -258,10 +258,14 @@ fn split_on_boundaries(text: &str) -> Vec<(String, usize, usize)> {
 ///
 /// Thread-safe: the writer is behind a [`Mutex`] so concurrent calls to
 /// `add_chunk` / `remove_file` / `commit` are serialized.
+///
+/// When opened in read-only mode (`writer` is `None`), all read operations
+/// work normally but write operations return [`CodixingError::ReadOnly`].
+/// This allows concurrent instances to share the index directory.
 pub struct TantivyIndex {
     index: Index,
     reader: IndexReader,
-    writer: Mutex<IndexWriter>,
+    writer: Option<Mutex<IndexWriter>>,
     fields: SchemaFields,
 }
 
@@ -285,7 +289,7 @@ impl TantivyIndex {
         Ok(Self {
             index,
             reader,
-            writer: Mutex::new(writer),
+            writer: Some(Mutex::new(writer)),
             fields,
         })
     }
@@ -308,7 +312,7 @@ impl TantivyIndex {
         Ok(Self {
             index,
             reader,
-            writer: Mutex::new(writer),
+            writer: Some(Mutex::new(writer)),
             fields,
         })
     }
@@ -353,9 +357,65 @@ impl TantivyIndex {
         Ok(Self {
             index,
             reader,
-            writer: Mutex::new(writer),
+            writer: Some(Mutex::new(writer)),
             fields,
         })
+    }
+
+    /// Open an existing persistent index in **read-only** mode.
+    ///
+    /// No [`IndexWriter`] is acquired, so this will not conflict with another
+    /// process that already holds the write lock on the same directory.
+    /// Search (`search`, `search_with_filter`, `search_by_file`, `lookup_chunk`,
+    /// etc.) work normally; write operations (`add_chunk`, `remove_file`,
+    /// `commit`) return [`CodixingError::ReadOnly`].
+    pub fn open_read_only(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Err(CodixingError::IndexNotFound {
+                path: path.to_path_buf(),
+            });
+        }
+        let index = Index::open_in_dir(path)?;
+        register_code_tokenizer(&index);
+
+        // Reconstruct field handles from the existing schema.
+        let schema = index.schema();
+        let field = |name: &str| -> Result<Field> {
+            schema
+                .get_field(name)
+                .map_err(|e| CodixingError::Index(e.to_string()))
+        };
+        let fields = SchemaFields {
+            chunk_id: field("chunk_id")?,
+            file_path: field("file_path")?,
+            file_path_exact: field("file_path_exact")?,
+            language: field("language")?,
+            content: field("content")?,
+            scope_chain: field("scope_chain")?,
+            signature: field("signature")?,
+            entity_names: field("entity_names")?,
+            line_start: field("line_start")?,
+            line_end: field("line_end")?,
+            byte_start: field("byte_start")?,
+            byte_end: field("byte_end")?,
+        };
+
+        // No writer — read-only mode.
+        let reader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            .try_into()?;
+        Ok(Self {
+            index,
+            reader,
+            writer: None,
+            fields,
+        })
+    }
+
+    /// Return `true` if this index was opened in read-only mode (no writer).
+    pub fn is_read_only(&self) -> bool {
+        self.writer.is_none()
     }
 
     /// Add a [`Chunk`] to the index.
@@ -363,13 +423,13 @@ impl TantivyIndex {
     /// The document is staged but not committed — call [`Self::commit`] to
     /// make it visible to readers.
     pub fn add_chunk(&self, chunk: &Chunk) -> Result<()> {
+        let writer_mutex = self.writer.as_ref().ok_or(CodixingError::ReadOnly)?;
         let scope_chain_text = chunk.scope_chain.join(" ");
         let signatures_text = chunk.signatures.join("\n");
         let entity_names_text = chunk.entity_names.join(" ");
         let chunk_id_str = chunk.id.to_string();
 
-        let writer = self
-            .writer
+        let writer = writer_mutex
             .lock()
             .map_err(|e| CodixingError::Index(format!("writer lock poisoned: {e}")))?;
 
@@ -395,8 +455,8 @@ impl TantivyIndex {
     ///
     /// Like `add_chunk`, the delete is staged until [`Self::commit`].
     pub fn remove_file(&self, file_path: &str) -> Result<()> {
-        let writer = self
-            .writer
+        let writer_mutex = self.writer.as_ref().ok_or(CodixingError::ReadOnly)?;
+        let writer = writer_mutex
             .lock()
             .map_err(|e| CodixingError::Index(format!("writer lock poisoned: {e}")))?;
         writer.delete_term(Term::from_field_text(
@@ -408,8 +468,8 @@ impl TantivyIndex {
 
     /// Commit all staged additions and deletions, making them visible to readers.
     pub fn commit(&self) -> Result<()> {
-        let mut writer = self
-            .writer
+        let writer_mutex = self.writer.as_ref().ok_or(CodixingError::ReadOnly)?;
+        let mut writer = writer_mutex
             .lock()
             .map_err(|e| CodixingError::Index(format!("writer lock poisoned: {e}")))?;
         writer.commit()?;

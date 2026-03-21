@@ -49,6 +49,9 @@ pub enum CodixingError {
 
     #[error("reranker error: {0}")]
     Reranker(String),
+
+    #[error("index is open in read-only mode (another instance holds the write lock)")]
+    ReadOnly,
 }
 
 /// Convenience alias used throughout the crate.
@@ -78,5 +81,11 @@ mod tests {
             path: PathBuf::from("/project"),
         };
         assert!(err.to_string().contains("codixing init"));
+    }
+
+    #[test]
+    fn read_only_display() {
+        let err = CodixingError::ReadOnly;
+        assert!(err.to_string().contains("read-only mode"));
     }
 }

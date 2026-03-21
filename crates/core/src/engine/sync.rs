@@ -24,6 +24,9 @@ impl Engine {
     /// When called directly, also recomputes PageRank and persists the graph.
     /// Use `apply_changes` to batch multiple files with a single PageRank pass.
     pub fn reindex_file(&mut self, path: &Path) -> Result<()> {
+        if self.read_only {
+            return Err(CodixingError::ReadOnly);
+        }
         self.reindex_file_impl(path, true)?;
         self.tantivy.commit()?;
         Ok(())
@@ -197,6 +200,9 @@ impl Engine {
 
     /// Remove a file from the index entirely.
     pub fn remove_file(&mut self, path: &Path) -> Result<()> {
+        if self.read_only {
+            return Err(CodixingError::ReadOnly);
+        }
         let rel_str = self.config.normalize_path(path).unwrap_or_else(|| {
             normalize_path(path.strip_prefix(&self.config.root).unwrap_or(path))
         });
@@ -233,6 +239,9 @@ impl Engine {
     /// Tantivy commit for the entire batch, then runs PageRank exactly once.
     /// For N-file batches (e.g. after `git pull`) this reduces N fsyncs to 1.
     pub fn apply_changes(&mut self, changes: &[crate::watcher::FileChange]) -> Result<()> {
+        if self.read_only {
+            return Err(CodixingError::ReadOnly);
+        }
         use crate::watcher::ChangeKind;
 
         if changes.is_empty() {
@@ -290,6 +299,9 @@ impl Engine {
     /// embeddings are later desired.  Persists the updated vector index to disk.
     /// Returns the number of chunks that were embedded.
     pub fn embed_remaining(&mut self) -> Result<usize> {
+        if self.read_only {
+            return Err(CodixingError::ReadOnly);
+        }
         use super::embed_and_index_chunks;
 
         let embedder = self
@@ -356,6 +368,9 @@ impl Engine {
     /// `git pull`, manual copies, etc.). For an already-current index the method
     /// returns in milliseconds (stat scan only, no file reads or Tantivy commit).
     pub fn sync(&mut self) -> Result<SyncStats> {
+        if self.read_only {
+            return Err(CodixingError::ReadOnly);
+        }
         use crate::watcher::{ChangeKind, FileChange};
         use std::collections::{HashMap, HashSet};
 
@@ -498,6 +513,9 @@ impl Engine {
     /// In all no-op cases the method returns [`GitSyncStats::unchanged`] = `true`
     /// and skips all I/O.
     pub fn git_sync(&mut self) -> Result<GitSyncStats> {
+        if self.read_only {
+            return Err(CodixingError::ReadOnly);
+        }
         use crate::watcher::{ChangeKind, FileChange};
 
         // Load stored git commit from the persisted meta.
@@ -601,6 +619,9 @@ impl Engine {
     /// [`IndexMeta`] so that subsequent [`Engine::git_sync`] calls can compute
     /// the minimal diff rather than doing a full re-index.
     pub fn save(&self) -> Result<()> {
+        if self.read_only {
+            return Err(CodixingError::ReadOnly);
+        }
         let sym_bytes = serialize_symbols(&self.symbols)?;
         self.store.save_symbols_bytes(&sym_bytes)?;
 
@@ -675,6 +696,9 @@ impl Engine {
     /// table, so a subsequent [`Self::sync`] will correctly detect the changed
     /// file rather than re-indexing the entire repo.
     pub fn persist_incremental(&self) -> Result<()> {
+        if self.read_only {
+            return Err(CodixingError::ReadOnly);
+        }
         let sym_bytes = serialize_symbols(&self.symbols)?;
         self.store.save_symbols_bytes(&sym_bytes)?;
 
