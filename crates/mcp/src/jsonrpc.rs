@@ -932,8 +932,7 @@ mod tests {
         let list_changed: Vec<&Value> = all_output
             .iter()
             .filter(|v| {
-                v.get("method").and_then(|m| m.as_str())
-                    == Some("notifications/tools/list_changed")
+                v.get("method").and_then(|m| m.as_str()) == Some("notifications/tools/list_changed")
             })
             .collect();
 
@@ -948,10 +947,7 @@ mod tests {
         // Verify notification structure (no id, no result/error).
         let notif = list_changed[0];
         assert_eq!(notif["jsonrpc"], "2.0");
-        assert_eq!(
-            notif["method"],
-            "notifications/tools/list_changed"
-        );
+        assert_eq!(notif["method"], "notifications/tools/list_changed");
         assert!(
             notif.get("id").is_none(),
             "notification must not have an id"
@@ -962,7 +958,11 @@ mod tests {
             .iter()
             .filter(|v| v.get("id").is_some())
             .collect();
-        assert_eq!(responses.len(), 3, "expected 3 responses (init + 2 tool calls)");
+        assert_eq!(
+            responses.len(),
+            3,
+            "expected 3 responses (init + 2 tool calls)"
+        );
         assert_eq!(responses[1]["result"]["isError"], false);
         assert_eq!(responses[2]["result"]["isError"], false);
     }
@@ -999,8 +999,7 @@ mod tests {
         let list_changed: Vec<&Value> = all_output
             .iter()
             .filter(|v| {
-                v.get("method").and_then(|m| m.as_str())
-                    == Some("notifications/tools/list_changed")
+                v.get("method").and_then(|m| m.as_str()) == Some("notifications/tools/list_changed")
             })
             .collect();
 
@@ -1042,8 +1041,7 @@ mod tests {
         let list_changed: Vec<&Value> = all_output
             .iter()
             .filter(|v| {
-                v.get("method").and_then(|m| m.as_str())
-                    == Some("notifications/tools/list_changed")
+                v.get("method").and_then(|m| m.as_str()) == Some("notifications/tools/list_changed")
             })
             .collect();
 

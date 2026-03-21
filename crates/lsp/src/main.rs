@@ -755,7 +755,10 @@ impl LanguageServer for CodixingBackend {
                     selection_range,
                     data: None,
                 },
-                from_ranges: vec![line_range(item.selection_range.start.line as usize, item.selection_range.start.line as usize)],
+                from_ranges: vec![line_range(
+                    item.selection_range.start.line as usize,
+                    item.selection_range.start.line as usize,
+                )],
             });
         }
 
