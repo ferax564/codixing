@@ -5,6 +5,8 @@
 
 mod common;
 
+use std::sync::Mutex;
+
 use codixing_core::{Engine, IndexConfig, SearchQuery, Strategy};
 use tempfile::tempdir;
 
@@ -153,4 +155,99 @@ fn search_no_results() {
         "expected no results for nonsense query, got {} results",
         results.len()
     );
+}
+
+#[test]
+fn search_with_progress_reports_bm25_phase() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    common::setup_multi_language_project(root);
+
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
+
+    let phases = Mutex::new(Vec::new());
+    let query = SearchQuery::new("add")
+        .with_limit(10)
+        .with_strategy(Strategy::Instant);
+
+    let results = engine.search_with_progress(query, |phase, partial| {
+        phases
+            .lock()
+            .unwrap()
+            .push((phase.to_string(), partial.len()));
+    });
+
+    assert!(results.is_ok());
+    let results = results.unwrap();
+    assert!(!results.is_empty(), "expected results for 'add'");
+
+    let phases = phases.into_inner().unwrap();
+    assert!(!phases.is_empty(), "should have at least one phase");
+    assert_eq!(phases[0].0, "bm25", "first phase should be BM25");
+    assert!(phases[0].1 > 0, "BM25 phase should have results");
+
+    // Instant strategy should only produce the bm25 phase.
+    assert_eq!(phases.len(), 1, "Instant should have exactly one phase");
+}
+
+#[test]
+fn search_with_progress_reports_fused_phase_for_fast() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    common::setup_multi_language_project(root);
+
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
+
+    let phases = Mutex::new(Vec::new());
+    let query = SearchQuery::new("add")
+        .with_limit(10)
+        .with_strategy(Strategy::Fast);
+
+    let results = engine.search_with_progress(query, |phase, partial| {
+        phases
+            .lock()
+            .unwrap()
+            .push((phase.to_string(), partial.len()));
+    });
+
+    assert!(results.is_ok());
+
+    let phases = phases.into_inner().unwrap();
+    assert!(
+        phases.len() >= 2,
+        "Fast strategy should report at least bm25 + fused phases, got: {phases:?}"
+    );
+    assert_eq!(phases[0].0, "bm25", "first phase should be BM25");
+    assert_eq!(phases[1].0, "fused", "second phase should be fused");
+}
+
+#[test]
+fn search_with_progress_no_results_still_reports_bm25() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    common::setup_multi_language_project(root);
+
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
+
+    let phases = Mutex::new(Vec::new());
+    let query = SearchQuery::new("xyzzy_nonexistent_gibberish_42")
+        .with_limit(10)
+        .with_strategy(Strategy::Instant);
+
+    let results = engine.search_with_progress(query, |phase, partial| {
+        phases
+            .lock()
+            .unwrap()
+            .push((phase.to_string(), partial.len()));
+    });
+
+    assert!(results.is_ok());
+    let phases = phases.into_inner().unwrap();
+    assert_eq!(
+        phases.len(),
+        1,
+        "even with no results, bm25 phase should fire"
+    );
+    assert_eq!(phases[0].0, "bm25");
+    assert_eq!(phases[0].1, 0, "no results expected for nonsense query");
 }
