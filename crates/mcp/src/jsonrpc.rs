@@ -32,6 +32,10 @@ where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
+    // In --compact mode, track whether we have already sent a
+    // `notifications/tools/list_changed` notification so we only send it once.
+    let mut compact_notification_sent = false;
+
     while let Some(line) = reader.next_line().await? {
         let line = line.trim().to_string();
         if line.is_empty() {
@@ -66,6 +70,7 @@ where
             listing_mode,
             &federation,
             &mut writer,
+            &mut compact_notification_sent,
         )
         .await;
         write_line(&mut writer, &response).await?;
@@ -79,6 +84,7 @@ where
 // Dispatch
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch<W>(
     engine: &Arc<RwLock<Engine>>,
     id: Value,
@@ -87,6 +93,7 @@ async fn dispatch<W>(
     listing_mode: ListingMode,
     federation: &Option<Arc<FederatedEngine>>,
     writer: &mut BufWriter<W>,
+    compact_notification_sent: &mut bool,
 ) -> Value
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -95,7 +102,18 @@ where
         "initialize" => handle_initialize(id, params),
         "initialized" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
         "tools/list" => handle_tools_list(id, listing_mode, federation.is_some()),
-        "tools/call" => handle_tools_call(engine, id, params, federation, writer).await,
+        "tools/call" => {
+            handle_tools_call(
+                engine,
+                id,
+                params,
+                federation,
+                writer,
+                listing_mode,
+                compact_notification_sent,
+            )
+            .await
+        }
         _ => {
             let err = JsonRpcError::method_not_found(id, method);
             serde_json::to_value(err).unwrap_or(Value::Null)
@@ -137,6 +155,8 @@ async fn handle_tools_call<W>(
     params: Option<Value>,
     federation: &Option<Arc<FederatedEngine>>,
     writer: &mut BufWriter<W>,
+    listing_mode: ListingMode,
+    compact_notification_sent: &mut bool,
 ) -> Value
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -156,6 +176,23 @@ where
             return serde_json::to_value(err).unwrap_or(Value::Null);
         }
     };
+
+    // In --compact mode, notify the client once when a non-meta tool is called
+    // so it can re-fetch tools/list and discover all available tools.
+    if listing_mode == ListingMode::Compact
+        && !*compact_notification_sent
+        && !tools::is_meta_tool(&tool_name)
+    {
+        let notification = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/tools/list_changed"
+        });
+        if let Err(e) = write_line(writer, &notification).await {
+            warn!(error = %e, "failed to write tools/list_changed notification");
+        } else {
+            *compact_notification_sent = true;
+        }
+    }
 
     let args = params
         .get("arguments")
@@ -799,6 +836,220 @@ mod tests {
             responses.len(),
             2,
             "expected 2 responses (init + tool call)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Compact mode notification tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: run requests with a specific listing mode and collect ALL output
+    /// lines (both responses and notifications).
+    async fn run_requests_with_mode(
+        engine: Engine,
+        requests: &[Value],
+        listing_mode: ListingMode,
+    ) -> Vec<Value> {
+        let mut input = Vec::new();
+        for req in requests {
+            serde_json::to_writer(&mut input, req).unwrap();
+            input.push(b'\n');
+        }
+
+        let engine = Arc::new(RwLock::new(engine));
+
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+        let (server_read, server_write) = tokio::io::split(server_stream);
+        let (mut client_read, mut client_write) = tokio::io::split(client_stream);
+
+        tokio::spawn(async move {
+            client_write.write_all(&input).await.unwrap();
+            client_write.shutdown().await.unwrap();
+        });
+
+        let loop_handle = tokio::spawn(async move {
+            run_jsonrpc_loop(
+                engine,
+                BufReader::new(server_read).lines(),
+                BufWriter::new(server_write),
+                listing_mode,
+                None,
+            )
+            .await
+            .unwrap();
+        });
+
+        let mut output = Vec::new();
+        client_read.read_to_end(&mut output).await.unwrap();
+        loop_handle.await.unwrap();
+
+        output
+            .split(|&b| b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).expect("output should be valid JSON"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn compact_mode_sends_list_changed_on_first_tool_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_test_engine(dir.path());
+
+        // In compact mode: initialize, then two tool calls.
+        let all_output = run_requests_with_mode(
+            engine,
+            &[
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": { "capabilities": {} }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "code_search",
+                        "arguments": { "query": "hello", "limit": 3 }
+                    }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "code_search",
+                        "arguments": { "query": "world", "limit": 3 }
+                    }
+                }),
+            ],
+            ListingMode::Compact,
+        )
+        .await;
+
+        // Collect tools/list_changed notifications.
+        let list_changed: Vec<&Value> = all_output
+            .iter()
+            .filter(|v| {
+                v.get("method").and_then(|m| m.as_str())
+                    == Some("notifications/tools/list_changed")
+            })
+            .collect();
+
+        // The notification must be sent exactly once (first non-meta tool call).
+        assert_eq!(
+            list_changed.len(),
+            1,
+            "expected exactly one tools/list_changed notification, got {}. All output: {all_output:?}",
+            list_changed.len()
+        );
+
+        // Verify notification structure (no id, no result/error).
+        let notif = list_changed[0];
+        assert_eq!(notif["jsonrpc"], "2.0");
+        assert_eq!(
+            notif["method"],
+            "notifications/tools/list_changed"
+        );
+        assert!(
+            notif.get("id").is_none(),
+            "notification must not have an id"
+        );
+
+        // Verify the two tool responses are still present.
+        let responses: Vec<&Value> = all_output
+            .iter()
+            .filter(|v| v.get("id").is_some())
+            .collect();
+        assert_eq!(responses.len(), 3, "expected 3 responses (init + 2 tool calls)");
+        assert_eq!(responses[1]["result"]["isError"], false);
+        assert_eq!(responses[2]["result"]["isError"], false);
+    }
+
+    #[tokio::test]
+    async fn compact_mode_no_notification_for_meta_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_test_engine(dir.path());
+
+        // Call only meta-tools in compact mode — no notification should be sent.
+        let all_output = run_requests_with_mode(
+            engine,
+            &[
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": { "capabilities": {} }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "search_tools",
+                        "arguments": { "query": "search" }
+                    }
+                }),
+            ],
+            ListingMode::Compact,
+        )
+        .await;
+
+        let list_changed: Vec<&Value> = all_output
+            .iter()
+            .filter(|v| {
+                v.get("method").and_then(|m| m.as_str())
+                    == Some("notifications/tools/list_changed")
+            })
+            .collect();
+
+        assert!(
+            list_changed.is_empty(),
+            "expected no list_changed notification when only meta-tools are called, got: {list_changed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_mode_no_list_changed_notification() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_test_engine(dir.path());
+
+        // In Full mode, no notification should ever be sent.
+        let all_output = run_requests_with_mode(
+            engine,
+            &[
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": { "capabilities": {} }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "code_search",
+                        "arguments": { "query": "hello", "limit": 3 }
+                    }
+                }),
+            ],
+            ListingMode::Full,
+        )
+        .await;
+
+        let list_changed: Vec<&Value> = all_output
+            .iter()
+            .filter(|v| {
+                v.get("method").and_then(|m| m.as_str())
+                    == Some("notifications/tools/list_changed")
+            })
+            .collect();
+
+        assert!(
+            list_changed.is_empty(),
+            "expected no list_changed notification in Full mode, got: {list_changed:?}"
         );
     }
 }

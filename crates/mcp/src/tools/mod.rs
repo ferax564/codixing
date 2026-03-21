@@ -724,6 +724,13 @@ pub fn is_read_only_tool(name: &str) -> bool {
     )
 }
 
+/// Returns true if the tool is a meta-tool (used for dynamic tool discovery
+/// in `--compact` mode).  Meta-tool calls do NOT trigger a
+/// `notifications/tools/list_changed` notification.
+pub fn is_meta_tool(name: &str) -> bool {
+    matches!(name, "search_tools" | "get_tool_schema")
+}
+
 /// Dispatch a read-only `tools/call` invocation.
 ///
 /// Takes `&Engine` (shared reference) so multiple read-only calls can run
