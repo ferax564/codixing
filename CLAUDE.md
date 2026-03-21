@@ -41,20 +41,81 @@ For broad codebase exploration, always try a Codixing tool first. Fall back to B
 
 - `crates/core/` — engine: AST parsing, BM25, graph, embeddings, PageRank, test mapping, shared sessions
 - `crates/cli/` — `codixing` CLI binary
-- `crates/mcp/` — MCP server (`codixing-mcp`), 47 tools in `src/tools/` (use `--compact` for 96.7% token reduction)
+- `crates/mcp/` — MCP server (`codixing-mcp`), 48 tools in `src/tools/` (use `--compact` or `--medium` for token reduction)
 - `crates/core/src/federation/` — cross-repo federated search (`--federation config.json`)
-- `crates/lsp/` — LSP server (`codixing-lsp`), hover/go-to-def/refs/symbols/complexity diagnostics, file-local symbol ranking
-- `crates/server/` — REST API server (`codixing-server`)
+- `crates/lsp/` — LSP server (`codixing-lsp`), hover/go-to-def/refs/symbols/complexity diagnostics
+- `claude-plugin/` — Claude Code plugin with 3 skills + MCP server config
 - `.codixing/` — index data (do not edit manually)
 
 ## Build & Test
 
 ```bash
-cargo build --release --bin codixing-mcp   # build MCP server
-cargo test --workspace                      # run all tests
+cargo build --release --workspace          # build all binaries
+cargo test --workspace                      # run all tests (649)
 cargo clippy --workspace -- -D warnings     # lint (must pass)
 cargo fmt --check                           # format check (must pass)
+
+# Windows (no usearch):
+cargo build --workspace --no-default-features
+cargo test --workspace --no-default-features
 ```
+
+## Version Locations
+
+When bumping the version, update ALL of these files:
+
+1. `Cargo.toml` — `workspace.package.version`
+2. `npm/package.json` — `version`
+3. `docs/install.sh` — `VERSION`
+4. `claude-plugin/.claude-plugin/plugin.json` — `version`
+5. `.claude-plugin/marketplace.json` — `metadata.version` AND `plugins[0].version`
+
+## Development Workflow — Lessons Learned
+
+### Parallel feature branches
+
+When launching multiple feature branches in parallel (e.g. via worktree agents):
+
+1. **Plan merge order upfront.** Identify which files are shared (especially `crates/mcp/src/main.rs` — it's a bottleneck) and decide merge order from smallest/most-independent to largest.
+2. **Each PR must include its own docs updates.** Don't batch docs updates after all merges — update README, website, test counts, and CLAUDE.md as part of each feature PR.
+3. **Merge one at a time, wait for CI.** After each squash-merge, pull main, verify CI passes on main, THEN rebase the next PR. Never merge multiple PRs without checking CI between them.
+4. **Rebase conflicts in `main.rs` are common.** The MCP dispatch loop, `run_jsonrpc_loop`, and tool definitions are all in one file. When multiple PRs touch it, use a dedicated agent to rebase — don't attempt manual 3-way conflict resolution.
+
+### CI checklist before merging
+
+Before merging any PR:
+- [ ] All CI checks green (macOS + Ubuntu + Windows if applicable)
+- [ ] No flaky test failures in the log (re-run if `git_sync` or Tantivy lock tests fail)
+- [ ] Review comments addressed and responded to
+- [ ] Test count in README/website matches actual `cargo test` output
+- [ ] Version in Cargo.toml matches what will be released
+
+### Release checklist
+
+Before tagging a release:
+- [ ] All 5 version locations updated (see above)
+- [ ] `cargo test --workspace` passes locally
+- [ ] README Key Features section reflects new features
+- [ ] docs/index.html test count and tool count are correct
+- [ ] docs/docs.html has no stale references
+- [ ] Plugin version matches in both `claude-plugin/` and `.claude-plugin/marketplace.json`
+
+### Git history hygiene
+
+When rewriting git history (e.g. before going public):
+- **`git-filter-repo` ordering matters:** Do file path removals (`--path --invert-paths`) first, blob replacements (`--replace-text`) second, message rewrites (`--message-callback`) third, and mailmap (`--mailmap`) LAST. Each pass rewrites all commits, undoing previous mailmap changes.
+- **Include ALL identity variants in one mailmap file.** Don't run mailmap multiple times — collect all `old → new` mappings in a single file.
+- **Verify with `git log --all -p -S "string"`** after each pass. `-S` searches reachable blobs, not just HEAD.
+
+### Known flaky tests
+
+These tests occasionally fail on CI due to file locking, not code bugs:
+- `git_sync_no_op_when_already_current` — Tantivy lock race on macOS
+- `git_sync_no_op_without_git` — same issue
+- `graph_persists_across_open` — Windows temp directory locking
+- Tier 2 retrieval tests — Windows `Access is denied` (marked `#[cfg_attr(windows, ignore)]`)
+
+Re-run failed CI if these are the only failures.
 
 ## MCP Index Maintenance
 
@@ -72,15 +133,6 @@ ORT_DYLIB_PATH=~/.local/lib/libonnxruntime.so LD_LIBRARY_PATH=~/.local/lib \
 ```
 
 ## Embedding Model Benchmark
-
-**AMD Rembrandt CPU (86 files, 667 chunks):**
-
-| Model        | Init time | Dims | Per-query overhead | Notes |
-|---|---|---|---|---|
-| BM25-only    | 0.2s      | —    | 13ms (cold)        | Best for exact keyword queries |
-| **BgeSmallEn** | **76s** | 384  | ~1ms (daemon)      | **Recommended** — best speed/quality tradeoff |
-| BgeBaseEn    | 192s      | 768  | ~1ms (daemon)      | 2.5× slower init, no quality gain on this codebase |
-| Qwen3        | N/A       | 1024 | N/A                | Memory leak in candle — grows to 24GB RSS, OOM killed |
 
 **Apple M4 (127 files, 1054 chunks):**
 
