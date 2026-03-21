@@ -20,12 +20,14 @@ mod tools;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+#[cfg(unix)]
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -123,6 +125,7 @@ async fn main() -> Result<()> {
         .canonicalize()
         .with_context(|| format!("root path not found: {}", args.root.display()))?;
 
+    #[cfg(unix)]
     let socket_path = args
         .socket
         .unwrap_or_else(|| root.join(".codixing/daemon.sock"));
@@ -156,19 +159,30 @@ async fn main() -> Result<()> {
     };
 
     if args.daemon {
-        // ── Daemon mode ────────────────────────────────────────────────────
-        let mut engine = load_engine(&root).await?;
-        if args.no_session {
-            engine.set_session(Arc::new(SessionState::new(false)));
+        // ── Daemon mode (Unix only -- requires Unix sockets) ──────────────
+        #[cfg(not(unix))]
+        {
+            anyhow::bail!(
+                "daemon mode requires Unix sockets and is not available on Windows. Use stdin/stdout mode instead."
+            );
         }
-        let engine = Arc::new(RwLock::new(engine));
-        run_daemon(engine, &socket_path, listing_mode, federation).await
+        #[cfg(unix)]
+        {
+            let mut engine = load_engine(&root).await?;
+            if args.no_session {
+                engine.set_session(Arc::new(SessionState::new(false)));
+            }
+            let engine = Arc::new(RwLock::new(engine));
+            run_daemon(engine, &socket_path, listing_mode, federation).await
+        }
     } else {
         // ── Normal mode: try proxy, fall back to direct ────────────────────
+        #[cfg(unix)]
         if socket_alive(&socket_path).await {
             info!(socket = %socket_path.display(), "daemon detected — proxying through socket");
-            run_proxy(&socket_path).await
-        } else {
+            return run_proxy(&socket_path).await;
+        }
+        {
             let mut engine = load_engine(&root).await?;
             if args.no_session {
                 engine.set_session(Arc::new(SessionState::new(false)));
@@ -230,9 +244,10 @@ async fn load_engine(root: &Path) -> Result<Engine> {
 }
 
 // ---------------------------------------------------------------------------
-// Daemon: Unix socket server
+// Daemon: Unix socket server (Unix only)
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 async fn run_daemon(
     engine: Arc<RwLock<Engine>>,
     socket_path: &Path,
@@ -344,6 +359,7 @@ async fn run_daemon(
 }
 
 /// Handle one client connection: run a JSON-RPC loop over the socket stream.
+#[cfg(unix)]
 async fn handle_socket_connection(
     stream: UnixStream,
     engine: Arc<RwLock<Engine>>,
@@ -362,7 +378,9 @@ async fn handle_socket_connection(
 }
 
 /// RAII guard that removes the socket file when dropped.
+#[cfg(unix)]
 struct SocketGuard(PathBuf);
+#[cfg(unix)]
 impl Drop for SocketGuard {
     fn drop(&mut self) {
         std::fs::remove_file(&self.0).ok();
@@ -370,9 +388,10 @@ impl Drop for SocketGuard {
 }
 
 // ---------------------------------------------------------------------------
-// Proxy: pipe stdin/stdout through an existing daemon socket
+// Proxy: pipe stdin/stdout through an existing daemon socket (Unix only)
 // ---------------------------------------------------------------------------
 
+#[cfg(unix)]
 async fn run_proxy(socket_path: &Path) -> Result<()> {
     let stream = UnixStream::connect(socket_path)
         .await
@@ -414,6 +433,7 @@ async fn run_proxy(socket_path: &Path) -> Result<()> {
 /// Uses `Ok(Ok(_))` matching to distinguish a live daemon from a stale socket
 /// file: a "Connection refused" error returns `Ok(Err(_))` which `.is_ok()`
 /// would incorrectly treat as alive.
+#[cfg(unix)]
 async fn socket_alive(path: &Path) -> bool {
     if !path.exists() {
         return false;
@@ -1035,6 +1055,7 @@ mod tests {
         assert_eq!(responses[2]["id"], 3);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn daemon_socket_roundtrip() {
         let dir = tempfile::tempdir().unwrap();

@@ -7,6 +7,13 @@ rust-version.workspace = true
 description = "Core engine for Codixing — AST parsing, indexing, and retrieval"
 
 [features]
+default = ["usearch"]
+
+## Enable the usearch HNSW vector backend.
+## Requires POSIX mmap (Linux, macOS). Disabled on Windows where a brute-force
+## fallback provides the same `VectorIndex` API without native dependencies.
+usearch = ["dep:usearch"]
+
 ## Enable the optional Qdrant vector backend.
 ## Requires a running Qdrant instance; connection URL via `QDRANT_URL` env var.
 qdrant = ["dep:qdrant-client", "dep:tokio"]
@@ -53,7 +60,7 @@ tree-sitter-php.workspace = true
 petgraph.workspace = true
 tantivy.workspace = true
 fastembed.workspace = true
-usearch.workspace = true
+usearch = { workspace = true, optional = true }
 tiktoken-rs.workspace = true
 notify.workspace = true
 dashmap.workspace = true
