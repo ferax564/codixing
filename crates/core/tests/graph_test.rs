@@ -5,7 +5,7 @@ mod common;
 use std::fs;
 use std::path::Path;
 
-use codixing_core::graph::{ImportExtractor, ImportResolver};
+use codixing_core::graph::{CallExtractor, ImportExtractor, ImportResolver};
 use codixing_core::language::Language;
 use codixing_core::{Engine, IndexConfig};
 use tempfile::tempdir;
@@ -264,4 +264,238 @@ fn graph_persists_across_open() {
         "expected graph to be restored after open, got {} nodes",
         stats.node_count
     );
+}
+
+// ---------------------------------------------------------------------------
+// 11. call_edge_extraction_rust
+// ---------------------------------------------------------------------------
+
+#[test]
+fn call_edge_extraction_rust() {
+    let src = r#"
+fn main() {
+    let x = helper(42);
+    let y = process();
+}
+
+fn helper(n: i32) -> i32 { n }
+fn process() -> String { String::new() }
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_rust::LANGUAGE.into())
+        .unwrap();
+    let tree = parser.parse(src, None).unwrap();
+
+    let calls = CallExtractor::extract_calls(&tree, src.as_bytes(), Language::Rust);
+    assert!(
+        calls.contains(&"helper".to_string()),
+        "expected 'helper' in calls, got: {calls:?}"
+    );
+    assert!(
+        calls.contains(&"process".to_string()),
+        "expected 'process' in calls, got: {calls:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 12. call_edge_extraction_python
+// ---------------------------------------------------------------------------
+
+#[test]
+fn call_edge_extraction_python() {
+    let src = r#"
+def main():
+    result = compute(42)
+    display(result)
+
+def compute(n):
+    return n * 2
+
+def display(val):
+    print(val)
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_python::LANGUAGE.into())
+        .unwrap();
+    let tree = parser.parse(src, None).unwrap();
+
+    let calls = CallExtractor::extract_calls(&tree, src.as_bytes(), Language::Python);
+    assert!(
+        calls.contains(&"compute".to_string()),
+        "expected 'compute' in calls, got: {calls:?}"
+    );
+    assert!(
+        calls.contains(&"display".to_string()),
+        "expected 'display' in calls, got: {calls:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 13. symbol_graph_populated_on_init
+// ---------------------------------------------------------------------------
+
+#[test]
+fn symbol_graph_populated_on_init() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    setup_project_with_calls(root);
+
+    let engine = Engine::init(root, no_embed_config(root)).unwrap();
+    let stats = engine.graph_stats().expect("graph should be built");
+
+    // The symbol graph should have nodes for the defined functions.
+    assert!(
+        stats.symbol_nodes >= 3,
+        "expected at least 3 symbol nodes (main, helper, parse_data), got {}",
+        stats.symbol_nodes
+    );
+    // There should be call edges between functions.
+    assert!(
+        stats.symbol_edges >= 1,
+        "expected at least 1 symbol edge, got {}",
+        stats.symbol_edges
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 14. symbol_callers_includes_call_edges
+// ---------------------------------------------------------------------------
+
+#[test]
+fn symbol_callers_includes_call_edges() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    setup_project_with_calls(root);
+
+    let engine = Engine::init(root, no_embed_config(root)).unwrap();
+
+    // helper is called by main -- the symbol graph should know this.
+    let callers = engine.symbol_callers_from_graph("helper");
+    assert!(
+        !callers.is_empty(),
+        "expected at least one caller of 'helper' from symbol graph"
+    );
+    // The caller should be 'main' in src/main.rs.
+    let has_main = callers
+        .iter()
+        .any(|(file, name)| file == "src/main.rs" && name == "main");
+    assert!(
+        has_main,
+        "expected 'main' in src/main.rs to be a caller of 'helper', got: {callers:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 15. symbol_callees_includes_call_edges
+// ---------------------------------------------------------------------------
+
+#[test]
+fn symbol_callees_includes_call_edges() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    setup_project_with_calls(root);
+
+    let engine = Engine::init(root, no_embed_config(root)).unwrap();
+
+    // main calls helper -- the symbol graph should know this.
+    let callees = engine.symbol_callees_from_graph("main");
+    assert!(
+        callees.contains(&"helper".to_string()),
+        "expected 'helper' as callee of 'main', got: {callees:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 16. predict_impact_uses_call_graph
+// ---------------------------------------------------------------------------
+
+#[test]
+fn predict_impact_uses_call_graph() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    setup_project_with_calls(root);
+
+    let engine = Engine::init(root, no_embed_config(root)).unwrap();
+
+    // src/lib.rs defines helper; src/main.rs calls it.
+    // Changing src/lib.rs should impact src/main.rs.
+    let callers = engine.callers("src/lib.rs");
+    assert!(
+        callers.contains(&"src/main.rs".to_string()),
+        "expected src/main.rs as caller of src/lib.rs via import graph, got: {callers:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 17. symbol_graph_persists_across_open
+// ---------------------------------------------------------------------------
+
+#[test]
+fn symbol_graph_persists_across_open() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    setup_project_with_calls(root);
+
+    let stats_init;
+    {
+        let engine = Engine::init(root, no_embed_config(root)).unwrap();
+        stats_init = engine.graph_stats().expect("graph should be built");
+        assert!(
+            stats_init.symbol_nodes > 0,
+            "symbol graph should have nodes after init"
+        );
+    }
+
+    // Re-open and verify symbol graph is restored.
+    let engine = Engine::open(root).unwrap();
+    let stats_open = engine.graph_stats().expect("graph should persist");
+    assert_eq!(
+        stats_open.symbol_nodes, stats_init.symbol_nodes,
+        "symbol node count should persist across open"
+    );
+    assert_eq!(
+        stats_open.symbol_edges, stats_init.symbol_edges,
+        "symbol edge count should persist across open"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Helper: project with explicit function calls for call graph tests
+// ---------------------------------------------------------------------------
+
+fn setup_project_with_calls(root: &Path) {
+    let src = root.join("src");
+    fs::create_dir_all(&src).expect("failed to create src directory");
+
+    fs::write(
+        src.join("main.rs"),
+        r#"use crate::lib::helper;
+
+fn main() {
+    let result = helper(42);
+    let data = parse_data("test");
+    println!("{result} {data}");
+}
+
+fn parse_data(input: &str) -> String {
+    input.to_uppercase()
+}
+"#,
+    )
+    .expect("failed to write main.rs");
+
+    fs::write(
+        src.join("lib.rs"),
+        r#"pub fn helper(n: i32) -> i32 {
+    n * 2
+}
+
+pub fn unused_func() -> bool {
+    true
+}
+"#,
+    )
+    .expect("failed to write lib.rs");
 }

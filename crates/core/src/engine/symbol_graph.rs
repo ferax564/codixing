@@ -3,6 +3,10 @@
 //! These methods provide more accurate results than the BM25-based
 //! `search_usages` or the regex-based callee detection by parsing source
 //! code with tree-sitter and extracting structured references.
+//!
+//! When a pre-built symbol-level graph is available (populated during
+//! indexing), callers/callees queries are answered directly from the graph
+//! without re-reading or re-parsing files.
 
 use crate::graph::extract::extract_references;
 use crate::graph::types::ReferenceKind;
@@ -24,15 +28,36 @@ pub struct SymbolReference {
 }
 
 impl Engine {
-    /// Find precise callers of a symbol using tree-sitter AST extraction.
+    /// Find precise callers of a symbol using the pre-built symbol graph or
+    /// tree-sitter AST extraction.
     ///
-    /// Uses BM25 `search_usages` as a first pass to identify candidate files,
-    /// then validates each hit by checking whether the symbol actually appears
-    /// as a structured reference in the AST. This filters out false positives
-    /// from pure text matches (e.g. comments, string literals).
-    ///
-    /// Falls back to raw BM25 results if no AST-confirmed references are found.
+    /// First checks the symbol-level inner graph for pre-computed call edges.
+    /// If the graph has results, returns them directly (no file I/O needed).
+    /// Otherwise falls back to BM25 search + AST validation.
     pub fn symbol_callers_precise(&self, symbol: &str, limit: usize) -> Vec<SymbolReference> {
+        // Phase 0: Check the pre-built symbol graph.
+        if let Some(ref graph) = self.graph {
+            let symbol_callers = graph.get_symbol_callers(symbol);
+            if !symbol_callers.is_empty() {
+                let mut refs: Vec<SymbolReference> = symbol_callers
+                    .into_iter()
+                    .map(|(file, caller_name)| {
+                        // Try to get the source line for context.
+                        let context = self.read_line_at_symbol(&file, &caller_name);
+                        let line = self.symbol_line(&file, &caller_name);
+                        SymbolReference {
+                            file_path: file,
+                            line,
+                            kind: "call".to_string(),
+                            context,
+                        }
+                    })
+                    .collect();
+                refs.truncate(limit);
+                return refs;
+            }
+        }
+
         // Phase 1: BM25 search to get candidate files
         let candidates = match self.search_usages(symbol, limit * 3) {
             Ok(r) => r,
@@ -89,12 +114,22 @@ impl Engine {
         precise_refs
     }
 
-    /// Find precise callees of a symbol by parsing its source with tree-sitter.
+    /// Find precise callees of a symbol using the pre-built symbol graph or
+    /// tree-sitter AST extraction.
     ///
-    /// Locates the symbol's definition, reads its source code, then uses
-    /// `extract_references` to find all function calls within the symbol body.
-    /// This is more accurate than regex because it uses the AST.
+    /// First checks the symbol-level inner graph for pre-computed call edges.
+    /// If the graph has results, returns them directly.
+    /// Otherwise falls back to reading and re-parsing the symbol's source.
     pub fn symbol_callees_precise(&self, symbol: &str, file_hint: Option<&str>) -> Vec<String> {
+        // Phase 0: Check the pre-built symbol graph.
+        if let Some(ref graph) = self.graph {
+            let symbol_callees = graph.get_symbol_callees(symbol);
+            if !symbol_callees.is_empty() {
+                return symbol_callees;
+            }
+        }
+
+        // Fallback: re-parse the symbol's source.
         // 1. Find the symbol's source code
         let src = match self.read_symbol_source(symbol, file_hint) {
             Ok(Some(s)) => s,
@@ -139,6 +174,34 @@ impl Engine {
         callees.sort();
         callees.dedup();
         callees
+    }
+
+    /// Helper: read a single source line at a symbol's definition for context.
+    fn read_line_at_symbol(&self, file: &str, symbol_name: &str) -> String {
+        let syms = self.symbols.filter(symbol_name, Some(file));
+        let sym = match syms.into_iter().next() {
+            Some(s) => s,
+            None => return String::new(),
+        };
+        let abs_path = self
+            .config
+            .resolve_path(&sym.file_path)
+            .unwrap_or_else(|| self.config.root.join(&sym.file_path));
+        match std::fs::read_to_string(&abs_path) {
+            Ok(source) => source
+                .lines()
+                .nth(sym.line_start)
+                .unwrap_or("")
+                .trim()
+                .to_string(),
+            Err(_) => String::new(),
+        }
+    }
+
+    /// Helper: get the definition line number of a symbol in a file.
+    fn symbol_line(&self, file: &str, symbol_name: &str) -> usize {
+        let syms = self.symbols.filter(symbol_name, Some(file));
+        syms.into_iter().next().map(|s| s.line_start).unwrap_or(0)
     }
 }
 

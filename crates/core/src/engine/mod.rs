@@ -28,7 +28,9 @@ use crate::chunker::cast::CastChunker;
 use crate::config::IndexConfig;
 use crate::embedder::Embedder;
 use crate::error::{CodixingError, Result};
+use crate::graph::extract::{extract_definitions, extract_references};
 use crate::graph::extractor::RawImport;
+use crate::graph::types::{ReferenceKind, SymbolKind};
 use crate::graph::{CallExtractor, CodeGraph, ImportExtractor, ImportResolver, compute_pagerank};
 use crate::index::TantivyIndex;
 use crate::language::{Language, SemanticEntity, detect_language};
@@ -362,11 +364,16 @@ impl Engine {
             let mut g = build_graph(&files, &root, &config, &parser, &pending_imports);
             // Resolve call-site edges using the now-complete symbol table.
             add_call_edges(&mut g, &symbols, &pending_calls);
+            // Populate the symbol-level inner graph with function-level call edges.
+            populate_symbol_graph(&mut g, &files, &root, &config);
             let scores = compute_pagerank(&g, config.graph.damping, config.graph.iterations);
             g.apply_pagerank(&scores);
             let flat = g.to_flat();
             if let Err(e) = store.save_graph(&flat) {
                 warn!(error = %e, "failed to persist graph");
+            }
+            if let Err(e) = store.save_symbol_graph(&g) {
+                warn!(error = %e, "failed to persist symbol graph");
             }
             Some(g)
         } else {
@@ -564,7 +571,20 @@ impl Engine {
 
         // Restore graph.
         let graph = match store.load_graph() {
-            Ok(Some(data)) => Some(CodeGraph::from_flat(data)),
+            Ok(Some(data)) => {
+                let mut g = CodeGraph::from_flat(data);
+                // Merge the symbol-level graph if persisted.
+                match store.load_symbol_graph() {
+                    Ok(Some(sym_graph)) => {
+                        g.inner = sym_graph.inner;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        warn!(error = %e, "failed to load symbol graph");
+                    }
+                }
+                Some(g)
+            }
             Ok(None) => None,
             Err(e) => {
                 warn!(error = %e, "failed to load graph; running without graph intelligence");
@@ -705,7 +725,20 @@ impl Engine {
 
         // Restore graph.
         let graph = match store.load_graph() {
-            Ok(Some(data)) => Some(CodeGraph::from_flat(data)),
+            Ok(Some(data)) => {
+                let mut g = CodeGraph::from_flat(data);
+                // Merge the symbol-level graph if persisted.
+                match store.load_symbol_graph() {
+                    Ok(Some(sym_graph)) => {
+                        g.inner = sym_graph.inner;
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        warn!(error = %e, "failed to load symbol graph");
+                    }
+                }
+                Some(g)
+            }
             Ok(None) => None,
             Err(e) => {
                 warn!(error = %e, "failed to load graph; running without graph intelligence");
@@ -1466,6 +1499,186 @@ fn add_call_edges(
     if total > 0 {
         info!(call_edges = total, "added call-site edges to graph");
     }
+}
+
+/// Populate the symbol-level inner graph with definitions and call references.
+///
+/// Reads each source file, extracts function/struct/enum definitions and call
+/// references via tree-sitter, then inserts them as nodes and edges into the
+/// `CodeGraph::inner` graph.  This gives precise symbol->symbol call edges that
+/// complement the coarser file-level import/call edges.
+///
+/// Must be called after the parallel parse phase so that all files are available.
+fn populate_symbol_graph(
+    graph: &mut CodeGraph,
+    files: &[PathBuf],
+    root: &Path,
+    config: &IndexConfig,
+) {
+    use std::collections::HashMap;
+
+    // Phase 1: Extract definitions from all files to build a name->NodeIndex map.
+    let mut name_to_indices: HashMap<String, Vec<petgraph::graph::NodeIndex>> = HashMap::new();
+
+    for abs_path in files {
+        let lang = match detect_language(abs_path) {
+            Some(l) => l,
+            None => continue,
+        };
+        let source = match fs::read_to_string(abs_path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let rel_str = config
+            .normalize_path(abs_path)
+            .unwrap_or_else(|| normalize_path(abs_path.strip_prefix(root).unwrap_or(abs_path)));
+
+        let defs = extract_definitions(&source, &rel_str, &lang);
+        for def in &defs {
+            let idx = graph.add_symbol_with_line(&def.name, &rel_str, def.kind.clone(), def.line);
+            name_to_indices
+                .entry(def.name.clone())
+                .or_default()
+                .push(idx);
+        }
+    }
+
+    // Phase 2: Extract references and wire call edges.
+    let mut total_edges = 0usize;
+    for abs_path in files {
+        let lang = match detect_language(abs_path) {
+            Some(l) => l,
+            None => continue,
+        };
+        let source = match fs::read_to_string(abs_path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let rel_str = config
+            .normalize_path(abs_path)
+            .unwrap_or_else(|| normalize_path(abs_path.strip_prefix(root).unwrap_or(abs_path)));
+
+        let refs = extract_references(&source, &rel_str, &lang);
+
+        // Build a map of function definitions in this file so we can attribute
+        // call references to their enclosing function.
+        let defs = extract_definitions(&source, &rel_str, &lang);
+        // Sort definitions by line for binary search.
+        let mut func_defs: Vec<(usize, petgraph::graph::NodeIndex)> =
+            defs.iter()
+                .filter(|d| d.kind == SymbolKind::Function)
+                .filter_map(|d| {
+                    name_to_indices
+                        .get(&d.name)
+                        .and_then(|indices| {
+                            indices
+                                .iter()
+                                .find(|&&idx| {
+                                    graph.inner.node_weight(idx).is_some_and(|n| {
+                                        n.file == rel_str && n.line == Some(d.line)
+                                    })
+                                })
+                                .copied()
+                        })
+                        .map(|idx| (d.line, idx))
+                })
+                .collect();
+        func_defs.sort_by_key(|(line, _)| *line);
+
+        for r in &refs {
+            if r.kind != ReferenceKind::Call {
+                continue;
+            }
+            // Find the enclosing function for this call site.
+            let caller_idx = find_enclosing_function(&func_defs, r.line);
+            let caller_idx = match caller_idx {
+                Some(idx) => idx,
+                None => continue, // Call at file scope -- skip
+            };
+
+            // Resolve the callee: look for a unique definition with this name.
+            // Prefer a definition in the SAME file as the caller; only fall
+            // back to cross-file if no same-file match exists.
+            let callee_base = r.target_name.rsplit("::").next().unwrap_or(&r.target_name);
+            if let Some(target_indices) = name_to_indices.get(callee_base) {
+                // Same-file candidates (excluding the caller itself).
+                let same_file: Vec<_> = target_indices
+                    .iter()
+                    .filter(|&&idx| {
+                        graph
+                            .inner
+                            .node_weight(idx)
+                            .is_some_and(|n| n.file == rel_str)
+                    })
+                    .filter(|&&idx| {
+                        // Exclude the caller node itself to avoid self-edges later.
+                        idx != caller_idx
+                    })
+                    .collect();
+                // Cross-file candidates.
+                let cross_file: Vec<_> = target_indices
+                    .iter()
+                    .filter(|&&idx| {
+                        graph
+                            .inner
+                            .node_weight(idx)
+                            .is_some_and(|n| n.file != rel_str)
+                    })
+                    .collect();
+                let target = if same_file.len() == 1 {
+                    Some(**same_file.first().unwrap())
+                } else if cross_file.len() == 1 {
+                    Some(**cross_file.first().unwrap())
+                } else if target_indices.len() == 1 {
+                    Some(target_indices[0])
+                } else {
+                    None
+                };
+                if let Some(target_idx) = target {
+                    // Avoid self-edges
+                    if caller_idx != target_idx {
+                        graph.add_reference(caller_idx, target_idx, ReferenceKind::Call);
+                        total_edges += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    if total_edges > 0 || !name_to_indices.is_empty() {
+        info!(
+            symbol_nodes = graph.symbol_node_count(),
+            symbol_edges = total_edges,
+            "populated symbol-level call graph"
+        );
+    }
+}
+
+/// Find the enclosing function for a given line number.
+///
+/// Uses the sorted list of `(start_line, NodeIndex)` pairs and returns the
+/// last function that starts at or before the given line, provided the line
+/// is before the NEXT function's start (or end of file). This prevents
+/// attributing a call at file scope between two functions to the earlier one.
+fn find_enclosing_function(
+    func_defs: &[(usize, petgraph::graph::NodeIndex)],
+    line: usize,
+) -> Option<petgraph::graph::NodeIndex> {
+    // Binary search for the last definition at or before `line`.
+    let pos = func_defs.partition_point(|(start, _)| *start <= line);
+    if pos == 0 {
+        return None;
+    }
+    let candidate_idx = pos - 1;
+    // Verify the call site line is before the next function's start line.
+    // If there is a next function, the call must be before its start;
+    // otherwise it's at file scope between two functions.
+    if let Some((next_start, _)) = func_defs.get(pos) {
+        if line >= *next_start {
+            return None;
+        }
+    }
+    Some(func_defs[candidate_idx].1)
 }
 
 /// Build a dependency graph from pre-extracted import lists (populated during

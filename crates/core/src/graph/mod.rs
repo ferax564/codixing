@@ -79,6 +79,10 @@ pub struct GraphStats {
     pub external_edges: usize,
     /// Number of call-site edges added by [`CallExtractor`].
     pub call_edges: usize,
+    /// Number of nodes in the symbol-level graph.
+    pub symbol_nodes: usize,
+    /// Number of edges in the symbol-level graph.
+    pub symbol_edges: usize,
 }
 
 /// In-memory dependency graph over source files.
@@ -113,6 +117,22 @@ impl CodeGraph {
             file: file.to_string(),
             kind,
             line: None,
+        })
+    }
+
+    /// Add a symbol node with a line number to the symbol-level graph.
+    pub fn add_symbol_with_line(
+        &mut self,
+        name: &str,
+        file: &str,
+        kind: types::SymbolKind,
+        line: usize,
+    ) -> NodeIndex {
+        self.inner.add_node(types::SymbolNode {
+            name: name.to_string(),
+            file: file.to_string(),
+            kind,
+            line: Some(line),
         })
     }
 
@@ -449,6 +469,8 @@ impl CodeGraph {
             resolved_edges: resolved,
             external_edges: external,
             call_edges: calls,
+            symbol_nodes: self.inner.node_count(),
+            symbol_edges: self.inner.edge_count(),
         }
     }
 
@@ -478,6 +500,99 @@ impl CodeGraph {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         nodes
+    }
+
+    /// Query the symbol-level graph for callers of `symbol_name`.
+    ///
+    /// Returns `(file, caller_symbol_name)` pairs for every symbol that has a
+    /// `Call` edge pointing to a node whose name matches `symbol_name`.
+    pub fn get_symbol_callers(&self, symbol_name: &str) -> Vec<(String, String)> {
+        // Find all nodes matching the target symbol name.
+        let target_indices: Vec<NodeIndex> = self
+            .inner
+            .node_indices()
+            .filter(|&idx| {
+                self.inner
+                    .node_weight(idx)
+                    .is_some_and(|n| n.name == symbol_name)
+            })
+            .collect();
+
+        if target_indices.is_empty() {
+            return Vec::new();
+        }
+
+        let mut callers = Vec::new();
+        for &target in &target_indices {
+            for edge in self
+                .inner
+                .edges_directed(target, petgraph::Direction::Incoming)
+            {
+                if *edge.weight() == types::ReferenceKind::Call {
+                    if let Some(caller_node) = self.inner.node_weight(edge.source()) {
+                        callers.push((caller_node.file.clone(), caller_node.name.clone()));
+                    }
+                }
+            }
+        }
+        callers
+    }
+
+    /// Query the symbol-level graph for callees of `symbol_name`.
+    ///
+    /// Returns the names of all symbols that have a `Call` edge FROM
+    /// a node whose name matches `symbol_name`.
+    pub fn get_symbol_callees(&self, symbol_name: &str) -> Vec<String> {
+        let source_indices: Vec<NodeIndex> = self
+            .inner
+            .node_indices()
+            .filter(|&idx| {
+                self.inner
+                    .node_weight(idx)
+                    .is_some_and(|n| n.name == symbol_name)
+            })
+            .collect();
+
+        if source_indices.is_empty() {
+            return Vec::new();
+        }
+
+        let mut callees = Vec::new();
+        for &src in &source_indices {
+            for edge in self
+                .inner
+                .edges_directed(src, petgraph::Direction::Outgoing)
+            {
+                if *edge.weight() == types::ReferenceKind::Call {
+                    if let Some(target_node) = self.inner.node_weight(edge.target()) {
+                        callees.push(target_node.name.clone());
+                    }
+                }
+            }
+        }
+        callees.sort();
+        callees.dedup();
+        callees
+    }
+
+    /// Return the number of nodes in the symbol-level inner graph.
+    pub fn symbol_node_count(&self) -> usize {
+        self.inner.node_count()
+    }
+
+    /// Remove all symbol nodes (and their edges) for a given file.
+    ///
+    /// This is used during incremental reindex: before re-extracting
+    /// definitions and call edges for a file, we remove the old ones.
+    pub fn remove_file_symbols(&mut self, file: &str) {
+        let to_remove: Vec<NodeIndex> = self
+            .inner
+            .node_indices()
+            .filter(|&idx| self.inner.node_weight(idx).is_some_and(|n| n.file == file))
+            .collect();
+        for idx in to_remove.into_iter().rev() {
+            self.inner.remove_node(idx);
+        }
     }
 }
 
@@ -589,5 +704,72 @@ mod tests {
         let g2 = CodeGraph::from_flat(flat);
 
         assert_eq!(g2.callees("src/a.rs"), vec!["src/b.rs"]);
+    }
+
+    #[test]
+    fn symbol_callers_returns_call_edges() {
+        let mut g = CodeGraph::new();
+        let main_fn = g.add_symbol_with_line("main", "src/main.rs", types::SymbolKind::Function, 0);
+        let helper = g.add_symbol_with_line("helper", "src/lib.rs", types::SymbolKind::Function, 5);
+        let process =
+            g.add_symbol_with_line("process", "src/engine.rs", types::SymbolKind::Function, 10);
+        g.add_reference(main_fn, helper, types::ReferenceKind::Call);
+        g.add_reference(process, helper, types::ReferenceKind::Call);
+
+        let callers = g.get_symbol_callers("helper");
+        assert_eq!(callers.len(), 2);
+        // Callers should be (file, symbol_name) pairs.
+        let names: Vec<&str> = callers.iter().map(|(_, n)| n.as_str()).collect();
+        assert!(names.contains(&"main"));
+        assert!(names.contains(&"process"));
+    }
+
+    #[test]
+    fn symbol_callees_returns_call_edges() {
+        let mut g = CodeGraph::new();
+        let main_fn = g.add_symbol_with_line("main", "src/main.rs", types::SymbolKind::Function, 0);
+        let helper = g.add_symbol_with_line("helper", "src/lib.rs", types::SymbolKind::Function, 5);
+        let process =
+            g.add_symbol_with_line("process", "src/engine.rs", types::SymbolKind::Function, 10);
+        g.add_reference(main_fn, helper, types::ReferenceKind::Call);
+        g.add_reference(main_fn, process, types::ReferenceKind::Call);
+
+        let callees = g.get_symbol_callees("main");
+        assert_eq!(callees.len(), 2);
+        assert!(callees.contains(&"helper".to_string()));
+        assert!(callees.contains(&"process".to_string()));
+    }
+
+    #[test]
+    fn symbol_node_count_tracks_additions() {
+        let mut g = CodeGraph::new();
+        assert_eq!(g.symbol_node_count(), 0);
+        g.add_symbol_with_line("foo", "a.rs", types::SymbolKind::Function, 0);
+        assert_eq!(g.symbol_node_count(), 1);
+        g.add_symbol_with_line("bar", "b.rs", types::SymbolKind::Function, 5);
+        assert_eq!(g.symbol_node_count(), 2);
+    }
+
+    #[test]
+    fn remove_file_symbols_cleans_up() {
+        let mut g = CodeGraph::new();
+        g.add_symbol_with_line("foo", "a.rs", types::SymbolKind::Function, 0);
+        g.add_symbol_with_line("bar", "a.rs", types::SymbolKind::Function, 10);
+        g.add_symbol_with_line("baz", "b.rs", types::SymbolKind::Function, 0);
+        assert_eq!(g.symbol_node_count(), 3);
+
+        g.remove_file_symbols("a.rs");
+        assert_eq!(g.symbol_node_count(), 1);
+    }
+
+    #[test]
+    fn stats_includes_symbol_counts() {
+        let mut g = CodeGraph::new();
+        let a = g.add_symbol_with_line("a", "a.rs", types::SymbolKind::Function, 0);
+        let b = g.add_symbol_with_line("b", "b.rs", types::SymbolKind::Function, 5);
+        g.add_reference(a, b, types::ReferenceKind::Call);
+        let s = g.stats();
+        assert_eq!(s.symbol_nodes, 2);
+        assert_eq!(s.symbol_edges, 1);
     }
 }

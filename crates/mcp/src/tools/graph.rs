@@ -216,6 +216,21 @@ pub(crate) fn call_predict_impact(
         );
     }
 
+    // Extract changed function names from the patch for symbol-level impact.
+    let mut changed_symbols: Vec<String> = Vec::new();
+    for line in patch.lines() {
+        // Unified diff function context: @@ -a,b +c,d @@ fn function_name
+        if let Some(rest) = line.strip_prefix("@@") {
+            if let Some(ctx) = rest.rsplit_once("@@").map(|(_, c)| c.trim()) {
+                // Extract function/method name from context line.
+                let name = extract_symbol_from_hunk_header(ctx);
+                if let Some(name) = name {
+                    changed_symbols.push(name);
+                }
+            }
+        }
+    }
+
     if let Some(p) = progress {
         p.report(33, "Computing graph impact...");
     }
@@ -229,6 +244,29 @@ pub(crate) fn call_predict_impact(
         let transitive = engine.transitive_callers(file, 2);
         for t in transitive {
             *impact.entry(t).or_insert(0) += 1;
+        }
+    }
+
+    // Symbol-level impact: find callers of changed functions, scoped to the
+    // file being changed so we only get callers of the specific file+symbol
+    // combination (not unrelated symbols with the same name in other files).
+    let mut symbol_impact: Vec<(String, String)> = Vec::new();
+    for sym_name in &changed_symbols {
+        let all_callers = engine.symbol_callers_precise(sym_name, 100);
+        // Filter to callers that reference the symbol defined in a changed file.
+        let callers: Vec<_> = all_callers
+            .into_iter()
+            .filter(|c| {
+                // Only include callers whose target is in one of the changed files.
+                // The caller itself should NOT be in a changed file (that's the
+                // impact we're measuring -- who else is affected).
+                !changed_files.contains(&c.file_path)
+            })
+            .take(20)
+            .collect();
+        for caller in &callers {
+            symbol_impact.push((caller.file_path.clone(), sym_name.clone()));
+            *impact.entry(caller.file_path.clone()).or_insert(0) += 2;
         }
     }
 
@@ -261,6 +299,18 @@ pub(crate) fn call_predict_impact(
         }
     }
 
+    // Symbol-level impact details.
+    if !symbol_impact.is_empty() {
+        out.push_str("\n### Symbol-level callers of changed functions\n");
+        let mut shown = std::collections::HashSet::new();
+        for (file, sym) in &symbol_impact {
+            let key = format!("{file}:{sym}");
+            if shown.insert(key) {
+                out.push_str(&format!("  - `{file}` calls `{sym}`\n"));
+            }
+        }
+    }
+
     // Temporal: show change frequency for changed files.
     let mut has_temporal = false;
     for file in &changed_files {
@@ -278,4 +328,46 @@ pub(crate) fn call_predict_impact(
     }
 
     (out, false)
+}
+
+/// Extract a function/method name from a unified diff hunk header context line.
+///
+/// Handles common patterns like `fn foo(`, `def foo(`, `function foo(`,
+/// `pub fn foo(`, `async fn foo(`, etc.
+fn extract_symbol_from_hunk_header(ctx: &str) -> Option<String> {
+    let ctx = ctx.trim();
+    if ctx.is_empty() {
+        return None;
+    }
+
+    // Split on whitespace and look for known function keywords.
+    let tokens: Vec<&str> = ctx.split_whitespace().collect();
+    let fn_kw_pos = tokens
+        .iter()
+        .position(|&t| t == "fn" || t == "def" || t == "function" || t == "func");
+
+    if let Some(pos) = fn_kw_pos {
+        if let Some(name_token) = tokens.get(pos + 1) {
+            // Strip generics and parens: `foo(` -> `foo`, `foo<T>` -> `foo`
+            let name = name_token
+                .split(&['(', '<', ':'][..])
+                .next()
+                .unwrap_or(name_token);
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+
+    // Fallback: look for `name(` pattern (common in C/C++/Java/Go).
+    // Matches tokens like `myFunction(` at the start of the line.
+    if let Some(first) = tokens.first() {
+        if let Some(name) = first.strip_suffix('(') {
+            if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                return Some(name.to_string());
+            }
+        }
+    }
+
+    None
 }
