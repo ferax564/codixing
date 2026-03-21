@@ -2,7 +2,7 @@
 
 ## Code Search & Navigation
 
-**Always use Codixing MCP tools** instead of `grep`, `find`, `cat`, or `rg` for code exploration tasks:
+**MANDATORY: Always use Codixing MCP tools** instead of `grep`, `find`, `cat`, or `rg` for code exploration tasks. This applies to ALL agents, including subagents dispatched for implementation, review, or exploration. Include this instruction when dispatching any subagent:
 
 | Instead of... | Use... |
 |---|---|
@@ -70,35 +70,77 @@ When bumping the version, update ALL of these files:
 4. `claude-plugin/.claude-plugin/plugin.json` — `version`
 5. `.claude-plugin/marketplace.json` — `metadata.version` AND `plugins[0].version`
 
-## Development Workflow — Lessons Learned
+## Development Workflow — Quality Rules
+
+### Mandatory verification before every commit
+
+Every commit MUST pass all 3 checks. No exceptions:
+
+```bash
+cargo test --workspace                      # ALL tests must pass
+cargo clippy --workspace -- -D warnings     # zero warnings
+cargo fmt --check                           # zero diffs
+```
+
+Subagents and worktree agents MUST run these checks before committing. If any check fails, fix the issue before committing — never skip.
+
+### Documentation is part of the feature
+
+Every feature commit MUST include documentation updates:
+- Update test count in README.md, CLAUDE.md, and docs/index.html
+- Update feature descriptions in README.md Key Features if applicable
+- Update CLAUDE.md if the change affects project structure, tools, or capabilities
+- Update docs/docs.html if LSP or MCP capabilities change
+
+Never batch documentation updates after implementation — document as you go.
+
+### Subagent rules
+
+When dispatching subagents (implementation, review, or any task):
+
+1. **Always use Codixing MCP tools for code exploration.** Subagents MUST use `mcp__codixing__code_search`, `mcp__codixing__find_symbol`, `mcp__codixing__read_file`, etc. instead of `grep`, `cat`, `find`. Include this instruction in every subagent prompt.
+2. **Always spec-review every task.** No task is "too simple" to skip review.
+3. **Always run the full verification triad** (test + clippy + fmt) before committing.
+4. **Never run background tests against the main repo** while working in a worktree. Always run tests from the worktree directory.
+5. **Never put generated files in `docs/`** — the `docs/` directory is served by Jekyll for GitHub Pages. Markdown with code blocks containing `{{ }}` will break the build. Plans, internal docs, and generated files go in `plans/` or the repo root.
+
+### Plan quality
+
+Implementation plans MUST use actual API signatures, not guesses:
+- `grep` for real method signatures before writing plan code snippets
+- Verify struct field names against the actual source
+- When a plan reviewer finds API mismatches, fix ALL of them — not just the ones flagged
 
 ### Parallel feature branches
 
 When launching multiple feature branches in parallel (e.g. via worktree agents):
 
-1. **Plan merge order upfront.** Identify which files are shared (especially `crates/mcp/src/main.rs` — it's a bottleneck) and decide merge order from smallest/most-independent to largest.
-2. **Each PR must include its own docs updates.** Don't batch docs updates after all merges — update README, website, test counts, and CLAUDE.md as part of each feature PR.
-3. **Merge one at a time, wait for CI.** After each squash-merge, pull main, verify CI passes on main, THEN rebase the next PR. Never merge multiple PRs without checking CI between them.
-4. **Rebase conflicts in `main.rs` are common.** The MCP dispatch loop, `run_jsonrpc_loop`, and tool definitions are all in one file. When multiple PRs touch it, use a dedicated agent to rebase — don't attempt manual 3-way conflict resolution.
+1. **Plan merge order upfront.** Identify which files are shared and decide merge order from smallest/most-independent to largest.
+2. **Each PR must include its own docs updates.** Update README, website, test counts, and CLAUDE.md as part of each feature PR.
+3. **Merge one at a time, wait for CI.** After each squash-merge, pull main, verify CI passes on main (including the Jekyll/Pages build), THEN rebase the next PR.
+4. **Check for behavioral interactions.** When planning features that change binary behavior (e.g., daemon auto-fork), explicitly note impacts on existing tests that spawn the binary as a subprocess.
 
 ### CI checklist before merging
 
 Before merging any PR:
-- [ ] All CI checks green (macOS + Ubuntu + Windows if applicable)
-- [ ] No flaky test failures in the log (re-run if `git_sync` or Tantivy lock tests fail)
+- [ ] All CI checks green (macOS + Ubuntu + Windows)
+- [ ] GitHub Pages build passes (no Jekyll/Liquid errors)
 - [ ] Review comments addressed and responded to
-- [ ] Test count in README/website matches actual `cargo test` output
-- [ ] Version in Cargo.toml matches what will be released
+- [ ] Test count in README/CLAUDE.md/website matches actual `cargo test` output
+- [ ] Documentation updated for all new features
 
 ### Release checklist
 
 Before tagging a release:
 - [ ] All 5 version locations updated (see above)
 - [ ] `cargo test --workspace` passes locally
+- [ ] `cargo clippy --workspace -- -D warnings` passes
+- [ ] `cargo fmt --check` passes
 - [ ] README Key Features section reflects new features
 - [ ] docs/index.html test count and tool count are correct
 - [ ] docs/docs.html has no stale references
 - [ ] Plugin version matches in both `claude-plugin/` and `.claude-plugin/marketplace.json`
+- [ ] GitHub Pages build succeeds (check the deploy workflow)
 
 ### Git history hygiene
 
