@@ -84,3 +84,7 @@ serial_test.workspace = true
 [[bench]]
 name = "search_bench"
 harness = false
+
+[[bench]]
+name = "large_repo_bench"
+harness = false
