@@ -65,3 +65,4 @@ benchmarks/models/
 benchmarks/reranker_data/
 benchmarks/__pycache__/
 .claude/worktrees/
+.worktrees/
