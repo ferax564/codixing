@@ -4,8 +4,9 @@
 //! sockets and are not available on Windows.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
@@ -16,6 +17,24 @@ use codixing_core::{Engine, FederatedEngine};
 
 use crate::ListingMode;
 use crate::jsonrpc::run_jsonrpc_loop;
+
+// ---------------------------------------------------------------------------
+// Idle timeout watchdog
+// ---------------------------------------------------------------------------
+
+/// Timestamp (millis since UNIX epoch) of the last client activity.
+static LAST_ACTIVITY: AtomicU64 = AtomicU64::new(0);
+
+/// Idle timeout: daemon exits after 30 minutes with no client connections.
+const IDLE_TIMEOUT_MS: u64 = 30 * 60 * 1000;
+
+fn touch_activity() {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    LAST_ACTIVITY.store(now, Ordering::Relaxed);
+}
 
 // ---------------------------------------------------------------------------
 // Daemon: Unix socket server
@@ -40,6 +59,27 @@ pub(crate) async fn run_daemon(
     let _guard = SocketGuard(socket_path_owned);
 
     info!(socket = %socket_path.display(), "daemon listening");
+
+    // Mark initial activity so the watchdog doesn't fire immediately.
+    touch_activity();
+
+    // Spawn an idle-timeout watchdog: check every 60s and exit if no client
+    // activity for IDLE_TIMEOUT_MS (30 minutes).
+    tokio::spawn(async {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            let last = LAST_ACTIVITY.load(Ordering::Relaxed);
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            if now.saturating_sub(last) > IDLE_TIMEOUT_MS {
+                info!("daemon idle for >30 min — shutting down");
+                std::process::exit(0);
+            }
+        }
+    });
 
     // Spawn a background task that watches the project directory and keeps the
     // in-memory engine up to date when source files change.
@@ -118,6 +158,7 @@ pub(crate) async fn run_daemon(
 
     loop {
         let (stream, _addr) = listener.accept().await.context("daemon: accept failed")?;
+        touch_activity();
 
         let engine_clone = Arc::clone(&engine);
         let fed_clone = federation.clone();

@@ -99,6 +99,11 @@ struct Args {
     /// search across multiple indexed projects.
     #[arg(long)]
     federation: Option<PathBuf>,
+
+    /// Disable automatic daemon forking. When set, the server always runs
+    /// in direct (non-daemon) mode even when no daemon is running.
+    #[arg(long)]
+    no_daemon_fork: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -174,6 +179,49 @@ async fn main() -> Result<()> {
         }
     } else {
         // ── Normal mode: try proxy, fall back to direct ────────────────────
+
+        // Auto-fork a daemon if none is running (Unix only).
+        #[cfg(unix)]
+        if !args.no_daemon_fork && !daemon::socket_alive(&socket_path).await {
+            info!("auto-starting daemon at {}", socket_path.display());
+            let exe = std::env::current_exe()?;
+            let mut daemon_args = vec![
+                "--root".to_string(),
+                root.to_str().unwrap().to_string(),
+                "--daemon".to_string(),
+                "--socket".to_string(),
+                socket_path.to_str().unwrap().to_string(),
+            ];
+            if args.compact {
+                daemon_args.push("--compact".to_string());
+            }
+            if args.medium {
+                daemon_args.push("--medium".to_string());
+            }
+            if args.no_session {
+                daemon_args.push("--no-session".to_string());
+            }
+            if let Some(ref fed_path) = args.federation {
+                daemon_args.push("--federation".to_string());
+                daemon_args.push(fed_path.to_str().unwrap().to_string());
+            }
+            std::process::Command::new(&exe)
+                .args(&daemon_args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .context("failed to fork daemon")?;
+
+            // Wait briefly for the daemon to bind the socket.
+            for _ in 0..20 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                if daemon::socket_alive(&socket_path).await {
+                    break;
+                }
+            }
+        }
+
         #[cfg(unix)]
         if daemon::socket_alive(&socket_path).await {
             info!(socket = %socket_path.display(), "daemon detected — proxying through socket");
