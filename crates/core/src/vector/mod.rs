@@ -334,6 +334,16 @@ mod brute_force_impl {
                 return Ok(Vec::new());
             }
 
+            const BRUTE_FORCE_WARN_THRESHOLD: usize = 50_000;
+            if self.entries.len() > BRUTE_FORCE_WARN_THRESHOLD {
+                tracing::warn!(
+                    count = self.entries.len(),
+                    "brute-force vector search over {} vectors — consider enabling the \
+                     `usearch` feature for sub-linear ANN search",
+                    self.entries.len()
+                );
+            }
+
             let mut scored: Vec<(u64, f32)> = self
                 .entries
                 .iter()

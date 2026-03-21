@@ -80,6 +80,7 @@ memmap2.workspace = true
 tempfile.workspace = true
 criterion.workspace = true
 serial_test.workspace = true
+rand.workspace = true
 
 [[bench]]
 name = "search_bench"
@@ -87,4 +88,8 @@ harness = false
 
 [[bench]]
 name = "large_repo_bench"
+harness = false
+
+[[bench]]
+name = "vector_bench"
 harness = false
