@@ -224,6 +224,12 @@ async fn main() -> Result<()> {
 
         #[cfg(unix)]
         if daemon::socket_alive(&socket_path).await {
+            if args.compact || args.medium {
+                tracing::warn!(
+                    "proxying through existing daemon — the daemon may have been started \
+                     with different --compact/--medium settings; restart the daemon to change modes"
+                );
+            }
             info!(socket = %socket_path.display(), "daemon detected — proxying through socket");
             return daemon::run_proxy(&socket_path).await;
         }

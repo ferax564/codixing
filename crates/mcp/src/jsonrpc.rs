@@ -74,6 +74,12 @@ where
         )
         .await;
         write_line(&mut writer, &response).await?;
+
+        // Refresh daemon idle-timeout watchdog on every request, not just
+        // on accept(). A long-lived MCP session (single socket) would
+        // otherwise let the daemon exit after 30 min of "inactivity".
+        #[cfg(unix)]
+        crate::daemon::touch_activity();
     }
 
     info!("client disconnected");

@@ -28,7 +28,7 @@ static LAST_ACTIVITY: AtomicU64 = AtomicU64::new(0);
 /// Idle timeout: daemon exits after 30 minutes with no client connections.
 const IDLE_TIMEOUT_MS: u64 = 30 * 60 * 1000;
 
-fn touch_activity() {
+pub(crate) fn touch_activity() {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -138,8 +138,10 @@ pub(crate) async fn run_daemon(
             // Deduplicate: if the same path appears multiple times, keep the
             // last occurrence (latest state).
             {
+                all_changes.reverse();
                 let mut seen = std::collections::HashSet::new();
                 all_changes.retain(|c| seen.insert(c.path.clone()));
+                all_changes.reverse();
             }
 
             info!(
