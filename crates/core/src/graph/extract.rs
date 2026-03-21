@@ -588,8 +588,7 @@ fn collect_typescript_definitions(
                         // Interface method signatures appear as various node types
                         // depending on the tree-sitter-typescript grammar version.
                         // Common types: "method_signature", "property_signature".
-                        if child.kind() == "method_signature"
-                            || child.kind() == "method_definition"
+                        if child.kind() == "method_signature" || child.kind() == "method_definition"
                         {
                             if let Some(method_name_node) = child.child_by_field_name("name") {
                                 let method_name = node_text(&method_name_node, source);
@@ -673,8 +672,7 @@ fn collect_typescript_references(
                     let mut inner_cursor = child.walk();
                     for clause in child.children(&mut inner_cursor) {
                         // `implements_clause` or `extends_clause`
-                        if clause.kind() == "implements_clause"
-                            || clause.kind() == "extends_clause"
+                        if clause.kind() == "implements_clause" || clause.kind() == "extends_clause"
                         {
                             let mut clause_cursor = clause.walk();
                             for type_node in clause.children(&mut clause_cursor) {
