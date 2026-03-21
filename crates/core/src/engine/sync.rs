@@ -6,6 +6,8 @@ use tracing::{debug, info, warn};
 use crate::chunker::Chunker;
 use crate::chunker::cast::CastChunker;
 use crate::error::{CodixingError, Result};
+use crate::graph::extract::{extract_definitions, extract_references};
+use crate::graph::types::{ReferenceKind, SymbolKind};
 use crate::graph::{CallExtractor, ImportExtractor, ImportResolver, compute_pagerank};
 use crate::language::detect_language;
 use crate::persistence::{FileHashEntry, IndexMeta};
@@ -159,6 +161,45 @@ impl Engine {
                     graph.add_call_edge(&rel_str, targets[0], name, file_language, target_lang);
                 }
             }
+            // Update symbol-level inner graph for this file.
+            graph.remove_file_symbols(&rel_str);
+            let source_str = String::from_utf8_lossy(&source);
+            let defs = extract_definitions(&source_str, &rel_str, &file_language);
+            let refs = extract_references(&source_str, &rel_str, &file_language);
+
+            // Insert definition nodes.
+            let mut local_indices = std::collections::HashMap::new();
+            let mut func_defs_sorted = Vec::new();
+            for def in &defs {
+                let idx =
+                    graph.add_symbol_with_line(&def.name, &rel_str, def.kind.clone(), def.line);
+                local_indices.insert(def.name.clone(), idx);
+                if def.kind == SymbolKind::Function {
+                    func_defs_sorted.push((def.line, idx));
+                }
+            }
+            func_defs_sorted.sort_by_key(|(line, _)| *line);
+
+            // Wire call edges.
+            for r in &refs {
+                if r.kind != ReferenceKind::Call {
+                    continue;
+                }
+                let caller_idx = super::find_enclosing_function(&func_defs_sorted, r.line);
+                let caller_idx = match caller_idx {
+                    Some(idx) => idx,
+                    None => continue,
+                };
+                let callee_base = r.target_name.rsplit("::").next().unwrap_or(&r.target_name);
+                // Look up the callee in local definitions first.
+                if let Some(&target_idx) = local_indices.get(callee_base) {
+                    if caller_idx != target_idx {
+                        graph.add_reference(caller_idx, target_idx, ReferenceKind::Call);
+                    }
+                }
+                // Cross-file resolution is skipped here; will be done on next full reindex.
+            }
+
             if do_graph_finalize {
                 let scores = compute_pagerank(
                     graph,
@@ -169,6 +210,9 @@ impl Engine {
                 let flat = graph.to_flat();
                 if let Err(e) = self.store.save_graph(&flat) {
                     warn!(error = %e, "failed to persist graph after reindex");
+                }
+                if let Err(e) = self.store.save_symbol_graph(graph) {
+                    warn!(error = %e, "failed to persist symbol graph after reindex");
                 }
             }
         }
@@ -193,6 +237,7 @@ impl Engine {
         // Remove graph node + incident edges (PageRank deferred to caller).
         if let Some(ref mut graph) = self.graph {
             graph.remove_file(rel_str);
+            graph.remove_file_symbols(rel_str);
         }
 
         Ok(())
@@ -287,6 +332,9 @@ impl Engine {
             let flat = graph.to_flat();
             if let Err(e) = self.store.save_graph(&flat) {
                 warn!(error = %e, "failed to persist graph after batch changes");
+            }
+            if let Err(e) = self.store.save_symbol_graph(graph) {
+                warn!(error = %e, "failed to persist symbol graph after batch changes");
             }
         }
 

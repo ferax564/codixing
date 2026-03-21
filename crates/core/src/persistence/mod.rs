@@ -298,6 +298,26 @@ impl IndexStore {
         Ok(Some(data))
     }
 
+    /// Path to the `graph/symbol_graph.bin` file for the symbol-level graph.
+    pub fn symbol_graph_path(&self) -> PathBuf {
+        self.graph_dir().join("symbol_graph.bin")
+    }
+
+    /// Persist the symbol-level graph to disk via binary serialization.
+    pub fn save_symbol_graph(&self, graph: &crate::graph::CodeGraph) -> Result<()> {
+        fs::create_dir_all(self.graph_dir())?;
+        crate::graph::persistence::save_graph_binary(graph, &self.symbol_graph_path())
+    }
+
+    /// Load the symbol-level graph from disk.
+    pub fn load_symbol_graph(&self) -> Result<Option<crate::graph::CodeGraph>> {
+        let path = self.symbol_graph_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        crate::graph::persistence::load_graph_binary(&path).map(Some)
+    }
+
     /// Save raw bytes to the `symbols.bin` file.
     pub fn save_symbols_bytes(&self, bytes: &[u8]) -> Result<()> {
         fs::write(self.symbols_path(), bytes)?;

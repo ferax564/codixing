@@ -86,6 +86,33 @@ impl Engine {
             .unwrap_or(false)
     }
 
+    /// Return true if the graph contains a pre-built symbol-level inner graph.
+    pub fn has_symbol_graph(&self) -> bool {
+        self.graph
+            .as_ref()
+            .is_some_and(|g| g.symbol_node_count() > 0)
+    }
+
+    /// Query the symbol-level graph for callers of a given symbol name.
+    ///
+    /// Returns `(file, caller_name)` pairs for each function that calls the symbol.
+    pub fn symbol_callers_from_graph(&self, symbol: &str) -> Vec<(String, String)> {
+        self.graph
+            .as_ref()
+            .map(|g| g.get_symbol_callers(symbol))
+            .unwrap_or_default()
+    }
+
+    /// Query the symbol-level graph for callees of a given symbol name.
+    ///
+    /// Returns callee symbol names.
+    pub fn symbol_callees_from_graph(&self, symbol: &str) -> Vec<String> {
+        self.graph
+            .as_ref()
+            .map(|g| g.get_symbol_callees(symbol))
+            .unwrap_or_default()
+    }
+
     /// Compute personalized PageRank anchored to `seed_files`.
     ///
     /// Files closer to the seeds in the import graph score higher.  Useful for

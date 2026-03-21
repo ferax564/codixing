@@ -557,6 +557,9 @@ fn cmd_graph(path: PathBuf, token_budget: usize, map: bool) -> Result<()> {
             println!("  Edges (imports):   {}", stats.edge_count);
             println!("  Resolved edges:    {}", stats.resolved_edges);
             println!("  External edges:    {}", stats.external_edges);
+            println!("  Call edges:        {}", stats.call_edges);
+            println!("  Symbol nodes:      {}", stats.symbol_nodes);
+            println!("  Symbol edges:      {}", stats.symbol_edges);
         }
         None => eprintln!("Graph not available — re-run `codixing init`"),
     }
