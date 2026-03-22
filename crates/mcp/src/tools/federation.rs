@@ -46,7 +46,13 @@ pub fn call_federation_add_project(args: &Value) -> (String, bool) {
     };
 
     let project_path = match args.get("path").and_then(|v| v.as_str()) {
-        Some(p) => PathBuf::from(p),
+        Some(p) => {
+            // Canonicalize to absolute path so configs are portable across cwd changes.
+            match PathBuf::from(p).canonicalize() {
+                Ok(abs) => abs,
+                Err(_) => PathBuf::from(p),
+            }
+        }
         None => {
             return (
                 "Missing required parameter 'path' (root directory of the project to add)."

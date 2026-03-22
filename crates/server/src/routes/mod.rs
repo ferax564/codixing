@@ -30,6 +30,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/graph/callees", get(graph::callees_handler))
         .route("/graph/stats", get(graph::stats_handler))
         .route("/graph/export", get(graph::export_handler))
+        .route("/graph/call-graph", get(graph::call_graph_handler))
         .route("/graph/history", get(graph::history_handler))
         .route("/graph/view", get(graph::view_handler))
         // Middleware
