@@ -167,7 +167,15 @@ These tests previously flaked due to file locking. The first three are now seria
 - `graph_persists_across_open` — fixed with `#[serial]`
 - Tier 2 retrieval tests — Windows `Access is denied` (marked `#[cfg_attr(windows, ignore)]`)
 
-Re-run failed CI if Tier 2 retrieval tests are the only failures.
+Windows Tantivy flakes are broader than just Tier 2 — any integration test touching the index can flake (`search_finds_python_class`, `trait_method_dispatch_links_impl`, etc.). Different test fails each run. Re-run failed CI if only Windows tests fail and Ubuntu+macOS are green.
+
+### Adding a new crate to the workspace
+
+When adding a new crate that depends on `codixing-core`, ALWAYS:
+1. Use `codixing-core = { path = "../core", default-features = false }` (NOT bare path)
+2. Add `usearch = ["codixing-core/usearch"]` to the crate's `[features]`
+3. Set `default = ["usearch"]`
+4. Verify with `cargo build --workspace --no-default-features` (simulates Windows CI)
 
 ## MCP Index Maintenance
 
