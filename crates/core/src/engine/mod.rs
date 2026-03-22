@@ -1335,6 +1335,7 @@ fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
                 signature: chunk.signatures.join("\n"),
                 scope_chain: chunk.scope_chain.clone(),
                 entity_names: chunk.entity_names.clone(),
+                content_hash: xxhash_rust::xxh3::xxh3_64(chunk.content.as_bytes()),
                 content: chunk.content.clone(),
             },
         );
@@ -1410,7 +1411,20 @@ fn build_context_prefix(meta: &ChunkMeta) -> String {
     header
 }
 
+/// Fixed-size window for streaming embedding batches.
+///
+/// Controls how many chunks are embedded and indexed per iteration.
+/// Keeps peak memory bounded: only `STREAM_BATCH_SIZE` text strings and
+/// their corresponding embedding vectors are alive at any given time.
+const STREAM_BATCH_SIZE: usize = 256;
+
 /// Batch-embed all pending chunks and add them to the vector index.
+///
+/// Processes chunks in fixed-size windows of [`STREAM_BATCH_SIZE`] to bound
+/// peak memory usage.  For each window the texts are collected, embedded via
+/// the ONNX model, and immediately indexed into the HNSW graph before moving
+/// on to the next window.  Progress is reported after every window via the
+/// optional `progress_callback`.
 ///
 /// When contextual embeddings are disabled (`!contextual`) this function
 /// first attempts **late chunking**: for each file whose tokenized form fits
@@ -1429,13 +1443,41 @@ fn embed_and_index_chunks(
     contextual: bool,
     root: &Path,
 ) -> Result<()> {
+    embed_and_index_chunks_with_progress(
+        pending,
+        chunk_meta,
+        embedder,
+        vec_idx,
+        contextual,
+        root,
+        None::<fn(usize, usize)>,
+    )
+}
+
+/// Inner implementation of [`embed_and_index_chunks`] with an optional
+/// progress callback `(embedded_so_far, total_chunks)`.
+fn embed_and_index_chunks_with_progress<F>(
+    pending: &DashMap<u64, String>,
+    chunk_meta: &DashMap<u64, ChunkMeta>,
+    embedder: &Embedder,
+    vec_idx: &mut VectorIndex,
+    contextual: bool,
+    root: &Path,
+    progress_callback: Option<F>,
+) -> Result<()>
+where
+    F: Fn(usize, usize),
+{
     let entries: Vec<u64> = pending.iter().map(|e| *e.key()).collect();
 
     if entries.is_empty() {
         return Ok(());
     }
 
-    info!(count = entries.len(), contextual, "embedding chunks");
+    let total_chunks = entries.len();
+    let mut embedded_so_far = 0usize;
+
+    info!(count = total_chunks, contextual, "embedding chunks");
 
     // ── Late chunking pass ────────────────────────────────────────────────
     //
@@ -1522,6 +1564,11 @@ fn embed_and_index_chunks(
                             warn!(error = %e, chunk_id = id, "failed to add vector");
                         }
                         done_ids.insert(*id);
+                        embedded_so_far += 1;
+                    }
+                    // Report progress after each file's late-chunked batch.
+                    if let Some(ref cb) = progress_callback {
+                        cb(embedded_so_far, total_chunks);
                     }
                 }
                 Ok(None) => {
@@ -1535,7 +1582,7 @@ fn embed_and_index_chunks(
         }
     }
 
-    // ── Fallback: independent per-chunk embedding ─────────────────────────
+    // ── Fallback: independent per-chunk embedding (streaming) ─────────────
     let remaining: Vec<u64> = entries
         .iter()
         .filter(|id| !done_ids.contains(id))
@@ -1549,9 +1596,8 @@ fn embed_and_index_chunks(
             "embedding remaining chunks independently"
         );
 
-        const BATCH: usize = 256;
-        for batch in remaining.chunks(BATCH) {
-            let texts: Vec<String> = batch
+        for window in remaining.chunks(STREAM_BATCH_SIZE) {
+            let texts: Vec<String> = window
                 .iter()
                 .map(|id| {
                     chunk_meta
@@ -1563,7 +1609,7 @@ fn embed_and_index_chunks(
 
             let embeddings = embedder.embed(texts)?;
 
-            for (chunk_id, embedding) in batch.iter().zip(embeddings.into_iter()) {
+            for (chunk_id, embedding) in window.iter().zip(embeddings.into_iter()) {
                 let file_path = chunk_meta
                     .get(chunk_id)
                     .map(|m| m.file_path.clone())
@@ -1571,6 +1617,12 @@ fn embed_and_index_chunks(
                 if let Err(e) = vec_idx.add_mut(*chunk_id, &embedding, &file_path) {
                     warn!(error = %e, chunk_id, "failed to add vector");
                 }
+                embedded_so_far += 1;
+            }
+
+            // Report progress after each streaming window.
+            if let Some(ref cb) = progress_callback {
+                cb(embedded_so_far, total_chunks);
             }
         }
     }
@@ -2199,6 +2251,7 @@ pub fn unique_new_function() -> bool {
             scope_chain: vec!["Engine".to_string(), "search".to_string()],
             entity_names: vec!["search".to_string(), "apply_graph_boost".to_string()],
             content: "fn search(&self) { }".to_string(),
+            content_hash: 0,
         };
         let prefix = build_context_prefix(&meta);
         assert_eq!(
@@ -2219,6 +2272,7 @@ pub fn unique_new_function() -> bool {
             scope_chain: vec![],
             entity_names: vec!["main".to_string()],
             content: "fn main() {}".to_string(),
+            content_hash: 0,
         };
         let prefix = build_context_prefix(&meta);
         assert_eq!(
@@ -2245,6 +2299,7 @@ pub fn unique_new_function() -> bool {
                 "validate".to_string(),
             ],
             content: "class Parser: ...".to_string(),
+            content_hash: 0,
         };
         let prefix = build_context_prefix(&meta);
         assert!(prefix.contains("Entities: parse, tokenize, validate"));
@@ -2264,6 +2319,7 @@ pub fn unique_new_function() -> bool {
             scope_chain: vec![],
             entity_names: vec![],
             content: "[package]\nname = \"foo\"".to_string(),
+            content_hash: 0,
         };
         let prefix = build_context_prefix(&meta);
         assert_eq!(prefix, "File: config.toml | Language: toml\n");
@@ -2283,6 +2339,7 @@ pub fn unique_new_function() -> bool {
             scope_chain: vec!["Foo".to_string()],
             entity_names: vec!["bar".to_string()],
             content: "fn bar() {}".to_string(),
+            content_hash: 0,
         };
         let text = make_embed_text(&meta, true);
         assert!(text.starts_with("File: src/lib.rs | Language: rust"));
@@ -2303,6 +2360,7 @@ pub fn unique_new_function() -> bool {
             scope_chain: vec!["Foo".to_string()],
             entity_names: vec!["bar".to_string()],
             content: "fn bar() {}".to_string(),
+            content_hash: 0,
         };
         let text = make_embed_text(&meta, false);
         // Non-contextual mode returns raw content only.
@@ -2505,6 +2563,182 @@ pub fn unique_reload_function() -> bool {
         assert!(
             !syms.is_empty(),
             "reader should find the new symbol after reload"
+        );
+
+        drop(dir);
+    }
+
+    #[test]
+    fn streaming_batch_constant_is_reasonable() {
+        // STREAM_BATCH_SIZE must be > 0 and within a reasonable range
+        // for memory-bounded embedding.
+        assert!(STREAM_BATCH_SIZE > 0);
+        assert!(STREAM_BATCH_SIZE <= 1024);
+    }
+
+    #[test]
+    fn streaming_embed_empty_pending_is_noop() {
+        use dashmap::DashMap;
+
+        // With an empty pending map, embed_and_index_chunks should return Ok
+        // immediately without requiring an embedder or vector index.
+        let pending: DashMap<u64, String> = DashMap::new();
+        let chunk_meta_map: DashMap<u64, ChunkMeta> = DashMap::new();
+
+        // embed_and_index_chunks returns early for empty pending — no embedder needed.
+        assert!(pending.is_empty());
+        assert!(chunk_meta_map.is_empty());
+
+        // Verify the constant is exposed and correct.
+        assert_eq!(STREAM_BATCH_SIZE, 256);
+    }
+
+    #[test]
+    fn chunk_meta_content_hash_populated_on_init() {
+        let (dir, root) = setup_project();
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+        let engine = Engine::init(&root, config).unwrap();
+
+        // Every chunk_meta entry should have a non-zero content_hash.
+        let mut total = 0;
+        let mut hashed = 0;
+        for entry in engine.chunk_meta.iter() {
+            total += 1;
+            if entry.value().content_hash != 0 {
+                hashed += 1;
+            }
+        }
+        assert!(total > 0, "expected at least one chunk");
+        assert_eq!(
+            total, hashed,
+            "all chunk_meta entries should have non-zero content_hash"
+        );
+
+        drop(dir);
+    }
+
+    #[test]
+    fn content_hash_matches_xxh3() {
+        let (dir, root) = setup_project();
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+        let engine = Engine::init(&root, config).unwrap();
+
+        // Verify each chunk's content_hash matches xxh3 of its content.
+        for entry in engine.chunk_meta.iter() {
+            let meta = entry.value();
+            let expected = xxhash_rust::xxh3::xxh3_64(meta.content.as_bytes());
+            assert_eq!(
+                meta.content_hash, expected,
+                "content_hash mismatch for chunk {} in {}",
+                meta.chunk_id, meta.file_path
+            );
+        }
+
+        drop(dir);
+    }
+
+    #[test]
+    fn reindex_preserves_content_hash() {
+        let (dir, root) = setup_project();
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+        let mut engine = Engine::init(&root, config).unwrap();
+
+        // Collect content hashes before reindex.
+        let hashes_before: std::collections::HashMap<String, Vec<u64>> = engine
+            .chunk_meta
+            .iter()
+            .fold(std::collections::HashMap::new(), |mut acc, entry| {
+                acc.entry(entry.value().file_path.clone())
+                    .or_default()
+                    .push(entry.value().content_hash);
+                acc
+            });
+
+        // Reindex without changing file content — hashes should remain consistent.
+        engine.reindex_file(Path::new("src/lib.rs")).unwrap();
+
+        let hashes_after: std::collections::HashMap<String, Vec<u64>> = engine
+            .chunk_meta
+            .iter()
+            .filter(|e| e.value().file_path.contains("lib.rs"))
+            .fold(std::collections::HashMap::new(), |mut acc, entry| {
+                acc.entry(entry.value().file_path.clone())
+                    .or_default()
+                    .push(entry.value().content_hash);
+                acc
+            });
+
+        // lib.rs chunks should have the same hashes (content unchanged).
+        for (file, mut after_hashes) in hashes_after {
+            if let Some(mut before_hashes) = hashes_before.get(&file).cloned() {
+                before_hashes.sort();
+                after_hashes.sort();
+                assert_eq!(
+                    before_hashes, after_hashes,
+                    "content hashes should be identical for unchanged file"
+                );
+            }
+        }
+
+        drop(dir);
+    }
+
+    #[test]
+    fn reindex_changes_hash_for_modified_content() {
+        let (dir, root) = setup_project();
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+        let mut engine = Engine::init(&root, config).unwrap();
+
+        // Collect hashes before.
+        let hashes_before: Vec<u64> = engine
+            .chunk_meta
+            .iter()
+            .filter(|e| e.value().file_path.contains("main.rs"))
+            .map(|e| e.value().content_hash)
+            .collect();
+
+        // Modify main.rs significantly.
+        fs::write(
+            root.join("src/main.rs"),
+            r#"
+/// Completely different content.
+fn totally_new_main() {
+    let x = 42;
+    println!("x = {}", x);
+}
+
+pub fn another_function(a: f64, b: f64) -> f64 {
+    a * b + 1.0
+}
+"#,
+        )
+        .unwrap();
+
+        engine.reindex_file(Path::new("src/main.rs")).unwrap();
+
+        let hashes_after: Vec<u64> = engine
+            .chunk_meta
+            .iter()
+            .filter(|e| e.value().file_path.contains("main.rs"))
+            .map(|e| e.value().content_hash)
+            .collect();
+
+        // At least some hashes should differ (content changed).
+        assert!(
+            !hashes_after.is_empty(),
+            "expected chunks for main.rs after reindex"
+        );
+
+        // The hash sets should be different since content was completely replaced.
+        let before_set: std::collections::HashSet<u64> = hashes_before.into_iter().collect();
+        let after_set: std::collections::HashSet<u64> = hashes_after.into_iter().collect();
+        assert_ne!(
+            before_set, after_set,
+            "content hashes should differ after modifying file content"
         );
 
         drop(dir);

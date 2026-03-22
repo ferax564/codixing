@@ -134,6 +134,11 @@ pub struct ChunkMeta {
     pub entity_names: Vec<String>,
     /// Source code content.
     pub content: String,
+    /// xxh3 hash of the chunk content, used for incremental vector updates.
+    /// During sync, chunks whose content hash has not changed can skip
+    /// re-embedding, reusing the existing vector.
+    #[serde(default)]
+    pub content_hash: u64,
 }
 
 /// Trait for swappable retrieval strategies.

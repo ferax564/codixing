@@ -45,6 +45,29 @@ impl Engine {
             normalize_path(abs_path.strip_prefix(&self.config.root).unwrap_or(path))
         });
 
+        // ── Collect old chunk content hashes before removing data ────────
+        // Used for incremental vector updates: chunks whose content hash is
+        // unchanged can reuse their existing embedding vector.
+        let old_chunk_hashes: std::collections::HashMap<u64, (u64, Vec<f32>)> = {
+            let mut map = std::collections::HashMap::new();
+            if self.vector.is_some() {
+                for entry in self.chunk_meta.iter() {
+                    let meta = entry.value();
+                    if meta.file_path == rel_str && meta.content_hash != 0 {
+                        // Try to retrieve the existing vector for this chunk.
+                        let existing_vec = self
+                            .vector
+                            .as_ref()
+                            .and_then(|v| v.get_vector(meta.chunk_id));
+                        if let Some(vec) = existing_vec {
+                            map.insert(meta.content_hash, (meta.chunk_id, vec));
+                        }
+                    }
+                }
+            }
+            map
+        };
+
         // Remove old data.
         self.tantivy.remove_file(&rel_str)?;
         self.symbols.remove_file(&rel_str);
@@ -92,6 +115,7 @@ impl Engine {
                     signature: chunk.signatures.join("\n"),
                     scope_chain: chunk.scope_chain.clone(),
                     entity_names: chunk.entity_names.clone(),
+                    content_hash: xxhash_rust::xxh3::xxh3_64(chunk.content.as_bytes()),
                     content: chunk.content.clone(),
                 },
             );
@@ -105,29 +129,60 @@ impl Engine {
                 .insert(symbol_from_entity(entity, &rel_str, result.language));
         }
 
-        // Embed new chunks and add to vector index.
+        // ── Incremental vector update ────────────────────────────────────
+        // Compare new chunk content hashes against old ones.  Chunks whose
+        // content is identical reuse the previous embedding vector, avoiding
+        // an expensive re-embedding round-trip through the ONNX model.
         if let (Some(emb), Some(vec_idx)) = (self.embedder.as_ref(), self.vector.as_mut()) {
             let contextual = self.config.embedding.contextual_embeddings;
-            let texts: Vec<String> = chunks
-                .iter()
-                .map(|c| {
-                    if contextual {
-                        if let Some(meta) = self.chunk_meta.get(&c.id) {
-                            return make_embed_text(&meta, true);
-                        }
+            let mut reused = 0usize;
+            let mut needs_embed: Vec<usize> = Vec::new();
+
+            for (i, chunk) in chunks.iter().enumerate() {
+                let new_hash = xxhash_rust::xxh3::xxh3_64(chunk.content.as_bytes());
+                if let Some((_old_id, old_vec)) = old_chunk_hashes.get(&new_hash) {
+                    // Content unchanged — reuse the existing vector.
+                    if let Err(e) = vec_idx.add_mut(chunk.id, old_vec, &rel_str) {
+                        warn!(error = %e, chunk_id = chunk.id, "failed to reuse vector");
                     }
-                    c.content.clone()
-                })
-                .collect();
-            match emb.embed(texts) {
-                Ok(embeddings) => {
-                    for (chunk, embedding) in chunks.iter().zip(embeddings.iter()) {
-                        if let Err(e) = vec_idx.add_mut(chunk.id, embedding, &rel_str) {
-                            warn!(error = %e, chunk_id = chunk.id, "failed to add vector");
-                        }
-                    }
+                    reused += 1;
+                } else {
+                    needs_embed.push(i);
                 }
-                Err(e) => warn!(error = %e, "embedding failed during reindex"),
+            }
+
+            if !needs_embed.is_empty() {
+                let texts: Vec<String> = needs_embed
+                    .iter()
+                    .map(|&i| {
+                        let c = &chunks[i];
+                        if contextual {
+                            if let Some(meta) = self.chunk_meta.get(&c.id) {
+                                return make_embed_text(&meta, true);
+                            }
+                        }
+                        c.content.clone()
+                    })
+                    .collect();
+                match emb.embed(texts) {
+                    Ok(embeddings) => {
+                        for (&idx, embedding) in needs_embed.iter().zip(embeddings.iter()) {
+                            let chunk = &chunks[idx];
+                            if let Err(e) = vec_idx.add_mut(chunk.id, embedding, &rel_str) {
+                                warn!(error = %e, chunk_id = chunk.id, "failed to add vector");
+                            }
+                        }
+                    }
+                    Err(e) => warn!(error = %e, "embedding failed during reindex"),
+                }
+            }
+
+            if reused > 0 {
+                debug!(
+                    reused,
+                    re_embedded = needs_embed.len(),
+                    "incremental vector update"
+                );
             }
         }
 
