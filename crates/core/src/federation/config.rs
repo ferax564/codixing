@@ -98,6 +98,49 @@ impl FederationConfig {
             })
             .collect()
     }
+
+    /// Add a project to the federation config.
+    pub fn add_project(&mut self, root: impl Into<PathBuf>, weight: f32) {
+        self.projects.push(ProjectEntry {
+            root: root.into(),
+            weight,
+        });
+    }
+
+    /// Remove a project whose root directory name matches `name`.
+    pub fn remove_project(&mut self, name: &str) {
+        self.projects.retain(|p| {
+            p.root
+                .file_name()
+                .map(|n| n.to_string_lossy() != name)
+                .unwrap_or(true)
+        });
+    }
+
+    /// Serialize this config and write it to `path` as pretty-printed JSON.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let json = serde_json::to_string_pretty(self).map_err(|e| {
+            CodixingError::Config(format!("failed to serialize federation config: {e}"))
+        })?;
+        std::fs::write(path, json).map_err(|e| {
+            CodixingError::Config(format!(
+                "failed to write federation config to {}: {e}",
+                path.display()
+            ))
+        })?;
+        Ok(())
+    }
+
+    /// Create an empty template config file at `path` with sensible defaults.
+    pub fn init_template(path: &Path) -> Result<()> {
+        let config = FederationConfig {
+            projects: Vec::new(),
+            rrf_k: default_rrf_k(),
+            lazy_load: default_lazy_load(),
+            max_resident: default_max_resident(),
+        };
+        config.save(path)
+    }
 }
 
 #[cfg(test)]
@@ -145,5 +188,66 @@ mod tests {
         let weights = cfg.project_weights();
         assert!((weights["alpha"] - 1.0).abs() < f32::EPSILON);
         assert!((weights["beta"] - 2.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_add_project() {
+        let mut cfg = FederationConfig {
+            projects: Vec::new(),
+            rrf_k: 60.0,
+            lazy_load: true,
+            max_resident: 5,
+        };
+        cfg.add_project("/home/user/project-a", 1.0);
+        cfg.add_project("/home/user/project-b", 2.0);
+        assert_eq!(cfg.projects.len(), 2);
+        assert_eq!(cfg.projects[0].root, PathBuf::from("/home/user/project-a"));
+        assert!((cfg.projects[1].weight - 2.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_remove_project() {
+        let json = r#"{
+            "projects": [
+                { "root": "/home/user/alpha" },
+                { "root": "/home/user/beta" },
+                { "root": "/home/user/gamma" }
+            ]
+        }"#;
+        let mut cfg: FederationConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.projects.len(), 3);
+        cfg.remove_project("beta");
+        assert_eq!(cfg.projects.len(), 2);
+        let names: Vec<String> = cfg
+            .projects
+            .iter()
+            .map(|p| p.root.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(names.contains(&"alpha".to_string()));
+        assert!(names.contains(&"gamma".to_string()));
+        assert!(!names.contains(&"beta".to_string()));
+    }
+
+    #[test]
+    fn test_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("federation.json");
+
+        let mut cfg = FederationConfig {
+            projects: Vec::new(),
+            rrf_k: 42.0,
+            lazy_load: false,
+            max_resident: 3,
+        };
+        cfg.add_project("/tmp/project-x", 1.5);
+
+        cfg.save(&path).unwrap();
+
+        let loaded = FederationConfig::load(&path).unwrap();
+        assert_eq!(loaded.projects.len(), 1);
+        assert!((loaded.rrf_k - 42.0).abs() < f32::EPSILON);
+        assert!(!loaded.lazy_load);
+        assert_eq!(loaded.max_resident, 3);
+        assert!((loaded.projects[0].weight - 1.5).abs() < f32::EPSILON);
     }
 }
