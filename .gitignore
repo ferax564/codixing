@@ -66,3 +66,6 @@ benchmarks/reranker_data/
 benchmarks/__pycache__/
 .claude/worktrees/
 .worktrees/
+
+# Internal plans and strategy documents (local only)
+plans/
