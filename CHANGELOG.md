@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.15.1] — 2026-03-22
+
+### Fixed
+- Fix 2 security vulnerabilities: lz4_flex (RUSTSEC-2026-0041) and rustls-webpki (RUSTSEC-2026-0049) via dep update
+- Fix Windows CI build failure: server crate now proxies usearch feature (matches mcp/lsp/cli pattern)
+- Make cargo-audit CI job blocking (was `continue-on-error`) with explicit `--ignore` for unfixable transitive deps
+
+### Changed
+- Updated all transitive dependencies via `cargo update`
+- Added `audit.toml` documenting ignored advisories with justification and resolution plan
+- Document broader Windows Tantivy flake surface in CLAUDE.md
+- Add "Adding a new crate" checklist to CLAUDE.md
+
+### Known Issues
+- `time 0.3.45` (RUSTSEC-2026-0009, medium severity) pinned by tantivy 0.22 — resolution planned for v0.16.0 tantivy bump
+
 ## [0.14.0] — 2026-03-21
 
 ### Added
