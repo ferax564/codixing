@@ -37,10 +37,15 @@ impl ImportExtractor {
             Language::Scala => extract_scala(tree, source),
             Language::Zig => extract_zig(tree, source),
             Language::Php => extract_php(tree, source),
+            // Bash/Matlab: import extraction not yet implemented.
+            Language::Bash | Language::Matlab => Vec::new(),
             // Config languages use line-based parsing; no tree-sitter imports.
-            Language::Yaml | Language::Toml | Language::Dockerfile | Language::Makefile => {
-                Vec::new()
-            }
+            Language::Yaml
+            | Language::Toml
+            | Language::Dockerfile
+            | Language::Makefile
+            | Language::Mermaid
+            | Language::Xml => Vec::new(),
         }
     }
 }

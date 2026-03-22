@@ -47,10 +47,15 @@ impl ImportResolver {
             Language::Swift => None, // Swift module imports are external frameworks.
             Language::Kotlin => self.resolve_kotlin(&raw.path),
             Language::Scala => self.resolve_scala(&raw.path),
-            // Tier 3: Zig and PHP import resolution not yet supported.
-            Language::Zig | Language::Php => None,
+            // Tier 3: Zig, PHP, Bash, Matlab import resolution not yet supported.
+            Language::Zig | Language::Php | Language::Bash | Language::Matlab => None,
             // Config languages have no import resolution.
-            Language::Yaml | Language::Toml | Language::Dockerfile | Language::Makefile => None,
+            Language::Yaml
+            | Language::Toml
+            | Language::Dockerfile
+            | Language::Makefile
+            | Language::Mermaid
+            | Language::Xml => None,
         }
     }
 
