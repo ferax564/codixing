@@ -177,6 +177,12 @@ cd editors/vscode && npm install && npm run compile
 # Then F5 in VS Code to launch the Extension Development Host
 ```
 
+**Pre-built VSIX:** Download `codixing.vsix` from the [releases page](https://github.com/ferax564/codixing/releases) and install:
+
+```bash
+code --install-extension codixing.vsix
+```
+
 ---
 
 ## Performance
