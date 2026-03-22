@@ -1,5 +1,8 @@
 # Codixing
 
+[![CI](https://github.com/ferax564/codixing/actions/workflows/ci.yml/badge.svg)](https://github.com/ferax564/codixing/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/ferax564/codixing/graph/badge.svg)](https://codecov.io/gh/ferax564/codixing)
+
 **Website: [codixing.com](https://codixing.com)** · **[Docs](https://codixing.com/docs)**
 
 Ultra-fast code retrieval engine for AI agents — beats `grep` at its own game.
