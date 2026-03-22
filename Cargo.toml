@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/cli", "crates/mcp", "crates/lsp"]
+members = ["crates/core", "crates/cli", "crates/mcp", "crates/lsp", "crates/server"]
 resolver = "3"
 
 [workspace.package]
@@ -47,6 +47,7 @@ usearch = "2"
 # Async runtime & HTTP server
 axum = { version = "0.8", features = ["json", "macros"] }
 tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # Graph
