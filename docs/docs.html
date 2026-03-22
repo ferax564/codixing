@@ -1470,7 +1470,7 @@ QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=codixing codixing init .</cod
       <!-- Languages -->
       <section class="doc-section" id="languages">
         <h2>Language Support</h2>
-        <p>Codixing uses tree-sitter for AST-aware parsing. All 20 languages below get full chunking, symbol extraction, and import graph edges.</p>
+        <p>Codixing uses tree-sitter for AST-aware parsing. All 24 languages below get full chunking, symbol extraction, and import graph edges.</p>
 
         <h3>Tier 1 — Full support</h3>
         <div class="lang-grid">
@@ -1494,11 +1494,29 @@ QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=codixing codixing init .</cod
           <span class="lang-pill">Scala</span>
         </div>
 
+        <h3>Tier 3 — Full AST</h3>
+        <div class="lang-grid">
+          <span class="lang-pill">Zig</span>
+          <span class="lang-pill">PHP</span>
+          <span class="lang-pill">Bash</span>
+          <span class="lang-pill">Matlab</span>
+        </div>
+
+        <h3>Config / Diagram — Symbol extraction</h3>
+        <div class="lang-grid">
+          <span class="lang-pill">YAML</span>
+          <span class="lang-pill">TOML</span>
+          <span class="lang-pill">Dockerfile</span>
+          <span class="lang-pill">Makefile</span>
+          <span class="lang-pill">Mermaid</span>
+          <span class="lang-pill">XML/Draw.io</span>
+        </div>
+
         <p>Files in unsupported languages are indexed with a line-based fallback chunker — they appear in BM25 results but not in the symbol table or graph.</p>
 
         <div class="callout callout-info">
-          <span class="callout-icon">ℹ</span>
-          <span>Zig and PHP are supported as Tier 3 languages using the C grammar as a structural fallback. They appear in BM25 results and the symbol table; full tree-sitter-zig/php support will arrive once those crates are published on crates.io. The <code>.gitignore</code>-aware walker (via the <code>ignore</code> crate, same as ripgrep) automatically skips build artefacts, vendor directories, and binary files.</span>
+          <span class="callout-icon">&#8505;</span>
+          <span>The <code>.gitignore</code>-aware walker (via the <code>ignore</code> crate, same as ripgrep) automatically skips build artefacts, vendor directories, and binary files.</span>
         </div>
       </section>
 

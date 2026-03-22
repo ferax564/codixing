@@ -204,7 +204,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ## Key Features
 
-- **20 languages** — Full AST parsing via tree-sitter (Rust, Python, TypeScript, Go, Java, C, C++, C#, Ruby, Swift, Kotlin, Scala, Zig, PHP + config formats)
+- **24 languages** — Full AST parsing via tree-sitter (Rust, Python, TypeScript, Go, Java, C, C++, C#, Ruby, Swift, Kotlin, Scala, Zig, PHP, Bash, Matlab + config/diagram formats)
 - **Hybrid search** — BM25 + optional vector embeddings, fused with Reciprocal Rank Fusion
 - **Symbol-level call graph** — Function-to-function call edges extracted from AST, including Rust trait dispatch, Python class inheritance, and TypeScript interface implementations
 - **Dependency graph** — Import + call extraction, PageRank scoring, Personalized PageRank for focus-aware maps
@@ -228,8 +228,9 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 |------|-----------|
 | **Tier 1** (full AST + graph) | Rust, Python, TypeScript, TSX, JavaScript, Go, Java, C, C++, C# |
 | **Tier 2** (full AST + graph) | Ruby, Swift, Kotlin, Scala |
-| **Tier 3** (full AST + graph) | Zig, PHP |
+| **Tier 3** (full AST + graph) | Zig, PHP, Bash, Matlab |
 | **Config** (symbol extraction) | YAML, TOML, Dockerfile, Makefile |
+| **Diagram / Markup** (symbol extraction) | Mermaid, XML/Draw.io |
 
 ---
 
@@ -240,7 +241,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 │                        Codixing Engine                            │
 │                                                                   │
 │  Tree-sitter  →  cAST Chunker  →  Tantivy (BM25)                │
-│  AST Parser      (16 langs)       + Code Tokenizer               │
+│  AST Parser      (18 langs)       + Code Tokenizer               │
 │                                                                   │
 │  Symbol Table (DashMap)    Code Graph (petgraph + PageRank)      │
 │                                                                   │
