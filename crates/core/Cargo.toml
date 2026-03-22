@@ -76,6 +76,7 @@ thiserror.workspace = true
 tracing.workspace = true
 regex.workspace = true
 glob.workspace = true
+toml.workspace = true
 ignore.workspace = true
 memmap2.workspace = true
 

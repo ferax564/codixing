@@ -590,6 +590,24 @@ pub fn federation_tool_definitions() -> Vec<Value> {
                 "required": ["query"]
             }
         }),
+        json!({
+            "name": "federation_discover",
+            "description": "Auto-discover workspace projects under a root directory. Detects Cargo workspaces, npm/pnpm workspaces, Go workspaces, git submodules, and nested projects. Optionally writes a federation config file.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "root": {
+                        "type": "string",
+                        "description": "Root directory to scan for workspace projects"
+                    },
+                    "output": {
+                        "type": "string",
+                        "description": "Optional file path to write the discovered projects as a federation config"
+                    }
+                },
+                "required": ["root"]
+            }
+        }),
     ]
 }
 
@@ -823,6 +841,7 @@ pub fn is_read_only_tool(name: &str) -> bool {
             | "federation_remove_project"
             | "federation_list"
             | "federation_search"
+            | "federation_discover"
     )
 }
 
@@ -906,6 +925,7 @@ pub fn dispatch_tool_ref_with_progress(
         "federation_remove_project" => federation::call_federation_remove_project(args),
         "federation_list" => federation::call_federation_list(args, federation),
         "federation_search" => federation::call_federation_search(args, federation),
+        "federation_discover" => federation::call_federation_discover(args),
         _ => (format!("Unknown read-only tool: {name}"), true),
     };
     (maybe_compact(output, args), is_error)

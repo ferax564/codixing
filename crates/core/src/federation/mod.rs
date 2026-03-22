@@ -19,6 +19,7 @@
 //! `None`).
 
 pub mod config;
+pub mod discover;
 
 use std::collections::HashMap;
 use std::collections::VecDeque;

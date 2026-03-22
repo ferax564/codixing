@@ -88,6 +88,9 @@ regex = "1"
 # Glob pattern matching
 glob = "0.3"
 
+# TOML parsing (federation workspace discovery)
+toml = "0.8"
+
 # XML parsing
 quick-xml = "0.37"
 

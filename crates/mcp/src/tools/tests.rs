@@ -1373,7 +1373,7 @@ fn search_tools_finds_search_tools() {
 fn search_tools_empty_query_returns_all() {
     let (out, err) = call_search_tools(&json!({"query": ""}));
     assert!(!err, "search_tools returned error: {out}");
-    // Should list all tools (46 core + 5 federation + 1 deprecated list_projects = 52).
+    // Should list all tools (46 core + 6 federation + 1 deprecated list_projects = 53).
     assert!(
         out.contains("code_search")
             && out.contains("find_symbol")
@@ -1381,8 +1381,8 @@ fn search_tools_empty_query_returns_all() {
         "empty query should return all tools: {out}"
     );
     assert!(
-        out.contains("52 results"),
-        "should report 52 results for empty query: {out}"
+        out.contains("53 results"),
+        "should report 53 results for empty query: {out}"
     );
 }
 
