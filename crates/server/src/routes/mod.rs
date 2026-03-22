@@ -20,6 +20,7 @@ pub fn build_router(state: AppState) -> Router {
         // Index management
         .route("/index/reindex", post(index::reindex_handler))
         .route("/index/file", delete(index::remove_file_handler))
+        .route("/index/sync", post(index::sync_sse_handler))
         // Status + health
         .route("/status", get(index::status_handler))
         .route("/health", get(index::health_handler))

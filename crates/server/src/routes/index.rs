@@ -1,9 +1,12 @@
+use std::convert::Infallible;
 use std::path::PathBuf;
 use std::time::Instant;
 
 use axum::Json;
 use axum::extract::State;
+use axum::response::sse::{Event, Sse};
 use serde::{Deserialize, Serialize};
+use tokio_stream::wrappers::ReceiverStream;
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -114,4 +117,44 @@ pub struct HealthResponse {
 
 pub async fn health_handler() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
+}
+
+// ---------------------------------------------------------------------------
+// POST /index/sync — SSE streaming sync
+// ---------------------------------------------------------------------------
+
+pub async fn sync_sse_handler(
+    State(state): State<AppState>,
+) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(32);
+
+    tokio::spawn(async move {
+        // Acquire the write lock before entering block_in_place so we hold it
+        // across the synchronous sync operation.
+        let mut engine = state.write().await;
+
+        let tx_progress = tx.clone();
+        let result = tokio::task::block_in_place(move || {
+            engine.sync_with_progress(move |msg| {
+                let event = Event::default()
+                    .event("progress")
+                    .data(msg.to_string());
+                // Ignore send errors (client may have disconnected).
+                let _ = tx_progress.blocking_send(Ok(event));
+            })
+        });
+
+        let final_event = match result {
+            Ok(stats) => {
+                let json = serde_json::to_string(&stats).unwrap_or_default();
+                Event::default().event("result").data(json)
+            }
+            Err(e) => Event::default()
+                .event("error")
+                .data(e.to_string()),
+        };
+        let _ = tx.send(Ok(final_event)).await;
+    });
+
+    Sse::new(ReceiverStream::new(rx))
 }
