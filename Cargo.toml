@@ -28,6 +28,8 @@ tree-sitter-kotlin-ng = "1.1"
 tree-sitter-scala = "0.24"
 tree-sitter-zig = "1.1"
 tree-sitter-php = "0.24"
+tree-sitter-matlab = "1.3"
+tree-sitter-bash = "0.23"
 
 # Search
 tantivy = "0.22"
@@ -84,6 +86,9 @@ regex = "1"
 
 # Glob pattern matching
 glob = "0.3"
+
+# XML parsing
+quick-xml = "0.37"
 
 # .gitignore-aware directory walking
 ignore = "0.4"
