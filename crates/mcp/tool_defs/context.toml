@@ -1,0 +1,20 @@
+[[tools]]
+name = "get_context_for_task"
+description = "Given a task description, automatically assembles the most relevant code context. Uses hybrid search + dependency-aware ordering so definitions appear before usages. Perfect for understanding a feature or preparing for an edit."
+handler = "context::call_get_context_for_task"
+calling_convention = "engine_args_progress"
+read_only = true
+medium = true
+
+[tools.params.task]
+type = "string"
+description = "Natural language description of the task (e.g. 'understand how PageRank is computed', 'prepare to add caching to the search function')"
+required = true
+
+[tools.params.token_budget]
+type = "integer"
+description = "Maximum tokens in response (default: 4000)"
+
+[tools.params.limit]
+type = "integer"
+description = "Maximum number of code snippets (default: 10)"

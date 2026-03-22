@@ -1,0 +1,65 @@
+[[tools]]
+name = "enrich_docs"
+description = "Fetch a symbol's source and generate a stub documentation comment, storing the result in .codixing/symbol_docs.json. Returns cached doc on subsequent calls. Currently generates a template stub \u2014 full LLM enrichment planned for a future release."
+handler = "memory::call_enrich_docs"
+calling_convention = "engine_mut_args"
+read_only = false
+
+[tools.params.symbol]
+type = "string"
+description = "Symbol name to generate documentation for"
+required = true
+
+[tools.params.force]
+type = "boolean"
+description = "Regenerate even if a cached doc already exists (default: false)"
+
+[[tools]]
+name = "remember"
+description = "Store a persistent key/value note in .codixing/memory.json. Notes survive engine restarts and MCP reconnects \u2014 useful for recording architectural decisions, module conventions, and context that should not be lost between sessions."
+handler = "memory::call_remember"
+calling_convention = "engine_mut_args"
+read_only = false
+
+[tools.params.key]
+type = "string"
+description = "Unique key for this memory entry (e.g. 'auth_flow', 'db_schema')"
+required = true
+
+[tools.params.value]
+type = "string"
+description = "The information to store"
+required = true
+
+[tools.params.tags]
+type = "array"
+description = "Optional tags for categorisation and filtering (e.g. ['auth', 'security'])"
+items_type = "string"
+
+[[tools]]
+name = "recall"
+description = "Retrieve stored memory entries. Searches by keyword substring (matched against key + value) and/or filters by tags. Call with no arguments to list everything."
+handler = "memory::call_recall"
+calling_convention = "engine_args"
+read_only = true
+
+[tools.params.query]
+type = "string"
+description = "Optional substring filter applied to key + value"
+
+[tools.params.tags]
+type = "array"
+description = "Optional tag filter \u2014 all specified tags must be present (AND)"
+items_type = "string"
+
+[[tools]]
+name = "forget"
+description = "Remove a memory entry from .codixing/memory.json by key."
+handler = "memory::call_forget"
+calling_convention = "engine_mut_args"
+read_only = false
+
+[tools.params.key]
+type = "string"
+description = "Key of the memory entry to delete"
+required = true

@@ -1,0 +1,184 @@
+[[tools]]
+name = "read_file"
+description = "Read the raw source of a file in the indexed project, optionally restricted to a line range. Use this after code_search or find_symbol locates a relevant position and you need to see surrounding context \u2014 entire functions, neighbouring definitions, or configuration blocks."
+handler = "files::call_read_file"
+calling_convention = "engine_args"
+read_only = true
+medium = true
+
+[tools.params.file]
+type = "string"
+description = "Relative file path within the project root (e.g. 'crates/core/src/engine.rs', 'src/main.py')"
+required = true
+
+[tools.params.line_start]
+type = "integer"
+description = "First line to read, 0-indexed inclusive (default: 0 = beginning of file)"
+
+[tools.params.line_end]
+type = "integer"
+description = "Last line to read, 0-indexed inclusive (default: end of file)"
+
+[tools.params.token_budget]
+type = "integer"
+description = "Maximum tokens to return; content is truncated with a notice if exceeded (default: 4000)"
+
+[[tools]]
+name = "grep_code"
+description = "Fast regex or literal text search across all source files in the indexed project. Unlike code_search (which uses BM25/vector retrieval on pre-indexed chunks), grep_code scans file content directly \u2014 ideal for finding exact identifiers, string literals, TODO/FIXME comments, error codes, or any pattern requiring verbatim matching. Returns file path, line number, the matching line, and optional surrounding context."
+handler = "files::call_grep_code"
+calling_convention = "engine_args"
+read_only = true
+medium = true
+
+[tools.params.pattern]
+type = "string"
+description = "Search pattern. Interpreted as a regular expression (RE2 syntax, e.g. 'fn\\\\s+search', 'TODO|FIXME'). Set literal=true for exact string matching."
+required = true
+
+[tools.params.literal]
+type = "boolean"
+description = "When true, treat pattern as a plain string (regex metacharacters are escaped). Default: false."
+
+[tools.params.file_glob]
+type = "string"
+description = "Glob pattern to restrict which files are searched (e.g. '*.rs', 'src/**/*.py', 'crates/core/**'). Omit to search all indexed files."
+
+[tools.params.context_lines]
+type = "integer"
+description = "Lines of surrounding context to include before and after each match (default: 0, max: 5)."
+
+[tools.params.limit]
+type = "integer"
+description = "Maximum matches to return (default: 50)."
+
+[[tools]]
+name = "write_file"
+description = "Write content to a file inside the indexed project and immediately re-index it so the change is searchable. Creates the file (and any missing parent directories) if it does not exist; overwrites it if it does. Use this instead of a plain file-write so the Codixing index stays in sync."
+handler = "files::call_write_file"
+calling_convention = "engine_mut_args"
+read_only = false
+
+[tools.params.file]
+type = "string"
+description = "Relative file path within the project root (e.g. 'src/utils.rs', 'lib/helpers.py')"
+required = true
+
+[tools.params.content]
+type = "string"
+description = "Full text content to write to the file"
+required = true
+
+[[tools]]
+name = "edit_file"
+description = "Apply an exact find-and-replace to a file inside the indexed project and immediately re-index it. The old_string must match exactly once in the file; if it appears zero or multiple times the edit is rejected to avoid ambiguity. Use this instead of a plain file-edit so the Codixing index stays in sync."
+handler = "files::call_edit_file"
+calling_convention = "engine_mut_args"
+read_only = false
+
+[tools.params.file]
+type = "string"
+description = "Relative file path within the project root (e.g. 'src/engine.rs')"
+required = true
+
+[tools.params.old_string]
+type = "string"
+description = "The exact text to find in the file. Must appear exactly once."
+required = true
+
+[tools.params.new_string]
+type = "string"
+description = "The text to replace old_string with."
+required = true
+
+[[tools]]
+name = "delete_file"
+description = "Delete a file from the project filesystem and remove it from the Codixing index. Use this instead of a plain file-delete so the index stays in sync."
+handler = "files::call_delete_file"
+calling_convention = "engine_mut_args"
+read_only = false
+
+[tools.params.file]
+type = "string"
+description = "Relative file path within the project root (e.g. 'src/old_module.rs')"
+required = true
+
+[[tools]]
+name = "apply_patch"
+description = "Apply a unified git diff (patch) to one or more files and immediately reindex all affected files. The patch must be in standard unified diff format as produced by 'git diff'."
+handler = "files::call_apply_patch"
+calling_convention = "engine_mut_args"
+read_only = false
+
+[tools.params.patch]
+type = "string"
+description = "Unified diff content (e.g. output of 'git diff' or 'diff -u')"
+required = true
+
+[[tools]]
+name = "run_tests"
+description = "Execute a test command in the project root and return the combined stdout + stderr output along with the exit code. Use to verify changes or check test status."
+handler = "files::call_run_tests"
+calling_convention = "engine_mut_args"
+read_only = false
+
+[tools.params.command]
+type = "string"
+description = "Shell command to run (e.g. 'cargo test', 'pytest tests/', 'npm test')"
+required = true
+
+[tools.params.timeout_secs]
+type = "integer"
+description = "Maximum seconds to wait before killing the process (default: 120)"
+
+[[tools]]
+name = "list_files"
+description = "List all files currently indexed by Codixing with their chunk counts. Supports optional glob pattern filtering."
+handler = "files::call_list_files"
+calling_convention = "engine_args"
+read_only = true
+medium = true
+
+[tools.params.pattern]
+type = "string"
+description = "Optional glob pattern to filter files (e.g. '**/*.rs', 'src/**')"
+
+[tools.params.limit]
+type = "integer"
+description = "Maximum number of files to return (default: 200)"
+
+[[tools]]
+name = "outline_file"
+description = "Return a token-efficient symbol outline for a file: all symbols (functions, structs, classes, etc.) sorted by line number with their kind and line range. Useful as a quick map before diving into read_file."
+handler = "files::call_outline_file"
+calling_convention = "engine_args"
+read_only = true
+medium = true
+
+[tools.params.file]
+type = "string"
+description = "File path (relative to project root, e.g. 'src/engine.rs')"
+required = true
+
+[[tools]]
+name = "git_diff"
+description = "Show git diff output for the indexed project. Shows unstaged working tree changes by default. Useful for reviewing pending changes, creating commit messages, or understanding recent modifications."
+handler = "files::call_git_diff"
+calling_convention = "engine_args"
+read_only = true
+
+[tools.params.commit]
+type = "string"
+description = "Compare against this commit/ref (e.g. 'HEAD~1', 'main', 'abc123'). Default: compare working tree against index (unstaged changes)."
+
+[tools.params.staged]
+type = "boolean"
+description = "Show staged (cached) changes instead of unstaged. Default: false."
+
+[tools.params.file]
+type = "string"
+description = "Restrict diff to a specific file path."
+
+[tools.params.stat_only]
+type = "boolean"
+description = "Show only file names and line count summary, not full patch. Default: false."

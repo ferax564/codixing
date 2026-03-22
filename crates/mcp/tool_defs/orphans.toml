@@ -1,0 +1,22 @@
+[[tools]]
+name = "find_orphans"
+description = "Identify orphan files \u2014 files with zero in-degree in the dependency graph (no other tracked file imports them). These are potential dead code candidates. Returns a table sorted by confidence level. Requires graph intelligence to be enabled."
+handler = "orphans::call_find_orphans"
+calling_convention = "engine_args"
+read_only = true
+
+[tools.params.include]
+type = "string"
+description = "File pattern to include (substring match, e.g. '*.rs', 'src/'). Omit to check all files."
+
+[tools.params.exclude]
+type = "string"
+description = "File pattern to exclude (substring match, e.g. 'test', 'vendor'). Default excludes test/spec/bench/__pycache__/node_modules."
+
+[tools.params.check_dynamic]
+type = "boolean"
+description = "Check for dynamic references via text search to refine confidence (default: true)"
+
+[tools.params.limit]
+type = "integer"
+description = "Maximum number of orphan files to return (default: 50)"

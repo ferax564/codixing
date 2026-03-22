@@ -1,0 +1,98 @@
+[[tools]]
+name = "index_status"
+description = "Return diagnostic information about the Codixing index: file count, chunk count, symbol count, vector count, graph statistics, available search strategies, and whether semantic search is active. Call this first when starting work on an unfamiliar codebase."
+handler = "analysis::call_index_status"
+calling_convention = "engine_only"
+read_only = true
+medium = true
+
+[[tools]]
+name = "rename_symbol"
+description = "Rename an identifier across all indexed files in the project. Performs exact-string replacement (not semantic rename) and immediately reindexes every modified file."
+handler = "analysis::call_rename_symbol"
+calling_convention = "engine_mut_args"
+read_only = false
+
+[tools.params.old_name]
+type = "string"
+description = "Current identifier name to replace"
+required = true
+
+[tools.params.new_name]
+type = "string"
+description = "New identifier name"
+required = true
+
+[tools.params.file_filter]
+type = "string"
+description = "Optional file path substring \u2014 restrict the rename to matching files only"
+
+[[tools]]
+name = "find_tests"
+description = "Discover test functions across the indexed codebase by naming conventions (test_*, *_test, TestXxx) and annotations (#[test], @Test, @pytest.mark.*). When 'file' points to a source file, first tries test-to-code mapping; falls back to name/convention-based discovery if no mapping found."
+handler = "analysis::call_find_tests"
+calling_convention = "engine_args"
+read_only = true
+medium = true
+
+[tools.params.pattern]
+type = "string"
+description = "Optional name/file substring filter (e.g. 'auth', 'login')"
+
+[tools.params.file]
+type = "string"
+description = "Optional file path substring to restrict search (e.g. 'tests/')"
+
+[[tools]]
+name = "get_complexity"
+description = "Compute cyclomatic complexity (McCabe 1976) for every function/method in a file by counting decision points. Returns a risk-banded table sorted by complexity descending."
+handler = "analysis::call_get_complexity"
+calling_convention = "engine_args"
+read_only = true
+
+[tools.params.file]
+type = "string"
+description = "Relative file path (e.g. 'crates/core/src/engine.rs')"
+required = true
+
+[tools.params.min_complexity]
+type = "integer"
+description = "Only show functions with CC >= this threshold (default: 1)"
+
+[[tools]]
+name = "review_context"
+description = "Given a git diff, return: (1) changed files, (2) symbols whose definitions overlap the diff hunks, (3) impact prediction (which other files may need changes), and (4) cross-file context for the most-changed symbols. Call at the start of a code review."
+handler = "analysis::call_review_context"
+calling_convention = "engine_args"
+read_only = true
+
+[tools.params.patch]
+type = "string"
+description = "Unified diff content (e.g. from 'git diff HEAD~1')"
+required = true
+
+[[tools]]
+name = "generate_onboarding"
+description = "Assemble index statistics, language breakdown, top files by PageRank, and a token-budgeted repository map, then write the result to .codixing/ONBOARDING.md. Run once after indexing a new project."
+handler = "analysis::call_generate_onboarding"
+calling_convention = "engine_mut_only"
+read_only = false
+
+[[tools]]
+name = "find_source_for_test"
+description = "Given a test file, find the source files it tests using naming conventions, directory structure, and import graph analysis. Returns matched source files with confidence scores."
+handler = "analysis::call_find_source_for_test"
+calling_convention = "engine_args"
+read_only = true
+
+[tools.params.file]
+type = "string"
+description = "Relative path to a test file (e.g. 'tests/test_engine.py', 'src/engine_test.rs', '__tests__/Button.test.tsx')"
+required = true
+
+[[tools]]
+name = "check_staleness"
+description = "Check whether the Codixing index is out of date relative to the current filesystem. Uses fast stat() checks (mtime + size) without reading file content. Reports modified, new, and deleted file counts with a sync suggestion."
+handler = "analysis::call_check_staleness"
+calling_convention = "engine_only"
+read_only = true
