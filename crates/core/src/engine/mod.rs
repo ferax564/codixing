@@ -21,6 +21,7 @@ use std::time::SystemTime;
 
 use dashmap::DashMap;
 use rayon::prelude::*;
+use serde::Serialize;
 use tracing::{debug, info, warn};
 
 use crate::chunker::Chunker;
@@ -66,7 +67,7 @@ pub struct IndexStats {
 }
 
 /// Statistics returned by [`Engine::sync`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SyncStats {
     /// Files present on disk but not yet in the index (new files).
     pub added: usize,

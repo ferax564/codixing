@@ -3,6 +3,7 @@
 mod analysis;
 mod common;
 mod context;
+pub mod federation;
 mod files;
 mod focus;
 mod graph;
@@ -476,19 +477,22 @@ pub fn tool_definitions() -> Value {
 /// Return tool definitions, optionally including federation-only tools.
 pub fn tool_definitions_with_federation(has_federation: bool) -> Value {
     let mut defs = tool_definitions();
-    if has_federation {
-        if let Some(arr) = defs.as_array_mut() {
+    if let Some(arr) = defs.as_array_mut() {
+        // Federation management tools are always listed so users can manage
+        // configs even without a live FederatedEngine.
+        arr.extend(federation_tool_definitions());
+        if has_federation {
             arr.push(list_projects_tool_definition());
         }
     }
     defs
 }
 
-/// JSON-Schema definition for the `list_projects` tool.
+/// JSON-Schema definition for the `list_projects` tool (deprecated).
 pub fn list_projects_tool_definition() -> Value {
     json!({
         "name": "list_projects",
-        "description": "List all projects registered in the federation with their load status, file count, and root path. Only available when the server is started with --federation.",
+        "description": "Deprecated: use federation_list instead. List all projects registered in the federation with their load status, file count, and root path. Only available when the server is started with --federation.",
         "inputSchema": {
             "type": "object",
             "properties": {},
@@ -497,14 +501,107 @@ pub fn list_projects_tool_definition() -> Value {
     })
 }
 
+/// JSON-Schema definitions for federation management tools.
+pub fn federation_tool_definitions() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "federation_init",
+            "description": "Create an empty federation config file with sensible defaults. Use this as the first step to set up cross-repo federated search.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path where the federation config will be created (e.g. 'codixing-federation.json')"
+                    }
+                },
+                "required": ["path"]
+            }
+        }),
+        json!({
+            "name": "federation_add_project",
+            "description": "Add a project to an existing federation config file. The project root must contain a .codixing/ index.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "config": {
+                        "type": "string",
+                        "description": "Path to the federation config file"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Root directory of the project to add"
+                    },
+                    "weight": {
+                        "type": "number",
+                        "description": "Per-project weight for RRF fusion (default: 1.0). Higher values rank this project's results higher."
+                    }
+                },
+                "required": ["config", "path"]
+            }
+        }),
+        json!({
+            "name": "federation_remove_project",
+            "description": "Remove a project from a federation config file by its directory name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "config": {
+                        "type": "string",
+                        "description": "Path to the federation config file"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Directory name of the project to remove (last component of root path)"
+                    }
+                },
+                "required": ["config", "name"]
+            }
+        }),
+        json!({
+            "name": "federation_list",
+            "description": "List all projects in the federation. If a live FederatedEngine is available (--federation), shows load status and file counts. Otherwise reads from the config file.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "config": {
+                        "type": "string",
+                        "description": "Path to federation config file (only needed when no FederatedEngine is active)"
+                    }
+                },
+                "required": []
+            }
+        }),
+        json!({
+            "name": "federation_search",
+            "description": "Search across all federated projects using RRF fusion. Requires an active FederatedEngine (--federation flag).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query (natural language or code pattern)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return (default: 10)"
+                    }
+                },
+                "required": ["query"]
+            }
+        }),
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // Dynamic tool discovery helpers
 // ---------------------------------------------------------------------------
 
 /// Return a compact list of `(name, description)` tuples from the full tool
-/// definitions. Used by `search_tools` to return lightweight summaries.
+/// definitions (including federation tools). Used by `search_tools` to return
+/// lightweight summaries.
 pub fn tool_summaries() -> Vec<(String, String)> {
-    let defs = tool_definitions();
+    let defs = tool_definitions_with_federation(true);
     defs.as_array()
         .unwrap_or(&vec![])
         .iter()
@@ -575,7 +672,7 @@ pub fn call_get_tool_schema(args: &Value) -> (String, bool) {
         );
     }
 
-    let defs = tool_definitions();
+    let defs = tool_definitions_with_federation(true);
     let empty = vec![];
     let all_tools = defs.as_array().unwrap_or(&empty);
 
@@ -721,6 +818,11 @@ pub fn is_read_only_tool(name: &str) -> bool {
             | "search_tools"
             | "get_tool_schema"
             | "list_projects"
+            | "federation_init"
+            | "federation_add_project"
+            | "federation_remove_project"
+            | "federation_list"
+            | "federation_search"
     )
 }
 
@@ -799,6 +901,11 @@ pub fn dispatch_tool_ref_with_progress(
         "search_tools" => call_search_tools(args),
         "get_tool_schema" => call_get_tool_schema(args),
         "list_projects" => call_list_projects(federation),
+        "federation_init" => federation::call_federation_init(args),
+        "federation_add_project" => federation::call_federation_add_project(args),
+        "federation_remove_project" => federation::call_federation_remove_project(args),
+        "federation_list" => federation::call_federation_list(args, federation),
+        "federation_search" => federation::call_federation_search(args, federation),
         _ => (format!("Unknown read-only tool: {name}"), true),
     };
     (maybe_compact(output, args), is_error)

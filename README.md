@@ -14,7 +14,7 @@ claude plugin marketplace add ferax564/codixing
 claude plugin install codixing@codixing
 ```
 
-Restart Claude Code after installing. You get 48 MCP tools plus `/codixing-setup`, `/codixing-explore`, and `/codixing-review`.
+Restart Claude Code after installing. You get 53 MCP tools plus `/codixing-setup`, `/codixing-explore`, and `/codixing-review`.
 
 Alternatively, register just the MCP server without the plugin:
 
@@ -208,7 +208,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Hybrid search** — BM25 + optional vector embeddings, fused with Reciprocal Rank Fusion
 - **Symbol-level call graph** — Function-to-function call edges extracted from AST, including Rust trait dispatch, Python class inheritance, and TypeScript interface implementations
 - **Dependency graph** — Import + call extraction, PageRank scoring, Personalized PageRank for focus-aware maps
-- **48 MCP tools** — Search, graph traversal, file operations, code review, git analysis, session memory
+- **53 MCP tools** — Search, graph traversal, file operations, code review, git analysis, session memory
 - **Daemon mode** — Engine stays in memory, auto-starts on first connection, Unix socket IPC, file watcher for live index updates, 30-min idle timeout
 - **Read-only concurrent access** — Multiple instances share the same index; periodic reload detects writer updates automatically
 - **Incremental embedding** — `sync` skips re-embedding unchanged chunks (content hash comparison)
@@ -217,7 +217,8 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Dynamic tool discovery** — `--compact` mode emits `notifications/tools/list_changed` when new tools are used
 - **GitHub Action** — Automated code review with impact analysis on PRs
 - **Token budgets** — All output respects token limits; adaptive truncation at score cliffs
-- **Cross-repo federation** — Unified search across multiple indexed projects
+- **Cross-repo federation** — Unified search across multiple indexed projects with CLI management (`codixing federation init/add/remove/list/search`)
+- **HTTP API server** — REST endpoints with SSE streaming for sync progress (`crates/server/`)
 - **Single binary** — No JVM, no Docker, no external databases, no API keys. macOS, Linux, and Windows
 
 ---
@@ -259,7 +260,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 678 tests
+cargo test --workspace        # 692 tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```
