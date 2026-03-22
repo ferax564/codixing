@@ -284,7 +284,8 @@ impl Engine {
             .map_err(|e| CodixingError::Config(format!("cannot resolve root path: {e}")))?;
 
         let store = IndexStore::init(&root, &config)?;
-        let tantivy = TantivyIndex::create_in_dir(&store.tantivy_dir())?;
+        let tantivy =
+            TantivyIndex::create_in_dir_with_config(&store.tantivy_dir(), config.bm25.clone())?;
         let parser = Parser::new();
         let symbols = SymbolTable::new();
 
@@ -520,7 +521,11 @@ impl Engine {
         let config = store.load_config()?;
 
         // Try read-write first; fall back to read-only on lock conflict.
-        let (tantivy, read_only) = match TantivyIndex::open_in_dir(&store.tantivy_dir()) {
+        let bm25_config = config.bm25.clone();
+        let (tantivy, read_only) = match TantivyIndex::open_in_dir_with_config(
+            &store.tantivy_dir(),
+            bm25_config.clone(),
+        ) {
             Ok(idx) => (idx, false),
             Err(CodixingError::Tantivy(ref e))
                 if e.to_string().contains("lock")
@@ -528,7 +533,8 @@ impl Engine {
                     || e.to_string().contains("already") =>
             {
                 info!("write lock held by another process — falling back to read-only mode");
-                let idx = TantivyIndex::open_read_only(&store.tantivy_dir())?;
+                let idx =
+                    TantivyIndex::open_read_only_with_config(&store.tantivy_dir(), bm25_config)?;
                 (idx, true)
             }
             Err(e) => return Err(e),
@@ -704,7 +710,8 @@ impl Engine {
 
         let store = IndexStore::open(&root)?;
         let config = store.load_config()?;
-        let tantivy = TantivyIndex::open_read_only(&store.tantivy_dir())?;
+        let tantivy =
+            TantivyIndex::open_read_only_with_config(&store.tantivy_dir(), config.bm25.clone())?;
 
         // Restore symbols.
         let symbols = if store.symbols_path().exists() {

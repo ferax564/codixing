@@ -50,6 +50,57 @@ fn default_graph_iterations() -> usize {
     20
 }
 
+/// BM25 field boost weights for Tantivy queries.
+///
+/// Controls how much each indexed field contributes to BM25 relevance scoring.
+/// Higher values make matches in that field rank higher. The `content` field
+/// always has an implicit boost of 1.0 (the Tantivy default).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Bm25Config {
+    /// Boost for matches in `entity_names` (symbol names like function/struct/class names).
+    #[serde(default = "default_bm25_entity_names_boost")]
+    pub entity_names_boost: f32,
+
+    /// Boost for matches in `signature` (full function/method signatures).
+    #[serde(default = "default_bm25_signature_boost")]
+    pub signature_boost: f32,
+
+    /// Boost for matches in `scope_chain` (module/class/namespace path).
+    #[serde(default = "default_bm25_scope_chain_boost")]
+    pub scope_chain_boost: f32,
+
+    /// Boost for matches in `content` (raw source code).
+    #[serde(default = "default_bm25_content_boost")]
+    pub content_boost: f32,
+}
+
+impl Default for Bm25Config {
+    fn default() -> Self {
+        Self {
+            entity_names_boost: default_bm25_entity_names_boost(),
+            signature_boost: default_bm25_signature_boost(),
+            scope_chain_boost: default_bm25_scope_chain_boost(),
+            content_boost: default_bm25_content_boost(),
+        }
+    }
+}
+
+fn default_bm25_entity_names_boost() -> f32 {
+    3.0
+}
+
+fn default_bm25_signature_boost() -> f32 {
+    2.0
+}
+
+fn default_bm25_scope_chain_boost() -> f32 {
+    1.5
+}
+
+fn default_bm25_content_boost() -> f32 {
+    1.0
+}
+
 /// Configuration for the Codixing index.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IndexConfig {
@@ -81,6 +132,10 @@ pub struct IndexConfig {
     /// Dependency graph configuration.
     #[serde(default)]
     pub graph: GraphConfig,
+
+    /// BM25 field boost weights.
+    #[serde(default)]
+    pub bm25: Bm25Config,
 }
 
 /// Which embedding model to use for vector search.
@@ -282,6 +337,7 @@ impl IndexConfig {
             chunk: ChunkConfig::default(),
             embedding: EmbeddingConfig::default(),
             graph: GraphConfig::default(),
+            bm25: Bm25Config::default(),
         }
     }
 
