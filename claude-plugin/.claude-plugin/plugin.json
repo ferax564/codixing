@@ -1,7 +1,7 @@
 {
   "name": "codixing",
   "description": "Code retrieval engine for AI agents — AST-aware search, dependency graph, and 48 MCP tools for Claude Code",
-  "version": "0.15.0",
+  "version": "0.15.1",
   "author": {
     "name": "ferax564",
     "url": "https://codixing.com"

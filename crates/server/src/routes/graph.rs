@@ -793,6 +793,53 @@ pub async fn history_handler(
 }
 
 // ---------------------------------------------------------------------------
+// GET /graph/call-graph
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct CallGraphResponse {
+    pub available: bool,
+    pub edge_count: usize,
+    pub edges: Vec<CallEdge>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CallEdge {
+    pub caller: String,
+    pub callee: String,
+}
+
+pub async fn call_graph_handler(
+    State(state): State<AppState>,
+) -> Result<Json<CallGraphResponse>, ApiError> {
+    let engine = state.read().await;
+    match engine.graph_data() {
+        Some(data) => {
+            let edges: Vec<CallEdge> = data
+                .edges
+                .iter()
+                .filter(|(_, _, e)| e.kind == EdgeKind::Calls)
+                .map(|(from, _, e)| CallEdge {
+                    caller: from.clone(),
+                    callee: e.raw_import.clone(),
+                })
+                .collect();
+            let edge_count = edges.len();
+            Ok(Json(CallGraphResponse {
+                available: true,
+                edge_count,
+                edges,
+            }))
+        }
+        None => Ok(Json(CallGraphResponse {
+            available: false,
+            edge_count: 0,
+            edges: vec![],
+        })),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GET /graph/view
 // ---------------------------------------------------------------------------
 
