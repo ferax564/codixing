@@ -152,7 +152,7 @@ The daemon auto-updates the index within ~100ms of any file save.
 
 `codixing-lsp` brings code intelligence to any LSP-capable editor — VS Code, Neovim, Emacs, Sublime Text, JetBrains.
 
-**Capabilities:** Hover, Go-to-definition, References, Call hierarchy (incoming/outgoing), Workspace symbols, Document symbols, Live reindex on save, Cyclomatic complexity diagnostics, Code actions, Inlay hints, Completions, Signature help.
+**Capabilities:** Hover, Go-to-definition, References, Call hierarchy (incoming/outgoing), Workspace symbols, Document symbols, Live reindex on save, Cyclomatic complexity diagnostics, Code actions, Inlay hints, Completions, Signature help, Rename refactoring, Semantic tokens.
 
 ```bash
 codixing-lsp --root /path/to/project
@@ -263,7 +263,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 692 tests
+cargo test --workspace        # 705+ tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```

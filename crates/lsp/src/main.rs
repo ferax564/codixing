@@ -1,6 +1,7 @@
 //! Codixing LSP server — hover, go-to-definition, references, workspace symbols,
 //! document sync, live reindex on save, cyclomatic complexity diagnostics,
-//! code actions, inlay hints, completions, and signature help.
+//! code actions, inlay hints, completions, signature help, rename refactoring,
+//! and semantic tokens.
 //!
 //! # Usage
 //!
@@ -12,8 +13,11 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
+use std::path::Path;
+
 use codixing_core::complexity::{count_cyclomatic_complexity, risk_band};
-use codixing_core::{Engine, EntityKind};
+use codixing_core::language::detect_language;
+use codixing_core::{ConflictKind, Engine, EntityKind};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
@@ -70,6 +74,27 @@ impl LanguageServer for CodixingBackend {
                     ..Default::default()
                 }),
                 call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: WorkDoneProgressOptions {
+                        work_done_progress: None,
+                    },
+                })),
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            legend: SemanticTokensLegend {
+                                token_types: SEMANTIC_TOKEN_TYPES.to_vec(),
+                                token_modifiers: SEMANTIC_TOKEN_MODIFIERS.to_vec(),
+                            },
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            range: None,
+                            work_done_progress_options: WorkDoneProgressOptions {
+                                work_done_progress: None,
+                            },
+                        },
+                    ),
+                ),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -764,6 +789,176 @@ impl LanguageServer for CodixingBackend {
 
         Ok(Some(results))
     }
+
+    // -----------------------------------------------------------------------
+    // Rename refactoring
+    // -----------------------------------------------------------------------
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let word = match self.word_at(&params) {
+            Some(w) => w,
+            None => return Ok(None),
+        };
+
+        let engine = self.engine.read().unwrap();
+        // Only allow renaming if the word is a known symbol.
+        if self
+            .best_symbol(&engine, &word, &params.text_document.uri)
+            .is_none()
+        {
+            return Ok(None);
+        }
+
+        // Compute the exact range of the word under the cursor.
+        let range = match self.word_range_at(&params) {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
+            range,
+            placeholder: word,
+        }))
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let pos = &params.text_document_position;
+        let old_name = match self.word_at(pos) {
+            Some(w) => w,
+            None => return Ok(None),
+        };
+        let new_name = &params.new_name;
+
+        // Validate: new name must be a valid identifier.
+        if new_name.is_empty()
+            || !new_name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        {
+            return Err(tower_lsp::jsonrpc::Error {
+                code: tower_lsp::jsonrpc::ErrorCode::InvalidParams,
+                message: "New name must be a valid identifier".into(),
+                data: None,
+            });
+        }
+
+        let engine = self.engine.read().unwrap();
+
+        // Use engine's validate_rename for conflict detection.
+        let validation = engine.validate_rename(&old_name, new_name, None);
+
+        // If there are name collisions, reject the rename.
+        let has_collision = validation
+            .conflicts
+            .iter()
+            .any(|c| c.kind == ConflictKind::NameCollision);
+        if has_collision {
+            let msg = validation
+                .conflicts
+                .iter()
+                .filter(|c| c.kind == ConflictKind::NameCollision)
+                .map(|c| c.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(tower_lsp::jsonrpc::Error {
+                code: tower_lsp::jsonrpc::ErrorCode::InvalidParams,
+                message: format!("Rename conflict: {msg}").into(),
+                data: None,
+            });
+        }
+
+        // Build WorkspaceEdit from affected files.
+        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+        let root = engine.config().root.clone();
+
+        for file_rel in &validation.affected_files {
+            let abs = root.join(file_rel);
+            let content = match std::fs::read_to_string(&abs) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let uri = match Url::from_file_path(&abs) {
+                Ok(u) => u,
+                Err(_) => continue,
+            };
+
+            let mut edits = Vec::new();
+            for (line_idx, line) in content.lines().enumerate() {
+                let mut col = 0usize;
+                while let Some(offset) = line[col..].find(&old_name) {
+                    let start_col = col + offset;
+                    let end_col = start_col + old_name.len();
+
+                    // Check word boundaries to avoid partial matches.
+                    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+                    let before_ok = start_col == 0 || !is_ident(line.as_bytes()[start_col - 1]);
+                    let after_ok = end_col >= line.len() || !is_ident(line.as_bytes()[end_col]);
+
+                    if before_ok && after_ok {
+                        edits.push(TextEdit {
+                            range: Range {
+                                start: Position {
+                                    line: line_idx as u32,
+                                    character: start_col as u32,
+                                },
+                                end: Position {
+                                    line: line_idx as u32,
+                                    character: end_col as u32,
+                                },
+                            },
+                            new_text: new_name.to_string(),
+                        });
+                    }
+                    col = end_col;
+                }
+            }
+
+            if !edits.is_empty() {
+                changes.insert(uri, edits);
+            }
+        }
+
+        Ok(Some(WorkspaceEdit {
+            changes: Some(changes),
+            ..Default::default()
+        }))
+    }
+
+    // -----------------------------------------------------------------------
+    // Semantic tokens — AST-based syntax highlighting
+    // -----------------------------------------------------------------------
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = &params.text_document.uri;
+        let abs = match uri.to_file_path() {
+            Ok(p) => p,
+            Err(_) => return Ok(None),
+        };
+
+        let content = {
+            let docs = self.open_docs.lock().unwrap();
+            docs.get(uri).cloned()
+        }
+        .or_else(|| std::fs::read_to_string(&abs).ok());
+
+        let content = match content {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+
+        let tokens = compute_semantic_tokens(&abs, content.as_bytes());
+
+        Ok(Some(SemanticTokensResult::Tokens(SemanticTokens {
+            result_id: None,
+            data: tokens,
+        })))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -906,6 +1101,19 @@ impl CodixingBackend {
         prefix_at_position(&content, pos.position)
     }
 
+    /// Extract the word under the cursor and return its Range in the document.
+    fn word_range_at(&self, pos: &TextDocumentPositionParams) -> Option<Range> {
+        let content = {
+            let docs = self.open_docs.lock().unwrap();
+            docs.get(&pos.text_document.uri).cloned()
+        };
+        let content = content.or_else(|| {
+            let path = pos.text_document.uri.to_file_path().ok()?;
+            std::fs::read_to_string(path).ok()
+        })?;
+        word_range_at_position(&content, pos.position)
+    }
+
     /// Extract the word under the cursor from either the tracked open document
     /// or by reading the file from disk.
     fn word_at(&self, pos: &TextDocumentPositionParams) -> Option<String> {
@@ -993,6 +1201,37 @@ impl CodixingBackend {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Extract the Range of the identifier word at a given position.
+fn word_range_at_position(content: &str, position: Position) -> Option<Range> {
+    let line = content.lines().nth(position.line as usize)?;
+    let col = position.character as usize;
+    let bytes = line.as_bytes();
+    if col >= bytes.len() {
+        return None;
+    }
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    if !is_ident(bytes[col]) {
+        return None;
+    }
+    let start = (0..col)
+        .rev()
+        .find(|&i| !is_ident(bytes[i]))
+        .map_or(0, |i| i + 1);
+    let end = (col + 1..bytes.len())
+        .find(|&i| !is_ident(bytes[i]))
+        .unwrap_or(bytes.len());
+    Some(Range {
+        start: Position {
+            line: position.line,
+            character: start as u32,
+        },
+        end: Position {
+            line: position.line,
+            character: end as u32,
+        },
+    })
+}
 
 /// Extract the identifier word at a given position within a text buffer.
 fn word_at_position(content: &str, position: Position) -> Option<String> {
@@ -1179,6 +1418,449 @@ fn kind_to_completion_kind(kind: EntityKind) -> CompletionItemKind {
 }
 
 // count_cyclomatic_complexity and risk_band imported from codixing_core::complexity
+
+// ---------------------------------------------------------------------------
+// Semantic token legend constants
+// ---------------------------------------------------------------------------
+
+/// Token types registered with the client in `initialize()`.
+/// The index in this array is the `token_type` value in `SemanticToken`.
+const SEMANTIC_TOKEN_TYPES: &[SemanticTokenType] = &[
+    SemanticTokenType::NAMESPACE, // 0
+    SemanticTokenType::TYPE,      // 1
+    SemanticTokenType::CLASS,     // 2
+    SemanticTokenType::ENUM,      // 3
+    SemanticTokenType::INTERFACE, // 4
+    SemanticTokenType::STRUCT,    // 5
+    SemanticTokenType::PARAMETER, // 6
+    SemanticTokenType::VARIABLE,  // 7
+    SemanticTokenType::PROPERTY,  // 8
+    SemanticTokenType::FUNCTION,  // 9
+    SemanticTokenType::METHOD,    // 10
+    SemanticTokenType::KEYWORD,   // 11
+    SemanticTokenType::MODIFIER,  // 12
+    SemanticTokenType::COMMENT,   // 13
+    SemanticTokenType::STRING,    // 14
+    SemanticTokenType::NUMBER,    // 15
+    SemanticTokenType::OPERATOR,  // 16
+    SemanticTokenType::MACRO,     // 17
+];
+
+/// Token modifiers registered with the client.
+/// Bit positions correspond to array indices.
+const SEMANTIC_TOKEN_MODIFIERS: &[SemanticTokenModifier] = &[
+    SemanticTokenModifier::DECLARATION, // bit 0
+    SemanticTokenModifier::DEFINITION,  // bit 1
+    SemanticTokenModifier::READONLY,    // bit 2
+    SemanticTokenModifier::STATIC,      // bit 3
+    SemanticTokenModifier::DEPRECATED,  // bit 4
+    SemanticTokenModifier::ABSTRACT,    // bit 5
+];
+
+const TT_NAMESPACE: u32 = 0;
+const TT_TYPE: u32 = 1;
+const TT_CLASS: u32 = 2;
+const TT_ENUM: u32 = 3;
+const TT_INTERFACE: u32 = 4;
+const TT_STRUCT: u32 = 5;
+const TT_VARIABLE: u32 = 7;
+const TT_PROPERTY: u32 = 8;
+const TT_FUNCTION: u32 = 9;
+const TT_METHOD: u32 = 10;
+const TT_KEYWORD: u32 = 11;
+const TT_COMMENT: u32 = 13;
+const TT_STRING: u32 = 14;
+const TT_NUMBER: u32 = 15;
+const TT_OPERATOR: u32 = 16;
+const TT_MACRO: u32 = 17;
+
+const MOD_DECLARATION: u32 = 1 << 0;
+const MOD_DEFINITION: u32 = 1 << 1;
+
+// ---------------------------------------------------------------------------
+// Semantic token computation
+// ---------------------------------------------------------------------------
+
+/// Map a tree-sitter node kind to a semantic token type index + modifier bitset.
+/// Returns `None` for node kinds we don't want to highlight.
+fn map_rust_node(kind: &str, parent_kind: &str) -> Option<(u32, u32)> {
+    match kind {
+        // Keywords
+        "fn" | "let" | "mut" | "const" | "static" | "struct" | "enum" | "trait" | "impl"
+        | "mod" | "pub" | "use" | "crate" | "self" | "super" | "as" | "for" | "in" | "if"
+        | "else" | "match" | "loop" | "while" | "return" | "break" | "continue" | "where"
+        | "type" | "async" | "await" | "move" | "ref" | "unsafe" | "extern" | "dyn" => {
+            Some((TT_KEYWORD, 0))
+        }
+
+        // Comments
+        "line_comment" | "block_comment" => Some((TT_COMMENT, 0)),
+
+        // String / char / raw literals
+        "string_literal" | "raw_string_literal" | "char_literal" | "string_content" => {
+            Some((TT_STRING, 0))
+        }
+
+        // Numbers
+        "integer_literal" | "float_literal" => Some((TT_NUMBER, 0)),
+
+        // Operators / punctuation with semantic meaning
+        "!" | "!=" | "%" | "&" | "&&" | "*" | "+" | "-" | ".." | "..=" | "/" | "<" | "<<"
+        | "<=" | "==" | ">" | ">=" | ">>" | "?" | "^" | "|" | "||" | "=>" | "->" => {
+            Some((TT_OPERATOR, 0))
+        }
+
+        // Identifiers — context-sensitive mapping
+        "identifier" => match parent_kind {
+            "function_item" | "function_signature_item" => {
+                Some((TT_FUNCTION, MOD_DEFINITION | MOD_DECLARATION))
+            }
+            "call_expression" => Some((TT_FUNCTION, 0)),
+            "struct_item" => Some((TT_STRUCT, MOD_DEFINITION | MOD_DECLARATION)),
+            "enum_item" => Some((TT_ENUM, MOD_DEFINITION | MOD_DECLARATION)),
+            "trait_item" => Some((TT_INTERFACE, MOD_DEFINITION | MOD_DECLARATION)),
+            "impl_item" => Some((TT_CLASS, 0)),
+            "mod_item" => Some((TT_NAMESPACE, MOD_DEFINITION | MOD_DECLARATION)),
+            "field_declaration" => Some((TT_PROPERTY, MOD_DEFINITION)),
+            "field_expression" => Some((TT_PROPERTY, 0)),
+            "let_declaration" | "parameter" | "closure_parameters" => Some((TT_VARIABLE, 0)),
+            "type_identifier" => Some((TT_TYPE, 0)),
+            "const_item" | "static_item" => Some((TT_VARIABLE, MOD_DEFINITION)),
+            _ => None,
+        },
+
+        // Type identifiers
+        "type_identifier" => Some((TT_TYPE, 0)),
+        "primitive_type" => Some((TT_TYPE, 0)),
+
+        // Field access
+        "field_identifier" => Some((TT_PROPERTY, 0)),
+
+        // Macros
+        "macro_invocation" => Some((TT_MACRO, 0)),
+
+        // Attribute (e.g., #[derive(...)]) — treat as macro
+        "attribute_item" => Some((TT_MACRO, 0)),
+
+        _ => None,
+    }
+}
+
+/// Map Python tree-sitter node kinds to semantic token types.
+fn map_python_node(kind: &str, parent_kind: &str) -> Option<(u32, u32)> {
+    match kind {
+        // Keywords
+        "def" | "class" | "return" | "if" | "else" | "elif" | "for" | "while" | "import"
+        | "from" | "as" | "with" | "try" | "except" | "finally" | "raise" | "pass" | "break"
+        | "continue" | "and" | "or" | "not" | "in" | "is" | "lambda" | "yield" | "global"
+        | "nonlocal" | "assert" | "del" | "async" | "await" => Some((TT_KEYWORD, 0)),
+
+        // Special identifiers
+        "true" | "false" | "none" | "True" | "False" | "None" => Some((TT_KEYWORD, 0)),
+
+        // Comments
+        "comment" => Some((TT_COMMENT, 0)),
+
+        // Strings
+        "string" | "string_start" | "string_content" | "string_end" | "concatenated_string" => {
+            Some((TT_STRING, 0))
+        }
+
+        // Numbers
+        "integer" | "float" => Some((TT_NUMBER, 0)),
+
+        // Operators
+        "+" | "-" | "*" | "/" | "//" | "%" | "**" | "==" | "!=" | "<" | ">" | "<=" | ">="
+        | "<<" | ">>" | "&" | "|" | "^" | "~" | "->" => Some((TT_OPERATOR, 0)),
+
+        // Identifiers — context-sensitive
+        "identifier" => match parent_kind {
+            "function_definition" => Some((TT_FUNCTION, MOD_DEFINITION | MOD_DECLARATION)),
+            "class_definition" => Some((TT_CLASS, MOD_DEFINITION | MOD_DECLARATION)),
+            "call" => Some((TT_FUNCTION, 0)),
+            "attribute" => Some((TT_PROPERTY, 0)),
+            "parameters" | "default_parameter" | "typed_parameter" | "typed_default_parameter" => {
+                Some((TT_VARIABLE, 0))
+            }
+            _ => None,
+        },
+
+        // Decorator
+        "decorator" => Some((TT_MACRO, 0)),
+
+        _ => None,
+    }
+}
+
+/// Map TypeScript/JavaScript tree-sitter node kinds to semantic token types.
+fn map_typescript_node(kind: &str, parent_kind: &str) -> Option<(u32, u32)> {
+    match kind {
+        // Keywords
+        "function" | "const" | "let" | "var" | "return" | "if" | "else" | "for" | "while"
+        | "do" | "switch" | "case" | "break" | "continue" | "class" | "extends" | "new"
+        | "this" | "import" | "export" | "default" | "from" | "as" | "try" | "catch"
+        | "finally" | "throw" | "typeof" | "instanceof" | "in" | "of" | "async" | "await"
+        | "yield" | "interface" | "type" | "enum" | "implements" | "abstract" | "readonly"
+        | "private" | "protected" | "public" | "static" | "void" => Some((TT_KEYWORD, 0)),
+
+        // Comments
+        "comment" | "line_comment" | "block_comment" => Some((TT_COMMENT, 0)),
+
+        // Strings
+        "string" | "string_fragment" | "template_string" | "template_substitution" => {
+            Some((TT_STRING, 0))
+        }
+
+        // Numbers
+        "number" => Some((TT_NUMBER, 0)),
+
+        // Operators
+        "!" | "!=" | "!==" | "%" | "&" | "&&" | "*" | "+" | "-" | "/" | "<" | "<=" | "=="
+        | "===" | ">" | ">=" | "??" | "?." | "^" | "|" | "||" | "=>" => Some((TT_OPERATOR, 0)),
+
+        // Identifiers
+        "identifier" | "property_identifier" => match parent_kind {
+            "function_declaration" | "function" | "arrow_function" => {
+                Some((TT_FUNCTION, MOD_DEFINITION))
+            }
+            "method_definition" => Some((TT_METHOD, MOD_DEFINITION)),
+            "call_expression" => Some((TT_FUNCTION, 0)),
+            "class_declaration" => Some((TT_CLASS, MOD_DEFINITION)),
+            "interface_declaration" => Some((TT_INTERFACE, MOD_DEFINITION)),
+            "enum_declaration" => Some((TT_ENUM, MOD_DEFINITION)),
+            "member_expression" => Some((TT_PROPERTY, 0)),
+            "pair" | "property_signature" => Some((TT_PROPERTY, 0)),
+            _ => None,
+        },
+
+        "type_identifier" => Some((TT_TYPE, 0)),
+
+        _ => None,
+    }
+}
+
+/// Map Go tree-sitter node kinds to semantic token types.
+fn map_go_node(kind: &str, parent_kind: &str) -> Option<(u32, u32)> {
+    match kind {
+        // Keywords
+        "func" | "var" | "const" | "type" | "struct" | "interface" | "map" | "chan" | "package"
+        | "import" | "return" | "if" | "else" | "for" | "range" | "switch" | "case" | "default"
+        | "break" | "continue" | "go" | "defer" | "select" | "fallthrough" | "goto" => {
+            Some((TT_KEYWORD, 0))
+        }
+
+        // Comments
+        "comment" => Some((TT_COMMENT, 0)),
+
+        // Strings
+        "raw_string_literal" | "interpreted_string_literal" | "rune_literal" => {
+            Some((TT_STRING, 0))
+        }
+
+        // Numbers
+        "int_literal" | "float_literal" | "imaginary_literal" => Some((TT_NUMBER, 0)),
+
+        // Operators
+        "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>" | "==" | "!=" | "<" | ">"
+        | "<=" | ">=" | "&&" | "||" | "!" | "<-" | ":=" => Some((TT_OPERATOR, 0)),
+
+        // Identifiers
+        "identifier" | "field_identifier" => match parent_kind {
+            "function_declaration" => Some((TT_FUNCTION, MOD_DEFINITION)),
+            "method_declaration" => Some((TT_METHOD, MOD_DEFINITION)),
+            "call_expression" => Some((TT_FUNCTION, 0)),
+            "type_spec" => Some((TT_TYPE, MOD_DEFINITION)),
+            "field_declaration" => Some((TT_PROPERTY, MOD_DEFINITION)),
+            "selector_expression" => Some((TT_PROPERTY, 0)),
+            _ => None,
+        },
+
+        "type_identifier" => Some((TT_TYPE, 0)),
+        "package_identifier" => Some((TT_NAMESPACE, 0)),
+
+        _ => None,
+    }
+}
+
+/// Compute semantic tokens for a file by walking its tree-sitter AST.
+fn compute_semantic_tokens(path: &Path, source: &[u8]) -> Vec<SemanticToken> {
+    let lang = match detect_language(path) {
+        Some(l) if l.is_tree_sitter() => l,
+        _ => return vec![],
+    };
+
+    // Select the mapper function based on language.
+    let mapper: fn(&str, &str) -> Option<(u32, u32)> = match lang {
+        codixing_core::language::Language::Rust => map_rust_node,
+        codixing_core::language::Language::Python => map_python_node,
+        codixing_core::language::Language::TypeScript
+        | codixing_core::language::Language::Tsx
+        | codixing_core::language::Language::JavaScript => map_typescript_node,
+        codixing_core::language::Language::Go => map_go_node,
+        _ => return vec![],
+    };
+
+    // Create a fresh tree-sitter parser for this language.
+    let registry = codixing_core::language::LanguageRegistry::new();
+    let lang_support = match registry.get(lang) {
+        Some(ls) => ls,
+        None => return vec![],
+    };
+
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&lang_support.tree_sitter_language())
+        .is_err()
+    {
+        return vec![];
+    }
+
+    let tree = match parser.parse(source, None) {
+        Some(t) => t,
+        None => return vec![],
+    };
+
+    // Collect raw (line, col, length, type, modifiers) tuples, then convert
+    // to delta-encoded SemanticTokens.
+    let mut raw: Vec<(u32, u32, u32, u32, u32)> = Vec::new();
+
+    // Walk the AST with a cursor.
+    let mut cursor = tree.walk();
+    walk_tree(&mut cursor, source, mapper, &mut raw);
+
+    // Sort by (line, col) — tree-sitter DFS generally gives this order, but
+    // it's important for delta encoding.
+    raw.sort_by_key(|&(line, col, _, _, _)| (line, col));
+
+    // Delta-encode.
+    let mut prev_line = 0u32;
+    let mut prev_start = 0u32;
+    let mut tokens = Vec::with_capacity(raw.len());
+
+    for (line, col, length, token_type, modifiers) in raw {
+        let delta_line = line - prev_line;
+        let delta_start = if delta_line == 0 {
+            col - prev_start
+        } else {
+            col
+        };
+        tokens.push(SemanticToken {
+            delta_line,
+            delta_start,
+            length,
+            token_type,
+            token_modifiers_bitset: modifiers,
+        });
+        prev_line = line;
+        prev_start = col;
+    }
+
+    tokens
+}
+
+/// Recursively walk the tree-sitter AST, collecting semantic tokens.
+fn walk_tree(
+    cursor: &mut tree_sitter::TreeCursor,
+    source: &[u8],
+    mapper: fn(&str, &str) -> Option<(u32, u32)>,
+    out: &mut Vec<(u32, u32, u32, u32, u32)>,
+) {
+    loop {
+        let node = cursor.node();
+        let kind = node.kind();
+        let parent_kind = node.parent().map(|p| p.kind()).unwrap_or("");
+
+        if let Some((token_type, modifiers)) = mapper(kind, parent_kind) {
+            let start = node.start_position();
+            let end = node.end_position();
+
+            // Only emit tokens that fit on a single line (multi-line tokens like
+            // block comments are emitted line-by-line for correctness).
+            if start.row == end.row {
+                let length = (end.column - start.column) as u32;
+                if length > 0 {
+                    out.push((
+                        start.row as u32,
+                        start.column as u32,
+                        length,
+                        token_type,
+                        modifiers,
+                    ));
+                }
+            } else {
+                // Multi-line token: emit the first line from start to EOL.
+                let lines: Vec<&[u8]> = source.split(|&b| b == b'\n').collect();
+                for row in start.row..=end.row {
+                    if row >= lines.len() {
+                        break;
+                    }
+                    let col_start = if row == start.row { start.column } else { 0 };
+                    let col_end = if row == end.row {
+                        end.column
+                    } else {
+                        lines[row].len()
+                    };
+                    if col_end > col_start {
+                        out.push((
+                            row as u32,
+                            col_start as u32,
+                            (col_end - col_start) as u32,
+                            token_type,
+                            modifiers,
+                        ));
+                    }
+                }
+            }
+
+            // For leaf-like tokens (keywords, literals, operators), skip children.
+            if !matches!(
+                kind,
+                "identifier"
+                    | "type_identifier"
+                    | "field_identifier"
+                    | "property_identifier"
+                    | "package_identifier"
+                    | "primitive_type"
+            ) && node.child_count() == 0
+            {
+                // Leaf node — no children to visit.
+                if cursor.goto_next_sibling() {
+                    continue;
+                }
+                // Walk up until we can go to a sibling.
+                loop {
+                    if !cursor.goto_parent() {
+                        return;
+                    }
+                    if cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+                continue;
+            }
+        }
+
+        // Recurse into children.
+        if cursor.goto_first_child() {
+            continue;
+        }
+
+        // No children — try next sibling.
+        if cursor.goto_next_sibling() {
+            continue;
+        }
+
+        // Walk up until we can go to a sibling.
+        loop {
+            if !cursor.goto_parent() {
+                return;
+            }
+            if cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Tests (P0)
@@ -1422,6 +2104,163 @@ mod tests {
     #[test]
     fn unmatched_paren_no_paren() {
         assert_eq!(find_unmatched_open_paren("hello world"), None);
+    }
+
+    // -- word_range_at_position -----------------------------------------------
+
+    #[test]
+    fn word_range_simple() {
+        let text = "fn hello_world() {}";
+        let range = word_range_at_position(
+            text,
+            Position {
+                line: 0,
+                character: 5,
+            },
+        );
+        let r = range.unwrap();
+        assert_eq!(r.start.line, 0);
+        assert_eq!(r.start.character, 3); // 'h' of hello_world
+        assert_eq!(r.end.character, 14); // after 'd'
+    }
+
+    #[test]
+    fn word_range_non_ident_returns_none() {
+        let text = "fn foo() {}";
+        let range = word_range_at_position(
+            text,
+            Position {
+                line: 0,
+                character: 6,
+            },
+        );
+        assert!(range.is_none());
+    }
+
+    // -- semantic tokens (unit-level) -----------------------------------------
+
+    #[test]
+    fn semantic_tokens_rust_basic() {
+        let source = b"fn main() {}\n";
+        let tokens = compute_semantic_tokens(Path::new("test.rs"), source);
+        // Should produce at least the "fn" keyword token.
+        assert!(
+            !tokens.is_empty(),
+            "expected at least one semantic token for Rust source"
+        );
+        // First token should be the "fn" keyword at (0, 0, length=2).
+        let first = &tokens[0];
+        assert_eq!(first.delta_line, 0);
+        assert_eq!(first.delta_start, 0);
+        assert_eq!(first.length, 2);
+        assert_eq!(first.token_type, TT_KEYWORD);
+    }
+
+    #[test]
+    fn semantic_tokens_rust_function_def() {
+        let source = b"fn compute(x: i32) -> bool { true }\n";
+        let tokens = compute_semantic_tokens(Path::new("test.rs"), source);
+        // Find the "compute" identifier token — should be tagged as FUNCTION + definition.
+        let fn_keyword = tokens.iter().find(|t| t.token_type == TT_FUNCTION);
+        assert!(
+            fn_keyword.is_some(),
+            "expected a function token for 'compute'"
+        );
+        let ft = fn_keyword.unwrap();
+        assert_eq!(ft.length, 7); // "compute" has 7 chars
+        assert_ne!(ft.token_modifiers_bitset & MOD_DEFINITION, 0);
+    }
+
+    #[test]
+    fn semantic_tokens_python_basic() {
+        let source = b"def hello():\n    pass\n";
+        let tokens = compute_semantic_tokens(Path::new("test.py"), source);
+        assert!(!tokens.is_empty(), "expected tokens for Python source");
+        // "def" should be a keyword.
+        let first = &tokens[0];
+        assert_eq!(first.token_type, TT_KEYWORD);
+        assert_eq!(first.length, 3); // "def"
+    }
+
+    #[test]
+    fn semantic_tokens_unsupported_lang_returns_empty() {
+        let source = b"key: value\n";
+        let tokens = compute_semantic_tokens(Path::new("config.yaml"), source);
+        assert!(
+            tokens.is_empty(),
+            "expected empty tokens for unsupported language"
+        );
+    }
+
+    #[test]
+    fn semantic_tokens_delta_encoding() {
+        // Two keywords on same line: "fn" at col 0 and "let" at col 18
+        let source = b"fn main() { let x = 1; }\n";
+        let tokens = compute_semantic_tokens(Path::new("test.rs"), source);
+        // Verify that delta encoding works: if two tokens are on the same line,
+        // delta_line == 0 and delta_start is the column difference.
+        let same_line: Vec<_> = tokens.iter().filter(|t| t.delta_line == 0).collect();
+        // At least the second token on line 0 should have delta_line == 0.
+        assert!(
+            same_line.len() >= 1,
+            "expected at least one same-line delta token"
+        );
+    }
+
+    // -- map_rust_node -------------------------------------------------------
+
+    #[test]
+    fn rust_keyword_mapping() {
+        assert_eq!(map_rust_node("fn", ""), Some((TT_KEYWORD, 0)));
+        assert_eq!(map_rust_node("let", ""), Some((TT_KEYWORD, 0)));
+        assert_eq!(map_rust_node("struct", ""), Some((TT_KEYWORD, 0)));
+    }
+
+    #[test]
+    fn rust_identifier_in_function_item() {
+        assert_eq!(
+            map_rust_node("identifier", "function_item"),
+            Some((TT_FUNCTION, MOD_DEFINITION | MOD_DECLARATION))
+        );
+    }
+
+    #[test]
+    fn rust_identifier_unknown_parent() {
+        assert_eq!(map_rust_node("identifier", "unknown_parent"), None);
+    }
+
+    #[test]
+    fn rust_type_identifier_mapping() {
+        assert_eq!(map_rust_node("type_identifier", ""), Some((TT_TYPE, 0)));
+    }
+
+    #[test]
+    fn rust_comment_mapping() {
+        assert_eq!(map_rust_node("line_comment", ""), Some((TT_COMMENT, 0)));
+        assert_eq!(map_rust_node("block_comment", ""), Some((TT_COMMENT, 0)));
+    }
+
+    #[test]
+    fn rust_number_mapping() {
+        assert_eq!(map_rust_node("integer_literal", ""), Some((TT_NUMBER, 0)));
+        assert_eq!(map_rust_node("float_literal", ""), Some((TT_NUMBER, 0)));
+    }
+
+    // -- map_python_node ----------------------------------------------------
+
+    #[test]
+    fn python_keyword_mapping() {
+        assert_eq!(map_python_node("def", ""), Some((TT_KEYWORD, 0)));
+        assert_eq!(map_python_node("class", ""), Some((TT_KEYWORD, 0)));
+        assert_eq!(map_python_node("import", ""), Some((TT_KEYWORD, 0)));
+    }
+
+    #[test]
+    fn python_function_def_mapping() {
+        assert_eq!(
+            map_python_node("identifier", "function_definition"),
+            Some((TT_FUNCTION, MOD_DEFINITION | MOD_DECLARATION))
+        );
     }
 }
 

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "LSP server for Codixing — hover, go-to-definition, references, symbols"
+description = "LSP server for Codixing — hover, go-to-definition, references, symbols, rename, semantic tokens"
 
 [[bin]]
 name = "codixing-lsp"
@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 codixing-core = { path = "../core", default-features = false }
+tree-sitter.workspace = true
 tower-lsp.workspace = true
 tokio.workspace = true
 tracing.workspace = true

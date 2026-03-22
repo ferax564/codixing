@@ -44,7 +44,7 @@ For broad codebase exploration, always try a Codixing tool first. Fall back to B
 - `crates/mcp/` — MCP server (`codixing-mcp`), 53 tools in `src/tools/` (use `--compact` or `--medium` for token reduction)
 - `crates/server/` — HTTP API server (`codixing-server`), REST endpoints with SSE streaming for sync
 - `crates/core/src/federation/` — cross-repo federated search (`--federation config.json`)
-- `crates/lsp/` — LSP server (`codixing-lsp`), hover/go-to-def/refs/symbols/call hierarchy/complexity diagnostics
+- `crates/lsp/` — LSP server (`codixing-lsp`), hover/go-to-def/refs/symbols/call hierarchy/complexity diagnostics/rename/semantic tokens
 - `claude-plugin/` — Claude Code plugin with 3 skills + MCP server config
 - `.codixing/` — index data (do not edit manually)
 
@@ -52,7 +52,7 @@ For broad codebase exploration, always try a Codixing tool first. Fall back to B
 
 ```bash
 cargo build --release --workspace          # build all binaries
-cargo test --workspace                      # run all tests (692)
+cargo test --workspace                      # run all tests (705+)
 cargo clippy --workspace -- -D warnings     # lint (must pass)
 cargo fmt --check                           # format check (must pass)
 
