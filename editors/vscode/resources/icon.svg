@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Magnifying glass -->
+  <circle cx="10" cy="10" r="7"/>
+  <line x1="15" y1="15" x2="21" y2="21"/>
+  <!-- Code brackets inside the glass -->
+  <polyline points="7,8 5,10 7,12"/>
+  <polyline points="13,8 15,10 13,12"/>
+</svg>

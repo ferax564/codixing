@@ -5,3 +5,4 @@ tsconfig.json
 **/*.map
 **/*.ts
 !out/**
+!resources/**
