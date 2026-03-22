@@ -120,6 +120,15 @@ When launching multiple feature branches in parallel (e.g. via worktree agents):
 3. **Merge one at a time, wait for CI.** After each squash-merge, pull main, verify CI passes on main (including the Jekyll/Pages build), THEN rebase the next PR.
 4. **Check for behavioral interactions.** When planning features that change binary behavior (e.g., daemon auto-fork), explicitly note impacts on existing tests that spawn the binary as a subprocess.
 
+### CI jobs
+
+The CI workflow (`.github/workflows/ci.yml`) has the following jobs:
+
+- **test** — builds and tests on Ubuntu, macOS, and Windows (matrix); runs clippy and fmt check
+- **audit** — runs `cargo-audit` on Ubuntu only; `continue-on-error: true` (non-blocking while advisories are triaged)
+- **coverage** — runs `cargo-llvm-cov` on Ubuntu only; uploads `lcov.info` as the `coverage-report` artifact
+- **benchmarks** — runs `cargo bench` on Ubuntu only; uploads `bench-results.txt` as the `benchmark-results` artifact; depends on `test` (only runs after tests pass)
+
 ### CI checklist before merging
 
 Before merging any PR:
