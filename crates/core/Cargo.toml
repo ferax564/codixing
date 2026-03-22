@@ -56,6 +56,9 @@ tree-sitter-kotlin-ng.workspace = true
 tree-sitter-scala.workspace = true
 tree-sitter-zig.workspace = true
 tree-sitter-php.workspace = true
+tree-sitter-matlab.workspace = true
+tree-sitter-bash.workspace = true
+quick-xml.workspace = true
 
 petgraph.workspace = true
 tantivy.workspace = true

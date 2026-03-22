@@ -31,9 +31,6 @@ GTM_Strategy.md
 research/
 docs/research/
 
-# Graph Atlas server (experimental — lives on feat/graph-atlas branch)
-crates/server/
-
 # Release staging binaries
 linux-staging/
 

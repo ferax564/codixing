@@ -41,7 +41,8 @@ For broad codebase exploration, always try a Codixing tool first. Fall back to B
 
 - `crates/core/` — engine: AST parsing, BM25, graph, embeddings, PageRank, test mapping, shared sessions
 - `crates/cli/` — `codixing` CLI binary
-- `crates/mcp/` — MCP server (`codixing-mcp`), 48 tools in `src/tools/` (use `--compact` or `--medium` for token reduction)
+- `crates/mcp/` — MCP server (`codixing-mcp`), 53 tools in `src/tools/` (use `--compact` or `--medium` for token reduction)
+- `crates/server/` — HTTP API server (`codixing-server`), REST endpoints with SSE streaming for sync
 - `crates/core/src/federation/` — cross-repo federated search (`--federation config.json`)
 - `crates/lsp/` — LSP server (`codixing-lsp`), hover/go-to-def/refs/symbols/call hierarchy/complexity diagnostics
 - `claude-plugin/` — Claude Code plugin with 3 skills + MCP server config
@@ -51,7 +52,7 @@ For broad codebase exploration, always try a Codixing tool first. Fall back to B
 
 ```bash
 cargo build --release --workspace          # build all binaries
-cargo test --workspace                      # run all tests (678)
+cargo test --workspace                      # run all tests (692)
 cargo clippy --workspace -- -D warnings     # lint (must pass)
 cargo fmt --check                           # format check (must pass)
 
@@ -119,6 +120,15 @@ When launching multiple feature branches in parallel (e.g. via worktree agents):
 2. **Each PR must include its own docs updates.** Update README, website, test counts, and CLAUDE.md as part of each feature PR.
 3. **Merge one at a time, wait for CI.** After each squash-merge, pull main, verify CI passes on main (including the Jekyll/Pages build), THEN rebase the next PR.
 4. **Check for behavioral interactions.** When planning features that change binary behavior (e.g., daemon auto-fork), explicitly note impacts on existing tests that spawn the binary as a subprocess.
+
+### CI jobs
+
+The CI workflow (`.github/workflows/ci.yml`) has the following jobs:
+
+- **test** — builds and tests on Ubuntu, macOS, and Windows (matrix); runs clippy and fmt check
+- **audit** — runs `cargo-audit` on Ubuntu only; `continue-on-error: true` (non-blocking while advisories are triaged)
+- **coverage** — runs `cargo-llvm-cov` on Ubuntu only; uploads `lcov.info` as the `coverage-report` artifact
+- **benchmarks** — runs `cargo bench` on Ubuntu only; uploads `bench-results.txt` as the `benchmark-results` artifact; depends on `test` (only runs after tests pass)
 
 ### CI checklist before merging
 

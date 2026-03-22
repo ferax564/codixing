@@ -6,8 +6,8 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use codixing_core::{
-    EmbeddingModel, Engine, GitSyncStats, IndexConfig, RepoMapOptions, SearchQuery, Strategy,
-    SyncStats,
+    EmbeddingModel, Engine, FederatedEngine, FederationConfig, GitSyncStats, IndexConfig,
+    RepoMapOptions, SearchQuery, Strategy, SyncStats,
 };
 
 #[derive(Parser)]
@@ -214,6 +214,68 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+
+    /// Manage federated cross-repo search configurations.
+    Federation {
+        #[command(subcommand)]
+        action: FederationAction,
+    },
+}
+
+/// Subcommands for managing federation configurations.
+#[derive(Subcommand)]
+enum FederationAction {
+    /// Create a new empty federation config file.
+    Init {
+        /// Path for the new federation config file.
+        #[arg(default_value = "codixing-federation.json")]
+        path: PathBuf,
+    },
+
+    /// Add a project to the federation config.
+    Add {
+        /// Root directory of the project to add (must contain a .codixing/ index).
+        path: PathBuf,
+
+        /// Per-project weight for RRF fusion (higher = ranked higher).
+        #[arg(long, default_value = "1.0")]
+        weight: f32,
+
+        /// Path to the federation config file.
+        #[arg(long, default_value = "codixing-federation.json")]
+        config: PathBuf,
+    },
+
+    /// Remove a project from the federation config by directory name.
+    Remove {
+        /// Directory name of the project to remove.
+        name: String,
+
+        /// Path to the federation config file.
+        #[arg(long, default_value = "codixing-federation.json")]
+        config: PathBuf,
+    },
+
+    /// List all projects in the federation config.
+    List {
+        /// Path to the federation config file.
+        #[arg(default_value = "codixing-federation.json")]
+        config: PathBuf,
+    },
+
+    /// Search across all federated projects.
+    Search {
+        /// The search query.
+        query: String,
+
+        /// Maximum number of results.
+        #[arg(short, long, default_value = "10")]
+        limit: usize,
+
+        /// Path to the federation config file.
+        #[arg(long, default_value = "codixing-federation.json")]
+        config: PathBuf,
+    },
 }
 
 /// Clap-parseable strategy argument.
@@ -301,6 +363,7 @@ async fn main() -> Result<()> {
         Command::GitSync { path } => cmd_git_sync(path),
         Command::Embed { path } => cmd_embed(path),
         Command::Serve { host, port, path } => cmd_serve(host, port, path).await,
+        Command::Federation { action } => cmd_federation(action),
     }
 }
 
@@ -888,6 +951,139 @@ fn cmd_embed(path: PathBuf) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn cmd_federation(action: FederationAction) -> Result<()> {
+    match action {
+        FederationAction::Init { path } => {
+            FederationConfig::init_template(&path).with_context(|| {
+                format!("failed to create federation config at {}", path.display())
+            })?;
+            eprintln!("Created federation config at: {}", path.display());
+            eprintln!("Edit it to add project roots, then use `codixing federation add`.");
+            Ok(())
+        }
+        FederationAction::Add {
+            path,
+            weight,
+            config,
+        } => {
+            let mut cfg = FederationConfig::load(&config).with_context(|| {
+                format!("failed to load federation config from {}", config.display())
+            })?;
+
+            let abs_path = path
+                .canonicalize()
+                .with_context(|| format!("project path not found: {}", path.display()))?;
+
+            let name = abs_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| abs_path.display().to_string());
+
+            cfg.add_project(&abs_path, weight);
+            cfg.save(&config)?;
+
+            eprintln!(
+                "Added project `{name}` (weight: {weight:.1}) to {}",
+                config.display()
+            );
+            eprintln!("{} project(s) total.", cfg.projects.len());
+            Ok(())
+        }
+        FederationAction::Remove { name, config } => {
+            let mut cfg = FederationConfig::load(&config).with_context(|| {
+                format!("failed to load federation config from {}", config.display())
+            })?;
+
+            let before = cfg.projects.len();
+            cfg.remove_project(&name);
+
+            if cfg.projects.len() == before {
+                anyhow::bail!("no project named `{name}` found in {}", config.display());
+            }
+
+            cfg.save(&config)?;
+            eprintln!(
+                "Removed project `{name}` from {}. {} project(s) remaining.",
+                config.display(),
+                cfg.projects.len()
+            );
+            Ok(())
+        }
+        FederationAction::List { config } => {
+            let cfg = FederationConfig::load(&config).with_context(|| {
+                format!("failed to load federation config from {}", config.display())
+            })?;
+
+            if cfg.projects.is_empty() {
+                eprintln!("No projects configured in {}", config.display());
+                return Ok(());
+            }
+
+            println!("{:<5} {:<40} {:<8}", "#", "ROOT", "WEIGHT");
+            println!("{}", "-".repeat(55));
+            for (i, proj) in cfg.projects.iter().enumerate() {
+                println!(
+                    "{:<5} {:<40} {:<8.1}",
+                    i + 1,
+                    proj.root.display(),
+                    proj.weight
+                );
+            }
+            eprintln!(
+                "\n{} project(s) in {}",
+                cfg.projects.len(),
+                config.display()
+            );
+            Ok(())
+        }
+        FederationAction::Search {
+            query,
+            limit,
+            config,
+        } => {
+            let cfg = FederationConfig::load(&config).with_context(|| {
+                format!("failed to load federation config from {}", config.display())
+            })?;
+
+            let fed =
+                FederatedEngine::new(cfg).with_context(|| "failed to create FederatedEngine")?;
+
+            let sq = SearchQuery::new(&query).with_limit(limit);
+            let results = fed.search(sq).with_context(|| "federated search failed")?;
+
+            if results.is_empty() {
+                eprintln!("No results for \"{}\"", query);
+                return Ok(());
+            }
+
+            for (i, r) in results.iter().enumerate() {
+                println!(
+                    "{}. [{}] {} [L{}-L{}] score={:.3}",
+                    i + 1,
+                    r.project,
+                    r.result.file_path,
+                    r.result.line_start,
+                    r.result.line_end,
+                    r.result.score,
+                );
+                let snippet: String = r
+                    .result
+                    .content
+                    .lines()
+                    .take(3)
+                    .map(|l| format!("   | {l}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !snippet.is_empty() {
+                    println!("{snippet}");
+                }
+                println!();
+            }
+            Ok(())
+        }
+    }
 }
 
 async fn cmd_serve(host: String, port: u16, path: PathBuf) -> Result<()> {

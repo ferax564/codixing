@@ -1,3 +1,4 @@
+pub mod bash;
 pub mod c;
 pub mod cpp;
 pub mod csharp;
@@ -6,6 +7,8 @@ pub mod go;
 pub mod java;
 pub mod kotlin;
 pub mod makefile;
+pub mod matlab;
+pub mod mermaid;
 pub mod php;
 pub mod python;
 pub mod ruby;
@@ -14,6 +17,7 @@ pub mod scala;
 pub mod swift;
 pub mod toml_lang;
 pub mod typescript;
+pub mod xml;
 pub mod yaml;
 pub mod zig;
 
@@ -43,11 +47,16 @@ pub enum Language {
     // Tier 3
     Zig,
     Php,
+    Bash,
+    Matlab,
     // Config languages (line-based, no tree-sitter)
     Yaml,
     Toml,
     Dockerfile,
     Makefile,
+    // Diagram / markup config (line-based, no tree-sitter)
+    Mermaid,
+    Xml,
 }
 
 impl Language {
@@ -70,10 +79,14 @@ impl Language {
             Self::Scala => "Scala",
             Self::Zig => "Zig",
             Self::Php => "PHP",
+            Self::Bash => "Bash",
+            Self::Matlab => "Matlab",
             Self::Yaml => "YAML",
             Self::Toml => "TOML",
             Self::Dockerfile => "Dockerfile",
             Self::Makefile => "Makefile",
+            Self::Mermaid => "Mermaid",
+            Self::Xml => "XML",
         }
     }
 
@@ -96,10 +109,14 @@ impl Language {
             Self::Scala => &["scala", "sc"],
             Self::Zig => &["zig"],
             Self::Php => &["php", "phtml", "php3", "php4", "php5", "phps"],
+            Self::Bash => &["sh", "bash", "zsh", "bats"],
+            Self::Matlab => &["m"],
             Self::Yaml => &["yaml", "yml"],
             Self::Toml => &["toml"],
             Self::Dockerfile => &["dockerfile"],
             Self::Makefile => &["mk"],
+            Self::Mermaid => &["mmd", "mermaid"],
+            Self::Xml => &["xml", "drawio"],
         }
     }
 
@@ -110,7 +127,7 @@ impl Language {
     pub fn is_tree_sitter(self) -> bool {
         !matches!(
             self,
-            Self::Yaml | Self::Toml | Self::Dockerfile | Self::Makefile
+            Self::Yaml | Self::Toml | Self::Dockerfile | Self::Makefile | Self::Mermaid | Self::Xml
         )
     }
 }
@@ -133,10 +150,14 @@ pub const ALL_LANGUAGES: &[Language] = &[
     Language::Scala,
     Language::Zig,
     Language::Php,
+    Language::Bash,
+    Language::Matlab,
     Language::Yaml,
     Language::Toml,
     Language::Dockerfile,
     Language::Makefile,
+    Language::Mermaid,
+    Language::Xml,
 ];
 
 /// The kind of semantic entity extracted from an AST.
@@ -257,12 +278,16 @@ impl LanguageRegistry {
             Arc::new(scala::ScalaLanguage),
             Arc::new(zig::ZigLanguage),
             Arc::new(php::PhpLanguage),
+            Arc::new(bash::BashLanguage),
+            Arc::new(matlab::MatlabLanguage),
         ];
         let config_impls: Vec<Arc<dyn ConfigLanguageSupport>> = vec![
             Arc::new(yaml::YamlLanguage),
             Arc::new(toml_lang::TomlLanguage),
             Arc::new(dockerfile::DockerfileLanguage),
             Arc::new(makefile::MakefileLanguage),
+            Arc::new(mermaid::MermaidLanguage),
+            Arc::new(xml::XmlLanguage),
         ];
         Self {
             impls,
@@ -319,6 +344,22 @@ pub fn detect_language(path: &Path) -> Option<Language> {
 
     // Extension-based detection.
     let ext = path.extension()?.to_str()?;
+
+    // Disambiguate `.m` files: Objective-C vs MATLAB.
+    // If the file exists, peek at the first 512 bytes for ObjC indicators.
+    if ext == "m" {
+        if let Ok(bytes) = std::fs::read(path) {
+            let peek = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]);
+            if peek.contains("#import")
+                || peek.contains("@interface")
+                || peek.contains("@implementation")
+            {
+                return None; // Objective-C — not supported
+            }
+        }
+        return Some(Language::Matlab);
+    }
+
     for lang in ALL_LANGUAGES {
         if lang.extensions().contains(&ext) {
             return Some(*lang);

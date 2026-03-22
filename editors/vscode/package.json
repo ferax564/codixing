@@ -4,6 +4,11 @@
   "description": "Ultra-fast code retrieval for AI agents — structural search, dependency graph, MCP integration",
   "version": "0.1.0",
   "publisher": "codixing",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ferax564/codixing"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -95,7 +100,7 @@
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package"
+    "package": "vsce package --out codixing.vsix"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.0"

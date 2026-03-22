@@ -539,6 +539,132 @@ impl Engine {
         })
     }
 
+    /// Sync the index with progress callbacks for streaming updates.
+    ///
+    /// Identical to [`Self::sync`] but calls `on_progress` at key stages so
+    /// callers (e.g. the SSE endpoint) can relay real-time feedback.
+    pub fn sync_with_progress<F>(&mut self, mut on_progress: F) -> Result<SyncStats>
+    where
+        F: FnMut(&str) + Send + 'static,
+    {
+        if self.read_only {
+            return Err(CodixingError::ReadOnly);
+        }
+        use crate::watcher::{ChangeKind, FileChange};
+        use std::collections::{HashMap, HashSet};
+
+        on_progress("scanning files");
+
+        // Load stored hashes (v2 format with mtime+size, falls back to v1).
+        let old_hashes: HashMap<std::path::PathBuf, FileHashEntry> = self
+            .store
+            .load_tree_hashes_v2()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+
+        let current_files = super::walk_source_files(&self.config.root, &self.config)?;
+
+        on_progress(&format!(
+            "found {} files, detecting changes",
+            current_files.len()
+        ));
+
+        let mut changes: Vec<FileChange> = Vec::new();
+        let mut seen: HashSet<std::path::PathBuf> = HashSet::new();
+        let mut unchanged = 0usize;
+        let mut skipped_by_mtime = 0usize;
+        let mut current_hashes: Vec<(std::path::PathBuf, FileHashEntry)> = Vec::new();
+
+        for abs_path in &current_files {
+            seen.insert(abs_path.clone());
+
+            let metadata = fs::metadata(abs_path);
+            let (current_mtime, current_size) = match &metadata {
+                Ok(m) => (m.modified().ok(), m.len()),
+                Err(_) => (None, 0),
+            };
+
+            if let Some(cached) = old_hashes.get(abs_path) {
+                if !cached.file_might_have_changed(current_mtime, current_size) {
+                    unchanged += 1;
+                    skipped_by_mtime += 1;
+                    current_hashes.push((abs_path.clone(), cached.clone()));
+                    continue;
+                }
+            }
+
+            let content = fs::read(abs_path)?;
+            let hash = xxhash_rust::xxh3::xxh3_64(&content);
+            let entry = FileHashEntry::new(hash, current_mtime, current_size);
+
+            match old_hashes.get(abs_path) {
+                Some(cached) if cached.content_hash == hash => {
+                    unchanged += 1;
+                    current_hashes.push((abs_path.clone(), entry));
+                }
+                _ => {
+                    current_hashes.push((abs_path.clone(), entry));
+                    changes.push(FileChange {
+                        path: abs_path.clone(),
+                        kind: ChangeKind::Modified,
+                    });
+                }
+            }
+        }
+
+        for old_path in old_hashes.keys() {
+            if !seen.contains(old_path) {
+                changes.push(FileChange {
+                    path: old_path.clone(),
+                    kind: ChangeKind::Removed,
+                });
+            }
+        }
+
+        let added = changes
+            .iter()
+            .filter(|c| matches!(c.kind, ChangeKind::Modified) && !old_hashes.contains_key(&c.path))
+            .count();
+        let modified = changes
+            .iter()
+            .filter(|c| matches!(c.kind, ChangeKind::Modified) && old_hashes.contains_key(&c.path))
+            .count();
+        let removed = changes
+            .iter()
+            .filter(|c| matches!(c.kind, ChangeKind::Removed))
+            .count();
+
+        let total_changes = added + modified + removed;
+        on_progress(&format!(
+            "{} changes detected (added: {}, modified: {}, removed: {}), indexing",
+            total_changes, added, modified, removed,
+        ));
+
+        if !changes.is_empty() {
+            self.apply_changes(&changes)?;
+            on_progress("persisting index");
+            self.save()?;
+            let v1_hashes: Vec<(std::path::PathBuf, u64)> = current_hashes
+                .iter()
+                .map(|(p, e)| (p.clone(), e.content_hash))
+                .collect();
+            self.store.save_tree_hashes(&v1_hashes)?;
+            self.store.save_tree_hashes_v2(&current_hashes)?;
+        } else if skipped_by_mtime != unchanged || !current_hashes.is_empty() {
+            self.store.save_tree_hashes_v2(&current_hashes)?;
+        }
+
+        on_progress("sync complete");
+
+        Ok(SyncStats {
+            added,
+            modified,
+            removed,
+            unchanged,
+        })
+    }
+
     /// Git-aware incremental sync: re-indexes only files that changed since the
     /// last indexed git commit.
     ///
