@@ -13,11 +13,7 @@ fn sync_with_progress_reports_messages() {
     // Create a simple Rust file so the engine has something to index.
     let src = root.join("src");
     std::fs::create_dir_all(&src).unwrap();
-    std::fs::write(
-        src.join("main.rs"),
-        "fn main() { println!(\"hello\"); }\n",
-    )
-    .unwrap();
+    std::fs::write(src.join("main.rs"), "fn main() { println!(\"hello\"); }\n").unwrap();
 
     let config = IndexConfig::new(root);
     let mut engine = Engine::init(root, config).unwrap();

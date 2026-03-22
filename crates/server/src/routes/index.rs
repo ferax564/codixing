@@ -136,9 +136,7 @@ pub async fn sync_sse_handler(
         let tx_progress = tx.clone();
         let result = tokio::task::block_in_place(move || {
             engine.sync_with_progress(move |msg| {
-                let event = Event::default()
-                    .event("progress")
-                    .data(msg.to_string());
+                let event = Event::default().event("progress").data(msg);
                 // Ignore send errors (client may have disconnected).
                 let _ = tx_progress.blocking_send(Ok(event));
             })
@@ -149,9 +147,7 @@ pub async fn sync_sse_handler(
                 let json = serde_json::to_string(&stats).unwrap_or_default();
                 Event::default().event("result").data(json)
             }
-            Err(e) => Event::default()
-                .event("error")
-                .data(e.to_string()),
+            Err(e) => Event::default().event("error").data(e.to_string()),
         };
         let _ = tx.send(Ok(final_event)).await;
     });

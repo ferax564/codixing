@@ -155,10 +155,7 @@ async fn symbols_returns_list() {
     let symbols = json["symbols"].as_array().unwrap();
     assert!(!symbols.is_empty());
     // Verify the hello symbol was found.
-    let names: Vec<&str> = symbols
-        .iter()
-        .filter_map(|s| s["name"].as_str())
-        .collect();
+    let names: Vec<&str> = symbols.iter().filter_map(|s| s["name"].as_str()).collect();
     assert!(
         names.iter().any(|n| n.contains("hello")),
         "expected 'hello' symbol, got: {names:?}"

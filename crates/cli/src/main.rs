@@ -956,8 +956,9 @@ fn cmd_embed(path: PathBuf) -> Result<()> {
 fn cmd_federation(action: FederationAction) -> Result<()> {
     match action {
         FederationAction::Init { path } => {
-            FederationConfig::init_template(&path)
-                .with_context(|| format!("failed to create federation config at {}", path.display()))?;
+            FederationConfig::init_template(&path).with_context(|| {
+                format!("failed to create federation config at {}", path.display())
+            })?;
             eprintln!("Created federation config at: {}", path.display());
             eprintln!("Edit it to add project roots, then use `codixing federation add`.");
             Ok(())
@@ -968,10 +969,7 @@ fn cmd_federation(action: FederationAction) -> Result<()> {
             config,
         } => {
             let mut cfg = FederationConfig::load(&config).with_context(|| {
-                format!(
-                    "failed to load federation config from {}",
-                    config.display()
-                )
+                format!("failed to load federation config from {}", config.display())
             })?;
 
             let abs_path = path
@@ -995,10 +993,7 @@ fn cmd_federation(action: FederationAction) -> Result<()> {
         }
         FederationAction::Remove { name, config } => {
             let mut cfg = FederationConfig::load(&config).with_context(|| {
-                format!(
-                    "failed to load federation config from {}",
-                    config.display()
-                )
+                format!("failed to load federation config from {}", config.display())
             })?;
 
             let before = cfg.projects.len();
@@ -1018,10 +1013,7 @@ fn cmd_federation(action: FederationAction) -> Result<()> {
         }
         FederationAction::List { config } => {
             let cfg = FederationConfig::load(&config).with_context(|| {
-                format!(
-                    "failed to load federation config from {}",
-                    config.display()
-                )
+                format!("failed to load federation config from {}", config.display())
             })?;
 
             if cfg.projects.is_empty() {
@@ -1039,7 +1031,11 @@ fn cmd_federation(action: FederationAction) -> Result<()> {
                     proj.weight
                 );
             }
-            eprintln!("\n{} project(s) in {}", cfg.projects.len(), config.display());
+            eprintln!(
+                "\n{} project(s) in {}",
+                cfg.projects.len(),
+                config.display()
+            );
             Ok(())
         }
         FederationAction::Search {
@@ -1048,14 +1044,11 @@ fn cmd_federation(action: FederationAction) -> Result<()> {
             config,
         } => {
             let cfg = FederationConfig::load(&config).with_context(|| {
-                format!(
-                    "failed to load federation config from {}",
-                    config.display()
-                )
+                format!("failed to load federation config from {}", config.display())
             })?;
 
-            let fed = FederatedEngine::new(cfg)
-                .with_context(|| "failed to create FederatedEngine")?;
+            let fed =
+                FederatedEngine::new(cfg).with_context(|| "failed to create FederatedEngine")?;
 
             let sq = SearchQuery::new(&query).with_limit(limit);
             let results = fed.search(sq).with_context(|| "federated search failed")?;

@@ -565,7 +565,10 @@ impl Engine {
 
         let current_files = super::walk_source_files(&self.config.root, &self.config)?;
 
-        on_progress(&format!("found {} files, detecting changes", current_files.len()));
+        on_progress(&format!(
+            "found {} files, detecting changes",
+            current_files.len()
+        ));
 
         let mut changes: Vec<FileChange> = Vec::new();
         let mut seen: HashSet<std::path::PathBuf> = HashSet::new();
@@ -648,10 +651,8 @@ impl Engine {
                 .collect();
             self.store.save_tree_hashes(&v1_hashes)?;
             self.store.save_tree_hashes_v2(&current_hashes)?;
-        } else {
-            if skipped_by_mtime != unchanged || !current_hashes.is_empty() {
-                self.store.save_tree_hashes_v2(&current_hashes)?;
-            }
+        } else if skipped_by_mtime != unchanged || !current_hashes.is_empty() {
+            self.store.save_tree_hashes_v2(&current_hashes)?;
         }
 
         on_progress("sync complete");

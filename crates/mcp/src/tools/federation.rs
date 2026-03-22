@@ -56,10 +56,7 @@ pub fn call_federation_add_project(args: &Value) -> (String, bool) {
         }
     };
 
-    let weight = args
-        .get("weight")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(1.0) as f32;
+    let weight = args.get("weight").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
 
     let mut config = match FederationConfig::load(&config_path) {
         Ok(c) => c,
@@ -138,10 +135,7 @@ pub fn call_federation_remove_project(args: &Value) -> (String, bool) {
 }
 
 /// `federation_list` — list projects in the federation.
-pub fn call_federation_list(
-    args: &Value,
-    federation: Option<&FederatedEngine>,
-) -> (String, bool) {
+pub fn call_federation_list(args: &Value, federation: Option<&FederatedEngine>) -> (String, bool) {
     // If a live FederatedEngine is available, use it for rich status info.
     if let Some(fed) = federation {
         let projects = fed.projects();
@@ -243,10 +237,7 @@ pub fn call_federation_search(
         }
     };
 
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(10) as usize;
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
     let sq = SearchQuery::new(query).with_limit(limit);
 
