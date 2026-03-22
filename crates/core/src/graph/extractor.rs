@@ -37,8 +37,8 @@ impl ImportExtractor {
             Language::Scala => extract_scala(tree, source),
             Language::Zig => extract_zig(tree, source),
             Language::Php => extract_php(tree, source),
-            // Bash/Matlab: import extraction not yet implemented.
-            Language::Bash | Language::Matlab => Vec::new(),
+            Language::Bash => extract_bash(tree, source),
+            Language::Matlab => extract_matlab(tree, source),
             // Config languages use line-based parsing; no tree-sitter imports.
             Language::Yaml
             | Language::Toml
@@ -711,6 +711,122 @@ fn extract_php(tree: &Tree, source: &[u8]) -> Vec<RawImport> {
 }
 
 // ---------------------------------------------------------------------------
+// Bash
+// ---------------------------------------------------------------------------
+
+fn extract_bash(tree: &Tree, source: &[u8]) -> Vec<RawImport> {
+    let mut imports = Vec::new();
+    walk_all(tree.root_node(), &mut |node| {
+        if node.kind() != "command" {
+            return;
+        }
+        // Look for `source` or `.` commands.
+        let mut c = node.walk();
+        let children: Vec<_> = node.children(&mut c).collect();
+        if children.is_empty() {
+            return;
+        }
+        let cmd_name = node_text(&children[0], source).trim().to_string();
+        if cmd_name != "source" && cmd_name != "." {
+            return;
+        }
+        // The second child is the file argument.
+        if children.len() < 2 {
+            return;
+        }
+        // The argument might be a word or a string node.
+        let arg_node = &children[1];
+        let path = match arg_node.kind() {
+            "string" => {
+                // Extract string_content child.
+                let mut sc = arg_node.walk();
+                let mut content = String::new();
+                for s in arg_node.children(&mut sc) {
+                    if s.kind() == "string_content" || s.kind() == "raw_string_content" {
+                        content = node_text(&s, source).to_string();
+                        break;
+                    }
+                }
+                if content.is_empty() {
+                    // Fallback: strip quotes from the node text.
+                    let text = node_text(arg_node, source);
+                    text.trim_matches('"').trim_matches('\'').to_string()
+                } else {
+                    content
+                }
+            }
+            "raw_string" => {
+                let text = node_text(arg_node, source);
+                text.trim_matches('\'').to_string()
+            }
+            "word" | "simple_expansion" | "concatenation" => {
+                node_text(arg_node, source).trim().to_string()
+            }
+            _ => node_text(arg_node, source).trim().to_string(),
+        };
+
+        if !path.is_empty() {
+            // Skip paths with variable expansions ($VAR, ${VAR}) — too complex.
+            if path.contains('$') {
+                return;
+            }
+            let is_relative = !path.starts_with('/');
+            imports.push(RawImport {
+                path,
+                language: Language::Bash,
+                is_relative,
+            });
+        }
+    });
+    imports
+}
+
+// ---------------------------------------------------------------------------
+// Matlab
+// ---------------------------------------------------------------------------
+
+fn extract_matlab(tree: &Tree, source: &[u8]) -> Vec<RawImport> {
+    let mut imports = Vec::new();
+    walk_all(tree.root_node(), &mut |node| {
+        // Look for function calls: `addpath('dir')` and direct function calls
+        // that could reference .m files.
+        if node.kind() != "function_call" {
+            return;
+        }
+        // Get the function name.
+        let mut c = node.walk();
+        let children: Vec<_> = node.children(&mut c).collect();
+        if children.is_empty() {
+            return;
+        }
+        let func_name = node_text(&children[0], source).trim().to_string();
+
+        if func_name == "addpath" || func_name == "run" {
+            // Extract string argument for addpath/run.
+            for child in &children {
+                if child.kind() == "arguments" {
+                    let mut ac = child.walk();
+                    for arg in child.children(&mut ac) {
+                        if arg.kind() == "string" {
+                            let text = node_text(&arg, source);
+                            let path = text.trim_matches('\'').trim_matches('"').trim().to_string();
+                            if !path.is_empty() {
+                                imports.push(RawImport {
+                                    path,
+                                    language: Language::Matlab,
+                                    is_relative: false,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+    imports
+}
+
+// ---------------------------------------------------------------------------
 // CallExtractor — function/method call sites
 // ---------------------------------------------------------------------------
 
@@ -1095,5 +1211,52 @@ mod tests {
             parse_c_include("#include <stdio.h>"),
             ("stdio.h".to_string(), false)
         );
+    }
+
+    fn parse_bash_tree(source: &str) -> Tree {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_bash::LANGUAGE.into())
+            .unwrap();
+        parser.parse(source, None).unwrap()
+    }
+
+    #[test]
+    fn bash_source_relative_extracted() {
+        let src = "source ./helpers.sh";
+        let tree = parse_bash_tree(src);
+        let imports = ImportExtractor::extract(&tree, src.as_bytes(), Language::Bash);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].path, "./helpers.sh");
+        assert!(imports[0].is_relative);
+    }
+
+    #[test]
+    fn bash_dot_command_extracted() {
+        let src = ". ./lib/common.sh";
+        let tree = parse_bash_tree(src);
+        let imports = ImportExtractor::extract(&tree, src.as_bytes(), Language::Bash);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].path, "./lib/common.sh");
+        assert!(imports[0].is_relative);
+    }
+
+    #[test]
+    fn bash_source_absolute_path() {
+        let src = "source /etc/profile.d/custom.sh";
+        let tree = parse_bash_tree(src);
+        let imports = ImportExtractor::extract(&tree, src.as_bytes(), Language::Bash);
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].path, "/etc/profile.d/custom.sh");
+        assert!(!imports[0].is_relative);
+    }
+
+    #[test]
+    fn bash_source_with_variable_skipped() {
+        let src = "source $HOME/.bashrc";
+        let tree = parse_bash_tree(src);
+        let imports = ImportExtractor::extract(&tree, src.as_bytes(), Language::Bash);
+        // Variable expansion paths should be skipped.
+        assert!(imports.is_empty());
     }
 }
