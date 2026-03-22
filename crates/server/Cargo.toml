@@ -10,8 +10,12 @@ description = "HTTP API server for Codixing — REST endpoints with SSE streamin
 name = "codixing-server"
 path = "src/main.rs"
 
+[features]
+default = ["usearch"]
+usearch = ["codixing-core/usearch"]
+
 [dependencies]
-codixing-core = { path = "../core" }
+codixing-core = { path = "../core", default-features = false }
 axum.workspace = true
 tokio.workspace = true
 tokio-stream = { workspace = true }
