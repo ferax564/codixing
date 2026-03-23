@@ -51,8 +51,19 @@ impl Engine {
         if let Some(ref mut vec_idx) = self.vector {
             vec_idx.remove_file(&rel_str)?;
         }
-        // Remove old chunk_meta entries for this file.
-        self.chunk_meta.retain(|_, v| v.file_path != rel_str);
+        // Remove old chunk_meta entries for this file and update trigram index.
+        let mut removed_ids = Vec::new();
+        self.chunk_meta.retain(|k, v| {
+            if v.file_path == rel_str {
+                removed_ids.push(*k);
+                false
+            } else {
+                true
+            }
+        });
+        for id in removed_ids {
+            self.trigram.remove(id);
+        }
 
         // Read and re-process.
         let source = fs::read(&abs_path)?;
@@ -84,6 +95,9 @@ impl Engine {
                     content: chunk.content.clone(),
                 },
             );
+
+            // Update trigram index for Strategy::Exact fast-path.
+            self.trigram.add(chunk.id, &chunk.content);
         }
 
         for entity in &result.entities {
@@ -232,7 +246,19 @@ impl Engine {
         if let Some(ref mut vec_idx) = self.vector {
             vec_idx.remove_file(rel_str)?;
         }
-        self.chunk_meta.retain(|_, v| v.file_path != rel_str);
+        // Remove chunk_meta entries and update trigram index.
+        let mut removed_ids = Vec::new();
+        self.chunk_meta.retain(|k, v| {
+            if v.file_path == rel_str {
+                removed_ids.push(*k);
+                false
+            } else {
+                true
+            }
+        });
+        for id in removed_ids {
+            self.trigram.remove(id);
+        }
 
         // Remove graph node + incident edges (PageRank deferred to caller).
         if let Some(ref mut graph) = self.graph {

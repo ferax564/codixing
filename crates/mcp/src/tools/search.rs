@@ -29,6 +29,7 @@ pub(crate) fn call_code_search(
         Some("thorough") => Strategy::Thorough,
         Some("explore") => Strategy::Explore,
         Some("deep") => Strategy::Deep,
+        Some("exact") => Strategy::Exact,
         _ => engine.detect_strategy(&query_str),
     };
 

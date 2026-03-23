@@ -9,6 +9,7 @@ use crate::retriever::mmr::mmr_select;
 use crate::retriever::{Retriever, SearchQuery, SearchResult, Strategy};
 
 use super::Engine;
+use super::pipeline::{SearchContext, SearchPipeline};
 
 impl Engine {
     /// Search the index using the strategy specified in `query`.
@@ -16,10 +17,11 @@ impl Engine {
     /// - `Instant` → BM25 only
     /// - `Fast`    → BM25 + vector + RRF fusion (falls back to BM25 if no embedder)
     /// - `Thorough` → hybrid + MMR deduplication
+    /// - `Exact`   → Trigram index fast-path with BM25 fallback
     pub fn search(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
         // Expand CamelCase/snake_case identifiers in the query for better BM25 matching.
-        // Skip expansion for Instant strategy (exact symbol lookups) to avoid false positives.
-        let query = if query.strategy != Strategy::Instant {
+        // Skip expansion for Instant/Exact strategies (exact symbol lookups).
+        let query = if query.strategy != Strategy::Instant && query.strategy != Strategy::Exact {
             let expanded = expand_query(&query.query);
             if expanded != query.query {
                 SearchQuery {
@@ -40,20 +42,17 @@ impl Engine {
         // because it contains the synonym map).
 
         let strategy = query.strategy;
+        let pipeline = self.pipeline_for_strategy(strategy);
+        // Save query string before the match block moves `query` into Explore/Deep.
+        let query_str = query.query.clone();
+
         let mut results = match strategy {
             Strategy::Instant => {
                 let retriever = BM25Retriever::new(&self.tantivy);
-                let mut results = retriever.search(&query)?;
-                // Apply definition boost even on the BM25-only path: it's pure
-                // HashMap lookups and fixes the definition-vs-usage ranking issue.
-                self.apply_definition_boost(&mut results, &query.query);
-                apply_path_match_boost(&mut results, &query.query);
-                self.apply_test_demotion(&mut results, &query.query);
-                results
+                retriever.search(&query)?
             }
             Strategy::Fast => {
-                let mut results = if let (Some(emb), Some(vec_idx)) = (&self.embedder, &self.vector)
-                {
+                if let (Some(emb), Some(vec_idx)) = (&self.embedder, &self.vector) {
                     let retriever = HybridRetriever::new(
                         &self.tantivy,
                         Arc::clone(emb),
@@ -65,18 +64,11 @@ impl Engine {
                 } else {
                     debug!("no embedder available; falling back to BM25 for Fast strategy");
                     BM25Retriever::new(&self.tantivy).search(&query)?
-                };
-                self.apply_graph_boost(&mut results, self.config.graph.boost_weight);
-                self.apply_definition_boost(&mut results, &query.query);
-                self.apply_popularity_boost(&mut results);
-                apply_path_match_boost(&mut results, &query.query);
-                self.apply_test_demotion(&mut results, &query.query);
-                results
+                }
             }
             Strategy::Explore => self.search_explore(query)?,
             Strategy::Thorough => {
-                let mut results = if let (Some(emb), Some(vec_idx)) = (&self.embedder, &self.vector)
-                {
+                if let (Some(emb), Some(vec_idx)) = (&self.embedder, &self.vector) {
                     let hybrid = HybridRetriever::new(
                         &self.tantivy,
                         Arc::clone(emb),
@@ -114,24 +106,115 @@ impl Engine {
                 } else {
                     debug!("no embedder available; falling back to BM25 for Thorough strategy");
                     BM25Retriever::new(&self.tantivy).search(&query)?
-                };
-                self.apply_graph_boost(&mut results, self.config.graph.boost_weight);
-                self.apply_definition_boost(&mut results, &query.query);
-                self.apply_popularity_boost(&mut results);
-                apply_path_match_boost(&mut results, &query.query);
-                self.apply_test_demotion(&mut results, &query.query);
-                results
+                }
             }
             Strategy::Deep => self.search_deep(query)?,
+            Strategy::Exact => self.search_exact(&query)?,
         };
 
-        // Apply adaptive truncation for non-Instant strategies.
-        // Instant = exact symbol lookups, should return all matches.
-        if strategy != Strategy::Instant {
-            adaptive_truncate(&mut results, 3, 0.35);
+        // Apply the post-retrieval pipeline (boosts, demotions, dedup, truncation).
+        let ctx = self.search_context(&query_str);
+        pipeline.run(&mut results, &ctx)?;
+        Ok(results)
+    }
+
+    /// Build the post-retrieval pipeline for the given strategy.
+    fn pipeline_for_strategy(&self, strategy: Strategy) -> SearchPipeline {
+        use super::pipeline::*;
+        match strategy {
+            Strategy::Instant => instant_pipeline(),
+            Strategy::Fast => fast_pipeline(),
+            Strategy::Thorough => thorough_pipeline(),
+            Strategy::Exact => exact_pipeline(),
+            // Explore and Deep handle their own boosts/demotions internally,
+            // but still need truncation + dedup from the outer pipeline.
+            Strategy::Explore | Strategy::Deep => SearchPipeline::new()
+                .add(TruncationStage {
+                    min_results: 3,
+                    cliff_threshold: 0.35,
+                })
+                .add(DeduplicationStage),
+        }
+    }
+
+    /// Build a [`SearchContext`] for pipeline stages.
+    fn search_context<'a>(&'a self, query: &'a str) -> SearchContext<'a> {
+        SearchContext {
+            query,
+            symbols: &self.symbols,
+            graph: self.graph.as_ref(),
+            graph_boost_weight: self.config.graph.boost_weight,
+        }
+    }
+
+    /// Trigram-index fast-path for exact identifier lookups.
+    ///
+    /// Phase 1: query the trigram inverted index for sub-millisecond exact
+    ///          substring matching.
+    /// Phase 2: if trigram yields < 3 results, fall back to BM25 and merge.
+    ///
+    /// Results are hydrated from chunk_meta and scored by match count.
+    fn search_exact(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
+        let trigram_matches = self.trigram.search(&query.query);
+
+        // Collect unique chunk IDs with match counts for scoring.
+        let mut chunk_hits: std::collections::HashMap<u64, usize> =
+            std::collections::HashMap::new();
+        for m in &trigram_matches {
+            *chunk_hits.entry(m.chunk_id).or_insert(0) += 1;
         }
 
-        dedup_overlapping(&mut results);
+        // Hydrate trigram results from chunk_meta.
+        let mut results: Vec<SearchResult> = Vec::new();
+        for (&chunk_id, &hit_count) in &chunk_hits {
+            if let Some(meta) = self.chunk_meta.get(&chunk_id) {
+                // Apply file filter if set.
+                if let Some(ref filter) = query.file_filter {
+                    if !meta.file_path.contains(filter.as_str()) {
+                        continue;
+                    }
+                }
+                results.push(SearchResult {
+                    chunk_id: format!("{chunk_id}"),
+                    file_path: meta.file_path.clone(),
+                    language: meta.language.clone(),
+                    // Score based on hit count: more occurrences = more relevant.
+                    score: hit_count as f32,
+                    line_start: meta.line_start,
+                    line_end: meta.line_end,
+                    signature: meta.signature.clone(),
+                    scope_chain: meta.scope_chain.clone(),
+                    content: meta.content.clone(),
+                });
+            }
+        }
+
+        // Sort by score descending.
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // If trigram yields < 3 results, augment with BM25.
+        if results.len() < 3 {
+            let bm25_query = SearchQuery {
+                strategy: Strategy::Instant,
+                ..query.clone()
+            };
+            let bm25_results = BM25Retriever::new(&self.tantivy).search(&bm25_query)?;
+
+            // Merge: add BM25 results not already in the trigram set.
+            let existing_ids: std::collections::HashSet<String> =
+                results.iter().map(|r| r.chunk_id.clone()).collect();
+            for r in bm25_results {
+                if !existing_ids.contains(&r.chunk_id) {
+                    results.push(r);
+                }
+            }
+        }
+
+        results.truncate(query.limit);
         Ok(results)
     }
 
@@ -164,8 +247,8 @@ impl Engine {
         let bm25_results = self.search(bm25_query)?;
         on_progress("bm25", &bm25_results);
 
-        // For Instant, BM25 is the only phase — return directly.
-        if strategy == Strategy::Instant {
+        // For Instant/Exact, BM25 is the only phase — return directly.
+        if strategy == Strategy::Instant || strategy == Strategy::Exact {
             return Ok(bm25_results);
         }
 
@@ -384,6 +467,7 @@ impl Engine {
     /// Auto-detect the best search strategy based on query characteristics
     /// and available engine capabilities (embedder, reranker).
     ///
+    /// - Single exact identifier → `Exact` (trigram fast-path for `_`, `::`, `.`, or camelCase)
     /// - Single identifier → `Instant` (BM25 is fastest for exact matches)
     /// - Two identifiers → `Fast` (if embedder available) or `Instant`
     /// - Natural language (3+ words) → `Thorough`/`Deep`/`Instant` depending on availability
@@ -391,6 +475,12 @@ impl Engine {
         let trimmed = query.trim();
         let words: Vec<&str> = trimmed.split_whitespace().collect();
         let word_count = words.len();
+
+        // Single identifier that looks like code → Exact (trigram fast-path).
+        // Criteria: contains `_`, `::`, `.`, or is camelCase (mixed case).
+        if word_count == 1 && is_identifier_like(trimmed) && looks_like_exact_identifier(trimmed) {
+            return Strategy::Exact;
+        }
 
         // Single identifier → Instant (BM25)
         if word_count == 1 && is_identifier_like(trimmed) {
@@ -624,7 +714,11 @@ impl Engine {
 /// 3. If any drop exceeds `cliff_threshold` of the top score, truncate at that point
 /// 4. Always keep at least `min_results`
 /// 5. Never exceed the original length
-fn adaptive_truncate(results: &mut Vec<SearchResult>, min_results: usize, cliff_threshold: f32) {
+pub(super) fn adaptive_truncate(
+    results: &mut Vec<SearchResult>,
+    min_results: usize,
+    cliff_threshold: f32,
+) {
     if results.len() <= min_results {
         return;
     }
@@ -650,7 +744,7 @@ fn adaptive_truncate(results: &mut Vec<SearchResult>, min_results: usize, cliff_
 /// Remove results whose line ranges overlap with a higher-scored result from
 /// the same file.  Results arrive sorted by score descending, so the first
 /// result from an overlapping group is always the best.
-fn dedup_overlapping(results: &mut Vec<SearchResult>) {
+pub(super) fn dedup_overlapping(results: &mut Vec<SearchResult>) {
     if results.len() <= 1 {
         return;
     }
@@ -669,7 +763,7 @@ fn dedup_overlapping(results: &mut Vec<SearchResult>) {
 }
 
 /// Detect inline test chunks by scope chain (e.g. Rust `#[cfg(test)] mod tests { }`).
-fn is_test_chunk(result: &SearchResult) -> bool {
+pub(super) fn is_test_chunk(result: &SearchResult) -> bool {
     result
         .scope_chain
         .iter()
@@ -677,7 +771,7 @@ fn is_test_chunk(result: &SearchResult) -> bool {
 }
 
 /// Detect test files by common path patterns across languages.
-fn is_test_file(path: &str) -> bool {
+pub(super) fn is_test_file(path: &str) -> bool {
     // Directory patterns: tests/, test/, __tests__/, fixtures/, __fixtures__/
     // Also check start of path for relative paths like "tests/foo/bar.py"
     if path.contains("/tests/")
@@ -745,7 +839,7 @@ fn is_test_file(path: &str) -> bool {
 ///
 /// Skipped when the query explicitly targets search concepts (detected by
 /// presence of search-related terms like "rrf", "fusion", "retriev", "hybrid").
-fn is_search_infra(path: &str, query: &str) -> bool {
+pub(super) fn is_search_infra(path: &str, query: &str) -> bool {
     let is_infra = path.ends_with("engine/search.rs") || path.ends_with("retriever/hybrid.rs");
     if !is_infra {
         return false;
@@ -775,7 +869,7 @@ fn is_search_infra(path: &str, query: &str) -> bool {
 /// 1. Same stem: `db/db_impl.h` demoted when `db/db_impl.cc` is present
 /// 2. Any impl present: when results contain both .h and .cc/.cpp files,
 ///    all headers get a mild demotion to prefer implementation files.
-fn apply_header_demotion(results: &mut [SearchResult], changed: &mut bool) {
+pub(super) fn apply_header_demotion(results: &mut [SearchResult], changed: &mut bool) {
     use std::collections::HashSet;
 
     let is_impl = |p: &str| {
@@ -840,7 +934,7 @@ fn extract_dotted_paths(query: &str) -> Vec<String> {
 /// When a query mentions something like `django.db.models.lookups`, results
 /// whose `file_path` contains `django/db/models/lookups` get a 2× score boost.
 /// This is a zero-cost post-retrieval heuristic — no ML compute involved.
-fn apply_path_match_boost(results: &mut [SearchResult], query: &str) {
+pub(super) fn apply_path_match_boost(results: &mut [SearchResult], query: &str) {
     let mut boosted = false;
 
     // Boost 1: dotted module paths (e.g., "django.db.models" → file path match)
@@ -1291,6 +1385,26 @@ fn is_identifier_like(s: &str) -> bool {
         && s.len() <= 80
         && s.chars()
             .all(|c| c.is_alphanumeric() || c == '_' || c == ':' || c == '.')
+}
+
+/// Check if a single-token identifier looks like an exact code symbol that
+/// benefits from trigram fast-path: contains `_`, `::`, `.`, or is camelCase.
+///
+/// Simple all-lowercase words like "engine" or "search" go through BM25 (Instant)
+/// instead, since they are more likely to be concept searches.
+fn looks_like_exact_identifier(s: &str) -> bool {
+    // Must be at least 3 chars for trigram to work.
+    if s.len() < 3 {
+        return false;
+    }
+    // Contains structural separators → definitely code.
+    if s.contains('_') || s.contains("::") || s.contains('.') {
+        return true;
+    }
+    // camelCase / PascalCase: has both upper and lower case letters.
+    let has_upper = s.chars().any(|c| c.is_uppercase());
+    let has_lower = s.chars().any(|c| c.is_lowercase());
+    has_upper && has_lower
 }
 
 /// Split a CamelCase or PascalCase identifier into lowercase words.
@@ -2039,5 +2153,50 @@ mod tests {
             orphan_token_count, 1,
             "should not add standalone 'orphan' when already in query, got: {result}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Exact identifier detection tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn looks_like_exact_identifier_snake_case() {
+        assert!(looks_like_exact_identifier("process_batch"));
+        assert!(looks_like_exact_identifier("my_func_name"));
+    }
+
+    #[test]
+    fn looks_like_exact_identifier_camel_case() {
+        assert!(looks_like_exact_identifier("ProcessBatch"));
+        assert!(looks_like_exact_identifier("getServerSideProps"));
+        assert!(looks_like_exact_identifier("URLResolver"));
+    }
+
+    #[test]
+    fn looks_like_exact_identifier_qualified() {
+        assert!(looks_like_exact_identifier("std::io::Read"));
+        assert!(looks_like_exact_identifier("django.db.models"));
+    }
+
+    #[test]
+    fn looks_like_exact_identifier_rejects_plain_words() {
+        // Simple all-lowercase words should NOT trigger Exact strategy.
+        assert!(!looks_like_exact_identifier("engine"));
+        assert!(!looks_like_exact_identifier("search"));
+        assert!(!looks_like_exact_identifier("results"));
+    }
+
+    #[test]
+    fn looks_like_exact_identifier_rejects_short() {
+        // Must be >= 3 chars for trigram.
+        assert!(!looks_like_exact_identifier("ab"));
+        assert!(!looks_like_exact_identifier(""));
+    }
+
+    #[test]
+    fn looks_like_exact_identifier_all_uppercase() {
+        // All-uppercase like "URL" or "HTTP" — no mixed case, no separators.
+        assert!(!looks_like_exact_identifier("URL"));
+        assert!(!looks_like_exact_identifier("HTTP"));
     }
 }

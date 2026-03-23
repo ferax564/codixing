@@ -27,6 +27,10 @@ pub enum Strategy {
     /// Highest precision available; requires `reranker_enabled = true` in config.
     /// Falls back to `Thorough` if the reranker model is not loaded.
     Deep,
+    /// Trigram index fast-path for exact identifier lookups.
+    /// Uses the trigram inverted index for sub-millisecond exact substring
+    /// matching, with BM25 fallback when trigram yields < 3 results.
+    Exact,
 }
 
 /// A search query against the code index.

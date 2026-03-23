@@ -2,6 +2,7 @@ mod files;
 mod focus_map;
 mod graph;
 mod orphans;
+pub(crate) mod pipeline;
 mod search;
 mod symbol_graph;
 mod sync;
@@ -251,6 +252,8 @@ pub struct Engine {
     pub(super) graph: Option<CodeGraph>,
     /// Optional cross-encoder reranker (BGE-Reranker-Base) for the `deep` strategy.
     pub(super) reranker: Option<Arc<Reranker>>,
+    /// Trigram index for sub-millisecond exact substring search (Strategy::Exact).
+    pub(super) trigram: crate::index::TrigramIndex,
     /// Session state for tracking agent interactions.
     session: Arc<SessionState>,
     /// Shared session store for multi-agent context sharing.
@@ -471,6 +474,12 @@ impl Engine {
         let session = Arc::new(SessionState::with_root(true, &root));
         session.cleanup_old_sessions();
 
+        // Build trigram index from chunk metadata for Strategy::Exact fast-path.
+        let mut trigram = crate::index::TrigramIndex::new();
+        for entry in chunk_meta_map.iter() {
+            trigram.add(*entry.key(), &entry.value().content);
+        }
+
         Ok(Self {
             config,
             store,
@@ -483,6 +492,7 @@ impl Engine {
             chunk_meta: chunk_meta_map,
             graph,
             reranker,
+            trigram,
             session,
             shared_session: SharedSession::default_new(),
             read_only: false,
@@ -652,6 +662,12 @@ impl Engine {
             .ok()
             .and_then(|m| m.modified().ok());
 
+        // Build trigram index from chunk metadata for Strategy::Exact fast-path.
+        let mut trigram = crate::index::TrigramIndex::new();
+        for entry in chunk_meta.iter() {
+            trigram.add(*entry.key(), &entry.value().content);
+        }
+
         Ok(Self {
             config,
             store,
@@ -664,6 +680,7 @@ impl Engine {
             chunk_meta,
             graph,
             reranker,
+            trigram,
             session,
             shared_session: SharedSession::default_new(),
             read_only,
@@ -813,6 +830,12 @@ impl Engine {
             .ok()
             .and_then(|m| m.modified().ok());
 
+        // Build trigram index from chunk metadata for Strategy::Exact fast-path.
+        let mut trigram = crate::index::TrigramIndex::new();
+        for entry in chunk_meta.iter() {
+            trigram.add(*entry.key(), &entry.value().content);
+        }
+
         Ok(Self {
             config,
             store,
@@ -825,6 +848,7 @@ impl Engine {
             chunk_meta,
             graph,
             reranker,
+            trigram,
             session,
             shared_session: SharedSession::default_new(),
             read_only: true,
@@ -956,6 +980,12 @@ impl Engine {
                     }
                 }
             }
+        }
+
+        // Rebuild trigram index from updated chunk metadata.
+        self.trigram = crate::index::TrigramIndex::new();
+        for entry in self.chunk_meta.iter() {
+            self.trigram.add(*entry.key(), &entry.value().content);
         }
 
         // Refresh the Tantivy reader so it picks up new segments.

@@ -14,7 +14,7 @@ required = true
 [tools.params.strategy]
 type = "string"
 description = "Retrieval strategy. Omit to auto-detect from query: single identifiers use 'instant' (BM25), multi-word uses 'fast'/'thorough'. Explicit options: 'instant'=BM25 only (fastest), 'fast'=hybrid BM25+vector, 'thorough'=hybrid+MMR deduplication, 'explore'=BM25 + graph expansion, 'deep'=hybrid + reranker"
-enum = ["instant", "fast", "thorough", "explore", "deep"]
+enum = ["instant", "fast", "thorough", "explore", "deep", "exact"]
 
 [tools.params.limit]
 type = "integer"

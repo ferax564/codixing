@@ -306,6 +306,8 @@ enum StrategyArg {
     /// Two-stage: hybrid first-pass then BGE-Reranker cross-encoder re-scoring.
     /// Requires reranker_enabled = true (set via --reranker on init).
     Deep,
+    /// Trigram index fast-path for exact identifier lookups.
+    Exact,
 }
 
 impl StrategyArg {
@@ -318,6 +320,7 @@ impl StrategyArg {
             StrategyArg::Thorough => Strategy::Thorough,
             StrategyArg::Explore => Strategy::Explore,
             StrategyArg::Deep => Strategy::Deep,
+            StrategyArg::Exact => Strategy::Exact,
         }
     }
 }
