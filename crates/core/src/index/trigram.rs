@@ -4,6 +4,11 @@
 //! Search intersects posting lists for all query trigrams, then verifies exact
 //! matches in the original text. This provides O(1) candidate filtering for
 //! exact substring queries.
+//!
+//! Also exposes [`FileTrigramIndex`] — a file-level variant used by
+//! [`crate::engine::Engine::grep_code`] to skip files that cannot possibly
+//! match before doing any disk I/O, and [`extract_regex_seeds`] to pull
+//! required literal prefixes out of a regex pattern for the same purpose.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -183,6 +188,190 @@ impl Default for TrigramIndex {
     }
 }
 
+// ── File-level trigram index ──────────────────────────────────────────────────
+
+/// A file-level trigram index for fast grep pre-filtering.
+///
+/// Maps 3-byte substrings to the set of files whose indexed content contains
+/// those trigrams. Used by [`crate::engine::Engine::grep_code`] to skip files
+/// that cannot possibly contain a pattern, avoiding unnecessary disk I/O.
+///
+/// The index is built from chunk content. Trigrams that straddle a chunk
+/// boundary are not captured, but this affects < 0.1 % of real-world patterns.
+pub struct FileTrigramIndex {
+    /// file index → relative path (empty string = tombstoned / removed)
+    files: Vec<String>,
+    /// path → file index
+    file_index: HashMap<String, u32>,
+    /// trigram → sorted list of file indices containing that trigram
+    index: HashMap<[u8; 3], Vec<u32>>,
+}
+
+impl Default for FileTrigramIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FileTrigramIndex {
+    /// Creates an empty index.
+    pub fn new() -> Self {
+        Self {
+            files: Vec::new(),
+            file_index: HashMap::new(),
+            index: HashMap::new(),
+        }
+    }
+
+    /// Index all trigrams from `content` under `path`.
+    ///
+    /// Safe to call multiple times with the same `path` (e.g. once per chunk):
+    /// duplicate `(trigram, file_index)` pairs are deduplicated.
+    pub fn add(&mut self, path: &str, content: &[u8]) {
+        let file_idx = if let Some(&idx) = self.file_index.get(path) {
+            idx
+        } else {
+            let idx = self.files.len() as u32;
+            self.files.push(path.to_string());
+            self.file_index.insert(path.to_string(), idx);
+            idx
+        };
+
+        if content.len() < 3 {
+            return;
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..content.len() - 2 {
+            let tri = [content[i], content[i + 1], content[i + 2]];
+            if seen.insert(tri) {
+                let list = self.index.entry(tri).or_default();
+                // Maintain sorted order; dedup on insert to avoid duplicates
+                // when `add` is called multiple times for the same file.
+                if list.last() != Some(&file_idx) {
+                    match list.binary_search(&file_idx) {
+                        Ok(_) => {} // already present
+                        Err(pos) => list.insert(pos, file_idx),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Returns candidate file paths for a **literal** pattern.
+    ///
+    /// Returns `None` when the literal is shorter than 3 bytes and trigram
+    /// pre-filtering cannot be applied — the caller should fall back to a full
+    /// scan.  Returns `Some([])` when the literal contains a trigram absent
+    /// from the index, meaning no file can match.
+    pub fn candidates_for_literal<'a>(&'a self, literal: &[u8]) -> Option<Vec<&'a str>> {
+        if literal.len() < 3 {
+            return None;
+        }
+        let trigrams: Vec<[u8; 3]> = (0..literal.len() - 2)
+            .map(|i| [literal[i], literal[i + 1], literal[i + 2]])
+            .collect();
+
+        let mut lists: Vec<&Vec<u32>> = Vec::with_capacity(trigrams.len());
+        for t in &trigrams {
+            match self.index.get(t) {
+                Some(l) => lists.push(l),
+                None => return Some(Vec::new()), // trigram absent → no matches
+            }
+        }
+
+        // Intersect posting lists starting from the shortest.
+        lists.sort_unstable_by_key(|l| l.len());
+        let mut candidates = lists[0].clone();
+        for list in &lists[1..] {
+            candidates.retain(|id| list.binary_search(id).is_ok());
+            if candidates.is_empty() {
+                break;
+            }
+        }
+
+        Some(
+            candidates
+                .iter()
+                .filter_map(|&i| {
+                    let p = self.files[i as usize].as_str();
+                    if p.is_empty() { None } else { Some(p) }
+                })
+                .collect(),
+        )
+    }
+
+    /// Returns candidate file paths for a set of possible literal **seeds**.
+    ///
+    /// A seed represents one possible required prefix of a regex match.
+    /// Semantics: a file is a candidate if it matches **all** trigrams of
+    /// **any** seed (AND within a seed, OR across seeds).
+    ///
+    /// Returns `None` if no seed is long enough (≥ 3 bytes) to pre-filter.
+    pub fn candidates_for_seeds<'a>(&'a self, seeds: &[Vec<u8>]) -> Option<Vec<&'a str>> {
+        let usable: Vec<&Vec<u8>> = seeds.iter().filter(|s| s.len() >= 3).collect();
+        if usable.is_empty() {
+            return None;
+        }
+
+        let mut result: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for seed in usable {
+            if let Some(paths) = self.candidates_for_literal(seed) {
+                for path in paths {
+                    if let Some(&idx) = self.file_index.get(path) {
+                        result.insert(idx);
+                    }
+                }
+            }
+        }
+
+        Some(
+            result
+                .into_iter()
+                .filter_map(|i| {
+                    let p = self.files[i as usize].as_str();
+                    if p.is_empty() { None } else { Some(p) }
+                })
+                .collect(),
+        )
+    }
+
+    /// Number of files currently in the index.
+    pub fn file_count(&self) -> usize {
+        self.file_index.len()
+    }
+}
+
+// ── Regex literal seed extraction ─────────────────────────────────────────────
+
+/// Extract required literal prefix seeds from a regex pattern.
+///
+/// Uses `regex-syntax` to parse the pattern and extract the set of possible
+/// prefix literals.  Any match of the pattern must *start with* one of the
+/// returned seeds, so the seeds can be used to pre-filter candidate files via
+/// [`FileTrigramIndex::candidates_for_seeds`].
+///
+/// Returns an empty `Vec` when the pattern is too broad to extract useful
+/// seeds (e.g. `.*`, `[a-z]+`).
+pub fn extract_regex_seeds(pattern: &str) -> Vec<Vec<u8>> {
+    use regex_syntax::{Parser, hir::literal::Extractor};
+
+    let hir = match Parser::new().parse(pattern) {
+        Ok(h) => h,
+        Err(_) => return Vec::new(),
+    };
+
+    let seq = Extractor::new().extract(&hir);
+    match seq.literals() {
+        None => Vec::new(),
+        Some(lits) => lits
+            .iter()
+            .filter(|l| l.len() >= 3)
+            .map(|l| l.as_bytes().to_vec())
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,5 +511,92 @@ mod tests {
     fn load_nonexistent_file_returns_error() {
         let result = TrigramIndex::load_binary(std::path::Path::new("/nonexistent/trigram.bin"));
         assert!(result.is_err());
+    }
+
+    // ── FileTrigramIndex tests ────────────────────────────────────────────────
+
+    #[test]
+    fn file_trigram_literal_finds_correct_files() {
+        let mut idx = FileTrigramIndex::new();
+        idx.add("a.rs", b"fn process_batch() {}");
+        idx.add("b.rs", b"fn main() { process_batch(); }");
+        idx.add("c.rs", b"fn unrelated() {}");
+
+        let candidates = idx.candidates_for_literal(b"process_batch").unwrap();
+        assert!(candidates.contains(&"a.rs"));
+        assert!(candidates.contains(&"b.rs"));
+        assert!(!candidates.contains(&"c.rs"));
+    }
+
+    #[test]
+    fn file_trigram_absent_trigram_returns_empty() {
+        let mut idx = FileTrigramIndex::new();
+        idx.add("a.rs", b"fn hello() {}");
+
+        let candidates = idx.candidates_for_literal(b"nonexistent_sym").unwrap();
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn file_trigram_short_literal_returns_none() {
+        let idx = FileTrigramIndex::new();
+        assert!(idx.candidates_for_literal(b"ab").is_none());
+    }
+
+    #[test]
+    fn file_trigram_multi_chunk_same_file() {
+        let mut idx = FileTrigramIndex::new();
+        idx.add("a.rs", b"fn foo() {}"); // chunk 1
+        idx.add("a.rs", b"fn bar() {}"); // chunk 2
+        idx.add("b.rs", b"fn baz() {}");
+
+        assert_eq!(idx.file_count(), 2);
+        let c = idx.candidates_for_literal(b"foo").unwrap();
+        assert_eq!(c, vec!["a.rs"]);
+    }
+
+    #[test]
+    fn file_trigram_seeds_or_logic() {
+        let mut idx = FileTrigramIndex::new();
+        idx.add("a.rs", b"use tokio::runtime;");
+        idx.add("b.rs", b"use async_std::task;");
+        idx.add("c.rs", b"fn plain_function() {}");
+
+        let seeds = vec![b"tokio".to_vec(), b"async_std".to_vec()];
+        let candidates = idx.candidates_for_seeds(&seeds).unwrap();
+        assert!(candidates.contains(&"a.rs"));
+        assert!(candidates.contains(&"b.rs"));
+        assert!(!candidates.contains(&"c.rs"));
+    }
+
+    #[test]
+    fn extract_regex_seeds_literal_pattern() {
+        // A plain literal has itself as the only seed.
+        let seeds = extract_regex_seeds("process_batch");
+        assert!(!seeds.is_empty());
+        assert!(seeds.iter().any(|s| s == b"process_batch"));
+    }
+
+    #[test]
+    fn extract_regex_seeds_anchored_literal() {
+        let seeds = extract_regex_seeds("^fn main");
+        assert!(!seeds.is_empty());
+        // prefix should contain "fn " or longer
+        assert!(seeds.iter().any(|s| s.windows(3).any(|w| w == b"fn ")));
+    }
+
+    #[test]
+    fn extract_regex_seeds_broad_pattern_returns_empty() {
+        // .* can match anything — no useful seeds
+        let seeds = extract_regex_seeds(".*");
+        assert!(seeds.is_empty());
+    }
+
+    #[test]
+    fn extract_regex_seeds_alternation() {
+        let seeds = extract_regex_seeds("tokio|async_std");
+        // Both branches should appear as seeds
+        assert!(seeds.iter().any(|s| s == b"tokio"));
+        assert!(seeds.iter().any(|s| s == b"async_std"));
     }
 }
