@@ -17,7 +17,7 @@ use std::path::Path;
 
 use codixing_core::complexity::{count_cyclomatic_complexity, risk_band};
 use codixing_core::language::detect_language;
-use codixing_core::{ConflictKind, Engine, EntityKind};
+use codixing_core::{Engine, EntityKind};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
@@ -850,16 +850,11 @@ impl LanguageServer for CodixingBackend {
         // Use engine's validate_rename for conflict detection.
         let validation = engine.validate_rename(&old_name, new_name, None);
 
-        // If there are name collisions, reject the rename.
-        let has_collision = validation
-            .conflicts
-            .iter()
-            .any(|c| c.kind == ConflictKind::NameCollision);
-        if has_collision {
+        // Reject ALL conflict types (NameCollision, ImportConflict, Shadowing).
+        if !validation.conflicts.is_empty() {
             let msg = validation
                 .conflicts
                 .iter()
-                .filter(|c| c.kind == ConflictKind::NameCollision)
                 .map(|c| c.message.as_str())
                 .collect::<Vec<_>>()
                 .join("; ");

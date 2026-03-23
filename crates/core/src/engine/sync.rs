@@ -139,7 +139,19 @@ impl Engine {
             let mut needs_embed: Vec<usize> = Vec::new();
 
             for (i, chunk) in chunks.iter().enumerate() {
-                let new_hash = xxhash_rust::xxh3::xxh3_64(chunk.content.as_bytes());
+                // Hash the full embed text (including context metadata like scope,
+                // file path, entities) so that moving a block to a different scope
+                // or renaming the enclosing symbol triggers re-embedding.
+                let hash_text = if contextual {
+                    if let Some(meta) = self.chunk_meta.get(&chunk.id) {
+                        make_embed_text(&meta, true)
+                    } else {
+                        chunk.content.clone()
+                    }
+                } else {
+                    chunk.content.clone()
+                };
+                let new_hash = xxhash_rust::xxh3::xxh3_64(hash_text.as_bytes());
                 if let Some((_old_id, old_vec)) = old_chunk_hashes.get(&new_hash) {
                     // Content unchanged — reuse the existing vector.
                     if let Err(e) = vec_idx.add_mut(chunk.id, old_vec, &rel_str) {

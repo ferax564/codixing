@@ -135,6 +135,21 @@ export function activate(context: vscode.ExtensionContext): void {
     // Start LSP client if configured and an index exists
     if (cfg.get<boolean>('lspEnabled', true)) {
         startLspClient(context, outputChannel);
+
+        // Watch for .codixing directory creation so that LSP starts
+        // automatically after the user runs "Index Workspace" on a fresh repo.
+        if (root && !fs.existsSync(path.join(root, '.codixing'))) {
+            const watcher = vscode.workspace.createFileSystemWatcher(
+                new vscode.RelativePattern(root, '.codixing/**'),
+            );
+            const onIndexCreated = () => {
+                startLspClient(context, outputChannel);
+                updateStatusBar();
+                watcher.dispose();
+            };
+            watcher.onDidCreate(onIndexCreated);
+            context.subscriptions.push(watcher);
+        }
     }
 }
 
