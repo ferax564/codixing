@@ -301,34 +301,37 @@ impl FileTrigramIndex {
         )
     }
 
-    /// Returns candidate file paths for a set of possible literal **seeds**.
+    /// Returns candidate file paths given a set of trigrams that **all** must
+    /// be present in any matching file (AND semantics).
     ///
-    /// A seed represents one possible required prefix of a regex match.
-    /// Semantics: a file is a candidate if it matches **all** trigrams of
-    /// **any** seed (AND within a seed, OR across seeds).
-    ///
-    /// Returns `None` if no seed is long enough (≥ 3 bytes) to pre-filter.
-    pub fn candidates_for_seeds<'a>(&'a self, seeds: &[Vec<u8>]) -> Option<Vec<&'a str>> {
-        let usable: Vec<&Vec<u8>> = seeds.iter().filter(|s| s.len() >= 3).collect();
-        if usable.is_empty() {
+    /// Typically fed the output of [`extract_required_trigrams`].
+    /// Returns `None` when the trigram set is empty (can't pre-filter).
+    pub fn candidates_for_trigrams<'a>(&'a self, trigrams: &[[u8; 3]]) -> Option<Vec<&'a str>> {
+        if trigrams.is_empty() {
             return None;
         }
 
-        let mut result: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        for seed in usable {
-            if let Some(paths) = self.candidates_for_literal(seed) {
-                for path in paths {
-                    if let Some(&idx) = self.file_index.get(path) {
-                        result.insert(idx);
-                    }
-                }
+        let mut lists: Vec<&Vec<u32>> = Vec::with_capacity(trigrams.len());
+        for t in trigrams {
+            match self.index.get(t) {
+                Some(l) => lists.push(l),
+                None => return Some(Vec::new()), // required trigram absent → no match
+            }
+        }
+
+        lists.sort_unstable_by_key(|l| l.len());
+        let mut candidates = lists[0].clone();
+        for list in &lists[1..] {
+            candidates.retain(|id| list.binary_search(id).is_ok());
+            if candidates.is_empty() {
+                break;
             }
         }
 
         Some(
-            result
-                .into_iter()
-                .filter_map(|i| {
+            candidates
+                .iter()
+                .filter_map(|&i| {
                     let p = self.files[i as usize].as_str();
                     if p.is_empty() { None } else { Some(p) }
                 })
@@ -342,34 +345,101 @@ impl FileTrigramIndex {
     }
 }
 
-// ── Regex literal seed extraction ─────────────────────────────────────────────
+// ── Regex → required trigram extraction (Russ Cox / trigrep technique) ────────
 
-/// Extract required literal prefix seeds from a regex pattern.
+/// Extract trigrams that **must** appear in any match of a regex pattern.
 ///
-/// Uses `regex-syntax` to parse the pattern and extract the set of possible
-/// prefix literals.  Any match of the pattern must *start with* one of the
-/// returned seeds, so the seeds can be used to pre-filter candidate files via
-/// [`FileTrigramIndex::candidates_for_seeds`].
+/// Recursively walks the `regex-syntax` HIR tree with these rules:
+/// - **Literal** bytes → extract all 3-byte windows as required trigrams
+/// - **Concat**(a, b) → union (AND): both a's and b's trigrams are required
+/// - **Alternation**(a, b) → intersection: only trigrams common to ALL branches
+/// - **Repetition** (?, *, +) → trigrams from the inner expr (but `?` / `*` clears
+///   them since the branch can match without the inner content)
+/// - **Class** / **Anchor** / **Look** → no trigrams extractable
 ///
-/// Returns an empty `Vec` when the pattern is too broad to extract useful
-/// seeds (e.g. `.*`, `[a-z]+`).
-pub fn extract_regex_seeds(pattern: &str) -> Vec<Vec<u8>> {
-    use regex_syntax::{Parser, hir::literal::Extractor};
+/// The returned set can be fed directly to
+/// [`FileTrigramIndex::candidates_for_trigrams`] for AND-intersection.
+///
+/// Returns an empty `Vec` for patterns too broad to extract anything useful
+/// (e.g. `.*`, `[a-z]+`, or invalid syntax).
+pub fn extract_required_trigrams(pattern: &str) -> Vec<[u8; 3]> {
+    use regex_syntax::Parser;
+    use regex_syntax::hir::{Hir, HirKind};
 
     let hir = match Parser::new().parse(pattern) {
         Ok(h) => h,
         Err(_) => return Vec::new(),
     };
 
-    let seq = Extractor::new().extract(&hir);
-    match seq.literals() {
-        None => Vec::new(),
-        Some(lits) => lits
-            .iter()
-            .filter(|l| l.len() >= 3)
-            .map(|l| l.as_bytes().to_vec())
-            .collect(),
+    fn walk(hir: &Hir) -> std::collections::HashSet<[u8; 3]> {
+        match hir.kind() {
+            HirKind::Literal(lit) => trigrams_from_bytes(&lit.0),
+            HirKind::Concat(subs) => {
+                // All sub-expressions are concatenated — every sub's trigrams
+                // must appear in any match.  Also extract trigrams that span
+                // the boundary between adjacent literal sub-expressions.
+                let mut required = std::collections::HashSet::new();
+                let mut literal_run: Vec<u8> = Vec::new();
+
+                for sub in subs {
+                    if let HirKind::Literal(lit) = sub.kind() {
+                        literal_run.extend_from_slice(&lit.0);
+                    } else {
+                        // Flush accumulated literal bytes.
+                        if literal_run.len() >= 3 {
+                            required.extend(trigrams_from_bytes(&literal_run));
+                        }
+                        literal_run.clear();
+                        // Recurse into non-literal sub-expression.
+                        required.extend(walk(sub));
+                    }
+                }
+                // Flush trailing literal bytes.
+                if literal_run.len() >= 3 {
+                    required.extend(trigrams_from_bytes(&literal_run));
+                }
+                required
+            }
+            HirKind::Alternation(branches) => {
+                // A match uses exactly one branch.  Only trigrams common to
+                // ALL branches are required.
+                let mut iter = branches.iter();
+                let first = match iter.next() {
+                    Some(b) => walk(b),
+                    None => return std::collections::HashSet::new(),
+                };
+                iter.fold(first, |acc, branch| {
+                    let branch_set = walk(branch);
+                    acc.intersection(&branch_set).copied().collect()
+                })
+            }
+            HirKind::Repetition(rep) => {
+                // `+` means the inner must match at least once → its trigrams
+                // are required.  `*` and `?` can match zero times → clear.
+                if rep.min >= 1 {
+                    walk(&rep.sub)
+                } else {
+                    std::collections::HashSet::new()
+                }
+            }
+            HirKind::Capture(cap) => walk(&cap.sub),
+            // Class, Look, Empty → no trigrams
+            _ => std::collections::HashSet::new(),
+        }
     }
+
+    fn trigrams_from_bytes(bytes: &[u8]) -> std::collections::HashSet<[u8; 3]> {
+        let mut set = std::collections::HashSet::new();
+        if bytes.len() >= 3 {
+            for i in 0..bytes.len() - 2 {
+                set.insert([bytes[i], bytes[i + 1], bytes[i + 2]]);
+            }
+        }
+        set
+    }
+
+    let result = walk(&hir);
+    result.into_iter().collect()
 }
 
 #[cfg(test)]
@@ -556,47 +626,95 @@ mod tests {
     }
 
     #[test]
-    fn file_trigram_seeds_or_logic() {
+    fn file_trigram_candidates_for_trigrams_and_logic() {
         let mut idx = FileTrigramIndex::new();
-        idx.add("a.rs", b"use tokio::runtime;");
-        idx.add("b.rs", b"use async_std::task;");
-        idx.add("c.rs", b"fn plain_function() {}");
+        idx.add("a.rs", b"fn process_batch() {}");
+        idx.add("b.rs", b"fn main() { process_batch(); }");
+        idx.add("c.rs", b"fn unrelated() {}");
 
-        let seeds = vec![b"tokio".to_vec(), b"async_std".to_vec()];
-        let candidates = idx.candidates_for_seeds(&seeds).unwrap();
+        // Extract trigrams from "process" — all must be present (AND).
+        let trigrams: Vec<[u8; 3]> = b"process".windows(3).map(|w| [w[0], w[1], w[2]]).collect();
+        let candidates = idx.candidates_for_trigrams(&trigrams).unwrap();
         assert!(candidates.contains(&"a.rs"));
         assert!(candidates.contains(&"b.rs"));
         assert!(!candidates.contains(&"c.rs"));
     }
 
     #[test]
-    fn extract_regex_seeds_literal_pattern() {
-        // A plain literal has itself as the only seed.
-        let seeds = extract_regex_seeds("process_batch");
-        assert!(!seeds.is_empty());
-        assert!(seeds.iter().any(|s| s == b"process_batch"));
+    fn file_trigram_candidates_for_trigrams_empty_returns_none() {
+        let idx = FileTrigramIndex::new();
+        assert!(idx.candidates_for_trigrams(&[]).is_none());
+    }
+
+    // ── extract_required_trigrams tests ────────────────────────────────────────
+
+    #[test]
+    fn required_trigrams_literal_pattern() {
+        let tris = extract_required_trigrams("process_batch");
+        // All trigrams of "process_batch" must be required.
+        let expected: std::collections::HashSet<[u8; 3]> = b"process_batch"
+            .windows(3)
+            .map(|w| [w[0], w[1], w[2]])
+            .collect();
+        let result: std::collections::HashSet<[u8; 3]> = tris.into_iter().collect();
+        assert_eq!(result, expected);
     }
 
     #[test]
-    fn extract_regex_seeds_anchored_literal() {
-        let seeds = extract_regex_seeds("^fn main");
-        assert!(!seeds.is_empty());
-        // prefix should contain "fn " or longer
-        assert!(seeds.iter().any(|s| s.windows(3).any(|w| w == b"fn ")));
+    fn required_trigrams_concat_with_wildcard() {
+        // foo.*bar → trigrams from "foo" AND "bar" both required.
+        let tris = extract_required_trigrams("foo.*bar");
+        let result: std::collections::HashSet<[u8; 3]> = tris.into_iter().collect();
+        assert!(result.contains(b"foo"));
+        assert!(result.contains(b"bar"));
     }
 
     #[test]
-    fn extract_regex_seeds_broad_pattern_returns_empty() {
-        // .* can match anything — no useful seeds
-        let seeds = extract_regex_seeds(".*");
-        assert!(seeds.is_empty());
+    fn required_trigrams_alternation_intersection() {
+        // (fooXYZ|fooABC) → only trigrams common to both branches are required.
+        // "foo" is common to both.
+        let tris = extract_required_trigrams("(fooXYZ|fooABC)");
+        let result: std::collections::HashSet<[u8; 3]> = tris.into_iter().collect();
+        assert!(result.contains(b"foo"));
+        // "XYZ" is NOT in the intersection (only in first branch).
+        assert!(!result.contains(b"XYZ"));
     }
 
     #[test]
-    fn extract_regex_seeds_alternation() {
-        let seeds = extract_regex_seeds("tokio|async_std");
-        // Both branches should appear as seeds
-        assert!(seeds.iter().any(|s| s == b"tokio"));
-        assert!(seeds.iter().any(|s| s == b"async_std"));
+    fn required_trigrams_broad_pattern_returns_empty() {
+        assert!(extract_required_trigrams(".*").is_empty());
+        assert!(extract_required_trigrams("[a-z]+").is_empty());
+    }
+
+    #[test]
+    fn required_trigrams_case_insensitive_graceful_fallback() {
+        // (?i)foo compiles to character classes, not literals — should
+        // return empty (graceful fallback to full scan).
+        let tris = extract_required_trigrams("(?i)foo");
+        assert!(tris.is_empty());
+    }
+
+    #[test]
+    fn required_trigrams_repetition_plus_vs_star() {
+        // (foo)+ requires foo, (foo)* does not.
+        let plus_tris = extract_required_trigrams("(foo)+bar");
+        let plus: std::collections::HashSet<[u8; 3]> = plus_tris.into_iter().collect();
+        assert!(plus.contains(b"foo"));
+        assert!(plus.contains(b"bar"));
+
+        let star_tris = extract_required_trigrams("(foo)*bar");
+        let star: std::collections::HashSet<[u8; 3]> = star_tris.into_iter().collect();
+        // foo is NOT required (can match zero times), but bar is.
+        assert!(!star.contains(b"foo"));
+        assert!(star.contains(b"bar"));
+    }
+
+    #[test]
+    fn required_trigrams_anchored_literal() {
+        // ^fn main → "fn main" is a literal in a concat.
+        let tris = extract_required_trigrams("^fn main");
+        let result: std::collections::HashSet<[u8; 3]> = tris.into_iter().collect();
+        assert!(result.contains(b"fn "));
+        assert!(result.contains(b"mai"));
     }
 }

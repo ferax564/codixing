@@ -31,6 +31,7 @@ impl Engine {
         }
         self.reindex_file_impl(path, true)?;
         self.tantivy.commit()?;
+        self.file_trigram = build_file_trigram(&self.chunk_meta);
         Ok(())
     }
 
@@ -199,11 +200,12 @@ impl Engine {
         }
 
         self.file_chunk_counts.insert(rel_str.clone(), chunks.len());
-        self.file_trigram = build_file_trigram(&self.chunk_meta);
 
         // Update graph edges for this file using the already-parsed tree.
         // PageRank is only recomputed when do_graph_finalize=true (single-file
         // reindex). apply_changes() calls with false and does one pass at the end.
+        // Similarly, file_trigram is rebuilt lazily — callers that need it up-to-
+        // date (reindex_file, remove_file, apply_changes) rebuild once at the end.
         let file_language = result.language;
         // Config languages have no tree-sitter tree; skip import/call extraction.
         let raw_imports = match result.tree.as_ref() {
