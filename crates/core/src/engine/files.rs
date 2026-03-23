@@ -1,9 +1,12 @@
 use std::fs;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
+use rayon::prelude::*;
 use tracing::warn;
 
 use crate::error::{CodixingError, Result};
-use crate::index::trigram::extract_required_trigrams;
+use crate::index::trigram::build_query_plan;
 
 use super::{Engine, GrepMatch};
 
@@ -103,13 +106,9 @@ impl Engine {
             None => None,
         };
 
-        let mut matches: Vec<GrepMatch> = Vec::new();
-
         // Use the file-level trigram index to narrow the candidate set before
         // doing any disk I/O.  For a literal pattern all trigrams must be
-        // present; for a regex we extract required prefix seeds.  When pre-
-        // filtering is not possible (pattern too short, or too broad) we fall
-        // back to scanning all indexed files.
+        // present; for a regex we build a full QueryPlan (with OR support).
         let candidate_set: Option<std::collections::HashSet<&str>> = if literal {
             // Use the raw pattern bytes, NOT compiled_pattern — the latter has
             // regex escaping applied (e.g. `foo.bar` → `foo\.bar`) which would
@@ -118,50 +117,62 @@ impl Engine {
                 .candidates_for_literal(pattern.as_bytes())
                 .map(|v| v.into_iter().collect())
         } else {
-            let trigrams = extract_required_trigrams(pattern);
+            let plan = build_query_plan(pattern);
             self.file_trigram
-                .candidates_for_trigrams(&trigrams)
+                .execute_plan(&plan)
                 .map(|v| v.into_iter().collect())
         };
 
-        // Iterate over the already-indexed file set (relative paths).
+        // Collect candidate file paths after trigram + glob filtering.
         let mut rel_paths: Vec<String> = self.file_chunk_counts.keys().cloned().collect();
         rel_paths.sort_unstable(); // deterministic ordering
 
-        'files: for rel_path in &rel_paths {
-            // Skip files that the trigram pre-filter ruled out.
-            if let Some(ref candidates) = candidate_set {
-                if !candidates.contains(rel_path.as_str()) {
-                    continue;
+        let candidate_paths: Vec<&String> = rel_paths
+            .iter()
+            .filter(|p| {
+                if let Some(ref candidates) = candidate_set {
+                    if !candidates.contains(p.as_str()) {
+                        return false;
+                    }
                 }
+                if let Some(ref pat) = glob_pat {
+                    let filename = std::path::Path::new(p.as_str())
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("");
+                    if !pat.matches(p) && !pat.matches(filename) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+
+        // Scan candidate files in parallel using rayon.  An AtomicBool
+        // provides approximate early termination once enough matches are found.
+        let done = AtomicBool::new(false);
+        let results = Mutex::new(Vec::<GrepMatch>::new());
+        let config = &self.config;
+
+        candidate_paths.par_iter().for_each(|rel_path| {
+            if done.load(Ordering::Relaxed) {
+                return;
             }
 
-            // Apply glob filter if present.
-            if let Some(ref pat) = glob_pat {
-                // Match against both the full rel_path and just the filename.
-                let filename = std::path::Path::new(rel_path)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
-                if !pat.matches(rel_path) && !pat.matches(filename) {
-                    continue;
-                }
-            }
-
-            let abs = self
-                .config
+            let abs = config
                 .resolve_path(rel_path)
-                .unwrap_or_else(|| self.config.root.join(rel_path));
+                .unwrap_or_else(|| config.root.join(rel_path.as_str()));
             let content = match fs::read_to_string(&abs) {
                 Ok(c) => c,
                 Err(e) => {
                     warn!(file = %rel_path, error = %e, "grep_code: skipping unreadable file");
-                    continue;
+                    return;
                 }
             };
 
             let lines: Vec<&str> = content.lines().collect();
             let n = lines.len();
+            let mut file_matches = Vec::new();
 
             for (i, line) in lines.iter().enumerate() {
                 if let Some(m) = re.find(line) {
@@ -176,8 +187,8 @@ impl Engine {
                         .map(|s| s.to_string())
                         .collect();
 
-                    matches.push(GrepMatch {
-                        file_path: rel_path.clone(),
+                    file_matches.push(GrepMatch {
+                        file_path: rel_path.to_string(),
                         line_number: i as u64,
                         line: line.to_string(),
                         match_start: m.start(),
@@ -185,13 +196,26 @@ impl Engine {
                         before,
                         after,
                     });
-
-                    if matches.len() >= limit {
-                        break 'files;
-                    }
                 }
             }
-        }
+
+            if !file_matches.is_empty() {
+                let mut guard = results.lock().unwrap();
+                guard.extend(file_matches);
+                if guard.len() >= limit {
+                    done.store(true, Ordering::Relaxed);
+                }
+            }
+        });
+
+        let mut matches = results.into_inner().unwrap();
+        // Sort by file path + line number for deterministic output.
+        matches.sort_by(|a, b| {
+            a.file_path
+                .cmp(&b.file_path)
+                .then(a.line_number.cmp(&b.line_number))
+        });
+        matches.truncate(limit);
 
         Ok(matches)
     }

@@ -7,8 +7,9 @@
 //!
 //! Also exposes [`FileTrigramIndex`] — a file-level variant used by
 //! [`crate::engine::Engine::grep_code`] to skip files that cannot possibly
-//! match before doing any disk I/O, and [`extract_regex_seeds`] to pull
-//! required literal prefixes out of a regex pattern for the same purpose.
+//! match before doing any disk I/O, [`QueryPlan`] for boolean trigram
+//! queries with OR support, and [`build_query_plan`] to decompose a regex
+//! pattern into a query plan using the Russ Cox / trigrep technique.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -190,6 +191,32 @@ impl Default for TrigramIndex {
 
 // ── File-level trigram index ──────────────────────────────────────────────────
 
+/// Serializable representation of the file trigram index.
+#[derive(Serialize, Deserialize)]
+struct FileTrigramIndexData {
+    files: Vec<String>,
+    index: Vec<([u8; 3], Vec<u32>)>,
+}
+
+/// A boolean query plan over trigrams, produced by [`build_query_plan`].
+///
+/// Execution semantics (see [`FileTrigramIndex::execute_plan`]):
+/// - `MatchAll` → no pre-filtering possible (fall back to full scan)
+/// - `Trigrams(t)` → intersect posting lists for all trigrams (AND)
+/// - `And(plans)` → intersect candidate sets of all sub-plans
+/// - `Or(plans)` → union candidate sets of all sub-plans
+#[derive(Debug, Clone)]
+pub enum QueryPlan {
+    /// No trigrams extractable — must scan all files.
+    MatchAll,
+    /// A set of trigrams that must ALL appear (leaf AND node).
+    Trigrams(Vec<[u8; 3]>),
+    /// All sub-plans must match (intersection).
+    And(Vec<QueryPlan>),
+    /// At least one sub-plan must match (union).
+    Or(Vec<QueryPlan>),
+}
+
 /// A file-level trigram index for fast grep pre-filtering.
 ///
 /// Maps 3-byte substrings to the set of files whose indexed content contains
@@ -241,18 +268,21 @@ impl FileTrigramIndex {
             return;
         }
 
-        let mut seen = std::collections::HashSet::new();
-        for i in 0..content.len() - 2 {
-            let tri = [content[i], content[i + 1], content[i + 2]];
-            if seen.insert(tri) {
-                let list = self.index.entry(tri).or_default();
-                // Maintain sorted order; dedup on insert to avoid duplicates
-                // when `add` is called multiple times for the same file.
-                if list.last() != Some(&file_idx) {
-                    match list.binary_search(&file_idx) {
-                        Ok(_) => {} // already present
-                        Err(pos) => list.insert(pos, file_idx),
-                    }
+        // Collect unique trigrams via sort+dedup (avoids per-call HashSet alloc).
+        let mut trigrams: Vec<[u8; 3]> = (0..content.len() - 2)
+            .map(|i| [content[i], content[i + 1], content[i + 2]])
+            .collect();
+        trigrams.sort_unstable();
+        trigrams.dedup();
+
+        for tri in trigrams {
+            let list = self.index.entry(tri).or_default();
+            // Maintain sorted order; dedup on insert to avoid duplicates
+            // when `add` is called multiple times for the same file.
+            if list.last() != Some(&file_idx) {
+                match list.binary_search(&file_idx) {
+                    Ok(_) => {} // already present
+                    Err(pos) => list.insert(pos, file_idx),
                 }
             }
         }
@@ -339,107 +369,270 @@ impl FileTrigramIndex {
         )
     }
 
+    /// Remove a single file from the index.
+    ///
+    /// Removes the file from all posting lists and tombstones its entry.
+    /// This is O(unique_trigrams_in_index) — fast enough for single-file
+    /// operations; batch operations should rebuild from scratch instead.
+    pub fn remove_file(&mut self, path: &str) {
+        let file_idx = match self.file_index.remove(path) {
+            Some(idx) => idx,
+            None => return,
+        };
+        // Tombstone the files entry.
+        self.files[file_idx as usize] = String::new();
+        // Remove from all posting lists; drop empty ones.
+        self.index.retain(|_, list| {
+            list.retain(|&id| id != file_idx);
+            !list.is_empty()
+        });
+    }
+
+    /// Execute a [`QueryPlan`] against this index.
+    ///
+    /// Returns `None` when the plan is `MatchAll` (can't pre-filter).
+    /// Otherwise returns the set of candidate file paths.
+    pub fn execute_plan<'a>(&'a self, plan: &QueryPlan) -> Option<Vec<&'a str>> {
+        match plan {
+            QueryPlan::MatchAll => None,
+            QueryPlan::Trigrams(tris) => self.candidates_for_trigrams(tris),
+            QueryPlan::And(subs) => {
+                // Intersect all sub-plan results.  Skip MatchAll branches.
+                let mut result: Option<std::collections::HashSet<&str>> = None;
+                for sub in subs {
+                    match self.execute_plan(sub) {
+                        None => continue, // MatchAll → doesn't constrain
+                        Some(candidates) => {
+                            let set: std::collections::HashSet<&str> =
+                                candidates.into_iter().collect();
+                            result = Some(match result {
+                                None => set,
+                                Some(acc) => acc.intersection(&set).copied().collect(),
+                            });
+                        }
+                    }
+                }
+                result.map(|s| s.into_iter().collect())
+            }
+            QueryPlan::Or(subs) => {
+                // Union all sub-plan results.  If ANY branch is MatchAll,
+                // the whole OR matches everything.
+                let mut result: std::collections::HashSet<&str> = std::collections::HashSet::new();
+                for sub in subs {
+                    match self.execute_plan(sub) {
+                        None => return None, // MatchAll branch → can't pre-filter
+                        Some(candidates) => result.extend(candidates),
+                    }
+                }
+                Some(result.into_iter().collect())
+            }
+        }
+    }
+
     /// Number of files currently in the index.
     pub fn file_count(&self) -> usize {
         self.file_index.len()
     }
+
+    /// Save the file trigram index to a binary (bitcode) file.
+    pub fn save_binary(&self, path: &Path) -> Result<()> {
+        let data = FileTrigramIndexData {
+            files: self.files.clone(),
+            index: self.index.iter().map(|(k, v)| (*k, v.clone())).collect(),
+        };
+        let bytes = bitcode::serialize(&data).map_err(|e| {
+            CodixingError::Serialization(format!("failed to serialize file trigram index: {e}"))
+        })?;
+        std::fs::write(path, bytes)?;
+        Ok(())
+    }
+
+    /// Load the file trigram index from a binary (bitcode) file.
+    pub fn load_binary(path: &Path) -> Result<Self> {
+        let bytes = std::fs::read(path)?;
+        let data: FileTrigramIndexData = bitcode::deserialize(&bytes).map_err(|e| {
+            CodixingError::Serialization(format!("failed to deserialize file trigram index: {e}"))
+        })?;
+        let mut file_index = HashMap::new();
+        for (i, f) in data.files.iter().enumerate() {
+            if !f.is_empty() {
+                file_index.insert(f.clone(), i as u32);
+            }
+        }
+        Ok(Self {
+            files: data.files,
+            file_index,
+            index: data.index.into_iter().collect(),
+        })
+    }
 }
 
-// ── Regex → required trigram extraction (Russ Cox / trigrep technique) ────────
+// ── Regex → QueryPlan (Russ Cox / trigrep technique) ─────────────────────────
 
-/// Extract trigrams that **must** appear in any match of a regex pattern.
+/// Build a [`QueryPlan`] from a regex pattern.
 ///
-/// Recursively walks the `regex-syntax` HIR tree with these rules:
-/// - **Literal** bytes → extract all 3-byte windows as required trigrams
-/// - **Concat**(a, b) → union (AND): both a's and b's trigrams are required
-/// - **Alternation**(a, b) → intersection: only trigrams common to ALL branches
-/// - **Repetition** (?, *, +) → trigrams from the inner expr (but `?` / `*` clears
-///   them since the branch can match without the inner content)
-/// - **Class** / **Anchor** / **Look** → no trigrams extractable
+/// Recursively walks the `regex-syntax` HIR tree:
+/// - **Literal** → `Trigrams(all 3-byte windows)`
+/// - **Concat** → `And` of children (merges adjacent literal runs for
+///   cross-boundary trigrams)
+/// - **Alternation** → `Or` of children (union at execution time)
+/// - **Repetition(`+`)** → recurse; **`*`/`?`** → `MatchAll`
+/// - **Capture** → recurse into sub
+/// - **Class** / **Look** / **Empty** → `MatchAll`
 ///
-/// The returned set can be fed directly to
-/// [`FileTrigramIndex::candidates_for_trigrams`] for AND-intersection.
-///
-/// Returns an empty `Vec` for patterns too broad to extract anything useful
-/// (e.g. `.*`, `[a-z]+`, or invalid syntax).
-pub fn extract_required_trigrams(pattern: &str) -> Vec<[u8; 3]> {
+/// Use with [`FileTrigramIndex::execute_plan`].
+pub fn build_query_plan(pattern: &str) -> QueryPlan {
     use regex_syntax::Parser;
     use regex_syntax::hir::{Hir, HirKind};
 
     let hir = match Parser::new().parse(pattern) {
         Ok(h) => h,
-        Err(_) => return Vec::new(),
+        Err(_) => return QueryPlan::MatchAll,
     };
 
-    fn walk(hir: &Hir) -> std::collections::HashSet<[u8; 3]> {
+    fn walk(hir: &Hir) -> QueryPlan {
         match hir.kind() {
-            HirKind::Literal(lit) => trigrams_from_bytes(&lit.0),
+            HirKind::Literal(lit) => {
+                let tris = trigrams_from_bytes(&lit.0);
+                if tris.is_empty() {
+                    QueryPlan::MatchAll
+                } else {
+                    QueryPlan::Trigrams(tris)
+                }
+            }
             HirKind::Concat(subs) => {
-                // All sub-expressions are concatenated — every sub's trigrams
-                // must appear in any match.  Also extract trigrams that span
-                // the boundary between adjacent literal sub-expressions.
-                let mut required = std::collections::HashSet::new();
+                let mut parts: Vec<QueryPlan> = Vec::new();
                 let mut literal_run: Vec<u8> = Vec::new();
 
                 for sub in subs {
                     if let HirKind::Literal(lit) = sub.kind() {
                         literal_run.extend_from_slice(&lit.0);
                     } else {
-                        // Flush accumulated literal bytes.
                         if literal_run.len() >= 3 {
-                            required.extend(trigrams_from_bytes(&literal_run));
+                            parts.push(QueryPlan::Trigrams(trigrams_from_bytes(&literal_run)));
                         }
                         literal_run.clear();
-                        // Recurse into non-literal sub-expression.
-                        required.extend(walk(sub));
+                        let child = walk(sub);
+                        if !matches!(child, QueryPlan::MatchAll) {
+                            parts.push(child);
+                        }
                     }
                 }
-                // Flush trailing literal bytes.
                 if literal_run.len() >= 3 {
-                    required.extend(trigrams_from_bytes(&literal_run));
+                    parts.push(QueryPlan::Trigrams(trigrams_from_bytes(&literal_run)));
                 }
-                required
+
+                simplify_and(parts)
             }
             HirKind::Alternation(branches) => {
-                // A match uses exactly one branch.  Only trigrams common to
-                // ALL branches are required.
-                let mut iter = branches.iter();
-                let first = match iter.next() {
-                    Some(b) => walk(b),
-                    None => return std::collections::HashSet::new(),
-                };
-                iter.fold(first, |acc, branch| {
-                    let branch_set = walk(branch);
-                    acc.intersection(&branch_set).copied().collect()
-                })
+                let plans: Vec<QueryPlan> = branches.iter().map(walk).collect();
+                // If ANY branch is MatchAll, the whole OR is MatchAll
+                // (that branch matches everything).
+                if plans.iter().any(|p| matches!(p, QueryPlan::MatchAll)) {
+                    return QueryPlan::MatchAll;
+                }
+                if plans.is_empty() {
+                    return QueryPlan::MatchAll;
+                }
+                if plans.len() == 1 {
+                    return plans.into_iter().next().unwrap();
+                }
+                QueryPlan::Or(plans)
             }
             HirKind::Repetition(rep) => {
-                // `+` means the inner must match at least once → its trigrams
-                // are required.  `*` and `?` can match zero times → clear.
                 if rep.min >= 1 {
                     walk(&rep.sub)
                 } else {
-                    std::collections::HashSet::new()
+                    QueryPlan::MatchAll
                 }
             }
             HirKind::Capture(cap) => walk(&cap.sub),
-            // Class, Look, Empty → no trigrams
-            _ => std::collections::HashSet::new(),
+            _ => QueryPlan::MatchAll,
         }
     }
 
-    fn trigrams_from_bytes(bytes: &[u8]) -> std::collections::HashSet<[u8; 3]> {
-        let mut set = std::collections::HashSet::new();
-        if bytes.len() >= 3 {
-            for i in 0..bytes.len() - 2 {
-                set.insert([bytes[i], bytes[i + 1], bytes[i + 2]]);
+    /// Flatten and simplify an AND of sub-plans.
+    fn simplify_and(parts: Vec<QueryPlan>) -> QueryPlan {
+        let mut trigrams = Vec::new();
+        let mut others = Vec::new();
+        for p in parts {
+            match p {
+                QueryPlan::Trigrams(t) => trigrams.extend(t),
+                QueryPlan::And(subs) => {
+                    for s in subs {
+                        match s {
+                            QueryPlan::Trigrams(t) => trigrams.extend(t),
+                            other => others.push(other),
+                        }
+                    }
+                }
+                QueryPlan::MatchAll => {}
+                other => others.push(other),
             }
         }
-        set
+        trigrams.sort_unstable();
+        trigrams.dedup();
+
+        if others.is_empty() {
+            if trigrams.is_empty() {
+                QueryPlan::MatchAll
+            } else {
+                QueryPlan::Trigrams(trigrams)
+            }
+        } else {
+            if !trigrams.is_empty() {
+                others.insert(0, QueryPlan::Trigrams(trigrams));
+            }
+            if others.len() == 1 {
+                others.into_iter().next().unwrap()
+            } else {
+                QueryPlan::And(others)
+            }
+        }
     }
 
-    let result = walk(&hir);
-    result.into_iter().collect()
+    fn trigrams_from_bytes(bytes: &[u8]) -> Vec<[u8; 3]> {
+        if bytes.len() < 3 {
+            return Vec::new();
+        }
+        let mut v: Vec<[u8; 3]> = (0..bytes.len() - 2)
+            .map(|i| [bytes[i], bytes[i + 1], bytes[i + 2]])
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    walk(&hir)
+}
+
+/// Convenience wrapper: extract trigrams that must appear in any match.
+///
+/// Equivalent to building a query plan and collecting all AND-required
+/// trigrams.  Useful when only the flat trigram set is needed.
+pub fn extract_required_trigrams(pattern: &str) -> Vec<[u8; 3]> {
+    fn collect_and(plan: &QueryPlan) -> Vec<[u8; 3]> {
+        match plan {
+            QueryPlan::MatchAll => Vec::new(),
+            QueryPlan::Trigrams(t) => t.clone(),
+            QueryPlan::And(subs) => subs.iter().flat_map(collect_and).collect(),
+            QueryPlan::Or(subs) => {
+                // Intersection of branches' required trigrams.
+                let mut iter = subs.iter().map(|s| {
+                    let v = collect_and(s);
+                    v.into_iter()
+                        .collect::<std::collections::HashSet<[u8; 3]>>()
+                });
+                let first = match iter.next() {
+                    Some(s) => s,
+                    None => return Vec::new(),
+                };
+                let common = iter.fold(first, |acc, set| acc.intersection(&set).copied().collect());
+                common.into_iter().collect()
+            }
+        }
+    }
+    collect_and(&build_query_plan(pattern))
 }
 
 #[cfg(test)]
@@ -626,6 +819,42 @@ mod tests {
     }
 
     #[test]
+    fn file_trigram_remove_file() {
+        let mut idx = FileTrigramIndex::new();
+        idx.add("a.rs", b"fn target() {}");
+        idx.add("b.rs", b"fn target() { call(); }");
+        idx.remove_file("a.rs");
+        let candidates = idx.candidates_for_literal(b"target").unwrap();
+        assert_eq!(candidates, vec!["b.rs"]);
+        assert_eq!(idx.file_count(), 1);
+    }
+
+    #[test]
+    fn file_trigram_remove_nonexistent_is_noop() {
+        let mut idx = FileTrigramIndex::new();
+        idx.add("a.rs", b"fn hello() {}");
+        idx.remove_file("nonexistent.rs"); // should not panic
+        assert_eq!(idx.file_count(), 1);
+    }
+
+    #[test]
+    fn file_trigram_save_load_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("file_trigram.bin");
+
+        let mut idx = FileTrigramIndex::new();
+        idx.add("a.rs", b"fn process_batch() {}");
+        idx.add("b.rs", b"fn main() { process_batch(); }");
+        idx.save_binary(&path).unwrap();
+
+        let loaded = FileTrigramIndex::load_binary(&path).unwrap();
+        assert_eq!(loaded.file_count(), 2);
+        let c = loaded.candidates_for_literal(b"process_batch").unwrap();
+        assert!(c.contains(&"a.rs"));
+        assert!(c.contains(&"b.rs"));
+    }
+
+    #[test]
     fn file_trigram_candidates_for_trigrams_and_logic() {
         let mut idx = FileTrigramIndex::new();
         idx.add("a.rs", b"fn process_batch() {}");
@@ -716,5 +945,102 @@ mod tests {
         let result: std::collections::HashSet<[u8; 3]> = tris.into_iter().collect();
         assert!(result.contains(b"fn "));
         assert!(result.contains(b"mai"));
+    }
+
+    // ── QueryPlan + OR support tests ──────────────────────────────────────────
+
+    #[test]
+    fn query_plan_or_alternation() {
+        // (foo|bar) → Or of two branches; each branch has its own trigrams.
+        let plan = build_query_plan("foo|bar");
+        assert!(matches!(plan, QueryPlan::Or(_)));
+
+        let mut idx = FileTrigramIndex::new();
+        idx.add("a.rs", b"use foo::runtime;");
+        idx.add("b.rs", b"use bar::task;");
+        idx.add("c.rs", b"fn plain_function() {}");
+
+        let candidates = idx.execute_plan(&plan).unwrap();
+        assert!(candidates.contains(&"a.rs"));
+        assert!(candidates.contains(&"b.rs"));
+        assert!(!candidates.contains(&"c.rs"));
+    }
+
+    #[test]
+    fn query_plan_or_three_branches() {
+        // TODO|FIXME|HACK → Or of three branches.
+        let plan = build_query_plan("TODO|FIXME|HACK");
+
+        let mut idx = FileTrigramIndex::new();
+        idx.add("a.rs", b"// TODO: fix this");
+        idx.add("b.rs", b"// FIXME: broken");
+        idx.add("c.rs", b"// HACK: workaround");
+        idx.add("d.rs", b"fn clean_code() {}");
+
+        let candidates = idx.execute_plan(&plan).unwrap();
+        assert!(candidates.contains(&"a.rs"));
+        assert!(candidates.contains(&"b.rs"));
+        assert!(candidates.contains(&"c.rs"));
+        assert!(!candidates.contains(&"d.rs"));
+    }
+
+    #[test]
+    fn query_plan_concat_with_or() {
+        // (foo|bar).*baz → And([Or([foo, bar]), Trigrams([baz])])
+        let plan = build_query_plan("(foo|bar).*baz");
+
+        let mut idx = FileTrigramIndex::new();
+        idx.add("a.rs", b"foo something baz"); // matches
+        idx.add("b.rs", b"bar something baz"); // matches
+        idx.add("c.rs", b"foo something xyz"); // no baz
+        idx.add("d.rs", b"qux something baz"); // no foo/bar
+
+        let candidates = idx.execute_plan(&plan).unwrap();
+        assert!(candidates.contains(&"a.rs"));
+        assert!(candidates.contains(&"b.rs"));
+        assert!(!candidates.contains(&"c.rs"));
+        assert!(!candidates.contains(&"d.rs"));
+    }
+
+    #[test]
+    fn query_plan_matchall_for_broad_patterns() {
+        assert!(matches!(build_query_plan(".*"), QueryPlan::MatchAll));
+        assert!(matches!(build_query_plan("[a-z]+"), QueryPlan::MatchAll));
+        assert!(matches!(build_query_plan("(?i)foo"), QueryPlan::MatchAll));
+    }
+
+    #[test]
+    fn query_plan_literal_metacharacters() {
+        // Literal patterns with regex metacharacters should use raw bytes.
+        let mut idx = FileTrigramIndex::new();
+        idx.add("a.rs", b"arr[0].field");
+        idx.add("b.rs", b"fn something() {}");
+
+        // Literal search for "arr[0]" — raw bytes, not regex.
+        let candidates = idx.candidates_for_literal(b"arr[0]").unwrap();
+        assert!(candidates.contains(&"a.rs"));
+        assert!(!candidates.contains(&"b.rs"));
+    }
+
+    #[test]
+    fn query_plan_or_with_matchall_branch() {
+        // (foo|.*) → one branch is MatchAll → whole Or is MatchAll.
+        let plan = build_query_plan("(foo|.*)");
+        assert!(matches!(plan, QueryPlan::MatchAll));
+    }
+
+    #[test]
+    fn query_plan_large_file_count() {
+        let mut idx = FileTrigramIndex::new();
+        for i in 0..1000u32 {
+            idx.add(
+                &format!("file_{i}.rs"),
+                format!("fn func_{i}(x: i32) -> bool {{ x > {i} }}").as_bytes(),
+            );
+        }
+        assert_eq!(idx.file_count(), 1000);
+        let candidates = idx.candidates_for_literal(b"func_500").unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0], "file_500.rs");
     }
 }
