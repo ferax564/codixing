@@ -15,8 +15,8 @@ use crate::retriever::ChunkMeta;
 use crate::symbols::persistence::serialize_symbols;
 
 use super::{
-    Engine, GitSyncStats, SyncStats, build_file_trigram, git_diff_since, git_head_commit,
-    make_embed_text, normalize_path, symbol_from_entity, unix_timestamp_string,
+    Engine, GitSyncStats, SyncStats, git_diff_since, git_head_commit, make_embed_text,
+    normalize_path, symbol_from_entity, unix_timestamp_string,
 };
 
 impl Engine {
@@ -31,7 +31,13 @@ impl Engine {
         }
         self.reindex_file_impl(path, true)?;
         self.tantivy.commit()?;
-        self.file_trigram = build_file_trigram(&self.chunk_meta);
+        // file_trigram already updated incrementally in reindex_file_impl.
+        if let Err(e) = self
+            .file_trigram
+            .save_binary(&self.store.file_trigram_path())
+        {
+            warn!(error = %e, "failed to persist file trigram index");
+        }
         Ok(())
     }
 
@@ -201,11 +207,13 @@ impl Engine {
 
         self.file_chunk_counts.insert(rel_str.clone(), chunks.len());
 
+        // Incremental file trigram update: remove old, add new from full content.
+        self.file_trigram.remove_file(&rel_str);
+        self.file_trigram.add(&rel_str, &source);
+
         // Update graph edges for this file using the already-parsed tree.
         // PageRank is only recomputed when do_graph_finalize=true (single-file
         // reindex). apply_changes() calls with false and does one pass at the end.
-        // Similarly, file_trigram is rebuilt lazily — callers that need it up-to-
-        // date (reindex_file, remove_file, apply_changes) rebuild once at the end.
         let file_language = result.language;
         // Config languages have no tree-sitter tree; skip import/call extraction.
         let raw_imports = match result.tree.as_ref() {
@@ -329,8 +337,8 @@ impl Engine {
         for id in removed_ids {
             self.trigram.remove(id);
         }
-        // file_trigram rebuilt lazily by the caller (reindex_file, remove_file,
-        // apply_changes) once all per-file mutations are done.
+        // Incremental file trigram removal.
+        self.file_trigram.remove_file(rel_str);
 
         // Remove graph node + incident edges (PageRank deferred to caller).
         if let Some(ref mut graph) = self.graph {
@@ -352,7 +360,13 @@ impl Engine {
 
         self.remove_file_inner(path, &rel_str)?;
         self.tantivy.commit()?;
-        self.file_trigram = build_file_trigram(&self.chunk_meta);
+        // file_trigram already updated incrementally in remove_file_inner.
+        if let Err(e) = self
+            .file_trigram
+            .save_binary(&self.store.file_trigram_path())
+        {
+            warn!(error = %e, "failed to persist file trigram index");
+        }
 
         // Recompute PageRank + persist graph for single-file removal.
         if let Some(ref mut graph) = self.graph {
@@ -420,8 +434,14 @@ impl Engine {
         // Single Tantivy commit for all pending adds + deletes.
         self.tantivy.commit()?;
 
-        // Single file-trigram rebuild for the entire batch (not per-file).
-        self.file_trigram = build_file_trigram(&self.chunk_meta);
+        // file_trigram already updated incrementally per-file above.
+        // Persist the updated index.
+        if let Err(e) = self
+            .file_trigram
+            .save_binary(&self.store.file_trigram_path())
+        {
+            warn!(error = %e, "failed to persist file trigram index");
+        }
 
         // Single PageRank recompute for the entire batch.
         if let Some(ref mut graph) = self.graph {

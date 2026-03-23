@@ -332,6 +332,7 @@ impl Engine {
         // Call names extracted during parse — resolved into Calls edges after
         // the symbol table is fully populated (end of parallel phase).
         let pending_calls: DashMap<String, Vec<String>> = DashMap::new();
+        let file_contents: DashMap<String, Vec<u8>> = DashMap::new();
 
         let ctx = IndexContext {
             root: &root,
@@ -345,6 +346,7 @@ impl Engine {
             pending_embeds: &pending_embeds,
             pending_imports: &pending_imports,
             pending_calls: &pending_calls,
+            file_contents: &file_contents,
         };
 
         // Process files in parallel: parse → chunk → index → extract symbols.
@@ -484,7 +486,11 @@ impl Engine {
             trigram.add(*entry.key(), &entry.value().content);
         }
 
-        let file_trigram = build_file_trigram(&chunk_meta_map);
+        // Build file trigram from full file content (no chunk-boundary gaps).
+        let file_trigram = build_file_trigram_from_content(&file_contents);
+        if let Err(e) = file_trigram.save_binary(&store.file_trigram_path()) {
+            warn!(error = %e, "failed to persist file trigram index");
+        }
 
         Ok(Self {
             config,
@@ -680,7 +686,18 @@ impl Engine {
             trigram.add(*entry.key(), &entry.value().content);
         }
 
-        let file_trigram = build_file_trigram(&chunk_meta);
+        // Try loading persisted file trigram; fall back to building from chunks.
+        let file_trigram = if store.file_trigram_path().exists() {
+            match FileTrigramIndex::load_binary(&store.file_trigram_path()) {
+                Ok(idx) => idx,
+                Err(e) => {
+                    warn!(error = %e, "failed to load file trigram index; rebuilding from chunks");
+                    build_file_trigram(&chunk_meta)
+                }
+            }
+        } else {
+            build_file_trigram(&chunk_meta)
+        };
 
         Ok(Self {
             config,
@@ -852,7 +869,17 @@ impl Engine {
             trigram.add(*entry.key(), &entry.value().content);
         }
 
-        let file_trigram = build_file_trigram(&chunk_meta);
+        let file_trigram = if store.file_trigram_path().exists() {
+            match FileTrigramIndex::load_binary(&store.file_trigram_path()) {
+                Ok(idx) => idx,
+                Err(e) => {
+                    warn!(error = %e, "failed to load file trigram index; rebuilding from chunks");
+                    build_file_trigram(&chunk_meta)
+                }
+            }
+        } else {
+            build_file_trigram(&chunk_meta)
+        };
 
         Ok(Self {
             config,
@@ -1319,13 +1346,27 @@ struct IndexContext<'a> {
     /// Call names extracted during parsing: rel_path → Vec<callee_name>.
     /// Resolved into `EdgeKind::Calls` edges after the symbol table is complete.
     pending_calls: &'a DashMap<String, Vec<String>>,
+    /// Full file content accumulated during parallel indexing for building
+    /// a chunk-boundary-free file trigram index.
+    file_contents: &'a DashMap<String, Vec<u8>>,
 }
 
-/// Build a [`FileTrigramIndex`] from the chunk metadata already in memory.
+/// Build a [`FileTrigramIndex`] from full file content.
 ///
-/// Called after indexing/loading to enable trigram pre-filtering in `grep_code`.
-/// Trigrams are indexed per-file from chunk content; trigrams that cross chunk
-/// boundaries are not captured (affects < 0.1 % of real patterns).
+/// Uses `file_contents` (complete file bytes accumulated during indexing)
+/// to avoid missing trigrams that straddle chunk boundaries.
+fn build_file_trigram_from_content(file_contents: &DashMap<String, Vec<u8>>) -> FileTrigramIndex {
+    let mut idx = FileTrigramIndex::new();
+    for entry in file_contents.iter() {
+        idx.add(entry.key(), entry.value());
+    }
+    idx
+}
+
+/// Build a [`FileTrigramIndex`] from chunk metadata already in memory.
+///
+/// Fallback used at `open()` / `reload()` when full file content is not
+/// available and the persisted file trigram index is missing.
 fn build_file_trigram(chunk_meta: &DashMap<u64, ChunkMeta>) -> FileTrigramIndex {
     let mut idx = FileTrigramIndex::new();
     for entry in chunk_meta.iter() {
@@ -1344,6 +1385,9 @@ fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
         .config
         .normalize_path(path)
         .unwrap_or_else(|| normalize_path(path.strip_prefix(ctx.root).unwrap_or(path)));
+
+    // Accumulate full file content for chunk-boundary-free trigram indexing.
+    ctx.file_contents.insert(rel_str.clone(), source.clone());
 
     let chunker = CastChunker;
     let chunks = chunker.chunk(
