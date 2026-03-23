@@ -7,7 +7,9 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use codixing_core::{FederatedEngine, FederationConfig, SearchQuery};
+use codixing_core::{
+    FederatedEngine, FederationConfig, SearchQuery, discover_projects, to_federation_config,
+};
 
 /// `federation_init` — create a template federation config file.
 pub fn call_federation_init(args: &Value) -> (String, bool) {
@@ -288,4 +290,71 @@ pub fn call_federation_search(
         }
         Err(e) => (format!("Federated search failed: {e}"), true),
     }
+}
+
+/// `federation_discover` — auto-discover workspace projects under a root directory.
+pub fn call_federation_discover(args: &Value) -> (String, bool) {
+    let root_str = match args.get("root").and_then(|v| v.as_str()) {
+        Some(r) => r,
+        None => {
+            return (
+                "Missing required parameter 'root' (directory to scan for workspace projects)."
+                    .to_string(),
+                true,
+            );
+        }
+    };
+
+    let root = match PathBuf::from(root_str).canonicalize() {
+        Ok(r) => r,
+        Err(e) => {
+            return (format!("Cannot resolve root path `{root_str}`: {e}"), true);
+        }
+    };
+
+    let projects = discover_projects(&root);
+
+    if projects.is_empty() {
+        return (
+            format!(
+                "No workspace projects discovered under `{}`.",
+                root.display()
+            ),
+            false,
+        );
+    }
+
+    let mut out = format!(
+        "## Discovered Projects ({})\n\nRoot: `{}`\n\n",
+        projects.len(),
+        root.display()
+    );
+
+    out.push_str("| # | Name | Type | Weight | Root |\n");
+    out.push_str("|---|------|------|--------|------|\n");
+    for (i, proj) in projects.iter().enumerate() {
+        out.push_str(&format!(
+            "| {} | {} | {} | {:.1} | {} |\n",
+            i + 1,
+            proj.name,
+            proj.project_type,
+            proj.weight,
+            proj.root.display(),
+        ));
+    }
+
+    // If --output was requested, also write the config
+    if let Some(output_path) = args.get("output").and_then(|v| v.as_str()) {
+        let config = to_federation_config(&projects);
+        match config.save(&PathBuf::from(output_path)) {
+            Ok(()) => {
+                out.push_str(&format!("\nWrote federation config to `{output_path}`."));
+            }
+            Err(e) => {
+                out.push_str(&format!("\nFailed to write federation config: {e}"));
+            }
+        }
+    }
+
+    (out, false)
 }

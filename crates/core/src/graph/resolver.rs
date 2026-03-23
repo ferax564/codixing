@@ -44,11 +44,13 @@ impl ImportResolver {
             }
             Language::CSharp => self.resolve_csharp(&raw.path),
             Language::Ruby => self.resolve_ruby(&raw.path, source_file, raw.is_relative),
-            Language::Swift => None, // Swift module imports are external frameworks.
+            Language::Swift => self.resolve_swift(&raw.path),
             Language::Kotlin => self.resolve_kotlin(&raw.path),
             Language::Scala => self.resolve_scala(&raw.path),
-            // Tier 3: Zig, PHP, Bash, Matlab import resolution not yet supported.
-            Language::Zig | Language::Php | Language::Bash | Language::Matlab => None,
+            Language::Zig => self.resolve_zig(&raw.path, source_file),
+            Language::Php => self.resolve_php(&raw.path, source_file, raw.is_relative),
+            Language::Bash => self.resolve_bash(&raw.path, source_file),
+            Language::Matlab => self.resolve_matlab(&raw.path, source_file),
             // Config languages have no import resolution.
             Language::Yaml
             | Language::Toml
@@ -359,6 +361,221 @@ impl ImportResolver {
         }
         None
     }
+
+    // -------------------------------------------------------------------------
+    // Swift
+    // -------------------------------------------------------------------------
+
+    fn resolve_swift(&self, import: &str) -> Option<String> {
+        // Standard frameworks (Foundation, UIKit, SwiftUI, etc.) are external.
+        const EXTERNAL_FRAMEWORKS: &[&str] = &[
+            "Foundation",
+            "UIKit",
+            "SwiftUI",
+            "AppKit",
+            "CoreData",
+            "CoreGraphics",
+            "Combine",
+            "Darwin",
+            "Dispatch",
+            "ObjectiveC",
+            "os",
+            "XCTest",
+        ];
+        if EXTERNAL_FRAMEWORKS.contains(&import) {
+            return None;
+        }
+
+        // Try Swift Package Manager convention: Sources/ModuleName/
+        for file in &self.indexed_files {
+            if !file.ends_with(".swift") {
+                continue;
+            }
+            // Check if file is under Sources/ModuleName/ directory.
+            let prefix = format!("Sources/{import}/");
+            if file.starts_with(&prefix) {
+                return Some(file.clone());
+            }
+        }
+
+        // Try finding a directory matching the module name with .swift files.
+        for file in &self.indexed_files {
+            if !file.ends_with(".swift") {
+                continue;
+            }
+            let dir = parent_dir(file);
+            if dir == import || dir.ends_with(&format!("/{import}")) {
+                return Some(file.clone());
+            }
+        }
+
+        None
+    }
+
+    // -------------------------------------------------------------------------
+    // Zig
+    // -------------------------------------------------------------------------
+
+    fn resolve_zig(&self, import: &str, source_file: &str) -> Option<String> {
+        // `@import("std")` and other non-.zig imports are external packages.
+        if !import.ends_with(".zig") {
+            return None;
+        }
+
+        // Relative file import: resolve relative to the source file.
+        let source_dir = parent_dir(source_file);
+        let candidate = normalize_path(&join_paths(&source_dir, import));
+        if self.indexed_files.contains(&candidate) {
+            return Some(candidate);
+        }
+
+        // Also try from the project root (bare path).
+        if self.indexed_files.contains(import) {
+            return Some(import.to_string());
+        }
+
+        // Try under src/.
+        let as_src = format!("src/{import}");
+        if self.indexed_files.contains(&as_src) {
+            return Some(as_src);
+        }
+
+        None
+    }
+
+    // -------------------------------------------------------------------------
+    // PHP (PSR-4 style)
+    // -------------------------------------------------------------------------
+
+    fn resolve_php(&self, import: &str, source_file: &str, is_relative: bool) -> Option<String> {
+        if is_relative {
+            // `require_once './helpers.php'` or `require '../config.php'`
+            let source_dir = parent_dir(source_file);
+            let joined = join_paths(&source_dir, import);
+            let norm = normalize_path(&joined);
+            if self.indexed_files.contains(&norm) {
+                return Some(norm);
+            }
+            return None;
+        }
+
+        // `require 'vendor/...'` — vendor dependencies are external.
+        if import.starts_with("vendor/") || import.starts_with("vendor\\") {
+            return None;
+        }
+
+        // If the import looks like a file path (has .php extension), try it directly.
+        if import.ends_with(".php") {
+            if self.indexed_files.contains(import) {
+                return Some(import.to_string());
+            }
+            // Try with normalized slashes.
+            let normalized = import.replace('\\', "/");
+            if self.indexed_files.contains(&normalized) {
+                return Some(normalized);
+            }
+            return None;
+        }
+
+        // PSR-4 namespace resolution: `App\Models\User` → try common layouts.
+        let path = import.replace('\\', "/");
+
+        // Try common PHP project directory prefixes.
+        for prefix in &["src", "app", "lib", ""] {
+            let base = if prefix.is_empty() {
+                path.clone()
+            } else {
+                format!("{prefix}/{path}")
+            };
+            let as_file = format!("{base}.php");
+            if self.indexed_files.contains(&as_file) {
+                return Some(as_file);
+            }
+        }
+
+        // Also try stripping the first namespace segment (e.g. `App\Models\User` → `Models/User.php`)
+        // since PSR-4 often maps the root namespace to a directory.
+        if let Some(idx) = path.find('/') {
+            let without_root = &path[idx + 1..];
+            for prefix in &["src", "app", "lib", ""] {
+                let base = if prefix.is_empty() {
+                    without_root.to_string()
+                } else {
+                    format!("{prefix}/{without_root}")
+                };
+                let as_file = format!("{base}.php");
+                if self.indexed_files.contains(&as_file) {
+                    return Some(as_file);
+                }
+            }
+        }
+
+        None
+    }
+
+    // -------------------------------------------------------------------------
+    // Bash
+    // -------------------------------------------------------------------------
+
+    fn resolve_bash(&self, import: &str, source_file: &str) -> Option<String> {
+        // Absolute path: check if it matches an indexed file.
+        if import.starts_with('/') {
+            // We can't resolve absolute paths against our relative indexed files
+            // without knowing the project root mount point. Return None.
+            return None;
+        }
+
+        // Relative path: resolve relative to the source file.
+        let source_dir = parent_dir(source_file);
+        let joined = join_paths(&source_dir, import);
+        let norm = normalize_path(&joined);
+        if self.indexed_files.contains(&norm) {
+            return Some(norm);
+        }
+
+        // Try the bare import path from project root.
+        let bare = normalize_path(import);
+        if self.indexed_files.contains(&bare) {
+            return Some(bare);
+        }
+
+        None
+    }
+
+    // -------------------------------------------------------------------------
+    // Matlab
+    // -------------------------------------------------------------------------
+
+    fn resolve_matlab(&self, import: &str, source_file: &str) -> Option<String> {
+        // Matlab function calls resolve to `functionname.m` in the same directory
+        // or on the path. The extractor provides function names for direct calls
+        // and directory paths for `addpath`.
+
+        // If it looks like a directory path (addpath), we can't resolve to a single file.
+        // Return None for directory-style imports.
+        if import.ends_with('/') || import.contains('/') {
+            return None;
+        }
+
+        // Try to find `import.m` relative to the source file.
+        let source_dir = parent_dir(source_file);
+        let candidate = if source_dir.is_empty() {
+            format!("{import}.m")
+        } else {
+            format!("{source_dir}/{import}.m")
+        };
+        if self.indexed_files.contains(&candidate) {
+            return Some(candidate);
+        }
+
+        // Try from project root.
+        let root_candidate = format!("{import}.m");
+        if self.indexed_files.contains(&root_candidate) {
+            return Some(root_candidate);
+        }
+
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -548,5 +765,266 @@ mod tests {
         let resolved = resolver.resolve(&raw, "src/utils.py");
         // No __init__.py in our set, so None is fine.
         assert!(resolved.is_none() || resolved.as_deref() == Some("src/__init__.py"));
+    }
+
+    // -----------------------------------------------------------------
+    // PHP resolver tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn php_psr4_namespace_resolves() {
+        let resolver = make_resolver(&["src/Models/User.php", "app/Http/Controller.php"]);
+        let raw = RawImport {
+            path: "App\\Models\\User".to_string(),
+            language: Language::Php,
+            is_relative: false,
+        };
+        let resolved = resolver.resolve(&raw, "src/index.php");
+        assert_eq!(resolved, Some("src/Models/User.php".to_string()));
+    }
+
+    #[test]
+    fn php_psr4_app_prefix_resolves() {
+        let resolver = make_resolver(&["app/Http/Controller.php"]);
+        let raw = RawImport {
+            path: "App\\Http\\Controller".to_string(),
+            language: Language::Php,
+            is_relative: false,
+        };
+        let resolved = resolver.resolve(&raw, "app/index.php");
+        assert_eq!(resolved, Some("app/Http/Controller.php".to_string()));
+    }
+
+    #[test]
+    fn php_relative_require_resolves() {
+        let resolver = make_resolver(&["lib/helpers.php"]);
+        let raw = RawImport {
+            path: "./helpers.php".to_string(),
+            language: Language::Php,
+            is_relative: true,
+        };
+        let resolved = resolver.resolve(&raw, "lib/index.php");
+        assert_eq!(resolved, Some("lib/helpers.php".to_string()));
+    }
+
+    #[test]
+    fn php_relative_parent_dir_resolves() {
+        let resolver = make_resolver(&["config.php"]);
+        let raw = RawImport {
+            path: "../config.php".to_string(),
+            language: Language::Php,
+            is_relative: true,
+        };
+        let resolved = resolver.resolve(&raw, "src/index.php");
+        assert_eq!(resolved, Some("config.php".to_string()));
+    }
+
+    #[test]
+    fn php_vendor_returns_none() {
+        let resolver = make_resolver(&["src/main.php"]);
+        let raw = RawImport {
+            path: "vendor/autoload.php".to_string(),
+            language: Language::Php,
+            is_relative: false,
+        };
+        assert_eq!(resolver.resolve(&raw, "src/main.php"), None);
+    }
+
+    // -----------------------------------------------------------------
+    // Zig resolver tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn zig_relative_import_resolves() {
+        let resolver = make_resolver(&["src/utils.zig", "src/main.zig"]);
+        let raw = RawImport {
+            path: "utils.zig".to_string(),
+            language: Language::Zig,
+            is_relative: true,
+        };
+        let resolved = resolver.resolve(&raw, "src/main.zig");
+        assert_eq!(resolved, Some("src/utils.zig".to_string()));
+    }
+
+    #[test]
+    fn zig_std_import_returns_none() {
+        let resolver = make_resolver(&["src/main.zig"]);
+        let raw = RawImport {
+            path: "std".to_string(),
+            language: Language::Zig,
+            is_relative: false,
+        };
+        assert_eq!(resolver.resolve(&raw, "src/main.zig"), None);
+    }
+
+    #[test]
+    fn zig_package_import_returns_none() {
+        let resolver = make_resolver(&["src/main.zig"]);
+        let raw = RawImport {
+            path: "zap".to_string(),
+            language: Language::Zig,
+            is_relative: false,
+        };
+        assert_eq!(resolver.resolve(&raw, "src/main.zig"), None);
+    }
+
+    #[test]
+    fn zig_src_fallback_resolves() {
+        let resolver = make_resolver(&["src/network.zig"]);
+        let raw = RawImport {
+            path: "network.zig".to_string(),
+            language: Language::Zig,
+            is_relative: true,
+        };
+        // Source file is at root, so relative fails but src/ fallback should work.
+        let resolved = resolver.resolve(&raw, "build.zig");
+        assert_eq!(resolved, Some("src/network.zig".to_string()));
+    }
+
+    // -----------------------------------------------------------------
+    // Swift resolver tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn swift_external_framework_returns_none() {
+        let resolver = make_resolver(&["Sources/MyApp/main.swift"]);
+        let raw = RawImport {
+            path: "Foundation".to_string(),
+            language: Language::Swift,
+            is_relative: false,
+        };
+        assert_eq!(resolver.resolve(&raw, "Sources/MyApp/main.swift"), None);
+    }
+
+    #[test]
+    fn swift_uikit_returns_none() {
+        let resolver = make_resolver(&["Sources/MyApp/main.swift"]);
+        let raw = RawImport {
+            path: "UIKit".to_string(),
+            language: Language::Swift,
+            is_relative: false,
+        };
+        assert_eq!(resolver.resolve(&raw, "Sources/MyApp/main.swift"), None);
+    }
+
+    #[test]
+    fn swift_local_module_resolves_spm() {
+        let resolver = make_resolver(&[
+            "Sources/MyApp/main.swift",
+            "Sources/Networking/Client.swift",
+        ]);
+        let raw = RawImport {
+            path: "Networking".to_string(),
+            language: Language::Swift,
+            is_relative: false,
+        };
+        let resolved = resolver.resolve(&raw, "Sources/MyApp/main.swift");
+        assert_eq!(
+            resolved,
+            Some("Sources/Networking/Client.swift".to_string())
+        );
+    }
+
+    #[test]
+    fn swift_local_module_resolves_by_dir() {
+        let resolver = make_resolver(&["Networking/Client.swift", "App/main.swift"]);
+        let raw = RawImport {
+            path: "Networking".to_string(),
+            language: Language::Swift,
+            is_relative: false,
+        };
+        let resolved = resolver.resolve(&raw, "App/main.swift");
+        assert_eq!(resolved, Some("Networking/Client.swift".to_string()));
+    }
+
+    // -----------------------------------------------------------------
+    // Bash resolver tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn bash_relative_source_resolves() {
+        let resolver = make_resolver(&["scripts/helpers.sh", "scripts/deploy.sh"]);
+        let raw = RawImport {
+            path: "./helpers.sh".to_string(),
+            language: Language::Bash,
+            is_relative: true,
+        };
+        let resolved = resolver.resolve(&raw, "scripts/deploy.sh");
+        assert_eq!(resolved, Some("scripts/helpers.sh".to_string()));
+    }
+
+    #[test]
+    fn bash_parent_relative_resolves() {
+        let resolver = make_resolver(&["lib/common.sh", "scripts/deploy.sh"]);
+        let raw = RawImport {
+            path: "../lib/common.sh".to_string(),
+            language: Language::Bash,
+            is_relative: true,
+        };
+        let resolved = resolver.resolve(&raw, "scripts/deploy.sh");
+        assert_eq!(resolved, Some("lib/common.sh".to_string()));
+    }
+
+    #[test]
+    fn bash_absolute_path_returns_none() {
+        let resolver = make_resolver(&["scripts/deploy.sh"]);
+        let raw = RawImport {
+            path: "/usr/local/bin/helpers.sh".to_string(),
+            language: Language::Bash,
+            is_relative: false,
+        };
+        assert_eq!(resolver.resolve(&raw, "scripts/deploy.sh"), None);
+    }
+
+    #[test]
+    fn bash_bare_path_from_root() {
+        let resolver = make_resolver(&["lib/utils.sh", "scripts/run.sh"]);
+        let raw = RawImport {
+            path: "lib/utils.sh".to_string(),
+            language: Language::Bash,
+            is_relative: false,
+        };
+        let resolved = resolver.resolve(&raw, "scripts/run.sh");
+        assert_eq!(resolved, Some("lib/utils.sh".to_string()));
+    }
+
+    // -----------------------------------------------------------------
+    // Matlab resolver tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn matlab_function_resolves_same_dir() {
+        let resolver = make_resolver(&["src/helper.m", "src/main.m"]);
+        let raw = RawImport {
+            path: "helper".to_string(),
+            language: Language::Matlab,
+            is_relative: false,
+        };
+        let resolved = resolver.resolve(&raw, "src/main.m");
+        assert_eq!(resolved, Some("src/helper.m".to_string()));
+    }
+
+    #[test]
+    fn matlab_function_resolves_from_root() {
+        let resolver = make_resolver(&["utils.m", "src/main.m"]);
+        let raw = RawImport {
+            path: "utils".to_string(),
+            language: Language::Matlab,
+            is_relative: false,
+        };
+        let resolved = resolver.resolve(&raw, "src/main.m");
+        assert_eq!(resolved, Some("utils.m".to_string()));
+    }
+
+    #[test]
+    fn matlab_addpath_dir_returns_none() {
+        let resolver = make_resolver(&["lib/tool.m"]);
+        let raw = RawImport {
+            path: "lib/tools".to_string(),
+            language: Language::Matlab,
+            is_relative: false,
+        };
+        // addpath-style directory import should return None.
+        assert_eq!(resolver.resolve(&raw, "main.m"), None);
     }
 }

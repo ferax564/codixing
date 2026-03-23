@@ -1,0 +1,53 @@
+[[tools]]
+name = "get_hotspots"
+description = "Identify the most frequently changed files in the project using git history. Returns files ranked by a composite score of commit frequency and author diversity. Useful for finding areas of active development, likely bug sources, or code that needs refactoring."
+handler = "temporal::call_get_hotspots"
+calling_convention = "engine_args"
+read_only = true
+
+[tools.params.limit]
+type = "integer"
+description = "Maximum number of hotspot files to return (default: 15)"
+
+[tools.params.days]
+type = "integer"
+description = "Time window in days to analyze (default: 90)"
+
+[[tools]]
+name = "search_changes"
+description = "Search recent git commits by message content and/or file path. Returns commit hash, author, date, subject, and affected files. Useful for understanding recent modifications, finding when a bug was introduced, or tracing the evolution of a feature."
+handler = "temporal::call_search_changes"
+calling_convention = "engine_args"
+read_only = true
+
+[tools.params.query]
+type = "string"
+description = "Substring to search for in commit messages (case-insensitive)"
+
+[tools.params.file]
+type = "string"
+description = "Restrict to commits that touched this file path"
+
+[tools.params.limit]
+type = "integer"
+description = "Maximum number of commits to return (default: 20)"
+
+[[tools]]
+name = "get_blame"
+description = "Show git blame for a file, revealing who last modified each line and when. Groups consecutive lines by the same commit for compact output. Useful for understanding code ownership, finding the commit that introduced a bug, or knowing who to ask about a section of code."
+handler = "temporal::call_get_blame"
+calling_convention = "engine_args"
+read_only = true
+
+[tools.params.file]
+type = "string"
+description = "Relative file path within the project (e.g. 'src/engine.rs')"
+required = true
+
+[tools.params.line_start]
+type = "integer"
+description = "First line to blame (1-indexed). Omit for entire file."
+
+[tools.params.line_end]
+type = "integer"
+description = "Last line to blame (1-indexed). Omit for entire file."

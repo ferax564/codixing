@@ -1,0 +1,28 @@
+[[tools]]
+name = "get_session_summary"
+description = "Return a structured markdown summary of the current session: files read/edited, symbols explored, and searches performed, grouped by directory. Useful for understanding what context the agent has gathered so far."
+handler = "self::call_get_session_summary"
+calling_convention = "engine_args"
+read_only = true
+
+[tools.params.token_budget]
+type = "integer"
+description = "Maximum tokens for the summary output (default: 1500)"
+
+[[tools]]
+name = "session_reset_focus"
+description = "Clear progressive focus narrowing. After 5+ interactions in the same directory, search results are automatically narrowed to that directory. Call this when switching to a different area of the codebase."
+handler = "self::call_session_reset_focus"
+calling_convention = "engine_mut_only"
+read_only = false
+
+[[tools]]
+name = "session_status"
+description = "Return the shared multi-agent session status: active agents, hot files (ranked by recent cross-agent activity), and total event count. Use this to understand what other agents have been working on and which files are currently receiving the most attention."
+handler = "self::call_session_status"
+calling_convention = "engine_args"
+read_only = true
+
+[tools.params.limit]
+type = "integer"
+description = "Maximum number of hot files to return (default: 10)"

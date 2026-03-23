@@ -1,0 +1,106 @@
+# Federation tools are defined separately from the main tools.
+# They are added by tool_definitions_with_federation() only.
+# The `federation_only = true` flag marks these as federation-specific.
+federation_only = true
+
+[[tools]]
+name = "federation_init"
+description = "Create an empty federation config file with sensible defaults. Use this as the first step to set up cross-repo federated search."
+handler = "federation::call_federation_init"
+calling_convention = "args_only"
+read_only = true
+
+[tools.params.path]
+type = "string"
+description = "File path where the federation config will be created (e.g. 'codixing-federation.json')"
+required = true
+
+[[tools]]
+name = "federation_add_project"
+description = "Add a project to an existing federation config file. The project root must contain a .codixing/ index."
+handler = "federation::call_federation_add_project"
+calling_convention = "args_only"
+read_only = true
+
+[tools.params.config]
+type = "string"
+description = "Path to the federation config file"
+required = true
+
+[tools.params.path]
+type = "string"
+description = "Root directory of the project to add"
+required = true
+
+[tools.params.weight]
+type = "number"
+description = "Per-project weight for RRF fusion (default: 1.0). Higher values rank this project's results higher."
+
+[[tools]]
+name = "federation_remove_project"
+description = "Remove a project from a federation config file by its directory name."
+handler = "federation::call_federation_remove_project"
+calling_convention = "args_only"
+read_only = true
+
+[tools.params.config]
+type = "string"
+description = "Path to the federation config file"
+required = true
+
+[tools.params.name]
+type = "string"
+description = "Directory name of the project to remove (last component of root path)"
+required = true
+
+[[tools]]
+name = "federation_list"
+description = "List all projects in the federation. If a live FederatedEngine is available (--federation), shows load status and file counts. Otherwise reads from the config file."
+handler = "federation::call_federation_list"
+calling_convention = "args_federation"
+read_only = true
+
+[tools.params.config]
+type = "string"
+description = "Path to federation config file (only needed when no FederatedEngine is active)"
+
+[[tools]]
+name = "federation_search"
+description = "Search across all federated projects using RRF fusion. Requires an active FederatedEngine (--federation flag)."
+handler = "federation::call_federation_search"
+calling_convention = "args_federation"
+read_only = true
+
+[tools.params.query]
+type = "string"
+description = "Search query (natural language or code pattern)"
+required = true
+
+[tools.params.limit]
+type = "integer"
+description = "Maximum number of results to return (default: 10)"
+
+[[tools]]
+name = "federation_discover"
+description = "Auto-discover workspace projects under a root directory. Detects Cargo workspaces, npm/pnpm workspaces, Go workspaces, git submodules, and nested projects. Optionally writes a federation config file."
+handler = "federation::call_federation_discover"
+calling_convention = "args_only"
+read_only = true
+
+[tools.params.root]
+type = "string"
+description = "Root directory to scan for workspace projects"
+required = true
+
+[tools.params.output]
+type = "string"
+description = "File path to write the discovered federation config (optional — if omitted, just returns the list)"
+
+# list_projects is a deprecated tool that only appears when has_federation is true.
+[[tools]]
+name = "list_projects"
+description = "Deprecated: use federation_list instead. List all projects registered in the federation with their load status, file count, and root path. Only available when the server is started with --federation."
+handler = "self::call_list_projects"
+calling_convention = "federation_only"
+read_only = true
+requires_federation = true

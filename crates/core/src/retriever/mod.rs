@@ -27,6 +27,10 @@ pub enum Strategy {
     /// Highest precision available; requires `reranker_enabled = true` in config.
     /// Falls back to `Thorough` if the reranker model is not loaded.
     Deep,
+    /// Trigram index fast-path for exact identifier lookups.
+    /// Uses the trigram inverted index for sub-millisecond exact substring
+    /// matching, with BM25 fallback when trigram yields < 3 results.
+    Exact,
 }
 
 /// A search query against the code index.
@@ -130,6 +134,11 @@ pub struct ChunkMeta {
     pub entity_names: Vec<String>,
     /// Source code content.
     pub content: String,
+    /// xxh3 hash of the chunk content, used for incremental vector updates.
+    /// During sync, chunks whose content hash has not changed can skip
+    /// re-embedding, reusing the existing vector.
+    #[serde(default)]
+    pub content_hash: u64,
 }
 
 /// Trait for swappable retrieval strategies.

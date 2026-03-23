@@ -1,9 +1,9 @@
 {
   "name": "codixing",
   "displayName": "Codixing",
-  "description": "Ultra-fast code retrieval for AI agents — structural search, dependency graph, MCP integration",
-  "version": "0.1.0",
-  "publisher": "codixing",
+  "description": "Ultra-fast code retrieval engine — search, navigate, and understand code with AI-grade precision",
+  "version": "0.16.0",
+  "publisher": "ferax564",
   "icon": "icon.png",
   "repository": {
     "type": "git",
@@ -13,15 +13,17 @@
     "vscode": "^1.85.0"
   },
   "categories": [
-    "Other",
-    "Programming Languages"
+    "Programming Languages",
+    "Other"
   ],
   "keywords": [
     "search",
     "AI",
     "MCP",
     "code intelligence",
-    "Claude"
+    "Claude",
+    "code retrieval",
+    "dependency graph"
   ],
   "activationEvents": [
     "workspaceContains:.codixing",
@@ -32,29 +34,95 @@
     "commands": [
       {
         "command": "codixing.indexWorkspace",
-        "title": "Codixing: Index Workspace"
+        "title": "Codixing: Index Workspace",
+        "icon": "$(database)"
       },
       {
         "command": "codixing.syncIndex",
-        "title": "Codixing: Sync Index"
+        "title": "Codixing: Sync Index",
+        "icon": "$(sync)"
       },
       {
         "command": "codixing.search",
-        "title": "Codixing: Search..."
+        "title": "Codixing: Search...",
+        "icon": "$(search)"
       },
       {
         "command": "codixing.showRepoMap",
-        "title": "Codixing: Show Repo Map"
+        "title": "Codixing: Show Repo Map",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "codixing.showHotspots",
+        "title": "Codixing: Show Hotspots",
+        "icon": "$(flame)"
+      },
+      {
+        "command": "codixing.showComplexity",
+        "title": "Codixing: Show Complexity",
+        "icon": "$(graph)"
       },
       {
         "command": "codixing.startDaemon",
-        "title": "Codixing: Start Daemon"
+        "title": "Codixing: Start Daemon",
+        "icon": "$(server-process)"
       },
       {
         "command": "codixing.registerMcpServer",
-        "title": "Codixing: Register MCP Server"
+        "title": "Codixing: Register MCP Server",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "codixing.searchView.refresh",
+        "title": "Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "codixing.searchView.clear",
+        "title": "Clear Results",
+        "icon": "$(clear-all)"
       }
     ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codixing",
+          "title": "Codixing",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "codixing": [
+        {
+          "id": "codixing.searchResults",
+          "name": "Search Results"
+        },
+        {
+          "id": "codixing.repoMap",
+          "name": "Repository Map"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "codixing.search",
+          "when": "view == codixing.searchResults",
+          "group": "navigation"
+        },
+        {
+          "command": "codixing.searchView.clear",
+          "when": "view == codixing.searchResults",
+          "group": "navigation"
+        },
+        {
+          "command": "codixing.showRepoMap",
+          "when": "view == codixing.repoMap",
+          "group": "navigation"
+        }
+      ]
+    },
     "configuration": {
       "title": "Codixing",
       "properties": {
@@ -68,16 +136,6 @@
           "default": "",
           "description": "Path to the codixing-mcp binary. Leave empty to auto-detect."
         },
-        "codixing.autoStartDaemon": {
-          "type": "boolean",
-          "default": false,
-          "description": "Automatically start the codixing-mcp daemon when the extension activates."
-        },
-        "codixing.embeddings": {
-          "type": "boolean",
-          "default": false,
-          "description": "Enable vector embeddings when initializing a new index (slower init, better search quality)."
-        },
         "codixing.lspBinaryPath": {
           "type": "string",
           "default": "",
@@ -87,6 +145,16 @@
           "type": "boolean",
           "default": true,
           "description": "Start the Codixing LSP server for hover, go-to-definition, references, and complexity diagnostics."
+        },
+        "codixing.autoStartDaemon": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically start the codixing-mcp daemon when the extension activates."
+        },
+        "codixing.embeddings": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable vector embeddings when initializing a new index (slower init, better search quality)."
         },
         "codixing.complexityThreshold": {
           "type": "number",

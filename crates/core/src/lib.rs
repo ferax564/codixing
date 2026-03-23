@@ -33,6 +33,7 @@ pub use engine::{
 pub use error::{CodixingError, Result};
 pub use federation::{
     FederatedEngine, FederatedResult, FederatedStats, FederationConfig, ProjectInfo,
+    discover::{DiscoveredProject, ProjectType, discover_projects, to_federation_config},
 };
 pub use graph::{CodeEdge, CodeGraph, CodeNode, EdgeKind, GraphStats, RepoMapOptions};
 pub use language::EntityKind;

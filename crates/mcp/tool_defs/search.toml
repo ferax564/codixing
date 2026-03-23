@@ -1,0 +1,136 @@
+[[tools]]
+name = "code_search"
+description = "Search for relevant code chunks across the indexed codebase. Uses BM25, vector, or hybrid retrieval depending on the strategy. Returns formatted source excerpts with file paths and line numbers."
+handler = "search::call_code_search"
+calling_convention = "engine_args_progress"
+read_only = true
+medium = true
+
+[tools.params.query]
+type = "string"
+description = "Natural language or code search query (e.g. 'PageRank computation', 'fn search')"
+required = true
+
+[tools.params.strategy]
+type = "string"
+description = "Retrieval strategy. Omit to auto-detect from query: single identifiers use 'instant' (BM25), multi-word uses 'fast'/'thorough'. Explicit options: 'instant'=BM25 only (fastest), 'fast'=hybrid BM25+vector, 'thorough'=hybrid+MMR deduplication, 'explore'=BM25 + graph expansion, 'deep'=hybrid + reranker"
+enum = ["instant", "fast", "thorough", "explore", "deep", "exact"]
+
+[tools.params.limit]
+type = "integer"
+description = "Maximum number of results to return (default: 10, max recommended: 20)"
+
+[tools.params.file_filter]
+type = "string"
+description = "Optional substring to restrict results to files whose path contains this string (e.g. 'engine', 'src/graph')"
+
+[tools.params.kind]
+type = "string"
+description = "Filter results by symbol kind (e.g. 'function' for fn/def/func, 'struct' for structs/data classes, 'trait' for traits/protocols)"
+enum = ["function", "struct", "enum", "trait", "class", "method", "interface", "type", "const", "impl"]
+
+[[tools]]
+name = "find_symbol"
+description = "Look up symbols (functions, structs, classes, traits, methods, etc.) in the indexed codebase by name. Performs case-insensitive substring matching."
+handler = "search::call_find_symbol"
+calling_convention = "engine_args"
+read_only = true
+medium = true
+
+[tools.params.name]
+type = "string"
+description = "Symbol name to search for (case-insensitive substring match, e.g. 'Engine', 'compute_pagerank')"
+required = true
+
+[tools.params.file]
+type = "string"
+description = "Optional file path substring to restrict results to a specific file (e.g. 'engine.rs')"
+
+[[tools]]
+name = "search_usages"
+description = "Find all code locations where a symbol (function, struct, variable, etc.) is referenced or called. Unlike find_symbol which finds definitions, this finds usages \u2014 call sites, imports, and references. Essential for impact analysis before refactoring."
+handler = "search::call_search_usages"
+calling_convention = "engine_args"
+read_only = true
+
+[tools.params.symbol]
+type = "string"
+description = "The symbol name to find usages of (e.g. 'compute_pagerank', 'BM25Retriever', 'IndexConfig')"
+required = true
+
+[tools.params.limit]
+type = "integer"
+description = "Maximum number of usage locations to return (default: 20)"
+
+[[tools]]
+name = "read_symbol"
+description = "Read the complete source definition of a named symbol (function, struct, class, method, etc.) resolved from the symbol table. More precise than code_search for fetching a known definition \u2014 returns exact source lines with language-tagged fenced code."
+handler = "search::call_read_symbol"
+calling_convention = "engine_args"
+read_only = true
+
+[tools.params.name]
+type = "string"
+description = "Symbol name to look up (case-insensitive substring, e.g. 'compute_pagerank', 'BM25Retriever', 'IndexConfig')"
+required = true
+
+[tools.params.file]
+type = "string"
+description = "Optional file path substring to disambiguate when multiple symbols share the same name (e.g. 'engine.rs')"
+
+[[tools]]
+name = "explain"
+description = "Assemble a complete understanding package for a named symbol: its definition source, the top usage sites found via BM25 search (callers), and functions it calls (callees extracted from source). Ideal first step before modifying any significant function or class."
+handler = "search::call_explain"
+calling_convention = "engine_args_progress"
+read_only = true
+medium = true
+
+[tools.params.symbol]
+type = "string"
+description = "Symbol name to explain (e.g. 'compute_pagerank', 'BM25Retriever')"
+required = true
+
+[tools.params.file]
+type = "string"
+description = "Optional file path to disambiguate"
+
+[[tools]]
+name = "stitch_context"
+description = "Search for code and automatically attach the full source of callee definitions referenced in the top results, assembling cross-file context in one call."
+handler = "search::call_stitch_context"
+calling_convention = "engine_args"
+read_only = true
+
+[tools.params.query]
+type = "string"
+description = "Search query (same as code_search)"
+required = true
+
+[tools.params.limit]
+type = "integer"
+description = "Number of search results to stitch (default: 5)"
+
+[tools.params.callee_depth]
+type = "integer"
+description = "How many levels of callee definitions to attach (default: 1)"
+
+[[tools]]
+name = "find_similar"
+description = "Find code chunks semantically similar to a named symbol using vector embeddings (cosine similarity) or BM25 fallback. Useful for spotting copy-paste debt or finding parallel implementations."
+handler = "analysis::call_find_similar"
+calling_convention = "engine_args"
+read_only = true
+
+[tools.params.symbol]
+type = "string"
+description = "Symbol name to find similar code for (e.g. 'compute_pagerank')"
+required = true
+
+[tools.params.threshold]
+type = "number"
+description = "Minimum similarity score 0\u20131 (default: 0.5)"
+
+[tools.params.limit]
+type = "integer"
+description = "Maximum results to return (default: 10)"

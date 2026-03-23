@@ -1,3 +1,4 @@
+pub mod analysis;
 pub mod graph;
 pub mod index;
 pub mod search;
@@ -17,6 +18,13 @@ pub fn build_router(state: AppState) -> Router {
         .route("/search", post(search::search_handler))
         // Symbols
         .route("/symbols", post(symbols::symbols_handler))
+        .route("/find-symbol", post(analysis::find_symbol_handler))
+        // Grep
+        .route("/grep", post(analysis::grep_handler))
+        // Analysis
+        .route("/hotspots", get(analysis::hotspots_handler))
+        .route("/complexity/{*file}", get(analysis::complexity_handler))
+        .route("/outline/{*file}", get(analysis::outline_handler))
         // Index management
         .route("/index/reindex", post(index::reindex_handler))
         .route("/index/file", delete(index::remove_file_handler))

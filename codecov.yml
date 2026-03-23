@@ -1,0 +1,19 @@
+coverage:
+  status:
+    project:
+      default:
+        target: auto    # Use previous coverage as target (no hard floor yet)
+        threshold: 2%   # Allow 2% drop before failing
+    patch:
+      default:
+        target: 70%     # New code should have 70%+ coverage
+
+comment:
+  layout: "reach, diff, flags"
+  behavior: default
+
+ignore:
+  - "crates/*/benches/**"
+  - "npm/**"
+  - "docs/**"
+  - "vscode/**"

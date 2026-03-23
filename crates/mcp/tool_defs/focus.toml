@@ -1,0 +1,19 @@
+[[tools]]
+name = "focus_map"
+description = "Generate a focus-aware repository map using Personalized PageRank seeded by recently edited/viewed files. Surfaces the files most relevant to your current working context \u2014 direct dependencies, transitive imports, and co-dependent modules. If no seed files are given, auto-detects from git (unstaged changes, staged changes, recent commits)."
+handler = "focus::call_focus_map"
+calling_convention = "engine_args"
+read_only = true
+
+[tools.params.seed_files]
+type = "array"
+description = "File paths to seed the focus map (most important first). If omitted, auto-detects from git working tree changes and recent commits."
+items_type = "string"
+
+[tools.params.max_files]
+type = "integer"
+description = "Maximum number of files to return (default: 20)"
+
+[tools.params.include_symbols]
+type = "boolean"
+description = "Whether to include top symbol names per file (default: true)"

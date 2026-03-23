@@ -1393,8 +1393,17 @@ Sync complete in 0.12s</span></code></pre>
 
         <h3>Capabilities</h3>
         <ul>
+          <li><code>textDocument/hover</code> — signature + doc comment for the symbol under the cursor</li>
+          <li><code>textDocument/definition</code> — go-to-definition across all indexed files</li>
+          <li><code>textDocument/references</code> — find all usages of a symbol</li>
           <li><code>workspace/symbol</code> — global symbol search by query string (up to 200 results)</li>
           <li><code>textDocument/documentSymbol</code> — per-file symbol outline</li>
+          <li><code>textDocument/completion</code> — symbol-name completions from the index</li>
+          <li><code>textDocument/signatureHelp</code> — parameter info on function calls</li>
+          <li><code>textDocument/codeAction</code> — quickfix to suppress complexity warnings</li>
+          <li><code>textDocument/inlayHint</code> — cyclomatic complexity scores on function lines</li>
+          <li><code>textDocument/rename</code> + <code>textDocument/prepareRename</code> — rename refactoring with conflict detection</li>
+          <li><code>textDocument/semanticTokens/full</code> — AST-based semantic tokens for Rust, Python, TypeScript/JavaScript, and Go</li>
         </ul>
 
         <h3>Call Hierarchy</h3>

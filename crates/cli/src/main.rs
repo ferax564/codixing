@@ -7,7 +7,7 @@ use tracing_subscriber::EnvFilter;
 
 use codixing_core::{
     EmbeddingModel, Engine, FederatedEngine, FederationConfig, GitSyncStats, IndexConfig,
-    RepoMapOptions, SearchQuery, Strategy, SyncStats,
+    RepoMapOptions, SearchQuery, Strategy, SyncStats, discover_projects, to_federation_config,
 };
 
 #[derive(Parser)]
@@ -276,6 +276,21 @@ enum FederationAction {
         #[arg(long, default_value = "codixing-federation.json")]
         config: PathBuf,
     },
+
+    /// Auto-discover workspace projects (Cargo, npm, pnpm, Go, git submodules).
+    ///
+    /// Scans the given root for multi-project workspace patterns and prints
+    /// discovered projects. Use --output to write a federation config file.
+    Discover {
+        /// Root directory to scan for workspace projects.
+        #[arg(default_value = ".")]
+        root: PathBuf,
+
+        /// Write the discovered projects to this federation config file.
+        /// If omitted, just prints the discovery results.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
 }
 
 /// Clap-parseable strategy argument.
@@ -291,6 +306,8 @@ enum StrategyArg {
     /// Two-stage: hybrid first-pass then BGE-Reranker cross-encoder re-scoring.
     /// Requires reranker_enabled = true (set via --reranker on init).
     Deep,
+    /// Trigram index fast-path for exact identifier lookups.
+    Exact,
 }
 
 impl StrategyArg {
@@ -303,6 +320,7 @@ impl StrategyArg {
             StrategyArg::Thorough => Strategy::Thorough,
             StrategyArg::Explore => Strategy::Explore,
             StrategyArg::Deep => Strategy::Deep,
+            StrategyArg::Exact => Strategy::Exact,
         }
     }
 }
@@ -1081,6 +1099,60 @@ fn cmd_federation(action: FederationAction) -> Result<()> {
                 }
                 println!();
             }
+            Ok(())
+        }
+        FederationAction::Discover { root, output } => {
+            let abs_root = root
+                .canonicalize()
+                .with_context(|| format!("root path not found: {}", root.display()))?;
+
+            let start = Instant::now();
+            let projects = discover_projects(&abs_root);
+            let elapsed = start.elapsed();
+
+            if projects.is_empty() {
+                eprintln!(
+                    "No workspace projects discovered under {} ({:.2}s)",
+                    abs_root.display(),
+                    elapsed.as_secs_f64()
+                );
+                return Ok(());
+            }
+
+            // Print table of discovered projects
+            println!(
+                "{:<5} {:<20} {:<18} {:<8} ROOT",
+                "#", "NAME", "TYPE", "WEIGHT"
+            );
+            println!("{}", "-".repeat(80));
+            for (i, proj) in projects.iter().enumerate() {
+                println!(
+                    "{:<5} {:<20} {:<18} {:<8.1} {}",
+                    i + 1,
+                    proj.name,
+                    proj.project_type,
+                    proj.weight,
+                    proj.root.display(),
+                );
+            }
+            eprintln!(
+                "\nDiscovered {} project(s) in {:.2}s",
+                projects.len(),
+                elapsed.as_secs_f64()
+            );
+
+            // If --output is given, write the federation config
+            if let Some(output_path) = output {
+                let config = to_federation_config(&projects);
+                config.save(&output_path).with_context(|| {
+                    format!(
+                        "failed to write federation config to {}",
+                        output_path.display()
+                    )
+                })?;
+                eprintln!("Wrote federation config to: {}", output_path.display());
+            }
+
             Ok(())
         }
     }

@@ -6,14 +6,13 @@
 # Each entry must include justification and a planned resolution.
 ignore = [
     # time 0.3.45 — DoS via stack exhaustion (medium severity 6.8).
-    # Pinned by tantivy 0.22 which requires time >=0.3.2,<0.3.46.
-    # Resolution: bump tantivy to 0.25 in v0.16.0 (breaking API changes).
+    # Pinned by tantivy 0.25 via tantivy-common which requires time >=0.3.2,<0.3.46.
+    # Resolution: wait for tantivy to bump tantivy-common with time >=0.3.47.
     "RUSTSEC-2026-0009",
 
-    # unmaintained crates — all transitive, from tantivy/hf-hub/fastembed/qdrant-client
-    "RUSTSEC-2024-0384", # instant (tantivy -> measure_time)
+    # unmaintained crates — all transitive, from hf-hub/fastembed/qdrant-client/tantivy
     "RUSTSEC-2025-0119", # number_prefix (hf-hub -> indicatif)
     "RUSTSEC-2024-0436", # paste (fastembed -> tokenizers)
     "RUSTSEC-2025-0134", # rustls-pemfile (qdrant-client -> tonic)
-    "RUSTSEC-2026-0002", # lru unsound IterMut (tantivy)
+    "RUSTSEC-2026-0002", # lru unsound IterMut (tantivy 0.25)
 ]

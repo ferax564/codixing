@@ -1,0 +1,91 @@
+[[tools]]
+name = "get_references"
+description = "Get the dependency relationships for a file: which files import it (callers/dependents) and which files it imports (callees/dependencies). Requires graph intelligence to be enabled."
+handler = "graph::call_get_references"
+calling_convention = "engine_args"
+read_only = true
+medium = true
+
+[tools.params.file]
+type = "string"
+description = "Relative file path within the indexed project (e.g. 'src/engine.rs', 'crates/core/src/graph/mod.rs')"
+required = true
+
+[[tools]]
+name = "get_repo_map"
+description = "Generate a token-budgeted repository map showing the file structure and key symbols, sorted by PageRank (most important files first). Useful for understanding a codebase at a glance."
+handler = "graph::call_get_repo_map"
+calling_convention = "engine_args"
+read_only = true
+medium = true
+
+[tools.params.token_budget]
+type = "integer"
+description = "Maximum number of tokens for the repo map (default: 4000)"
+
+[[tools]]
+name = "get_transitive_deps"
+description = "Get the full transitive dependency chain for a file \u2014 all files it depends on, directly or indirectly, up to a given depth. Critical for understanding the blast radius of a change before making it."
+handler = "graph::call_get_transitive_deps"
+calling_convention = "engine_args"
+read_only = true
+
+[tools.params.file]
+type = "string"
+description = "Relative file path to analyse (e.g. 'src/engine.rs')"
+required = true
+
+[tools.params.depth]
+type = "integer"
+description = "Maximum hop depth for transitive traversal (default: 3, max recommended: 5)"
+
+[[tools]]
+name = "symbol_callers"
+description = "Return all functions in the codebase that directly call the given symbol. Uses the symbol-level call graph built at index time. Falls back to BM25 search if the graph has no results for this symbol."
+handler = "graph::call_symbol_callers"
+calling_convention = "engine_args"
+read_only = true
+medium = true
+
+[tools.params.symbol]
+type = "string"
+description = "Symbol name to look up callers for (e.g. 'compute_pagerank')"
+required = true
+
+[tools.params.limit]
+type = "integer"
+description = "Maximum call sites to return (default: 20)"
+
+[[tools]]
+name = "symbol_callees"
+description = "Return all functions that the given symbol directly calls. Uses the symbol-level call graph built at index time."
+handler = "graph::call_symbol_callees"
+calling_convention = "engine_args"
+read_only = true
+medium = true
+
+[tools.params.symbol]
+type = "string"
+description = "Symbol name to look up callees for (e.g. 'compute_pagerank')"
+required = true
+
+[tools.params.limit]
+type = "integer"
+description = "Maximum results to return (default: 20)"
+
+[[tools]]
+name = "predict_impact"
+description = "Given a unified diff, rank the files most likely to need changes based on the call graph and import graph. Useful for blast-radius analysis before committing a change."
+handler = "graph::call_predict_impact"
+calling_convention = "engine_args_progress"
+read_only = true
+medium = true
+
+[tools.params.patch]
+type = "string"
+description = "Unified diff content \u2014 the planned or committed change to analyze"
+required = true
+
+[tools.params.limit]
+type = "integer"
+description = "Maximum number of impacted files to return (default: 15)"

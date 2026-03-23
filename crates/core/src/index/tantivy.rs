@@ -9,6 +9,7 @@ use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, Term, doc};
 
 use crate::chunker::Chunk;
+use crate::config::Bm25Config;
 use crate::error::{CodixingError, Result};
 use crate::index::schema::{SchemaFields, build_schema};
 
@@ -267,6 +268,7 @@ pub struct TantivyIndex {
     reader: IndexReader,
     writer: Option<Mutex<IndexWriter>>,
     fields: SchemaFields,
+    bm25_config: Bm25Config,
 }
 
 /// Register the custom `"code"` tokenizer on a [`tantivy::Index`].
@@ -278,6 +280,11 @@ fn register_code_tokenizer(index: &Index) {
 impl TantivyIndex {
     /// Create a new **in-memory** index (useful for tests).
     pub fn create_in_ram() -> Result<Self> {
+        Self::create_in_ram_with_config(Bm25Config::default())
+    }
+
+    /// Create a new **in-memory** index with custom BM25 field boost weights.
+    pub fn create_in_ram_with_config(bm25_config: Bm25Config) -> Result<Self> {
         let (schema, fields) = build_schema();
         let index = Index::create_in_ram(schema);
         register_code_tokenizer(&index);
@@ -291,6 +298,7 @@ impl TantivyIndex {
             reader,
             writer: Some(Mutex::new(writer)),
             fields,
+            bm25_config,
         })
     }
 
@@ -298,6 +306,11 @@ impl TantivyIndex {
     ///
     /// If the directory does not exist it will be created.
     pub fn create_in_dir(path: &Path) -> Result<Self> {
+        Self::create_in_dir_with_config(path, Bm25Config::default())
+    }
+
+    /// Create or open a persistent index with custom BM25 field boost weights.
+    pub fn create_in_dir_with_config(path: &Path, bm25_config: Bm25Config) -> Result<Self> {
         std::fs::create_dir_all(path)?;
         let (schema, fields) = build_schema();
         let dir = tantivy::directory::MmapDirectory::open(path)
@@ -314,11 +327,17 @@ impl TantivyIndex {
             reader,
             writer: Some(Mutex::new(writer)),
             fields,
+            bm25_config,
         })
     }
 
     /// Open an existing persistent index (fails if no index exists).
     pub fn open_in_dir(path: &Path) -> Result<Self> {
+        Self::open_in_dir_with_config(path, Bm25Config::default())
+    }
+
+    /// Open an existing persistent index with custom BM25 field boost weights.
+    pub fn open_in_dir_with_config(path: &Path, bm25_config: Bm25Config) -> Result<Self> {
         if !path.exists() {
             return Err(CodixingError::IndexNotFound {
                 path: path.to_path_buf(),
@@ -359,6 +378,7 @@ impl TantivyIndex {
             reader,
             writer: Some(Mutex::new(writer)),
             fields,
+            bm25_config,
         })
     }
 
@@ -370,6 +390,11 @@ impl TantivyIndex {
     /// etc.) work normally; write operations (`add_chunk`, `remove_file`,
     /// `commit`) return [`CodixingError::ReadOnly`].
     pub fn open_read_only(path: &Path) -> Result<Self> {
+        Self::open_read_only_with_config(path, Bm25Config::default())
+    }
+
+    /// Open an existing persistent index in read-only mode with custom BM25 field boost weights.
+    pub fn open_read_only_with_config(path: &Path, bm25_config: Bm25Config) -> Result<Self> {
         if !path.exists() {
             return Err(CodixingError::IndexNotFound {
                 path: path.to_path_buf(),
@@ -410,6 +435,7 @@ impl TantivyIndex {
             reader,
             writer: None,
             fields,
+            bm25_config,
         })
     }
 
@@ -486,10 +512,10 @@ impl TantivyIndex {
         Ok(())
     }
 
-    /// Search the index using BM25 ranking.
+    /// Search the index using BM25 ranking with configurable field boost weights.
     ///
     /// Returns up to `limit` results as `(chunk_id, score)` pairs sorted by
-    /// descending relevance.
+    /// descending relevance. Field weights are controlled by [`Bm25Config`].
     pub fn search(&self, query_str: &str, limit: usize) -> Result<Vec<(String, f32)>> {
         let searcher = self.reader.searcher();
 
@@ -502,10 +528,15 @@ impl TantivyIndex {
                 self.fields.scope_chain,
             ],
         );
-        // Boost exact-name and signature fields so symbol lookups rank above
+        // Field-weighted BM25: configurable boosts so symbol lookups rank above
         // raw content hits — mirrors what Elasticsearch `multi_match boost` does.
-        query_parser.set_field_boost(self.fields.signature, 3.0);
-        query_parser.set_field_boost(self.fields.entity_names, 2.0);
+        query_parser.set_field_boost(
+            self.fields.entity_names,
+            self.bm25_config.entity_names_boost,
+        );
+        query_parser.set_field_boost(self.fields.signature, self.bm25_config.signature_boost);
+        query_parser.set_field_boost(self.fields.scope_chain, self.bm25_config.scope_chain_boost);
+        query_parser.set_field_boost(self.fields.content, self.bm25_config.content_boost);
 
         let query = query_parser.parse_query(query_str)?;
         let top_docs = searcher.search(&query, &TopDocs::with_limit(limit))?;
@@ -527,6 +558,7 @@ impl TantivyIndex {
     ///
     /// Unlike [`Self::search`], this extracts all stored fields from each
     /// matching document, allowing callers to build rich result objects.
+    /// Uses the same configurable field boost weights as [`Self::search`].
     pub fn search_documents(
         &self,
         query_str: &str,
@@ -543,8 +575,13 @@ impl TantivyIndex {
                 self.fields.scope_chain,
             ],
         );
-        query_parser.set_field_boost(self.fields.signature, 3.0);
-        query_parser.set_field_boost(self.fields.entity_names, 2.0);
+        query_parser.set_field_boost(
+            self.fields.entity_names,
+            self.bm25_config.entity_names_boost,
+        );
+        query_parser.set_field_boost(self.fields.signature, self.bm25_config.signature_boost);
+        query_parser.set_field_boost(self.fields.scope_chain, self.bm25_config.scope_chain_boost);
+        query_parser.set_field_boost(self.fields.content, self.bm25_config.content_boost);
 
         let query = query_parser.parse_query(query_str)?;
         let top_docs = searcher.search(&query, &TopDocs::with_limit(limit))?;
@@ -780,5 +817,166 @@ mod tests {
             assert!(!results.is_empty(), "expected results after reopen");
             assert_eq!(results[0].0, "7");
         }
+    }
+
+    // --- Field-weighted BM25 tests ---
+
+    #[test]
+    fn entity_name_match_ranks_above_content_only() {
+        use crate::config::Bm25Config;
+
+        let idx = TantivyIndex::create_in_ram().unwrap();
+
+        // Chunk 1: "FooParser" appears only in entity_names (via the chunk).
+        let entity_chunk = Chunk {
+            id: 1,
+            file_path: "src/parser.rs".to_string(),
+            language: Language::Rust,
+            content: "impl FooParser { fn parse(&self) {} }".to_string(),
+            byte_start: 0,
+            byte_end: 40,
+            line_start: 0,
+            line_end: 5,
+            scope_chain: vec!["module".to_string()],
+            signatures: vec![],
+            entity_names: vec!["FooParser".to_string()],
+        };
+
+        // Chunk 2: "FooParser" appears only in content, NOT in entity_names.
+        let content_chunk = Chunk {
+            id: 2,
+            file_path: "src/utils.rs".to_string(),
+            language: Language::Rust,
+            content: "// This helper is used by FooParser for validation".to_string(),
+            byte_start: 0,
+            byte_end: 50,
+            line_start: 0,
+            line_end: 5,
+            scope_chain: vec!["module".to_string()],
+            signatures: vec![],
+            entity_names: vec!["validate".to_string()],
+        };
+
+        idx.add_chunk(&entity_chunk).unwrap();
+        idx.add_chunk(&content_chunk).unwrap();
+        idx.commit().unwrap();
+
+        let results = idx.search("FooParser", 10).unwrap();
+        assert!(
+            results.len() >= 2,
+            "expected at least 2 results, got {}",
+            results.len()
+        );
+        // The entity_names match (chunk 1) should rank higher than content-only (chunk 2).
+        assert_eq!(
+            results[0].0, "1",
+            "entity_names match should rank first (got chunk {})",
+            results[0].0
+        );
+    }
+
+    #[test]
+    fn signature_match_ranks_above_content_only() {
+        let idx = TantivyIndex::create_in_ram().unwrap();
+
+        // Chunk 1: "compute_pagerank" appears in signature field.
+        let sig_chunk = Chunk {
+            id: 10,
+            file_path: "src/graph.rs".to_string(),
+            language: Language::Rust,
+            content: "fn compute_pagerank(g: &Graph) -> Vec<f64> { vec![] }".to_string(),
+            byte_start: 0,
+            byte_end: 55,
+            line_start: 0,
+            line_end: 5,
+            scope_chain: vec!["graph".to_string()],
+            signatures: vec!["fn compute_pagerank(g: &Graph) -> Vec<f64>".to_string()],
+            entity_names: vec!["compute_pagerank".to_string()],
+        };
+
+        // Chunk 2: "compute_pagerank" appears only in content (a comment reference).
+        let ref_chunk = Chunk {
+            id: 11,
+            file_path: "src/engine.rs".to_string(),
+            language: Language::Rust,
+            content: "// After indexing, we call compute_pagerank to rank nodes".to_string(),
+            byte_start: 0,
+            byte_end: 60,
+            line_start: 0,
+            line_end: 5,
+            scope_chain: vec!["engine".to_string()],
+            signatures: vec![],
+            entity_names: vec!["index_files".to_string()],
+        };
+
+        idx.add_chunk(&sig_chunk).unwrap();
+        idx.add_chunk(&ref_chunk).unwrap();
+        idx.commit().unwrap();
+
+        let results = idx.search("compute_pagerank", 10).unwrap();
+        assert!(
+            results.len() >= 2,
+            "expected at least 2 results, got {}",
+            results.len()
+        );
+        assert_eq!(
+            results[0].0, "10",
+            "signature match should rank first (got chunk {})",
+            results[0].0
+        );
+    }
+
+    #[test]
+    fn custom_bm25_config_changes_ranking() {
+        use crate::config::Bm25Config;
+
+        // Create index with entity_names boost of 10.0 (very high) — ensures entity match wins.
+        let high_entity = Bm25Config {
+            entity_names_boost: 10.0,
+            signature_boost: 1.0,
+            scope_chain_boost: 1.0,
+            content_boost: 1.0,
+        };
+        let idx = TantivyIndex::create_in_ram_with_config(high_entity).unwrap();
+
+        let entity_chunk = Chunk {
+            id: 100,
+            file_path: "src/a.rs".to_string(),
+            language: Language::Rust,
+            content: "struct Widget {}".to_string(),
+            byte_start: 0,
+            byte_end: 16,
+            line_start: 0,
+            line_end: 1,
+            scope_chain: vec![],
+            signatures: vec![],
+            entity_names: vec!["Widget".to_string()],
+        };
+        let content_chunk = Chunk {
+            id: 101,
+            file_path: "src/b.rs".to_string(),
+            language: Language::Rust,
+            content: "// Widget is used here for rendering Widget data to Widget output"
+                .to_string(),
+            byte_start: 0,
+            byte_end: 65,
+            line_start: 0,
+            line_end: 1,
+            scope_chain: vec![],
+            signatures: vec![],
+            entity_names: vec!["render".to_string()],
+        };
+
+        idx.add_chunk(&entity_chunk).unwrap();
+        idx.add_chunk(&content_chunk).unwrap();
+        idx.commit().unwrap();
+
+        let results = idx.search("Widget", 10).unwrap();
+        assert!(results.len() >= 2, "expected at least 2 results");
+        // With entity_names_boost=10.0, entity match should dominate.
+        assert_eq!(
+            results[0].0, "100",
+            "high entity_names_boost should make entity match rank first"
+        );
     }
 }
