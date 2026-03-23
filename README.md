@@ -17,7 +17,7 @@ claude plugin marketplace add ferax564/codixing
 claude plugin install codixing@codixing
 ```
 
-Restart Claude Code after installing. You get 53 MCP tools plus `/codixing-setup`, `/codixing-explore`, and `/codixing-review`.
+Restart Claude Code after installing. You get 54 MCP tools plus `/codixing-setup`, `/codixing-explore`, and `/codixing-review`.
 
 Alternatively, register just the MCP server without the plugin:
 
@@ -119,7 +119,7 @@ codixing sync
 
 ## MCP Tools
 
-48 tools across 7 categories:
+49 tools across 7 categories (54 with federation):
 
 | Category | Tools |
 |----------|-------|
@@ -135,7 +135,7 @@ Full reference: [codixing.com/docs](https://codixing.com/docs)
 
 ### Daemon mode
 
-Daemon mode loads the engine once and serves calls over a Unix socket — **4-5x faster**.
+Daemon mode loads the engine once and serves calls over a Unix socket (or named pipe on Windows) — **4-5x faster**.
 The daemon auto-starts on first connection and self-terminates after 30 minutes idle:
 
 ```bash
@@ -211,17 +211,22 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Hybrid search** — BM25 + optional vector embeddings, fused with Reciprocal Rank Fusion
 - **Symbol-level call graph** — Function-to-function call edges extracted from AST, including Rust trait dispatch, Python class inheritance, and TypeScript interface implementations
 - **Dependency graph** — Import + call extraction, PageRank scoring, Personalized PageRank for focus-aware maps
-- **53 MCP tools** — Search, graph traversal, file operations, code review, git analysis, session memory
-- **Daemon mode** — Engine stays in memory, auto-starts on first connection, Unix socket IPC, file watcher for live index updates, 30-min idle timeout
+- **54 MCP tools** — Search, graph traversal, file operations, code review, git analysis, session memory, federation discovery
+- **Daemon mode** — Engine stays in memory, auto-starts on first connection, Unix socket (macOS/Linux) or named pipe (Windows) IPC, file watcher for live index updates, 30-min idle timeout
+- **Field-weighted BM25** — Configurable per-field boosting (entity_names 3×, signature 2×, scope_chain 1.5×, content 1×)
+- **Search pipeline** — Composable search stages (definition boost, test demotion, path match, graph boost, deduplication, truncation) with 6 strategies including trigram exact-match
+- **LSP rename + semantic tokens** — Cross-file rename refactoring with conflict detection; semantic highlighting for Rust, Python, TypeScript, Go
+- **Streaming embeddings** — Fixed-window batch processing (256 chunks) with progress reporting; incremental vector reuse via content hashing
+- **Federation auto-discovery** — Auto-detects Cargo, npm, pnpm, Go workspaces, git submodules, and nested projects
 - **Read-only concurrent access** — Multiple instances share the same index; periodic reload detects writer updates automatically
 - **Incremental embedding** — `sync` skips re-embedding unchanged chunks (content hash comparison)
 - **Progress notifications** — Long-running MCP tools emit `notifications/progress` with streaming partial results so agents see live status
-- **Windows support** — Brute-force vector fallback when usearch (POSIX-only) is unavailable
+- **Windows support** — Named pipe daemon, brute-force vector fallback when usearch (POSIX-only) is unavailable
 - **Dynamic tool discovery** — `--compact` mode emits `notifications/tools/list_changed` when new tools are used
 - **GitHub Action** — Automated code review with impact analysis on PRs
 - **Token budgets** — All output respects token limits; adaptive truncation at score cliffs
-- **Cross-repo federation** — Unified search across multiple indexed projects with CLI management (`codixing federation init/add/remove/list/search`)
-- **HTTP API server** — REST endpoints with SSE streaming for sync progress (`crates/server/`)
+- **Cross-repo federation** — Unified search across multiple indexed projects with CLI management and workspace auto-discovery (`codixing federation init/add/remove/list/search/discover`)
+- **HTTP API server** — REST endpoints (search, symbols, grep, hotspots, complexity, outline, graph) with SSE streaming (`crates/server/`)
 - **Single binary** — No JVM, no Docker, no external databases, no API keys. macOS, Linux, and Windows
 
 ---
@@ -250,10 +255,11 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 │  Symbol Table (DashMap)    Code Graph (petgraph + PageRank)      │
 │                                                                   │
 │  Retriever: BM25 · Hybrid (RRF) · Thorough (MMR) · Explore      │
-│  + Graph boost · Definition 3.5× · Session boost                 │
+│  + Exact (trigram) · Graph boost · Definition 3.5× · Session     │
+│  SearchPipeline: composable stages, 6 strategies                  │
 │                                                                   │
-│  API: CLI · MCP (48 tools, JSON-RPC 2.0) · LSP Server           │
-│       Daemon (Unix socket) · File Watcher                        │
+│  API: CLI · MCP (49+ tools, JSON-RPC 2.0) · LSP · HTTP Server   │
+│       Daemon (Unix socket / Windows named pipe) · File Watcher   │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -263,7 +269,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 705+ tests
+cargo test --workspace        # 787+ tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```
