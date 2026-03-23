@@ -3,7 +3,7 @@ use std::fs;
 use tracing::warn;
 
 use crate::error::{CodixingError, Result};
-use crate::index::trigram::extract_regex_seeds;
+use crate::index::trigram::extract_required_trigrams;
 
 use super::{Engine, GrepMatch};
 
@@ -111,13 +111,16 @@ impl Engine {
         // filtering is not possible (pattern too short, or too broad) we fall
         // back to scanning all indexed files.
         let candidate_set: Option<std::collections::HashSet<&str>> = if literal {
+            // Use the raw pattern bytes, NOT compiled_pattern — the latter has
+            // regex escaping applied (e.g. `foo.bar` → `foo\.bar`) which would
+            // produce wrong trigrams and cause false negatives.
             self.file_trigram
-                .candidates_for_literal(compiled_pattern.as_bytes())
+                .candidates_for_literal(pattern.as_bytes())
                 .map(|v| v.into_iter().collect())
         } else {
-            let seeds = extract_regex_seeds(pattern);
+            let trigrams = extract_required_trigrams(pattern);
             self.file_trigram
-                .candidates_for_seeds(&seeds)
+                .candidates_for_trigrams(&trigrams)
                 .map(|v| v.into_iter().collect())
         };
 
