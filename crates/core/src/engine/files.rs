@@ -3,6 +3,7 @@ use std::fs;
 use tracing::warn;
 
 use crate::error::{CodixingError, Result};
+use crate::index::trigram::extract_regex_seeds;
 
 use super::{Engine, GrepMatch};
 
@@ -104,11 +105,34 @@ impl Engine {
 
         let mut matches: Vec<GrepMatch> = Vec::new();
 
+        // Use the file-level trigram index to narrow the candidate set before
+        // doing any disk I/O.  For a literal pattern all trigrams must be
+        // present; for a regex we extract required prefix seeds.  When pre-
+        // filtering is not possible (pattern too short, or too broad) we fall
+        // back to scanning all indexed files.
+        let candidate_set: Option<std::collections::HashSet<&str>> = if literal {
+            self.file_trigram
+                .candidates_for_literal(compiled_pattern.as_bytes())
+                .map(|v| v.into_iter().collect())
+        } else {
+            let seeds = extract_regex_seeds(pattern);
+            self.file_trigram
+                .candidates_for_seeds(&seeds)
+                .map(|v| v.into_iter().collect())
+        };
+
         // Iterate over the already-indexed file set (relative paths).
         let mut rel_paths: Vec<String> = self.file_chunk_counts.keys().cloned().collect();
         rel_paths.sort_unstable(); // deterministic ordering
 
         'files: for rel_path in &rel_paths {
+            // Skip files that the trigram pre-filter ruled out.
+            if let Some(ref candidates) = candidate_set {
+                if !candidates.contains(rel_path.as_str()) {
+                    continue;
+                }
+            }
+
             // Apply glob filter if present.
             if let Some(ref pat) = glob_pat {
                 // Match against both the full rel_path and just the filename.

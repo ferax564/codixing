@@ -15,8 +15,8 @@ use crate::retriever::ChunkMeta;
 use crate::symbols::persistence::serialize_symbols;
 
 use super::{
-    Engine, GitSyncStats, SyncStats, git_diff_since, git_head_commit, make_embed_text,
-    normalize_path, symbol_from_entity, unix_timestamp_string,
+    Engine, GitSyncStats, SyncStats, build_file_trigram, git_diff_since, git_head_commit,
+    make_embed_text, normalize_path, symbol_from_entity, unix_timestamp_string,
 };
 
 impl Engine {
@@ -199,6 +199,7 @@ impl Engine {
         }
 
         self.file_chunk_counts.insert(rel_str.clone(), chunks.len());
+        self.file_trigram = build_file_trigram(&self.chunk_meta);
 
         // Update graph edges for this file using the already-parsed tree.
         // PageRank is only recomputed when do_graph_finalize=true (single-file
@@ -326,6 +327,8 @@ impl Engine {
         for id in removed_ids {
             self.trigram.remove(id);
         }
+        // file_trigram rebuilt lazily by the caller (reindex_file, remove_file,
+        // apply_changes) once all per-file mutations are done.
 
         // Remove graph node + incident edges (PageRank deferred to caller).
         if let Some(ref mut graph) = self.graph {
@@ -347,6 +350,7 @@ impl Engine {
 
         self.remove_file_inner(path, &rel_str)?;
         self.tantivy.commit()?;
+        self.file_trigram = build_file_trigram(&self.chunk_meta);
 
         // Recompute PageRank + persist graph for single-file removal.
         if let Some(ref mut graph) = self.graph {
@@ -413,6 +417,9 @@ impl Engine {
 
         // Single Tantivy commit for all pending adds + deletes.
         self.tantivy.commit()?;
+
+        // Single file-trigram rebuild for the entire batch (not per-file).
+        self.file_trigram = build_file_trigram(&self.chunk_meta);
 
         // Single PageRank recompute for the entire batch.
         if let Some(ref mut graph) = self.graph {

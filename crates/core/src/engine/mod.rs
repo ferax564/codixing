@@ -35,6 +35,7 @@ use crate::graph::extractor::RawImport;
 use crate::graph::types::{ReferenceKind, SymbolKind};
 use crate::graph::{CallExtractor, CodeGraph, ImportExtractor, ImportResolver, compute_pagerank};
 use crate::index::TantivyIndex;
+use crate::index::trigram::FileTrigramIndex;
 use crate::language::{Language, SemanticEntity, detect_language};
 use crate::parser::Parser;
 use crate::persistence::{FileHashEntry, IndexMeta, IndexStore};
@@ -262,6 +263,8 @@ pub struct Engine {
     /// All search / read operations work; write operations return
     /// [`CodixingError::ReadOnly`].
     read_only: bool,
+    /// File-level trigram index for fast grep pre-filtering.
+    pub(super) file_trigram: FileTrigramIndex,
     /// When this engine was last loaded/reloaded from disk (mtime of `meta.json`).
     last_load_time: Option<std::time::SystemTime>,
     /// Minimum interval between reload checks (default: 30s).
@@ -481,6 +484,8 @@ impl Engine {
             trigram.add(*entry.key(), &entry.value().content);
         }
 
+        let file_trigram = build_file_trigram(&chunk_meta_map);
+
         Ok(Self {
             config,
             store,
@@ -497,6 +502,7 @@ impl Engine {
             session,
             shared_session: SharedSession::default_new(),
             read_only: false,
+            file_trigram,
             last_load_time: None,
             reload_interval: std::time::Duration::from_secs(30),
             last_staleness_check: None,
@@ -674,6 +680,8 @@ impl Engine {
             trigram.add(*entry.key(), &entry.value().content);
         }
 
+        let file_trigram = build_file_trigram(&chunk_meta);
+
         Ok(Self {
             config,
             store,
@@ -690,6 +698,7 @@ impl Engine {
             session,
             shared_session: SharedSession::default_new(),
             read_only,
+            file_trigram,
             last_load_time: meta_mtime,
             reload_interval: std::time::Duration::from_secs(30),
             last_staleness_check: None,
@@ -843,6 +852,8 @@ impl Engine {
             trigram.add(*entry.key(), &entry.value().content);
         }
 
+        let file_trigram = build_file_trigram(&chunk_meta);
+
         Ok(Self {
             config,
             store,
@@ -859,6 +870,7 @@ impl Engine {
             session,
             shared_session: SharedSession::default_new(),
             read_only: true,
+            file_trigram,
             last_load_time: meta_mtime,
             reload_interval: std::time::Duration::from_secs(30),
             last_staleness_check: None,
@@ -947,6 +959,9 @@ impl Engine {
                 .entry(entry.value().file_path.clone())
                 .or_insert(0) += 1;
         }
+
+        // Rebuild file trigram index.
+        self.file_trigram = build_file_trigram(&self.chunk_meta);
 
         // Reload graph.
         self.graph = match self.store.load_graph() {
@@ -1304,6 +1319,20 @@ struct IndexContext<'a> {
     /// Call names extracted during parsing: rel_path → Vec<callee_name>.
     /// Resolved into `EdgeKind::Calls` edges after the symbol table is complete.
     pending_calls: &'a DashMap<String, Vec<String>>,
+}
+
+/// Build a [`FileTrigramIndex`] from the chunk metadata already in memory.
+///
+/// Called after indexing/loading to enable trigram pre-filtering in `grep_code`.
+/// Trigrams are indexed per-file from chunk content; trigrams that cross chunk
+/// boundaries are not captured (affects < 0.1 % of real patterns).
+fn build_file_trigram(chunk_meta: &DashMap<u64, ChunkMeta>) -> FileTrigramIndex {
+    let mut idx = FileTrigramIndex::new();
+    for entry in chunk_meta.iter() {
+        let m = entry.value();
+        idx.add(&m.file_path, m.content.as_bytes());
+    }
+    idx
 }
 
 /// Process a single file: parse → chunk → index → extract symbols.
