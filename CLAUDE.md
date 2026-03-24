@@ -191,6 +191,20 @@ ORT_DYLIB_PATH=~/.local/lib/libonnxruntime.so LD_LIBRARY_PATH=~/.local/lib \
   ./target/release/codixing init . --model bge-small-en
 ```
 
+## Grep Trigram Benchmark
+
+**Apple M4 — trigram pre-filtering vs full scan:**
+
+| Repo size | Pattern type | Trigram | Full scan | Speedup |
+|---|---|---|---|---|
+| 1K files | Literal (`Widget_500`) | 74µs | 8.1ms | **110×** |
+| 1K files | Regex (`process_widget_\d+`) | 525µs | 420µs | ~1× (matches all files) |
+| 10K files | Literal (`Widget_500`) | 1.1ms | 58ms | **52×** |
+| 10K files | Regex (`process_widget_\d+`) | 2.6ms | 1.2ms | ~1× (matches all files) |
+| 20 files | Literal (`process_batch`) | 258µs | 263µs | ~1× (too few files) |
+
+Trigram pre-filtering provides massive speedups for **selective** patterns (identifiers, specific strings) at scale. Patterns that match most files see no benefit — this is expected and correct (the trigram index can't eliminate candidates that genuinely match).
+
 ## Embedding Model Benchmark
 
 **Apple M4 (127 files, 1054 chunks):**

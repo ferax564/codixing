@@ -219,4 +219,124 @@ impl Engine {
 
         Ok(matches)
     }
+
+    /// Like [`grep_code`] but **skips trigram pre-filtering** — always scans
+    /// every indexed file.  Used exclusively for benchmarking to measure the
+    /// speedup provided by the trigram index.
+    #[doc(hidden)]
+    pub fn grep_code_full_scan(
+        &self,
+        pattern: &str,
+        literal: bool,
+        file_glob: Option<&str>,
+        context_lines: usize,
+        limit: usize,
+    ) -> Result<Vec<GrepMatch>> {
+        use regex::Regex;
+
+        let context_lines = context_lines.min(5);
+        let limit = if limit == 0 { 50 } else { limit };
+
+        let compiled_pattern = if literal {
+            regex::escape(pattern)
+        } else {
+            pattern.to_string()
+        };
+        let re = Regex::new(&compiled_pattern)
+            .map_err(|e| CodixingError::Index(format!("grep pattern error: {e}")))?;
+
+        let glob_pat: Option<glob::Pattern> = match file_glob {
+            Some(g) => Some(
+                glob::Pattern::new(g)
+                    .map_err(|e| CodixingError::Index(format!("invalid file glob: {e}")))?,
+            ),
+            None => None,
+        };
+
+        // No trigram pre-filtering — full scan baseline.
+        let candidate_set: Option<std::collections::HashSet<&str>> = None;
+
+        let mut rel_paths: Vec<String> = self.file_chunk_counts.keys().cloned().collect();
+        rel_paths.sort_unstable();
+
+        let candidate_paths: Vec<&String> = rel_paths
+            .iter()
+            .filter(|p| {
+                if let Some(ref candidates) = candidate_set {
+                    if !candidates.contains(p.as_str()) {
+                        return false;
+                    }
+                }
+                if let Some(ref pat) = glob_pat {
+                    let filename = std::path::Path::new(p.as_str())
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("");
+                    if !pat.matches(p) && !pat.matches(filename) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .collect();
+
+        let done = AtomicBool::new(false);
+        let results = Mutex::new(Vec::<GrepMatch>::new());
+        let config = &self.config;
+
+        candidate_paths.par_iter().for_each(|rel_path| {
+            if done.load(Ordering::Relaxed) {
+                return;
+            }
+            let abs = config
+                .resolve_path(rel_path)
+                .unwrap_or_else(|| config.root.join(rel_path.as_str()));
+            let content = match fs::read_to_string(&abs) {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let lines: Vec<&str> = content.lines().collect();
+            let n = lines.len();
+            let mut file_matches = Vec::new();
+            for (i, line) in lines.iter().enumerate() {
+                if let Some(m) = re.find(line) {
+                    let before: Vec<String> = lines[i.saturating_sub(context_lines)..i]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
+                    let after_start = (i + 1).min(n);
+                    let after_end = (i + 1 + context_lines).min(n);
+                    let after: Vec<String> = lines[after_start..after_end]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect();
+                    file_matches.push(GrepMatch {
+                        file_path: rel_path.to_string(),
+                        line_number: i as u64,
+                        line: line.to_string(),
+                        match_start: m.start(),
+                        match_end: m.end(),
+                        before,
+                        after,
+                    });
+                }
+            }
+            if !file_matches.is_empty() {
+                let mut guard = results.lock().unwrap();
+                guard.extend(file_matches);
+                if guard.len() >= limit {
+                    done.store(true, Ordering::Relaxed);
+                }
+            }
+        });
+
+        let mut matches = results.into_inner().unwrap();
+        matches.sort_by(|a, b| {
+            a.file_path
+                .cmp(&b.file_path)
+                .then(a.line_number.cmp(&b.line_number))
+        });
+        matches.truncate(limit);
+        Ok(matches)
+    }
 }

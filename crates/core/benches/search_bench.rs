@@ -229,11 +229,64 @@ fn bench_sync_noop(c: &mut Criterion) {
     drop(dir);
 }
 
+fn bench_grep_trigram(c: &mut Criterion) {
+    let (_dir, engine) = setup_engine();
+
+    // Literal grep — trigram narrows to files containing "process_batch"
+    c.bench_function("grep_literal_with_trigram", |b| {
+        b.iter(|| {
+            engine
+                .grep_code("process_batch", true, None, 0, 50)
+                .unwrap()
+        })
+    });
+    c.bench_function("grep_literal_full_scan", |b| {
+        b.iter(|| {
+            engine
+                .grep_code_full_scan("process_batch", true, None, 0, 50)
+                .unwrap()
+        })
+    });
+
+    // Regex grep — trigram extracts trigrams from regex pattern
+    c.bench_function("grep_regex_with_trigram", |b| {
+        b.iter(|| {
+            engine
+                .grep_code("compute_hash.*data", false, None, 0, 50)
+                .unwrap()
+        })
+    });
+    c.bench_function("grep_regex_full_scan", |b| {
+        b.iter(|| {
+            engine
+                .grep_code_full_scan("compute_hash.*data", false, None, 0, 50)
+                .unwrap()
+        })
+    });
+
+    // OR pattern — QueryPlan union of branches
+    c.bench_function("grep_or_pattern_with_trigram", |b| {
+        b.iter(|| {
+            engine
+                .grep_code("(process_batch|compute_hash)", false, None, 0, 50)
+                .unwrap()
+        })
+    });
+    c.bench_function("grep_or_pattern_full_scan", |b| {
+        b.iter(|| {
+            engine
+                .grep_code_full_scan("(process_batch|compute_hash)", false, None, 0, 50)
+                .unwrap()
+        })
+    });
+}
+
 criterion_group!(
     benches,
     bench_bm25_search,
     bench_rrf_fuse,
     bench_detect_strategy,
     bench_sync_noop,
+    bench_grep_trigram,
 );
 criterion_main!(benches);
