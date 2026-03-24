@@ -29,6 +29,11 @@ type = "string"
 description = "Filter results by symbol kind (e.g. 'function' for fn/def/func, 'struct' for structs/data classes, 'trait' for traits/protocols)"
 enum = ["function", "struct", "enum", "trait", "class", "method", "interface", "type", "const", "impl"]
 
+[tools.params.queries]
+type = "array"
+items_type = "string"
+description = "Optional list of query reformulations for multi-query RRF fusion. When provided, each query is searched independently and results are fused. Overrides auto-reformulation."
+
 [[tools]]
 name = "find_symbol"
 description = "Look up symbols (functions, structs, classes, traits, methods, etc.) in the indexed codebase by name. Performs case-insensitive substring matching."

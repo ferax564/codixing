@@ -58,6 +58,14 @@ pub(crate) fn call_code_search(
         query = query.with_file_filter(filter);
     }
 
+    // Extract optional multi-query reformulations for RRF fusion.
+    let queries: Option<Vec<String>> = args.get("queries").and_then(|v| v.as_array()).map(|arr| {
+        arr.iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect()
+    });
+    query.queries = queries;
+
     // Report progress for deep/thorough strategies that take longer.
     let report_progress = matches!(
         effective_strategy,
