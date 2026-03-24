@@ -914,6 +914,48 @@ pub(super) fn apply_header_demotion(results: &mut [SearchResult], changed: &mut 
     }
 }
 
+/// Extract explicit file paths from a query string.
+///
+/// Recognises path patterns that contain at least one `/` and end with a known
+/// source-code extension (e.g. `src/models/query.py`). Returns the matched
+/// path strings.
+fn extract_explicit_file_paths(query: &str) -> Vec<String> {
+    use std::sync::LazyLock;
+
+    static RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(
+            r"\b[a-zA-Z0-9_]+/[a-zA-Z0-9_/.\-]*\.(py|rs|js|ts|tsx|jsx|go|java|rb|c|cpp|h|hpp|cs|swift|kt|scala|lua|m|sh|xml|yaml|yml|json|toml)\b",
+        )
+        .unwrap()
+    });
+
+    RE.find_iter(query)
+        .map(|m| m.as_str().to_string())
+        .collect()
+}
+
+/// Extract file-path references wrapped in backticks from a query string.
+///
+/// Recognises `` `some/path/here` `` patterns where the inner content contains
+/// at least one `/`, indicating a file-path reference rather than a plain
+/// identifier.
+fn extract_backtick_file_paths(query: &str) -> Vec<String> {
+    use std::sync::LazyLock;
+
+    static RE: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"`([^`]+)`").unwrap());
+
+    RE.captures_iter(query)
+        .filter_map(|cap| {
+            let inner = cap.get(1)?.as_str();
+            if inner.contains('/') {
+                Some(inner.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Extract dotted module paths from a query (e.g. "django.db.models.lookups").
 ///
 /// Only matches paths with at least 3 dot-separated segments to avoid false
@@ -929,13 +971,45 @@ fn extract_dotted_paths(query: &str) -> Vec<String> {
         .collect()
 }
 
-/// Boost results whose file path contains a dotted-path reference from the query.
+/// Boost results whose file path matches a reference in the query text.
 ///
-/// When a query mentions something like `django.db.models.lookups`, results
-/// whose `file_path` contains `django/db/models/lookups` get a 2× score boost.
+/// Supports three kinds of path references:
+/// - **Explicit file paths** (e.g. `src/models/query.py`) — 2.5× boost
+/// - **Backtick file references** (e.g. `` `django/db/models/lookups.py` ``) — 2.5× boost
+/// - **Dotted module paths** (e.g. `django.db.models.lookups`) — 2× boost
+///
+/// Path references are deduplicated via `HashSet` so the same path appearing
+/// both in plain text and backticks only boosts once.
 /// This is a zero-cost post-retrieval heuristic — no ML compute involved.
 pub(super) fn apply_path_match_boost(results: &mut [SearchResult], query: &str) {
     let mut boosted = false;
+
+    // Boost 0: explicit file paths and backtick file references.
+    // Collect all path references into a HashSet to deduplicate (a path mentioned
+    // both in plain text and inside backticks should only boost once).
+    {
+        use std::collections::HashSet;
+
+        let mut path_refs: HashSet<String> = HashSet::new();
+        for p in extract_explicit_file_paths(query) {
+            path_refs.insert(p);
+        }
+        for p in extract_backtick_file_paths(query) {
+            path_refs.insert(p);
+        }
+
+        if !path_refs.is_empty() {
+            for r in results.iter_mut() {
+                for path in &path_refs {
+                    if r.file_path.contains(path.as_str()) || path.contains(r.file_path.as_str()) {
+                        r.score *= 2.5;
+                        boosted = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     // Boost 1: dotted module paths (e.g., "django.db.models" → file path match)
     let dotted = extract_dotted_paths(query);
@@ -2198,5 +2272,92 @@ mod tests {
         // All-uppercase like "URL" or "HTTP" — no mixed case, no separators.
         assert!(!looks_like_exact_identifier("URL"));
         assert!(!looks_like_exact_identifier("HTTP"));
+    }
+
+    // -----------------------------------------------------------------------
+    // File path and backtick boosting tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn path_boost_explicit_file_path_in_query() {
+        // Query contains "src/models/query.py" → that file should be boosted to top
+        let mut results = vec![
+            SearchResult {
+                chunk_id: "1".into(),
+                file_path: "src/models/query.py".into(),
+                language: "Python".into(),
+                score: 5.0,
+                line_start: 0,
+                line_end: 20,
+                signature: String::new(),
+                scope_chain: vec![],
+                content: String::new(),
+            },
+            SearchResult {
+                chunk_id: "2".into(),
+                file_path: "src/views/api.py".into(),
+                language: "Python".into(),
+                score: 10.0,
+                line_start: 0,
+                line_end: 20,
+                signature: String::new(),
+                scope_chain: vec![],
+                content: String::new(),
+            },
+        ];
+        apply_path_match_boost(&mut results, "fix bug in src/models/query.py");
+        assert_eq!(results[0].file_path, "src/models/query.py");
+        assert!(results[0].score > 10.0);
+    }
+
+    #[test]
+    fn path_boost_backtick_file_reference() {
+        let mut results = vec![
+            SearchResult {
+                chunk_id: "1".into(),
+                file_path: "django/db/models/lookups.py".into(),
+                language: "Python".into(),
+                score: 5.0,
+                line_start: 0,
+                line_end: 20,
+                signature: String::new(),
+                scope_chain: vec![],
+                content: String::new(),
+            },
+            SearchResult {
+                chunk_id: "2".into(),
+                file_path: "django/utils/text.py".into(),
+                language: "Python".into(),
+                score: 10.0,
+                line_start: 0,
+                line_end: 20,
+                signature: String::new(),
+                scope_chain: vec![],
+                content: String::new(),
+            },
+        ];
+        apply_path_match_boost(
+            &mut results,
+            "issue in `django/db/models/lookups.py` causes crash",
+        );
+        assert_eq!(results[0].file_path, "django/db/models/lookups.py");
+    }
+
+    #[test]
+    fn path_boost_no_false_positive_bare_filename() {
+        // "error.py" without a `/` prefix should NOT trigger the 2.5× file-path
+        // boost (Boost 0). The keyword boost (Boost 2) may still apply since
+        // "error" appears as a path component, but the explicit-path regex
+        // requires at least one `/` in the match.
+        let explicit = extract_explicit_file_paths("this error.py problem is annoying");
+        assert!(
+            explicit.is_empty(),
+            "bare filename without / should not be extracted as explicit file path, got: {explicit:?}"
+        );
+        let backtick = extract_backtick_file_paths("this error.py problem is annoying");
+        assert!(
+            backtick.is_empty(),
+            "bare filename without / should not be extracted as backtick file path, got: {backtick:?}"
+        );
     }
 }
