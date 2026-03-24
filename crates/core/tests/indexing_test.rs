@@ -158,7 +158,6 @@ pub fn reindex_sentinel_function() -> bool {
 /// alongside the primary root.  Paths from the extra root must be prefixed with
 /// the extra root's directory base name so they remain distinct.
 #[test]
-#[cfg_attr(windows, ignore)] // Tantivy file locking — "Access is denied" on Windows CI
 fn multi_root_indexes_both_roots() {
     let tmp1 = tempdir().unwrap();
     let tmp2 = tempdir().unwrap();

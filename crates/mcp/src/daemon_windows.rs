@@ -264,10 +264,7 @@ pub(crate) async fn pipe_alive(pipe_name: &str) -> bool {
     // instance, this succeeds. We immediately drop the connection.
     let name = pipe_name.to_string();
     let result = tokio::task::spawn_blocking(move || ClientOptions::new().open(&name)).await;
-    match result {
-        Ok(Ok(_client)) => true,
-        _ => false,
-    }
+    matches!(result, Ok(Ok(_)))
 }
 
 // ---------------------------------------------------------------------------

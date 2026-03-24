@@ -38,9 +38,9 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: cargo test --workspace
 
-      - name: Test (Windows, no usearch)
+      - name: Test (Windows, no usearch, single-threaded)
         if: matrix.os == 'windows-latest'
-        run: cargo test --workspace --no-default-features
+        run: cargo test --workspace --no-default-features -- --test-threads=1
 
       - name: Clippy
         if: matrix.os != 'windows-latest'

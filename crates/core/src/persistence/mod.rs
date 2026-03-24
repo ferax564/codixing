@@ -23,6 +23,7 @@ const CHUNK_META_FILE: &str = "chunk_meta.bin";
 const GRAPH_DIR: &str = "graph";
 const GRAPH_FILE: &str = "graph.bin";
 const MMAP_VECTOR_FILE: &str = "vectors.mmap";
+const FILE_TRIGRAM_FILE: &str = "file_trigram.bin";
 
 /// Extended file hash entry storing content hash alongside filesystem metadata
 /// (mtime and size) for fast pre-filtering during sync.
@@ -224,6 +225,11 @@ impl IndexStore {
     /// Path to the memory-mapped vector index file (`vectors.mmap`).
     pub fn mmap_vector_path(&self) -> PathBuf {
         self.codixing_dir().join(MMAP_VECTOR_FILE)
+    }
+
+    /// Path to the file-level trigram index.
+    pub fn file_trigram_path(&self) -> PathBuf {
+        self.codixing_dir().join(FILE_TRIGRAM_FILE)
     }
 
     /// Save the [`IndexConfig`] to `config.json`.

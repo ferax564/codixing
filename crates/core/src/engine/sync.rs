@@ -31,6 +31,13 @@ impl Engine {
         }
         self.reindex_file_impl(path, true)?;
         self.tantivy.commit()?;
+        // file_trigram already updated incrementally in reindex_file_impl.
+        if let Err(e) = self
+            .file_trigram
+            .save_binary(&self.store.file_trigram_path())
+        {
+            warn!(error = %e, "failed to persist file trigram index");
+        }
         Ok(())
     }
 
@@ -200,6 +207,10 @@ impl Engine {
 
         self.file_chunk_counts.insert(rel_str.clone(), chunks.len());
 
+        // Incremental file trigram update: remove old, add new from full content.
+        self.file_trigram.remove_file(&rel_str);
+        self.file_trigram.add(&rel_str, &source);
+
         // Update graph edges for this file using the already-parsed tree.
         // PageRank is only recomputed when do_graph_finalize=true (single-file
         // reindex). apply_changes() calls with false and does one pass at the end.
@@ -326,6 +337,8 @@ impl Engine {
         for id in removed_ids {
             self.trigram.remove(id);
         }
+        // Incremental file trigram removal.
+        self.file_trigram.remove_file(rel_str);
 
         // Remove graph node + incident edges (PageRank deferred to caller).
         if let Some(ref mut graph) = self.graph {
@@ -347,6 +360,13 @@ impl Engine {
 
         self.remove_file_inner(path, &rel_str)?;
         self.tantivy.commit()?;
+        // file_trigram already updated incrementally in remove_file_inner.
+        if let Err(e) = self
+            .file_trigram
+            .save_binary(&self.store.file_trigram_path())
+        {
+            warn!(error = %e, "failed to persist file trigram index");
+        }
 
         // Recompute PageRank + persist graph for single-file removal.
         if let Some(ref mut graph) = self.graph {
@@ -413,6 +433,15 @@ impl Engine {
 
         // Single Tantivy commit for all pending adds + deletes.
         self.tantivy.commit()?;
+
+        // file_trigram already updated incrementally per-file above.
+        // Persist the updated index.
+        if let Err(e) = self
+            .file_trigram
+            .save_binary(&self.store.file_trigram_path())
+        {
+            warn!(error = %e, "failed to persist file trigram index");
+        }
 
         // Single PageRank recompute for the entire batch.
         if let Some(ref mut graph) = self.graph {

@@ -159,15 +159,14 @@ When rewriting git history (e.g. before going public):
 - **Include ALL identity variants in one mailmap file.** Don't run mailmap multiple times — collect all `old → new` mappings in a single file.
 - **Verify with `git log --all -p -S "string"`** after each pass. `-S` searches reachable blobs, not just HEAD.
 
-### Known flaky tests
+### Known flaky tests (resolved)
 
-These tests previously flaked due to file locking. The first three are now serialized via `serial_test`:
+These tests previously flaked due to Tantivy file locking on Windows:
 - `git_sync_no_op_when_already_current` — fixed with `#[serial]`
 - `git_sync_no_op_without_git` — fixed with `#[serial]`
 - `graph_persists_across_open` — fixed with `#[serial]`
-- Tier 2 retrieval tests — Windows `Access is denied` (marked `#[cfg_attr(windows, ignore)]`)
 
-Windows Tantivy flakes are broader than just Tier 2 — any integration test touching the index can flake (`search_finds_python_class`, `trait_method_dispatch_links_impl`, etc.). Different test fails each run. Re-run failed CI if only Windows tests fail and Ubuntu+macOS are green.
+**Windows Tantivy flakes — permanently fixed**: Windows CI now runs tests single-threaded (`--test-threads=1`), eliminating all Tantivy file lock contention. All `#[cfg_attr(windows, ignore)]` annotations have been removed — tests now run on all platforms with full coverage.
 
 ### Adding a new crate to the workspace
 
