@@ -495,6 +495,11 @@ pub(crate) fn call_stitch_context(engine: &Engine, args: &Value) -> (String, boo
     (stitched, false)
 }
 
+/// Handler for `assemble_context` — delegates to stitch_context.
+pub(crate) fn call_assemble_context(engine: &Engine, args: &Value) -> (String, bool) {
+    call_stitch_context(engine, args)
+}
+
 pub(crate) fn call_explain(
     engine: &Engine,
     args: &Value,

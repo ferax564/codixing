@@ -34,7 +34,7 @@ curl -fsSL https://codixing.com/install.sh | sh
 codex mcp add codixing -- codixing-mcp --root .
 ```
 
-> **Note:** Codex requires the binary installed locally — `npx` is not supported. Do not use `--compact` with Codex as it needs all 53 tools visible in the tool list.
+> **Note:** Codex requires the binary installed locally — `npx` is not supported. Do not use `--compact` with Codex as it needs all 54 tools visible in the tool list.
 
 ### Cursor / Windsurf
 
