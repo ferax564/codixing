@@ -232,6 +232,8 @@ fn git_sync_no_op_without_git() {
 
     // Build index, drop engine to release Tantivy lock.
     drop(Engine::init(root, bm25_config(root)).unwrap());
+    // Brief pause so the OS fully releases the Tantivy directory lock.
+    std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Open and call git_sync — must not fail.
     let mut engine = Engine::open(root).unwrap();

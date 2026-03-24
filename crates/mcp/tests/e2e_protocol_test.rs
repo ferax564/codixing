@@ -18,8 +18,13 @@ use serde_json::{Value, json};
 fn run_mcp(args: &[&str], requests: &[Value]) -> Vec<Value> {
     let bin = env!("CARGO_BIN_EXE_codixing-mcp");
 
+    // Always disable daemon auto-fork in tests — we want direct mode
+    // so the process exits cleanly when stdin is closed.
+    let mut full_args: Vec<&str> = vec!["--no-daemon-fork"];
+    full_args.extend_from_slice(args);
+
     let mut child = Command::new(bin)
-        .args(args)
+        .args(&full_args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
