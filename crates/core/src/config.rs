@@ -293,6 +293,11 @@ pub struct ChunkConfig {
     /// Minimum non-whitespace characters per chunk (merge threshold).
     #[serde(default = "default_min_chars")]
     pub min_chars: usize,
+
+    /// Fraction of overlap between adjacent chunks (0.0 = no overlap, 0.3 = 30%).
+    /// When > 0, bridge chunks are generated at each chunk boundary.
+    #[serde(default)]
+    pub overlap_ratio: f32,
 }
 
 impl Default for ChunkConfig {
@@ -300,6 +305,7 @@ impl Default for ChunkConfig {
         Self {
             max_chars: default_max_chars(),
             min_chars: default_min_chars(),
+            overlap_ratio: 0.0,
         }
     }
 }
@@ -430,5 +436,11 @@ mod tests {
         assert_eq!(config.chunk.min_chars, 200);
         assert!(config.exclude_patterns.contains(&".git".to_string()));
         assert!(config.languages.is_empty());
+    }
+
+    #[test]
+    fn chunk_config_default_overlap_ratio_is_zero() {
+        let config = ChunkConfig::default();
+        assert_eq!(config.overlap_ratio, 0.0);
     }
 }

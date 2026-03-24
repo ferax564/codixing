@@ -401,6 +401,7 @@ mod tests {
         let config = ChunkConfig {
             max_chars,
             min_chars,
+            overlap_ratio: 0.0,
         };
         let chunker = CastChunker;
         chunker.chunk(
@@ -610,6 +611,7 @@ class Foo:
         let config = ChunkConfig {
             max_chars: 100,
             min_chars: 20,
+            overlap_ratio: 0.0,
         };
         let chunker = CastChunker;
         let chunks = chunker.chunk(
