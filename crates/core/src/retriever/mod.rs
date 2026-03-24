@@ -46,6 +46,10 @@ pub struct SearchQuery {
     pub strategy: Strategy,
     /// Token budget for formatted context output.
     pub token_budget: Option<usize>,
+    /// Optional list of query reformulations for multi-query RRF fusion.
+    /// When provided, each query is searched independently and results are
+    /// fused via Reciprocal Rank Fusion. Overrides auto-reformulation.
+    pub queries: Option<Vec<String>>,
 }
 
 impl SearchQuery {
@@ -57,6 +61,7 @@ impl SearchQuery {
             file_filter: None,
             strategy: Strategy::default(),
             token_budget: None,
+            queries: None,
         }
     }
 

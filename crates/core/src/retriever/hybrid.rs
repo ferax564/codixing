@@ -96,6 +96,7 @@ impl Retriever for HybridRetriever<'_> {
             file_filter: query.file_filter.clone(),
             strategy: query.strategy,
             token_budget: query.token_budget,
+            queries: None,
         };
 
         let bm25_results = BM25Retriever::new(self.tantivy).search(&bm25_query)?;
@@ -113,6 +114,7 @@ impl Retriever for HybridRetriever<'_> {
                 file_filter: query.file_filter.clone(),
                 strategy: query.strategy,
                 token_budget: query.token_budget,
+                queries: None,
             };
             VectorRetriever::new(Arc::clone(&self.embedder), self.vector, self.chunk_meta)
                 .search(&vec_query)?

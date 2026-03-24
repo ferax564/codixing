@@ -203,6 +203,7 @@ fn assert_recall(engine: &Engine, query: &str, expected_file: &str, k: usize) {
             file_filter: None,
             strategy: Strategy::Instant,
             token_budget: None,
+            queries: None,
         })
         .unwrap_or_default();
 
@@ -281,6 +282,7 @@ fn top1_parser_is_parser_file() {
             file_filter: None,
             strategy: Strategy::Instant,
             token_budget: None,
+            queries: None,
         })
         .unwrap_or_default();
 
@@ -302,6 +304,7 @@ fn field_boost_ranks_signature_match_high() {
             file_filter: None,
             strategy: Strategy::Instant,
             token_budget: None,
+            queries: None,
         })
         .unwrap_or_default();
 

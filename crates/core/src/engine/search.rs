@@ -46,12 +46,34 @@ impl Engine {
         // Save query string before the match block moves `query` into Explore/Deep.
         let query_str = query.query.clone();
 
+        // Handle explicit multi-query RRF fusion (queries param from MCP/API).
+        if let Some(ref queries) = query.queries {
+            if queries.len() >= 2 {
+                let mut fused = self.search_multi(queries, &query)?;
+                let ctx = self.search_context(&query_str);
+                pipeline.run(&mut fused, &ctx)?;
+                return Ok(fused);
+            }
+        }
+
         let mut results = match strategy {
             Strategy::Instant => {
                 let retriever = BM25Retriever::new(&self.tantivy);
                 retriever.search(&query)?
             }
             Strategy::Fast => {
+                // Multi-query RRF fusion for 3+ word natural language queries.
+                let word_count = query.query.split_whitespace().count();
+                if word_count >= 3 {
+                    let reformulations = generate_reformulations(&query.query);
+                    if reformulations.len() >= 2 {
+                        let mut fused = self.search_multi(&reformulations, &query)?;
+                        let ctx = self.search_context(&query_str);
+                        pipeline.run(&mut fused, &ctx)?;
+                        return Ok(fused);
+                    }
+                }
+
                 if let (Some(emb), Some(vec_idx)) = (&self.embedder, &self.vector) {
                     let retriever = HybridRetriever::new(
                         &self.tantivy,
@@ -68,6 +90,18 @@ impl Engine {
             }
             Strategy::Explore => self.search_explore(query)?,
             Strategy::Thorough => {
+                // Multi-query RRF fusion for 3+ word natural language queries.
+                let word_count = query.query.split_whitespace().count();
+                if word_count >= 3 {
+                    let reformulations = generate_reformulations(&query.query);
+                    if reformulations.len() >= 2 {
+                        let mut fused = self.search_multi(&reformulations, &query)?;
+                        let ctx = self.search_context(&query_str);
+                        pipeline.run(&mut fused, &ctx)?;
+                        return Ok(fused);
+                    }
+                }
+
                 if let (Some(emb), Some(vec_idx)) = (&self.embedder, &self.vector) {
                     let hybrid = HybridRetriever::new(
                         &self.tantivy,
@@ -146,6 +180,58 @@ impl Engine {
             graph_boost_weight: self.config.graph.boost_weight,
             recency_map: Some(self.get_recency_map()),
         }
+    }
+
+    /// Multi-query search with RRF fusion.
+    ///
+    /// Runs `search_first_pass` independently for each query string and fuses
+    /// all result lists via progressive Reciprocal Rank Fusion. Results that
+    /// appear in multiple query passes are promoted, improving recall for
+    /// natural-language queries with vocabulary mismatches.
+    ///
+    /// Used by:
+    /// - `Fast`/`Thorough` strategies when the query is 3+ words (auto-reformulation)
+    /// - Explicit `queries` parameter from MCP/API (user-supplied reformulations)
+    /// - `Deep` strategy (which adds synonym + code-pattern reformulations)
+    pub fn search_multi(
+        &self,
+        queries: &[String],
+        base_query: &SearchQuery,
+    ) -> Result<Vec<SearchResult>> {
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let candidate_limit = (base_query.limit * 3).max(30);
+        let mut all_results: Vec<Vec<SearchResult>> = Vec::new();
+
+        for q_text in queries {
+            let sub_query = SearchQuery {
+                query: expand_query(q_text),
+                limit: candidate_limit,
+                file_filter: base_query.file_filter.clone(),
+                strategy: Strategy::Fast,
+                token_budget: None,
+                queries: None,
+            };
+            if let Ok(results) = self.search_first_pass(&sub_query) {
+                if !results.is_empty() {
+                    all_results.push(results);
+                }
+            }
+        }
+
+        if all_results.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Progressive RRF fusion: fold all result lists together.
+        let mut fused = all_results.remove(0);
+        for results in &all_results {
+            fused = rrf_fuse(&fused, results, 60.0);
+        }
+        fused.truncate(base_query.limit);
+        Ok(fused)
     }
 
     /// Trigram-index fast-path for exact identifier lookups.
@@ -331,6 +417,7 @@ impl Engine {
                     file_filter: Some(neighbour.clone()),
                     strategy: Strategy::Instant,
                     token_budget: None,
+                    queries: None,
                 };
                 if let Ok(mut exp) = bm25.search(&nq) {
                     for r in exp.iter_mut() {
@@ -625,6 +712,7 @@ impl Engine {
                     file_filter: query.file_filter.clone(),
                     strategy: Strategy::Fast,
                     token_budget: None,
+                    queries: None,
                 };
                 if let Ok(results) = self.search_first_pass(&sub_query) {
                     if !results.is_empty() {
