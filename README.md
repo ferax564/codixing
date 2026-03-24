@@ -215,6 +215,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Daemon mode** — Engine stays in memory, auto-starts on first connection, Unix socket (macOS/Linux) or named pipe (Windows) IPC, file watcher for live index updates, 30-min idle timeout
 - **Field-weighted BM25** — Configurable per-field boosting (entity_names 3×, signature 2×, scope_chain 1.5×, content 1×)
 - **Search pipeline** — Composable search stages (definition boost, test demotion, path match, graph boost, deduplication, truncation) with 6 strategies including trigram exact-match
+- **Trigram pre-filtering** — File-level trigram inverted index (Russ Cox/trigrep technique) skips files before disk I/O; persistent bitcode storage, regex HIR walking with OR-branch support, parallel rayon verification
 - **LSP rename + semantic tokens** — Cross-file rename refactoring with conflict detection; semantic highlighting for Rust, Python, TypeScript, Go
 - **Streaming embeddings** — Fixed-window batch processing (256 chunks) with progress reporting; incremental vector reuse via content hashing
 - **Federation auto-discovery** — Auto-detects Cargo, npm, pnpm, Go workspaces, git submodules, and nested projects
@@ -269,7 +270,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 787+ tests
+cargo test --workspace        # 815+ tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```

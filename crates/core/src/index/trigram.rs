@@ -61,12 +61,12 @@ impl TrigramIndex {
         if bytes.len() < 3 {
             return;
         }
-        // Collect the unique trigrams for this chunk to avoid inserting the
-        // same (trigram, chunk_id) pair more than once per add() call.
-        let mut chunk_trigrams = std::collections::HashSet::new();
-        for i in 0..bytes.len() - 2 {
-            chunk_trigrams.insert([bytes[i], bytes[i + 1], bytes[i + 2]]);
-        }
+        // Collect unique trigrams via sort+dedup (avoids per-call HashSet alloc).
+        let mut chunk_trigrams: Vec<[u8; 3]> = (0..bytes.len() - 2)
+            .map(|i| [bytes[i], bytes[i + 1], bytes[i + 2]])
+            .collect();
+        chunk_trigrams.sort_unstable();
+        chunk_trigrams.dedup();
         // Insert chunk_id into each unique trigram's posting list, then sort
         // and deduplicate only that list. This is O(trigrams_per_chunk × log N)
         // per add — not O(all_posting_lists) as the previous implementation was.
