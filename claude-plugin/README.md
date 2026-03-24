@@ -1,6 +1,6 @@
 # Codixing Plugin for Claude Code
 
-Code retrieval engine plugin that gives Claude Code AST-aware search, dependency graph intelligence, and 48 MCP tools.
+Code retrieval engine plugin that gives Claude Code AST-aware search, dependency graph intelligence, and 53 MCP tools.
 
 ## Install
 
