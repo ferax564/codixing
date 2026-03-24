@@ -3,6 +3,7 @@ mod focus_map;
 mod graph;
 mod orphans;
 pub(crate) mod pipeline;
+pub mod recency;
 mod search;
 mod symbol_graph;
 mod sync;
@@ -265,6 +266,8 @@ pub struct Engine {
     read_only: bool,
     /// File-level trigram index for fast grep pre-filtering.
     pub(super) file_trigram: FileTrigramIndex,
+    /// Lazy-initialised git recency map (file path → last commit timestamp).
+    recency_map: std::sync::OnceLock<std::collections::HashMap<String, i64>>,
     /// When this engine was last loaded/reloaded from disk (mtime of `meta.json`).
     last_load_time: Option<std::time::SystemTime>,
     /// Minimum interval between reload checks (default: 30s).
@@ -509,6 +512,7 @@ impl Engine {
             shared_session: SharedSession::default_new(),
             read_only: false,
             file_trigram,
+            recency_map: std::sync::OnceLock::new(),
             last_load_time: None,
             reload_interval: std::time::Duration::from_secs(30),
             last_staleness_check: None,
@@ -716,6 +720,7 @@ impl Engine {
             shared_session: SharedSession::default_new(),
             read_only,
             file_trigram,
+            recency_map: std::sync::OnceLock::new(),
             last_load_time: meta_mtime,
             reload_interval: std::time::Duration::from_secs(30),
             last_staleness_check: None,
@@ -898,6 +903,7 @@ impl Engine {
             shared_session: SharedSession::default_new(),
             read_only: true,
             file_trigram,
+            recency_map: std::sync::OnceLock::new(),
             last_load_time: meta_mtime,
             reload_interval: std::time::Duration::from_secs(30),
             last_staleness_check: None,
@@ -911,6 +917,15 @@ impl Engine {
     /// [`CodixingError::ReadOnly`].
     pub fn is_read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// Return the git recency map, lazily building it on first access.
+    ///
+    /// The map covers the last 180 days and maps relative file paths to
+    /// their most recent commit timestamp (Unix epoch seconds).
+    pub(super) fn get_recency_map(&self) -> &std::collections::HashMap<String, i64> {
+        self.recency_map
+            .get_or_init(|| recency::build_recency_map(self.store.root(), 180))
     }
 
     /// Set the minimum interval between reload-staleness checks.
