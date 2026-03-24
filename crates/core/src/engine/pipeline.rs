@@ -21,6 +21,8 @@ pub struct SearchContext<'a> {
     pub graph: Option<&'a crate::graph::CodeGraph>,
     /// Graph boost weight from config.
     pub graph_boost_weight: f32,
+    /// Git recency map (file path → last commit timestamp) for recency boosts.
+    pub recency_map: Option<&'a std::collections::HashMap<String, i64>>,
 }
 
 /// A single composable stage in the search pipeline.
@@ -165,6 +167,41 @@ impl SearchStage for PopularityBoostStage {
     }
 }
 
+/// Mild boost for files recently modified in git.
+///
+/// Files committed within the recency window (180 days) receive up to a 10%
+/// score increase that decays linearly to zero at the window boundary. Files
+/// older than the window or absent from the recency map are unchanged.
+pub struct RecencyBoostStage;
+
+impl SearchStage for RecencyBoostStage {
+    fn apply(&self, results: &mut Vec<SearchResult>, ctx: &SearchContext<'_>) -> Result<()> {
+        let recency_map = match ctx.recency_map {
+            Some(m) if !m.is_empty() => m,
+            _ => return Ok(()),
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let mut boosted = false;
+        for r in results.iter_mut() {
+            if let Some(&last_commit) = recency_map.get(&r.file_path) {
+                let days = (now - last_commit) / 86400;
+                let factor = (1.0 - days as f32 / 180.0).max(0.0);
+                if factor > 0.0 {
+                    r.score *= 1.0 + 0.1 * factor;
+                    boosted = true;
+                }
+            }
+        }
+        if boosted {
+            sort_descending(results);
+        }
+        Ok(())
+    }
+}
+
 /// Boost results whose file path contains a dotted-path or keyword reference
 /// from the query.
 pub struct PathMatchBoostStage;
@@ -255,6 +292,7 @@ pub fn fast_pipeline() -> SearchPipeline {
         .add(GraphBoostStage)
         .add(DefinitionBoostStage)
         .add(PopularityBoostStage)
+        .add(RecencyBoostStage)
         .add(PathMatchBoostStage)
         .add(TestDemotionStage)
         .add(TruncationStage {
@@ -270,6 +308,7 @@ pub fn thorough_pipeline() -> SearchPipeline {
         .add(GraphBoostStage)
         .add(DefinitionBoostStage)
         .add(PopularityBoostStage)
+        .add(RecencyBoostStage)
         .add(PathMatchBoostStage)
         .add(TestDemotionStage)
         .add(TruncationStage {
@@ -316,6 +355,7 @@ mod tests {
             symbols: &symbols,
             graph: None,
             graph_boost_weight: 0.0,
+            recency_map: None,
         };
         let mut results = vec![make_result("a", 10.0, "src/a.rs")];
         pipeline.run(&mut results, &ctx).unwrap();
@@ -332,6 +372,7 @@ mod tests {
             symbols: &symbols,
             graph: None,
             graph_boost_weight: 0.0,
+            recency_map: None,
         };
         let mut results = vec![
             make_result("a", 10.0, "src/main.rs"),
@@ -351,6 +392,7 @@ mod tests {
             symbols: &symbols,
             graph: None,
             graph_boost_weight: 0.0,
+            recency_map: None,
         };
         let mut results = vec![
             SearchResult {
@@ -393,6 +435,7 @@ mod tests {
             symbols: &symbols,
             graph: None,
             graph_boost_weight: 0.0,
+            recency_map: None,
         };
         let mut results = vec![
             make_result("a", 10.0, "src/a.rs"),
@@ -416,6 +459,7 @@ mod tests {
             symbols: &symbols,
             graph: None,
             graph_boost_weight: 0.0,
+            recency_map: None,
         };
         let mut results = vec![
             make_result("a", 10.0, "src/engine.rs"),
@@ -437,6 +481,7 @@ mod tests {
             symbols: &symbols,
             graph: None,
             graph_boost_weight: 0.0,
+            recency_map: None,
         };
         let mut results = vec![make_result("a", 10.0, "src/engine.rs")];
         pipeline.run(&mut results, &ctx).unwrap();
@@ -452,9 +497,68 @@ mod tests {
             symbols: &symbols,
             graph: None,
             graph_boost_weight: 0.0,
+            recency_map: None,
         };
         let mut results = vec![make_result("a", 10.0, "src/engine.rs")];
         pipeline.run(&mut results, &ctx).unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn recency_boost_stage_boosts_recent_files() {
+        use std::collections::HashMap;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let mut recency = HashMap::new();
+        // recent: committed 1 day ago
+        recency.insert("src/recent.rs".to_string(), now - 86400);
+        // old: committed 200 days ago (outside the 180-day window)
+        recency.insert("src/old.rs".to_string(), now - 200 * 86400);
+
+        let stage = RecencyBoostStage;
+        let symbols = crate::symbols::SymbolTable::new();
+        let ctx = SearchContext {
+            query: "test",
+            symbols: &symbols,
+            graph: None,
+            graph_boost_weight: 0.0,
+            recency_map: Some(&recency),
+        };
+
+        let mut results = vec![
+            make_result("recent", 10.0, "src/recent.rs"),
+            make_result("old", 10.0, "src/old.rs"),
+            make_result("unknown", 10.0, "src/unknown.rs"),
+        ];
+
+        stage.apply(&mut results, &ctx).unwrap();
+
+        // Recent file should be boosted above 10.0
+        let recent = results.iter().find(|r| r.chunk_id == "recent").unwrap();
+        assert!(
+            recent.score > 10.0,
+            "expected recent file to be boosted, got {}",
+            recent.score
+        );
+
+        // Old file (200 days > 180 window) should NOT be boosted
+        let old = results.iter().find(|r| r.chunk_id == "old").unwrap();
+        assert!(
+            (old.score - 10.0).abs() < f32::EPSILON,
+            "expected old file to remain at 10.0, got {}",
+            old.score
+        );
+
+        // Unknown file (not in recency map) should NOT be boosted
+        let unknown = results.iter().find(|r| r.chunk_id == "unknown").unwrap();
+        assert!(
+            (unknown.score - 10.0).abs() < f32::EPSILON,
+            "expected unknown file to remain at 10.0, got {}",
+            unknown.score
+        );
     }
 }

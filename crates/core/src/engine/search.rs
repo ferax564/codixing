@@ -144,6 +144,7 @@ impl Engine {
             symbols: &self.symbols,
             graph: self.graph.as_ref(),
             graph_boost_weight: self.config.graph.boost_weight,
+            recency_map: Some(self.get_recency_map()),
         }
     }
 
