@@ -17,7 +17,7 @@ claude plugin marketplace add ferax564/codixing
 claude plugin install codixing@codixing
 ```
 
-Restart Claude Code after installing. You get 54 MCP tools plus `/codixing-setup`, `/codixing-explore`, and `/codixing-review`.
+Restart Claude Code after installing. You get 53 MCP tools plus `/codixing-setup`, `/codixing-explore`, and `/codixing-review`.
 
 Alternatively, register just the MCP server without the plugin:
 
@@ -34,7 +34,7 @@ curl -fsSL https://codixing.com/install.sh | sh
 codex mcp add codixing -- codixing-mcp --root .
 ```
 
-> **Note:** Codex requires the binary installed locally — `npx` is not supported. Do not use `--compact` with Codex as it needs all 48 tools visible in the tool list.
+> **Note:** Codex requires the binary installed locally — `npx` is not supported. Do not use `--compact` with Codex as it needs all 53 tools visible in the tool list.
 
 ### Cursor / Windsurf
 
@@ -211,7 +211,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Hybrid search** — BM25 + optional vector embeddings, fused with Reciprocal Rank Fusion
 - **Symbol-level call graph** — Function-to-function call edges extracted from AST, including Rust trait dispatch, Python class inheritance, and TypeScript interface implementations
 - **Dependency graph** — Import + call extraction, PageRank scoring, Personalized PageRank for focus-aware maps
-- **54 MCP tools** — Search, graph traversal, file operations, code review, git analysis, session memory, federation discovery
+- **53 MCP tools** — Search, graph traversal, file operations, code review, git analysis, session memory, federation discovery
 - **Daemon mode** — Engine stays in memory, auto-starts on first connection, Unix socket (macOS/Linux) or named pipe (Windows) IPC, file watcher for live index updates, 30-min idle timeout
 - **Field-weighted BM25** — Configurable per-field boosting (entity_names 3×, signature 2×, scope_chain 1.5×, content 1×)
 - **Search pipeline** — Composable search stages (definition boost, test demotion, path match, graph boost, deduplication, truncation) with 6 strategies including trigram exact-match

@@ -50,7 +50,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Initial public release
 - 20 language support with full AST parsing via tree-sitter
 - Hybrid search (BM25 + optional vector embeddings with RRF fusion)
-- 48 MCP tools across 7 categories
+- 53 MCP tools across 7 categories
 - Daemon mode with Unix socket IPC and auto-fork
 - Cross-repo federation with RRF fusion
 - LSP server with hover, go-to-def, references, call hierarchy, complexity diagnostics

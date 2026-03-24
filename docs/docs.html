@@ -555,7 +555,7 @@ pub fn handle_auth_request(req: Request) -&gt; Result&lt;Token&gt;</span>
         <div class="pre-label">Plugin (recommended)</div>
         <pre><code><span class="tok-cmd">claude plugin marketplace add</span> ferax564/codixing
 <span class="tok-cmd">claude plugin install</span> codixing@codixing</code></pre>
-        <p>Installs the MCP server (48 tools) plus three slash commands: <code>/codixing-setup</code> (index + register), <code>/codixing-explore</code> (architecture deep-dive), <code>/codixing-review</code> (code review with impact analysis). Restart Claude Code after installing.</p>
+        <p>Installs the MCP server (53 tools) plus three slash commands: <code>/codixing-setup</code> (index + register), <code>/codixing-explore</code> (architecture deep-dive), <code>/codixing-review</code> (code review with impact analysis). Restart Claude Code after installing.</p>
 
         <p>Alternatively, register just the MCP server without the plugin:</p>
         <div class="pre-label">MCP only</div>
@@ -1022,7 +1022,7 @@ Sync complete in 0.12s</span></code></pre>
             <span class="tool-desc">Regex/literal search with context lines</span>
           </div>
           <div class="tool-body">
-            <p>Token-budgeted grep with match highlighting, context lines, and glob filtering. Designed for LLM consumption — far more efficient than raw <code>rg</code> output.</p>
+            <p>Token-budgeted grep with trigram pre-filtering, match highlighting, context lines, and glob filtering. A file-level trigram index skips non-candidate files before any disk I/O (Russ Cox/trigrep technique). Supports full regex patterns via HIR-walking query plans with OR-branch union. Designed for LLM consumption — far more efficient than raw <code>rg</code> output.</p>
             <div class="pre-label">parameters</div>
             <pre><code>{
   <span class="tok-key">"pattern"</span>:  <span class="tok-str">"fn handle_\\w+"</span>,
