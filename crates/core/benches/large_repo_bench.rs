@@ -130,5 +130,53 @@ fn bench_search(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_init, bench_search);
+fn bench_grep(c: &mut Criterion) {
+    let mut group = c.benchmark_group("large_repo_grep");
+
+    for &size in &[1_000usize, 10_000usize] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        generate_files(&root, size);
+        let config = bm25_config(&root);
+        let engine = Engine::init(&root, config).unwrap();
+
+        // Literal grep — trigram narrows to ~1 file out of thousands
+        group.bench_with_input(BenchmarkId::new("trigram_literal", size), &size, |b, _| {
+            b.iter(|| engine.grep_code("Widget_500", true, None, 0, 50).unwrap())
+        });
+        group.bench_with_input(
+            BenchmarkId::new("full_scan_literal", size),
+            &size,
+            |b, _| {
+                b.iter(|| {
+                    engine
+                        .grep_code_full_scan("Widget_500", true, None, 0, 50)
+                        .unwrap()
+                })
+            },
+        );
+
+        // Regex grep — trigram extracts "process_widget" trigrams
+        group.bench_with_input(BenchmarkId::new("trigram_regex", size), &size, |b, _| {
+            b.iter(|| {
+                engine
+                    .grep_code("process_widget_\\d+", false, None, 0, 50)
+                    .unwrap()
+            })
+        });
+        group.bench_with_input(BenchmarkId::new("full_scan_regex", size), &size, |b, _| {
+            b.iter(|| {
+                engine
+                    .grep_code_full_scan("process_widget_\\d+", false, None, 0, 50)
+                    .unwrap()
+            })
+        });
+
+        drop(dir);
+    }
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_init, bench_search, bench_grep);
 criterion_main!(benches);
