@@ -485,9 +485,11 @@ impl Engine {
 
         // Build trigram index from chunk metadata for Strategy::Exact fast-path.
         let mut trigram = crate::index::TrigramIndex::new();
-        for entry in chunk_meta_map.iter() {
-            trigram.add(*entry.key(), &entry.value().content);
-        }
+        trigram.build_batch(
+            chunk_meta_map
+                .iter()
+                .map(|e| (*e.key(), e.value().content.clone())),
+        );
         // Persist chunk trigram so open() can load it instead of rebuilding.
         if let Err(e) = trigram.save_binary(&store.chunk_trigram_path()) {
             warn!(error = %e, "failed to persist chunk trigram index");
@@ -695,9 +697,11 @@ impl Engine {
                 Err(e) => {
                     warn!(error = %e, "failed to load chunk trigram index; rebuilding from chunks");
                     let mut t = crate::index::TrigramIndex::new();
-                    for entry in chunk_meta.iter() {
-                        t.add(*entry.key(), &entry.value().content);
-                    }
+                    t.build_batch(
+                        chunk_meta
+                            .iter()
+                            .map(|e| (*e.key(), e.value().content.clone())),
+                    );
                     t
                 }
             }
@@ -897,9 +901,11 @@ impl Engine {
                 Err(e) => {
                     warn!(error = %e, "failed to load chunk trigram index; rebuilding from chunks");
                     let mut t = crate::index::TrigramIndex::new();
-                    for entry in chunk_meta.iter() {
-                        t.add(*entry.key(), &entry.value().content);
-                    }
+                    t.build_batch(
+                        chunk_meta
+                            .iter()
+                            .map(|e| (*e.key(), e.value().content.clone())),
+                    );
                     t
                 }
             }

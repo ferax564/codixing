@@ -55,24 +55,54 @@ impl TrigramIndex {
 
     /// Adds a chunk to the index. Extracts all trigrams from the content and
     /// updates posting lists. Content shorter than 3 bytes produces no trigrams.
+    ///
+    /// For bulk loading, prefer [`build_batch`] which defers sorting to the end.
     pub fn add(&mut self, chunk_id: u64, content: &str) {
         self.chunks.insert(chunk_id, content.to_string());
+        self.add_trigrams(chunk_id, content.as_bytes());
+        // Sort + dedup posting lists touched by this chunk.
+        // (For incremental adds during sync this keeps lists sorted.)
         let bytes = content.as_bytes();
         if bytes.len() < 3 {
             return;
         }
-        // Collect unique trigrams via sort+dedup (avoids per-call HashSet alloc).
+        for i in 0..bytes.len() - 2 {
+            let tri = [bytes[i], bytes[i + 1], bytes[i + 2]];
+            if let Some(list) = self.index.get_mut(&tri) {
+                list.sort_unstable();
+                list.dedup();
+            }
+        }
+    }
+
+    /// Insert trigrams for a chunk without sorting posting lists.
+    /// Called by both `add` and `build_batch`.
+    fn add_trigrams(&mut self, chunk_id: u64, bytes: &[u8]) {
+        if bytes.len() < 3 {
+            return;
+        }
+        // Collect unique trigrams via sort+dedup.
         let mut chunk_trigrams: Vec<[u8; 3]> = (0..bytes.len() - 2)
             .map(|i| [bytes[i], bytes[i + 1], bytes[i + 2]])
             .collect();
         chunk_trigrams.sort_unstable();
         chunk_trigrams.dedup();
-        // Insert chunk_id into each unique trigram's posting list, then sort
-        // and deduplicate only that list. This is O(trigrams_per_chunk × log N)
-        // per add — not O(all_posting_lists) as the previous implementation was.
         for trigram in chunk_trigrams {
-            let list = self.index.entry(trigram).or_default();
-            list.push(chunk_id);
+            self.index.entry(trigram).or_default().push(chunk_id);
+        }
+    }
+
+    /// Bulk-build the trigram index from an iterator of (chunk_id, content) pairs.
+    ///
+    /// Much faster than calling `add()` repeatedly because posting lists are
+    /// sorted and deduplicated only once at the end, avoiding O(N²) re-sorting.
+    pub fn build_batch(&mut self, chunks: impl Iterator<Item = (u64, String)>) {
+        for (chunk_id, content) in chunks {
+            self.add_trigrams(chunk_id, content.as_bytes());
+            self.chunks.insert(chunk_id, content);
+        }
+        // Single sort+dedup pass over all posting lists.
+        for list in self.index.values_mut() {
             list.sort_unstable();
             list.dedup();
         }
