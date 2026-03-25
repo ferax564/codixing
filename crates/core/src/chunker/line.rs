@@ -71,6 +71,7 @@ mod tests {
         let config = ChunkConfig {
             max_chars,
             min_chars: 0,
+            overlap_ratio: 0.0,
         };
         LineChunker.chunk(
             "test.rs",

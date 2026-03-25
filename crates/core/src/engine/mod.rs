@@ -3,6 +3,7 @@ mod focus_map;
 mod graph;
 mod orphans;
 pub(crate) mod pipeline;
+pub mod recency;
 mod search;
 mod symbol_graph;
 mod sync;
@@ -265,6 +266,8 @@ pub struct Engine {
     read_only: bool,
     /// File-level trigram index for fast grep pre-filtering.
     pub(super) file_trigram: FileTrigramIndex,
+    /// Lazy-initialised git recency map (file path → last commit timestamp).
+    recency_map: std::sync::OnceLock<std::collections::HashMap<String, i64>>,
     /// When this engine was last loaded/reloaded from disk (mtime of `meta.json`).
     last_load_time: Option<std::time::SystemTime>,
     /// Minimum interval between reload checks (default: 30s).
@@ -485,6 +488,10 @@ impl Engine {
         for entry in chunk_meta_map.iter() {
             trigram.add(*entry.key(), &entry.value().content);
         }
+        // Persist chunk trigram so open() can load it instead of rebuilding.
+        if let Err(e) = trigram.save_binary(&store.chunk_trigram_path()) {
+            warn!(error = %e, "failed to persist chunk trigram index");
+        }
 
         // Build file trigram from full file content (no chunk-boundary gaps).
         let file_trigram = build_file_trigram_from_content(&file_contents);
@@ -509,6 +516,7 @@ impl Engine {
             shared_session: SharedSession::default_new(),
             read_only: false,
             file_trigram,
+            recency_map: std::sync::OnceLock::new(),
             last_load_time: None,
             reload_interval: std::time::Duration::from_secs(30),
             last_staleness_check: None,
@@ -680,11 +688,29 @@ impl Engine {
             .ok()
             .and_then(|m| m.modified().ok());
 
-        // Build trigram index from chunk metadata for Strategy::Exact fast-path.
-        let mut trigram = crate::index::TrigramIndex::new();
-        for entry in chunk_meta.iter() {
-            trigram.add(*entry.key(), &entry.value().content);
-        }
+        // Load persisted chunk trigram index; fall back to rebuilding from chunk content.
+        let trigram = if store.chunk_trigram_path().exists() {
+            match crate::index::TrigramIndex::load_binary(&store.chunk_trigram_path()) {
+                Ok(idx) => idx,
+                Err(e) => {
+                    warn!(error = %e, "failed to load chunk trigram index; rebuilding from chunks");
+                    let mut t = crate::index::TrigramIndex::new();
+                    for entry in chunk_meta.iter() {
+                        t.add(*entry.key(), &entry.value().content);
+                    }
+                    t
+                }
+            }
+        } else {
+            info!(
+                "no persisted chunk trigram index; rebuilding from chunks (re-run `codixing init` to persist)"
+            );
+            let mut t = crate::index::TrigramIndex::new();
+            for entry in chunk_meta.iter() {
+                t.add(*entry.key(), &entry.value().content);
+            }
+            t
+        };
 
         // Try loading persisted file trigram; fall back to building from chunks.
         let file_trigram = if store.file_trigram_path().exists() {
@@ -716,6 +742,7 @@ impl Engine {
             shared_session: SharedSession::default_new(),
             read_only,
             file_trigram,
+            recency_map: std::sync::OnceLock::new(),
             last_load_time: meta_mtime,
             reload_interval: std::time::Duration::from_secs(30),
             last_staleness_check: None,
@@ -863,11 +890,29 @@ impl Engine {
             .ok()
             .and_then(|m| m.modified().ok());
 
-        // Build trigram index from chunk metadata for Strategy::Exact fast-path.
-        let mut trigram = crate::index::TrigramIndex::new();
-        for entry in chunk_meta.iter() {
-            trigram.add(*entry.key(), &entry.value().content);
-        }
+        // Load persisted chunk trigram index; fall back to rebuilding from chunk content.
+        let trigram = if store.chunk_trigram_path().exists() {
+            match crate::index::TrigramIndex::load_binary(&store.chunk_trigram_path()) {
+                Ok(idx) => idx,
+                Err(e) => {
+                    warn!(error = %e, "failed to load chunk trigram index; rebuilding from chunks");
+                    let mut t = crate::index::TrigramIndex::new();
+                    for entry in chunk_meta.iter() {
+                        t.add(*entry.key(), &entry.value().content);
+                    }
+                    t
+                }
+            }
+        } else {
+            info!(
+                "no persisted chunk trigram index; rebuilding from chunks (re-run `codixing init` to persist)"
+            );
+            let mut t = crate::index::TrigramIndex::new();
+            for entry in chunk_meta.iter() {
+                t.add(*entry.key(), &entry.value().content);
+            }
+            t
+        };
 
         let file_trigram = if store.file_trigram_path().exists() {
             match FileTrigramIndex::load_binary(&store.file_trigram_path()) {
@@ -898,6 +943,7 @@ impl Engine {
             shared_session: SharedSession::default_new(),
             read_only: true,
             file_trigram,
+            recency_map: std::sync::OnceLock::new(),
             last_load_time: meta_mtime,
             reload_interval: std::time::Duration::from_secs(30),
             last_staleness_check: None,
@@ -911,6 +957,15 @@ impl Engine {
     /// [`CodixingError::ReadOnly`].
     pub fn is_read_only(&self) -> bool {
         self.read_only
+    }
+
+    /// Return the git recency map, lazily building it on first access.
+    ///
+    /// The map covers the last 180 days and maps relative file paths to
+    /// their most recent commit timestamp (Unix epoch seconds).
+    pub(super) fn get_recency_map(&self) -> &std::collections::HashMap<String, i64> {
+        self.recency_map
+            .get_or_init(|| recency::build_recency_map(self.store.root(), 180))
     }
 
     /// Set the minimum interval between reload-staleness checks.

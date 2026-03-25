@@ -29,6 +29,11 @@ type = "string"
 description = "Filter results by symbol kind (e.g. 'function' for fn/def/func, 'struct' for structs/data classes, 'trait' for traits/protocols)"
 enum = ["function", "struct", "enum", "trait", "class", "method", "interface", "type", "const", "impl"]
 
+[tools.params.queries]
+type = "array"
+items_type = "string"
+description = "Optional list of query reformulations for multi-query RRF fusion. When provided, each query is searched independently and results are fused. Overrides auto-reformulation."
+
 [[tools]]
 name = "find_symbol"
 description = "Look up symbols (functions, structs, classes, traits, methods, etc.) in the indexed codebase by name. Performs case-insensitive substring matching."
@@ -48,7 +53,7 @@ description = "Optional file path substring to restrict results to a specific fi
 
 [[tools]]
 name = "search_usages"
-description = "Find all code locations where a symbol (function, struct, variable, etc.) is referenced or called. Unlike find_symbol which finds definitions, this finds usages \u2014 call sites, imports, and references. Essential for impact analysis before refactoring."
+description = "Find all code locations where a symbol (function, struct, variable, etc.) is referenced or called. Unlike find_symbol which finds definitions, this finds usages \u2014 call sites, imports, and references. Essential for impact analysis before refactoring. Tip: For graph-based caller discovery, use symbol_callers instead \u2014 it uses the dependency graph for more precise results."
 handler = "search::call_search_usages"
 calling_convention = "engine_args"
 read_only = true
@@ -97,7 +102,7 @@ description = "Optional file path to disambiguate"
 
 [[tools]]
 name = "stitch_context"
-description = "Search for code and automatically attach the full source of callee definitions referenced in the top results, assembling cross-file context in one call."
+description = "Deprecated: use assemble_context instead. Search for code and automatically attach callee definitions."
 handler = "search::call_stitch_context"
 calling_convention = "engine_args"
 read_only = true
@@ -110,6 +115,26 @@ required = true
 [tools.params.limit]
 type = "integer"
 description = "Number of search results to stitch (default: 5)"
+
+[tools.params.callee_depth]
+type = "integer"
+description = "How many levels of callee definitions to attach (default: 1)"
+
+[[tools]]
+name = "assemble_context"
+description = "Assemble cross-file context by gathering related code from multiple files based on a query. Searches for code and automatically attaches the full source of callee definitions referenced in the top results."
+handler = "search::call_assemble_context"
+calling_convention = "engine_args"
+read_only = true
+
+[tools.params.query]
+type = "string"
+description = "Search query (same as code_search)"
+required = true
+
+[tools.params.limit]
+type = "integer"
+description = "Number of search results to assemble context for (default: 5)"
 
 [tools.params.callee_depth]
 type = "integer"

@@ -74,8 +74,15 @@ impl Chunker for CastChunker {
         // Merge phase: combine adjacent small spans.
         let merged = merge_spans(&raw_spans, source, config.max_chars, config.min_chars);
 
+        // Bridge phase: optionally generate overlapping bridge chunks.
+        let final_spans = if config.overlap_ratio > 0.0 {
+            generate_bridge_chunks(&merged, source, config)
+        } else {
+            merged
+        };
+
         // Build final chunks.
-        merged
+        final_spans
             .into_iter()
             .map(|span| {
                 make_chunk(
@@ -248,6 +255,94 @@ fn merge_spans(
     merged
 }
 
+/// Clamp `offset` down to the nearest UTF-8 char boundary within `s`.
+///
+/// If `offset >= s.len()`, returns `s.len()`.
+/// Otherwise walks backward from `offset` until a char boundary is found.
+fn clamp_to_char_boundary(s: &str, offset: usize) -> usize {
+    if offset >= s.len() {
+        return s.len();
+    }
+    // Walk backward to find a valid char boundary.
+    let mut pos = offset;
+    while pos > 0 && !s.is_char_boundary(pos) {
+        pos -= 1;
+    }
+    pos
+}
+
+/// Generate bridge chunks that overlap adjacent original spans.
+///
+/// For each adjacent pair (A, B), a bridge chunk is created that spans from
+/// the tail of A into the head of B, creating overlap at chunk boundaries.
+/// The original spans are preserved; bridges are interleaved.
+fn generate_bridge_chunks(spans: &[RawSpan], source: &[u8], config: &ChunkConfig) -> Vec<RawSpan> {
+    if spans.len() < 2 {
+        return spans.to_vec();
+    }
+
+    let overlap_ratio = config.overlap_ratio.clamp(0.0, 0.5);
+    let source_str = String::from_utf8_lossy(source);
+
+    let mut result: Vec<RawSpan> = Vec::with_capacity(spans.len() * 2);
+
+    for i in 0..spans.len() {
+        // Always include the original span.
+        result.push(spans[i].clone());
+
+        // Generate a bridge between spans[i] and spans[i+1].
+        if i + 1 < spans.len() {
+            let a = &spans[i];
+            let b = &spans[i + 1];
+
+            let a_size = a.byte_end.saturating_sub(a.byte_start);
+            let b_size = b.byte_end.saturating_sub(b.byte_start);
+            let overlap_bytes = ((a_size + b_size) as f32 / 2.0 * overlap_ratio) as usize;
+            let half = overlap_bytes / 2;
+
+            if half == 0 {
+                continue;
+            }
+
+            let bridge_start_raw = a.byte_end.saturating_sub(half);
+            let bridge_end_raw = (b.byte_start + half).min(source.len());
+
+            // Clamp to UTF-8 char boundaries.
+            let bridge_start = clamp_to_char_boundary(&source_str, bridge_start_raw);
+            let bridge_end = clamp_to_char_boundary(&source_str, bridge_end_raw);
+
+            if bridge_start >= bridge_end {
+                continue;
+            }
+
+            let bridge_size = non_ws_chars(&source[bridge_start..bridge_end]);
+
+            // Skip if bridge is too small or too large.
+            if bridge_size < config.min_chars || bridge_size > config.max_chars {
+                continue;
+            }
+
+            // Inherit the deeper (longer) scope chain from either neighbor.
+            let scope = if b.scope.len() > a.scope.len() {
+                b.scope.clone()
+            } else {
+                a.scope.clone()
+            };
+
+            result.push(RawSpan {
+                byte_start: bridge_start,
+                byte_end: bridge_end,
+                scope,
+            });
+        }
+    }
+
+    // Sort by byte_start so chunks are in document order.
+    result.sort_by_key(|s| s.byte_start);
+
+    result
+}
+
 /// Build a Chunk from a byte range.
 fn make_chunk(
     file_path: &str,
@@ -401,6 +496,7 @@ mod tests {
         let config = ChunkConfig {
             max_chars,
             min_chars,
+            overlap_ratio: 0.0,
         };
         let chunker = CastChunker;
         chunker.chunk(
@@ -610,6 +706,7 @@ class Foo:
         let config = ChunkConfig {
             max_chars: 100,
             min_chars: 20,
+            overlap_ratio: 0.0,
         };
         let chunker = CastChunker;
         let chunks = chunker.chunk(
@@ -625,5 +722,164 @@ class Foo:
             assert_eq!(c.file_path, "test.py");
             assert_eq!(c.language, Language::Python);
         }
+    }
+
+    /// Helper: chunk Rust source with a given overlap_ratio.
+    fn chunk_rust_with_overlap(
+        source: &str,
+        max_chars: usize,
+        min_chars: usize,
+        overlap_ratio: f32,
+    ) -> Vec<Chunk> {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
+            .unwrap();
+        let tree = parser.parse(source.as_bytes(), None).unwrap();
+        let config = ChunkConfig {
+            max_chars,
+            min_chars,
+            overlap_ratio,
+        };
+        let chunker = CastChunker;
+        chunker.chunk(
+            "test.rs",
+            source.as_bytes(),
+            Some(&tree),
+            Language::Rust,
+            &config,
+        )
+    }
+
+    #[test]
+    fn overlap_zero_produces_same_chunks() {
+        let src = r#"
+fn alpha() {
+    let x = 1;
+    let y = 2;
+    let z = x + y;
+    println!("{}", z);
+}
+
+fn beta() {
+    let a = "hello";
+    let b = "world";
+    println!("{} {}", a, b);
+}
+
+fn gamma() {
+    for i in 0..100 {
+        println!("{}", i);
+    }
+}
+
+fn delta() {
+    let v: Vec<i32> = (0..50).collect();
+    let sum: i32 = v.iter().sum();
+    println!("{}", sum);
+}
+"#;
+        let chunks_no_overlap = chunk_rust_with_overlap(src, 150, 30, 0.0);
+        let chunks_with_overlap = chunk_rust_with_overlap(src, 150, 30, 0.3);
+
+        // With overlap, we should get more chunks (bridge chunks are added).
+        assert!(
+            chunks_with_overlap.len() > chunks_no_overlap.len(),
+            "Expected overlap=0.3 to produce more chunks than overlap=0.0: {} vs {}",
+            chunks_with_overlap.len(),
+            chunks_no_overlap.len(),
+        );
+
+        // All original chunks (from overlap=0.0) should still appear in the overlap=0.3 set
+        // (same byte ranges).
+        for orig in &chunks_no_overlap {
+            let found = chunks_with_overlap
+                .iter()
+                .any(|c| c.byte_start == orig.byte_start && c.byte_end == orig.byte_end);
+            assert!(
+                found,
+                "Original chunk [{}, {}) not found in overlap=0.3 output",
+                orig.byte_start, orig.byte_end
+            );
+        }
+    }
+
+    #[test]
+    fn bridge_chunks_span_boundaries() {
+        let src = r#"
+fn alpha() {
+    let x = 1;
+    let y = 2;
+    let z = x + y;
+    println!("{}", z);
+}
+
+fn beta() {
+    let a = "hello";
+    let b = "world";
+    println!("{} {}", a, b);
+}
+
+fn gamma() {
+    for i in 0..100 {
+        println!("{}", i);
+    }
+}
+
+fn delta() {
+    let v: Vec<i32> = (0..50).collect();
+    let sum: i32 = v.iter().sum();
+    println!("{}", sum);
+}
+"#;
+        let originals = chunk_rust_with_overlap(src, 150, 30, 0.0);
+        let all_chunks = chunk_rust_with_overlap(src, 150, 30, 0.3);
+
+        // Identify bridge chunks (those not in originals by byte range).
+        let bridges: Vec<&Chunk> = all_chunks
+            .iter()
+            .filter(|c| {
+                !originals
+                    .iter()
+                    .any(|o| o.byte_start == c.byte_start && o.byte_end == c.byte_end)
+            })
+            .collect();
+
+        // At least one bridge chunk should exist.
+        assert!(
+            !bridges.is_empty(),
+            "Expected at least one bridge chunk with overlap=0.3"
+        );
+
+        // Each bridge should overlap with at least two adjacent original chunks.
+        for bridge in &bridges {
+            let overlaps: Vec<&Chunk> = originals
+                .iter()
+                .filter(|o| bridge.byte_start < o.byte_end && bridge.byte_end > o.byte_start)
+                .collect();
+            assert!(
+                overlaps.len() >= 2,
+                "Bridge chunk [{}, {}) should overlap at least 2 originals, but overlaps {}",
+                bridge.byte_start,
+                bridge.byte_end,
+                overlaps.len(),
+            );
+        }
+    }
+
+    #[test]
+    fn clamp_to_char_boundary_works() {
+        // ASCII string — every byte is a char boundary.
+        assert_eq!(clamp_to_char_boundary("hello", 3), 3);
+        assert_eq!(clamp_to_char_boundary("hello", 10), 5);
+        assert_eq!(clamp_to_char_boundary("hello", 0), 0);
+
+        // Multi-byte: "café" = [99, 97, 102, 195, 169] (5 bytes, 4 chars)
+        let s = "caf\u{00e9}";
+        assert_eq!(s.len(), 5);
+        // Byte 4 is the second byte of the 2-byte é. Clamp back to byte 3.
+        assert_eq!(clamp_to_char_boundary(s, 4), 3);
+        // Byte 3 is a valid boundary (start of é).
+        assert_eq!(clamp_to_char_boundary(s, 3), 3);
     }
 }

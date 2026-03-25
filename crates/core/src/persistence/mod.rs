@@ -24,6 +24,7 @@ const GRAPH_DIR: &str = "graph";
 const GRAPH_FILE: &str = "graph.bin";
 const MMAP_VECTOR_FILE: &str = "vectors.mmap";
 const FILE_TRIGRAM_FILE: &str = "file_trigram.bin";
+const CHUNK_TRIGRAM_FILE: &str = "chunk_trigram.bin";
 
 /// Extended file hash entry storing content hash alongside filesystem metadata
 /// (mtime and size) for fast pre-filtering during sync.
@@ -230,6 +231,11 @@ impl IndexStore {
     /// Path to the file-level trigram index.
     pub fn file_trigram_path(&self) -> PathBuf {
         self.codixing_dir().join(FILE_TRIGRAM_FILE)
+    }
+
+    /// Path to the chunk-level trigram index (Strategy::Exact fast-path).
+    pub fn chunk_trigram_path(&self) -> PathBuf {
+        self.codixing_dir().join(CHUNK_TRIGRAM_FILE)
     }
 
     /// Save the [`IndexConfig`] to `config.json`.

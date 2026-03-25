@@ -38,6 +38,10 @@ impl Engine {
         {
             warn!(error = %e, "failed to persist file trigram index");
         }
+        // chunk trigram also updated incrementally; persist to disk.
+        if let Err(e) = self.trigram.save_binary(&self.store.chunk_trigram_path()) {
+            warn!(error = %e, "failed to persist chunk trigram index");
+        }
         Ok(())
     }
 
@@ -367,6 +371,9 @@ impl Engine {
         {
             warn!(error = %e, "failed to persist file trigram index");
         }
+        if let Err(e) = self.trigram.save_binary(&self.store.chunk_trigram_path()) {
+            warn!(error = %e, "failed to persist chunk trigram index");
+        }
 
         // Recompute PageRank + persist graph for single-file removal.
         if let Some(ref mut graph) = self.graph {
@@ -441,6 +448,9 @@ impl Engine {
             .save_binary(&self.store.file_trigram_path())
         {
             warn!(error = %e, "failed to persist file trigram index");
+        }
+        if let Err(e) = self.trigram.save_binary(&self.store.chunk_trigram_path()) {
+            warn!(error = %e, "failed to persist chunk trigram index");
         }
 
         // Single PageRank recompute for the entire batch.

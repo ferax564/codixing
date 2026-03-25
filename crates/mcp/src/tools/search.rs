@@ -58,6 +58,14 @@ pub(crate) fn call_code_search(
         query = query.with_file_filter(filter);
     }
 
+    // Extract optional multi-query reformulations for RRF fusion.
+    let queries: Option<Vec<String>> = args.get("queries").and_then(|v| v.as_array()).map(|arr| {
+        arr.iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect()
+    });
+    query.queries = queries;
+
     // Report progress for deep/thorough strategies that take longer.
     let report_progress = matches!(
         effective_strategy,
@@ -485,6 +493,11 @@ pub(crate) fn call_stitch_context(engine: &Engine, args: &Value) -> (String, boo
     }
 
     (stitched, false)
+}
+
+/// Handler for `assemble_context` — delegates to stitch_context.
+pub(crate) fn call_assemble_context(engine: &Engine, args: &Value) -> (String, bool) {
+    call_stitch_context(engine, args)
 }
 
 pub(crate) fn call_explain(

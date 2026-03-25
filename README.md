@@ -34,7 +34,7 @@ curl -fsSL https://codixing.com/install.sh | sh
 codex mcp add codixing -- codixing-mcp --root .
 ```
 
-> **Note:** Codex requires the binary installed locally — `npx` is not supported. Do not use `--compact` with Codex as it needs all 53 tools visible in the tool list.
+> **Note:** Codex requires the binary installed locally — `npx` is not supported. Do not use `--compact` with Codex as it needs all 54 tools visible in the tool list.
 
 ### Cursor / Windsurf
 
@@ -214,7 +214,11 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **53 MCP tools** — Search, graph traversal, file operations, code review, git analysis, session memory, federation discovery
 - **Daemon mode** — Engine stays in memory, auto-starts on first connection, Unix socket (macOS/Linux) or named pipe (Windows) IPC, file watcher for live index updates, 30-min idle timeout
 - **Field-weighted BM25** — Configurable per-field boosting (entity_names 3×, signature 2×, scope_chain 1.5×, content 1×)
-- **Search pipeline** — Composable search stages (definition boost, test demotion, path match, graph boost, deduplication, truncation) with 6 strategies including trigram exact-match
+- **Search pipeline** — Composable search stages (definition boost, test demotion, path match, graph boost, recency boost, deduplication, truncation) with 6 strategies including trigram exact-match
+- **Multi-query RRF fusion** — Auto-generates query reformulations for natural-language queries (3+ words) and fuses results via Reciprocal Rank Fusion; also available via explicit `queries` parameter on `code_search`
+- **Git recency signal** — Mildly boosts recently modified files (+10% linear decay over 180 days) via lazy-loaded git log timestamps
+- **Overlapping chunks** — Bridge chunks at AST-aware chunk boundaries capture cross-function context; configurable `overlap_ratio` (default 0.0)
+- **File path boosting** — Detects explicit file paths and backtick code references in queries and boosts matching results (2.5×)
 - **Trigram pre-filtering** — File-level trigram inverted index (Russ Cox/trigrep technique) skips files before disk I/O; **110× faster** literal grep at 1K files, **52× faster** at 10K files; persistent bitcode storage, regex HIR walking with OR-branch support, parallel rayon verification
 - **LSP rename + semantic tokens** — Cross-file rename refactoring with conflict detection; semantic highlighting for Rust, Python, TypeScript, Go
 - **Streaming embeddings** — Fixed-window batch processing (256 chunks) with progress reporting; incremental vector reuse via content hashing
@@ -270,7 +274,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 815+ tests
+cargo test --workspace        # 826+ tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```
