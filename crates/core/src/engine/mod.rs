@@ -488,6 +488,10 @@ impl Engine {
         for entry in chunk_meta_map.iter() {
             trigram.add(*entry.key(), &entry.value().content);
         }
+        // Persist chunk trigram so open() can load it instead of rebuilding.
+        if let Err(e) = trigram.save_binary(&store.chunk_trigram_path()) {
+            warn!(error = %e, "failed to persist chunk trigram index");
+        }
 
         // Build file trigram from full file content (no chunk-boundary gaps).
         let file_trigram = build_file_trigram_from_content(&file_contents);
@@ -684,11 +688,29 @@ impl Engine {
             .ok()
             .and_then(|m| m.modified().ok());
 
-        // Build trigram index from chunk metadata for Strategy::Exact fast-path.
-        let mut trigram = crate::index::TrigramIndex::new();
-        for entry in chunk_meta.iter() {
-            trigram.add(*entry.key(), &entry.value().content);
-        }
+        // Load persisted chunk trigram index; fall back to rebuilding from chunk content.
+        let trigram = if store.chunk_trigram_path().exists() {
+            match crate::index::TrigramIndex::load_binary(&store.chunk_trigram_path()) {
+                Ok(idx) => idx,
+                Err(e) => {
+                    warn!(error = %e, "failed to load chunk trigram index; rebuilding from chunks");
+                    let mut t = crate::index::TrigramIndex::new();
+                    for entry in chunk_meta.iter() {
+                        t.add(*entry.key(), &entry.value().content);
+                    }
+                    t
+                }
+            }
+        } else {
+            info!(
+                "no persisted chunk trigram index; rebuilding from chunks (re-run `codixing init` to persist)"
+            );
+            let mut t = crate::index::TrigramIndex::new();
+            for entry in chunk_meta.iter() {
+                t.add(*entry.key(), &entry.value().content);
+            }
+            t
+        };
 
         // Try loading persisted file trigram; fall back to building from chunks.
         let file_trigram = if store.file_trigram_path().exists() {
@@ -868,11 +890,29 @@ impl Engine {
             .ok()
             .and_then(|m| m.modified().ok());
 
-        // Build trigram index from chunk metadata for Strategy::Exact fast-path.
-        let mut trigram = crate::index::TrigramIndex::new();
-        for entry in chunk_meta.iter() {
-            trigram.add(*entry.key(), &entry.value().content);
-        }
+        // Load persisted chunk trigram index; fall back to rebuilding from chunk content.
+        let trigram = if store.chunk_trigram_path().exists() {
+            match crate::index::TrigramIndex::load_binary(&store.chunk_trigram_path()) {
+                Ok(idx) => idx,
+                Err(e) => {
+                    warn!(error = %e, "failed to load chunk trigram index; rebuilding from chunks");
+                    let mut t = crate::index::TrigramIndex::new();
+                    for entry in chunk_meta.iter() {
+                        t.add(*entry.key(), &entry.value().content);
+                    }
+                    t
+                }
+            }
+        } else {
+            info!(
+                "no persisted chunk trigram index; rebuilding from chunks (re-run `codixing init` to persist)"
+            );
+            let mut t = crate::index::TrigramIndex::new();
+            for entry in chunk_meta.iter() {
+                t.add(*entry.key(), &entry.value().content);
+            }
+            t
+        };
 
         let file_trigram = if store.file_trigram_path().exists() {
             match FileTrigramIndex::load_binary(&store.file_trigram_path()) {
