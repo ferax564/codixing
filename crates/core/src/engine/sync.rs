@@ -13,6 +13,7 @@ use crate::language::detect_language;
 use crate::persistence::{FileHashEntry, IndexMeta};
 use crate::retriever::ChunkMeta;
 use crate::symbols::persistence::serialize_symbols;
+use crate::symbols::writer::write_mmap_symbols;
 
 use super::{
     Engine, GitSyncStats, SyncStats, git_diff_since, git_head_commit, make_embed_text,
@@ -29,7 +30,7 @@ impl Engine {
         if self.read_only {
             return Err(CodixingError::ReadOnly);
         }
-        // Force-init lazy trigram indexes so they're available for mutation.
+        self.symbols.ensure_mutable();
         let _ = self.get_trigram();
         let _ = self.get_file_trigram();
         self.reindex_file_impl(path, true)?;
@@ -368,7 +369,7 @@ impl Engine {
         if self.read_only {
             return Err(CodixingError::ReadOnly);
         }
-        // Force-init lazy trigram indexes so they're available for mutation.
+        self.symbols.ensure_mutable();
         let _ = self.get_trigram();
         let _ = self.get_file_trigram();
         let rel_str = self.config.normalize_path(path).unwrap_or_else(|| {
@@ -423,6 +424,7 @@ impl Engine {
         if self.read_only {
             return Err(CodixingError::ReadOnly);
         }
+        self.symbols.ensure_mutable();
         use crate::watcher::ChangeKind;
 
         if changes.is_empty() {
@@ -574,6 +576,7 @@ impl Engine {
         if self.read_only {
             return Err(CodixingError::ReadOnly);
         }
+        self.symbols.ensure_mutable();
         use crate::watcher::{ChangeKind, FileChange};
         use std::collections::{HashMap, HashSet};
 
@@ -845,6 +848,7 @@ impl Engine {
         if self.read_only {
             return Err(CodixingError::ReadOnly);
         }
+        self.symbols.ensure_mutable();
         use crate::watcher::{ChangeKind, FileChange};
 
         // Load stored git commit from the persisted meta.
@@ -954,6 +958,13 @@ impl Engine {
         let sym_bytes = serialize_symbols(&self.symbols)?;
         self.store.save_symbols_bytes(&sym_bytes)?;
 
+        // Also write mmap-format v2 for zero-deserialization open().
+        if let Some(in_mem) = self.symbols.as_in_memory() {
+            if let Err(e) = write_mmap_symbols(in_mem, &self.store.symbols_v2_path()) {
+                warn!(error = %e, "failed to write symbols_v2.bin (non-fatal)");
+            }
+        }
+
         let hashes: Vec<(std::path::PathBuf, u64)> =
             self.parser.cache().content_hashes().into_iter().collect();
         self.store.save_tree_hashes(&hashes)?;
@@ -1023,6 +1034,13 @@ impl Engine {
         }
         let sym_bytes = serialize_symbols(&self.symbols)?;
         self.store.save_symbols_bytes(&sym_bytes)?;
+
+        // Also write mmap-format v2 for zero-deserialization open().
+        if let Some(in_mem) = self.symbols.as_in_memory() {
+            if let Err(e) = write_mmap_symbols(in_mem, &self.store.symbols_v2_path()) {
+                warn!(error = %e, "failed to write symbols_v2.bin (non-fatal)");
+            }
+        }
 
         let meta_bytes = serialize_chunk_meta_compact(&self.chunk_meta)?;
         self.store.save_chunk_meta_bytes(&meta_bytes)?;

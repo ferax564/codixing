@@ -25,6 +25,7 @@ const GRAPH_FILE: &str = "graph.bin";
 const MMAP_VECTOR_FILE: &str = "vectors.mmap";
 const FILE_TRIGRAM_FILE: &str = "file_trigram.bin";
 const CHUNK_TRIGRAM_FILE: &str = "chunk_trigram.bin";
+const SYMBOLS_V2_FILE: &str = "symbols_v2.bin";
 
 /// Extended file hash entry storing content hash alongside filesystem metadata
 /// (mtime and size) for fast pre-filtering during sync.
@@ -191,6 +192,11 @@ impl IndexStore {
     /// Path to the `symbols.bin` file.
     pub fn symbols_path(&self) -> PathBuf {
         self.codixing_dir().join(SYMBOLS_FILE)
+    }
+
+    /// Path to the `symbols_v2.bin` file (mmap format).
+    pub fn symbols_v2_path(&self) -> PathBuf {
+        self.codixing_dir().join(SYMBOLS_V2_FILE)
     }
 
     /// Path to the `tree_hashes.bin` file (legacy v1 format).
