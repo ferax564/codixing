@@ -116,8 +116,13 @@ impl Retriever for HybridRetriever<'_> {
                 token_budget: query.token_budget,
                 queries: None,
             };
-            VectorRetriever::new(Arc::clone(&self.embedder), self.vector, self.chunk_meta)
-                .search(&vec_query)?
+            VectorRetriever::with_tantivy(
+                Arc::clone(&self.embedder),
+                self.vector,
+                self.chunk_meta,
+                self.tantivy,
+            )
+            .search(&vec_query)?
         };
 
         debug!(

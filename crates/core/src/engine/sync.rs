@@ -16,7 +16,7 @@ use crate::symbols::persistence::serialize_symbols;
 
 use super::{
     Engine, GitSyncStats, SyncStats, git_diff_since, git_head_commit, make_embed_text,
-    normalize_path, symbol_from_entity, unix_timestamp_string,
+    normalize_path, serialize_chunk_meta_compact, symbol_from_entity, unix_timestamp_string,
 };
 
 impl Engine {
@@ -970,15 +970,8 @@ impl Engine {
             .collect();
         self.store.save_tree_hashes_v2(&v2_hashes)?;
 
-        // Persist chunk_meta.
-        let meta_pairs: Vec<(u64, ChunkMeta)> = self
-            .chunk_meta
-            .iter()
-            .map(|e| (*e.key(), e.value().clone()))
-            .collect();
-        let meta_bytes = bitcode::serialize(&meta_pairs).map_err(|e| {
-            CodixingError::Serialization(format!("failed to serialize chunk_meta: {e}"))
-        })?;
+        // Persist chunk_meta in compact format (without content).
+        let meta_bytes = serialize_chunk_meta_compact(&self.chunk_meta)?;
         self.store.save_chunk_meta_bytes(&meta_bytes)?;
 
         // Persist vector index.
@@ -1031,14 +1024,7 @@ impl Engine {
         let sym_bytes = serialize_symbols(&self.symbols)?;
         self.store.save_symbols_bytes(&sym_bytes)?;
 
-        let meta_pairs: Vec<(u64, ChunkMeta)> = self
-            .chunk_meta
-            .iter()
-            .map(|e| (*e.key(), e.value().clone()))
-            .collect();
-        let meta_bytes = bitcode::serialize(&meta_pairs).map_err(|e| {
-            CodixingError::Serialization(format!("failed to serialize chunk_meta: {e}"))
-        })?;
+        let meta_bytes = serialize_chunk_meta_compact(&self.chunk_meta)?;
         self.store.save_chunk_meta_bytes(&meta_bytes)?;
 
         if let Some(ref vec_idx) = self.vector {

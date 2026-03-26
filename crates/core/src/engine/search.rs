@@ -246,16 +246,22 @@ impl Engine {
 
         // Verify candidates and count actual substring matches using chunk content.
         let mut results: Vec<SearchResult> = Vec::new();
-        for chunk_id in &candidate_ids {
-            if let Some(meta) = self.chunk_meta.get(chunk_id) {
+        for &chunk_id in &candidate_ids {
+            if let Some(meta) = self.chunk_meta.get(&chunk_id) {
                 // Apply file filter if set.
                 if let Some(ref filter) = query.file_filter {
                     if !meta.file_path.contains(filter.as_str()) {
                         continue;
                     }
                 }
+                // Get content for verification: from meta if available, else from Tantivy.
+                let content = if meta.content.is_empty() {
+                    self.get_chunk_content(chunk_id).unwrap_or_default()
+                } else {
+                    meta.content.clone()
+                };
                 // Verify actual substring match and count occurrences.
-                let hit_count = meta.content.matches(&query.query).count();
+                let hit_count = content.matches(&query.query).count();
                 if hit_count == 0 {
                     continue; // Trigram false positive.
                 }
@@ -268,7 +274,7 @@ impl Engine {
                     line_end: meta.line_end,
                     signature: meta.signature.clone(),
                     scope_chain: meta.scope_chain.clone(),
-                    content: meta.content.clone(),
+                    content,
                 });
             }
         }

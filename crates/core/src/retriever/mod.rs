@@ -118,6 +118,12 @@ pub struct SearchResult {
 ///
 /// Stored in the engine's `chunk_meta` table (keyed by `chunk_id: u64`).
 /// Populated during indexing and persisted to `chunk_meta.bin`.
+///
+/// **Compact persistence (v2)**: The `content` field is NOT persisted to disk.
+/// On load, `content` is set to an empty string. Code that needs chunk content
+/// should fetch it from Tantivy stored fields via [`Engine::get_chunk_content`].
+/// During indexing and sync, `content` is populated from the source file and
+/// available in memory until the engine is dropped.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkMeta {
     /// Deterministic chunk ID (xxh3).
@@ -138,12 +144,67 @@ pub struct ChunkMeta {
     #[serde(default)]
     pub entity_names: Vec<String>,
     /// Source code content.
+    ///
+    /// **Note**: This field is empty after loading from disk (compact persistence).
+    /// Use [`Engine::get_chunk_content`] to retrieve content from Tantivy.
+    /// During indexing/sync, content is populated in memory from the source file.
     pub content: String,
     /// xxh3 hash of the chunk content, used for incremental vector updates.
     /// During sync, chunks whose content hash has not changed can skip
     /// re-embedding, reusing the existing vector.
     #[serde(default)]
     pub content_hash: u64,
+}
+
+/// Compact serialization format for [`ChunkMeta`] — excludes the `content`
+/// field to dramatically reduce `chunk_meta.bin` size.
+///
+/// On the Linux kernel (881K chunks), this shrinks the file from ~1.5 GB to
+/// ~100-150 MB by not duplicating content already stored in Tantivy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChunkMetaCompact {
+    pub chunk_id: u64,
+    pub file_path: String,
+    pub language: String,
+    pub line_start: u64,
+    pub line_end: u64,
+    pub signature: String,
+    pub scope_chain: Vec<String>,
+    pub entity_names: Vec<String>,
+    pub content_hash: u64,
+}
+
+impl From<&ChunkMeta> for ChunkMetaCompact {
+    fn from(meta: &ChunkMeta) -> Self {
+        Self {
+            chunk_id: meta.chunk_id,
+            file_path: meta.file_path.clone(),
+            language: meta.language.clone(),
+            line_start: meta.line_start,
+            line_end: meta.line_end,
+            signature: meta.signature.clone(),
+            scope_chain: meta.scope_chain.clone(),
+            entity_names: meta.entity_names.clone(),
+            content_hash: meta.content_hash,
+        }
+    }
+}
+
+impl From<ChunkMetaCompact> for ChunkMeta {
+    fn from(compact: ChunkMetaCompact) -> Self {
+        Self {
+            chunk_id: compact.chunk_id,
+            file_path: compact.file_path,
+            language: compact.language,
+            line_start: compact.line_start,
+            line_end: compact.line_end,
+            signature: compact.signature,
+            scope_chain: compact.scope_chain,
+            entity_names: compact.entity_names,
+            content: String::new(), // Content retrieved from Tantivy on demand
+            content_hash: compact.content_hash,
+        }
+    }
 }
 
 /// Trait for swappable retrieval strategies.
