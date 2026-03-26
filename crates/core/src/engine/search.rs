@@ -242,7 +242,7 @@ impl Engine {
     ///
     /// Results are hydrated from chunk_meta and scored by match count.
     fn search_exact(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
-        let candidate_ids = self.trigram.search(&query.query);
+        let candidate_ids = self.get_trigram().search(&query.query);
 
         // Verify candidates and count actual substring matches using chunk content.
         let mut results: Vec<SearchResult> = Vec::new();

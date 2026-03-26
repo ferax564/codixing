@@ -29,17 +29,23 @@ impl Engine {
         if self.read_only {
             return Err(CodixingError::ReadOnly);
         }
+        // Force-init lazy trigram indexes so they're available for mutation.
+        let _ = self.get_trigram();
+        let _ = self.get_file_trigram();
         self.reindex_file_impl(path, true)?;
         self.tantivy.commit()?;
         // file_trigram already updated incrementally in reindex_file_impl.
         if let Err(e) = self
-            .file_trigram
+            .get_file_trigram()
             .save_binary(&self.store.file_trigram_path())
         {
             warn!(error = %e, "failed to persist file trigram index");
         }
         // chunk trigram also updated incrementally; persist to disk.
-        if let Err(e) = self.trigram.save_binary(&self.store.chunk_trigram_path()) {
+        if let Err(e) = self
+            .get_trigram()
+            .save_binary(&self.store.chunk_trigram_path())
+        {
             warn!(error = %e, "failed to persist chunk trigram index");
         }
         Ok(())
@@ -97,7 +103,7 @@ impl Engine {
             }
         });
         for (id, content) in &removed {
-            self.trigram.remove(*id, content);
+            self.trigram.get_mut().unwrap().remove(*id, content);
         }
 
         // Read and re-process.
@@ -133,7 +139,10 @@ impl Engine {
             );
 
             // Update trigram index for Strategy::Exact fast-path.
-            self.trigram.add(chunk.id, &chunk.content);
+            self.trigram
+                .get_mut()
+                .unwrap()
+                .add(chunk.id, &chunk.content);
         }
 
         for entity in &result.entities {
@@ -213,8 +222,8 @@ impl Engine {
         self.file_chunk_counts.insert(rel_str.clone(), chunks.len());
 
         // Incremental file trigram update: remove old, add new from full content.
-        self.file_trigram.remove_file(&rel_str);
-        self.file_trigram.add(&rel_str, &source);
+        self.file_trigram.get_mut().unwrap().remove_file(&rel_str);
+        self.file_trigram.get_mut().unwrap().add(&rel_str, &source);
 
         // Update graph edges for this file using the already-parsed tree.
         // PageRank is only recomputed when do_graph_finalize=true (single-file
@@ -340,10 +349,10 @@ impl Engine {
             }
         });
         for (id, content) in &removed {
-            self.trigram.remove(*id, content);
+            self.trigram.get_mut().unwrap().remove(*id, content);
         }
         // Incremental file trigram removal.
-        self.file_trigram.remove_file(rel_str);
+        self.file_trigram.get_mut().unwrap().remove_file(rel_str);
 
         // Remove graph node + incident edges (PageRank deferred to caller).
         if let Some(ref mut graph) = self.graph {
@@ -359,6 +368,9 @@ impl Engine {
         if self.read_only {
             return Err(CodixingError::ReadOnly);
         }
+        // Force-init lazy trigram indexes so they're available for mutation.
+        let _ = self.get_trigram();
+        let _ = self.get_file_trigram();
         let rel_str = self.config.normalize_path(path).unwrap_or_else(|| {
             normalize_path(path.strip_prefix(&self.config.root).unwrap_or(path))
         });
@@ -367,12 +379,15 @@ impl Engine {
         self.tantivy.commit()?;
         // file_trigram already updated incrementally in remove_file_inner.
         if let Err(e) = self
-            .file_trigram
+            .get_file_trigram()
             .save_binary(&self.store.file_trigram_path())
         {
             warn!(error = %e, "failed to persist file trigram index");
         }
-        if let Err(e) = self.trigram.save_binary(&self.store.chunk_trigram_path()) {
+        if let Err(e) = self
+            .get_trigram()
+            .save_binary(&self.store.chunk_trigram_path())
+        {
             warn!(error = %e, "failed to persist chunk trigram index");
         }
 
@@ -414,6 +429,10 @@ impl Engine {
             return Ok(());
         }
 
+        // Force-init lazy trigram indexes so they're available for mutation.
+        let _ = self.get_trigram();
+        let _ = self.get_file_trigram();
+
         for change in changes {
             match change.kind {
                 ChangeKind::Modified => {
@@ -445,12 +464,15 @@ impl Engine {
         // file_trigram already updated incrementally per-file above.
         // Persist the updated index.
         if let Err(e) = self
-            .file_trigram
+            .get_file_trigram()
             .save_binary(&self.store.file_trigram_path())
         {
             warn!(error = %e, "failed to persist file trigram index");
         }
-        if let Err(e) = self.trigram.save_binary(&self.store.chunk_trigram_path()) {
+        if let Err(e) = self
+            .get_trigram()
+            .save_binary(&self.store.chunk_trigram_path())
+        {
             warn!(error = %e, "failed to persist chunk trigram index");
         }
 
