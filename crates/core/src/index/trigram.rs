@@ -18,30 +18,30 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{CodixingError, Result};
 
-/// Serializable representation of the trigram index data.
+/// Serializable representation of the trigram index data (v2: no content).
 #[derive(Serialize, Deserialize)]
 struct TrigramIndexData {
     /// Posting lists keyed by trigram bytes.
     index: Vec<([u8; 3], Vec<u64>)>,
-    /// Stored chunk content for verification of exact matches.
+}
+
+/// Legacy format with content (for backward-compatible loading).
+#[derive(Deserialize)]
+struct TrigramIndexDataLegacy {
+    index: Vec<([u8; 3], Vec<u64>)>,
+    #[allow(dead_code)]
     chunks: Vec<(u64, String)>,
 }
 
 /// An inverted index mapping 3-byte substrings to chunk IDs for fast exact search.
+///
+/// Content is NOT stored here — callers must verify candidate matches using
+/// an external content source (chunk_meta or Tantivy stored fields).
 pub struct TrigramIndex {
     /// Mapping from trigram to sorted list of chunk IDs containing that trigram.
     index: HashMap<[u8; 3], Vec<u64>>,
-    /// Stored chunk content for verification of exact matches.
-    chunks: HashMap<u64, String>,
-}
-
-/// A verified exact match of a query within a chunk.
-#[derive(Debug, Clone)]
-pub struct TrigramMatch {
-    /// The ID of the chunk containing the match.
-    pub chunk_id: u64,
-    /// The byte offset within the chunk where the match starts.
-    pub byte_offset: usize,
+    /// Number of distinct chunks indexed (for len/is_empty).
+    chunk_count: usize,
 }
 
 impl TrigramIndex {
@@ -49,7 +49,7 @@ impl TrigramIndex {
     pub fn new() -> Self {
         Self {
             index: HashMap::new(),
-            chunks: HashMap::new(),
+            chunk_count: 0,
         }
     }
 
@@ -58,10 +58,9 @@ impl TrigramIndex {
     ///
     /// For bulk loading, prefer [`build_batch`] which defers sorting to the end.
     pub fn add(&mut self, chunk_id: u64, content: &str) {
-        self.chunks.insert(chunk_id, content.to_string());
+        self.chunk_count += 1;
         self.add_trigrams(chunk_id, content.as_bytes());
         // Sort + dedup posting lists touched by this chunk.
-        // (For incremental adds during sync this keeps lists sorted.)
         let bytes = content.as_bytes();
         if bytes.len() < 3 {
             return;
@@ -76,12 +75,10 @@ impl TrigramIndex {
     }
 
     /// Insert trigrams for a chunk without sorting posting lists.
-    /// Called by both `add` and `build_batch`.
     fn add_trigrams(&mut self, chunk_id: u64, bytes: &[u8]) {
         if bytes.len() < 3 {
             return;
         }
-        // Collect unique trigrams via sort+dedup.
         let mut chunk_trigrams: Vec<[u8; 3]> = (0..bytes.len() - 2)
             .map(|i| [bytes[i], bytes[i + 1], bytes[i + 2]])
             .collect();
@@ -96,11 +93,13 @@ impl TrigramIndex {
     ///
     /// Much faster than calling `add()` repeatedly because posting lists are
     /// sorted and deduplicated only once at the end, avoiding O(N²) re-sorting.
-    pub fn build_batch(&mut self, chunks: impl Iterator<Item = (u64, String)>) {
+    pub fn build_batch(&mut self, chunks: impl Iterator<Item = (u64, impl AsRef<str>)>) {
+        let mut count = 0usize;
         for (chunk_id, content) in chunks {
-            self.add_trigrams(chunk_id, content.as_bytes());
-            self.chunks.insert(chunk_id, content);
+            self.add_trigrams(chunk_id, content.as_ref().as_bytes());
+            count += 1;
         }
+        self.chunk_count += count;
         // Single sort+dedup pass over all posting lists.
         for list in self.index.values_mut() {
             list.sort_unstable();
@@ -109,31 +108,36 @@ impl TrigramIndex {
     }
 
     /// Removes a chunk from the index, cleaning up all posting list entries.
-    pub fn remove(&mut self, chunk_id: u64) {
-        if let Some(content) = self.chunks.remove(&chunk_id) {
-            let bytes = content.as_bytes();
-            if bytes.len() < 3 {
-                return;
-            }
-            for i in 0..bytes.len() - 2 {
-                let trigram = [bytes[i], bytes[i + 1], bytes[i + 2]];
-                if let Some(list) = self.index.get_mut(&trigram) {
-                    list.retain(|&id| id != chunk_id);
-                    if list.is_empty() {
-                        self.index.remove(&trigram);
-                    }
+    ///
+    /// The caller must provide the chunk's content so we know which trigrams
+    /// to clean up from the posting lists.
+    pub fn remove(&mut self, chunk_id: u64, content: &str) {
+        let bytes = content.as_bytes();
+        if bytes.len() < 3 {
+            self.chunk_count = self.chunk_count.saturating_sub(1);
+            return;
+        }
+        for i in 0..bytes.len() - 2 {
+            let trigram = [bytes[i], bytes[i + 1], bytes[i + 2]];
+            if let Some(list) = self.index.get_mut(&trigram) {
+                list.retain(|&id| id != chunk_id);
+                if list.is_empty() {
+                    self.index.remove(&trigram);
                 }
             }
         }
+        self.chunk_count = self.chunk_count.saturating_sub(1);
     }
 
-    /// Searches for exact occurrences of `query` across all indexed chunks.
+    /// Returns candidate chunk IDs that may contain `query` as a substring.
     ///
-    /// Returns empty if the query is shorter than 3 bytes. Otherwise:
-    /// 1. Extracts trigrams from the query.
-    /// 2. Intersects posting lists to find candidate chunks.
-    /// 3. Verifies exact substring matches in each candidate.
-    pub fn search(&self, query: &str) -> Vec<TrigramMatch> {
+    /// Intersects trigram posting lists for fast candidate filtering.
+    /// **Callers must verify** actual substring matches in the chunk content
+    /// (from chunk_meta or Tantivy stored fields) since trigram intersection
+    /// can produce false positives.
+    ///
+    /// Returns empty if the query is shorter than 3 bytes.
+    pub fn search(&self, query: &str) -> Vec<u64> {
         let query_bytes = query.as_bytes();
         if query_bytes.len() < 3 {
             return Vec::new();
@@ -162,36 +166,23 @@ impl TrigramIndex {
             }
         }
 
-        // Verify exact matches and collect byte offsets
-        let mut results = Vec::new();
-        for chunk_id in candidates {
-            if let Some(content) = self.chunks.get(&chunk_id) {
-                for (offset, _) in content.match_indices(query) {
-                    results.push(TrigramMatch {
-                        chunk_id,
-                        byte_offset: offset,
-                    });
-                }
-            }
-        }
-        results
+        candidates
     }
 
     /// Returns the number of indexed chunks.
     pub fn len(&self) -> usize {
-        self.chunks.len()
+        self.chunk_count
     }
 
     /// Returns true if the index contains no chunks.
     pub fn is_empty(&self) -> bool {
-        self.chunks.is_empty()
+        self.chunk_count == 0
     }
 
     /// Save the trigram index to a binary (bitcode) file.
     pub fn save_binary(&self, path: &Path) -> Result<()> {
         let data = TrigramIndexData {
             index: self.index.iter().map(|(k, v)| (*k, v.clone())).collect(),
-            chunks: self.chunks.iter().map(|(k, v)| (*k, v.clone())).collect(),
         };
         let bytes = bitcode::serialize(&data).map_err(|e| {
             CodixingError::Serialization(format!("failed to serialize trigram index: {e}"))
@@ -201,15 +192,38 @@ impl TrigramIndex {
     }
 
     /// Load the trigram index from a binary (bitcode) file.
+    ///
+    /// Handles both v2 (no content) and legacy (with content) formats.
     pub fn load_binary(path: &Path) -> Result<Self> {
         let bytes = std::fs::read(path)?;
-        let data: TrigramIndexData = bitcode::deserialize(&bytes).map_err(|e| {
-            CodixingError::Serialization(format!("failed to deserialize trigram index: {e}"))
-        })?;
-        Ok(Self {
-            index: data.index.into_iter().collect(),
-            chunks: data.chunks.into_iter().collect(),
-        })
+        // Try v2 format first (no content), fall back to legacy.
+        if let Ok(data) = bitcode::deserialize::<TrigramIndexData>(&bytes) {
+            let chunk_count = data
+                .index
+                .iter()
+                .flat_map(|(_, ids)| ids.iter())
+                .collect::<std::collections::HashSet<_>>()
+                .len();
+            Ok(Self {
+                index: data.index.into_iter().collect(),
+                chunk_count,
+            })
+        } else if let Ok(data) = bitcode::deserialize::<TrigramIndexDataLegacy>(&bytes) {
+            let chunk_count = data
+                .index
+                .iter()
+                .flat_map(|(_, ids)| ids.iter())
+                .collect::<std::collections::HashSet<_>>()
+                .len();
+            Ok(Self {
+                index: data.index.into_iter().collect(),
+                chunk_count,
+            })
+        } else {
+            Err(CodixingError::Serialization(
+                "failed to deserialize trigram index: unknown format".to_string(),
+            ))
+        }
     }
 }
 
@@ -676,27 +690,26 @@ mod tests {
         idx.add(1, "fn process_batch(items: &[Item]) { todo!() }");
         idx.add(2, "fn main() { process_batch(&items); }");
         idx.add(3, "fn unrelated_function() {}");
-        let matches = idx.search("process_batch");
-        let ids: Vec<u64> = matches.iter().map(|m| m.chunk_id).collect();
-        assert!(ids.contains(&1));
-        assert!(ids.contains(&2));
-        assert!(!ids.contains(&3));
+        let candidates = idx.search("process_batch");
+        assert!(candidates.contains(&1));
+        assert!(candidates.contains(&2));
+        assert!(!candidates.contains(&3));
     }
 
     #[test]
     fn no_matches_returns_empty() {
         let mut idx = TrigramIndex::new();
         idx.add(1, "fn hello() {}");
-        let matches = idx.search("nonexistent_symbol");
-        assert!(matches.is_empty());
+        let candidates = idx.search("nonexistent_symbol");
+        assert!(candidates.is_empty());
     }
 
     #[test]
     fn short_query_under_3_chars_returns_empty() {
         let mut idx = TrigramIndex::new();
         idx.add(1, "ab");
-        let matches = idx.search("ab");
-        assert!(matches.is_empty());
+        let candidates = idx.search("ab");
+        assert!(candidates.is_empty());
     }
 
     #[test]
@@ -704,18 +717,20 @@ mod tests {
         let mut idx = TrigramIndex::new();
         idx.add(1, "fn ProcessBatch() {}");
         idx.add(2, "fn process_batch() {}");
-        let matches = idx.search("ProcessBatch");
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].chunk_id, 1);
+        let candidates = idx.search("ProcessBatch");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0], 1);
     }
 
     #[test]
-    fn byte_offset_is_correct() {
+    fn candidates_include_false_positives() {
+        // search() now returns candidates without verification.
+        // The caller must verify actual substring matches.
         let mut idx = TrigramIndex::new();
         idx.add(1, "prefix_process_batch_suffix");
-        let matches = idx.search("process_batch");
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].byte_offset, 7);
+        let candidates = idx.search("process_batch");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0], 1);
     }
 
     #[test]
@@ -723,10 +738,10 @@ mod tests {
         let mut idx = TrigramIndex::new();
         idx.add(1, "fn target() {}");
         idx.add(2, "fn target() { call(); }");
-        idx.remove(1);
-        let matches = idx.search("target");
-        assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].chunk_id, 2);
+        idx.remove(1, "fn target() {}");
+        let candidates = idx.search("target");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0], 2);
     }
 
     #[test]
@@ -748,12 +763,12 @@ mod tests {
     }
 
     #[test]
-    fn multiple_matches_in_same_chunk() {
+    fn multiple_candidates_from_same_chunk() {
         let mut idx = TrigramIndex::new();
         idx.add(1, "HashMap HashMap HashMap");
-        let matches = idx.search("HashMap");
-        assert!(!matches.is_empty());
-        assert!(matches.iter().all(|m| m.chunk_id == 1));
+        let candidates = idx.search("HashMap");
+        // search() returns candidate chunk IDs (deduplicated).
+        assert_eq!(candidates, vec![1]);
     }
 
     #[test]
@@ -771,16 +786,12 @@ mod tests {
 
         assert_eq!(loaded.len(), 3);
 
-        // Verify search results are identical after round-trip.
-        let original_matches = idx.search("process_batch");
-        let loaded_matches = loaded.search("process_batch");
-        assert_eq!(original_matches.len(), loaded_matches.len());
-
-        let mut orig_ids: Vec<u64> = original_matches.iter().map(|m| m.chunk_id).collect();
-        let mut load_ids: Vec<u64> = loaded_matches.iter().map(|m| m.chunk_id).collect();
-        orig_ids.sort();
-        load_ids.sort();
-        assert_eq!(orig_ids, load_ids);
+        // Verify search candidates are identical after round-trip.
+        let mut orig = idx.search("process_batch");
+        let mut loaded_ids = loaded.search("process_batch");
+        orig.sort();
+        loaded_ids.sort();
+        assert_eq!(orig, loaded_ids);
 
         // Verify that unrelated queries still work correctly.
         let no_match = loaded.search("nonexistent_symbol");

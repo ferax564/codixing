@@ -242,30 +242,27 @@ impl Engine {
     ///
     /// Results are hydrated from chunk_meta and scored by match count.
     fn search_exact(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
-        let trigram_matches = self.trigram.search(&query.query);
+        let candidate_ids = self.get_trigram().search(&query.query);
 
-        // Collect unique chunk IDs with match counts for scoring.
-        let mut chunk_hits: std::collections::HashMap<u64, usize> =
-            std::collections::HashMap::new();
-        for m in &trigram_matches {
-            *chunk_hits.entry(m.chunk_id).or_insert(0) += 1;
-        }
-
-        // Hydrate trigram results from chunk_meta.
+        // Verify candidates and count actual substring matches using chunk content.
         let mut results: Vec<SearchResult> = Vec::new();
-        for (&chunk_id, &hit_count) in &chunk_hits {
-            if let Some(meta) = self.chunk_meta.get(&chunk_id) {
+        for chunk_id in &candidate_ids {
+            if let Some(meta) = self.chunk_meta.get(chunk_id) {
                 // Apply file filter if set.
                 if let Some(ref filter) = query.file_filter {
                     if !meta.file_path.contains(filter.as_str()) {
                         continue;
                     }
                 }
+                // Verify actual substring match and count occurrences.
+                let hit_count = meta.content.matches(&query.query).count();
+                if hit_count == 0 {
+                    continue; // Trigram false positive.
+                }
                 results.push(SearchResult {
                     chunk_id: format!("{chunk_id}"),
                     file_path: meta.file_path.clone(),
                     language: meta.language.clone(),
-                    // Score based on hit count: more occurrences = more relevant.
                     score: hit_count as f32,
                     line_start: meta.line_start,
                     line_end: meta.line_end,

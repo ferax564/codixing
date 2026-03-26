@@ -113,12 +113,12 @@ impl Engine {
             // Use the raw pattern bytes, NOT compiled_pattern — the latter has
             // regex escaping applied (e.g. `foo.bar` → `foo\.bar`) which would
             // produce wrong trigrams and cause false negatives.
-            self.file_trigram
+            self.get_file_trigram()
                 .candidates_for_literal(pattern.as_bytes())
                 .map(|v| v.into_iter().collect())
         } else {
             let plan = build_query_plan(pattern);
-            self.file_trigram
+            self.get_file_trigram()
                 .execute_plan(&plan)
                 .map(|v| v.into_iter().collect())
         };
