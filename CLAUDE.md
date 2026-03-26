@@ -130,6 +130,15 @@ The CI workflow (`.github/workflows/ci.yml`) has the following jobs:
 - **coverage** — runs `cargo-llvm-cov` on Ubuntu only; uploads `lcov.info` as the `coverage-report` artifact
 - **benchmarks** — runs `cargo bench` on Ubuntu only; uploads `bench-results.txt` as the `benchmark-results` artifact; depends on `test` (only runs after tests pass)
 
+### Auto-tagging (`.github/workflows/auto-tag.yml`)
+
+When a commit with message `release: vX.Y.Z — ...` lands on main, the auto-tag workflow automatically:
+1. Extracts the version from the commit message
+2. Verifies all 3 key version locations match (Cargo.toml, npm/package.json, docs/install.sh)
+3. Creates and pushes the git tag, which triggers the Release workflow
+
+**No manual `git tag` + `git push --tags` needed.** The Release workflow (build binaries + GitHub Release + npm publish) fires automatically from the tag.
+
 ### CI checklist before merging
 
 Before merging any PR:
@@ -141,7 +150,7 @@ Before merging any PR:
 
 ### Release checklist
 
-Before tagging a release:
+Before merging the release commit (auto-tag handles the rest):
 - [ ] All 5 version locations updated (see above)
 - [ ] `cargo test --workspace` passes locally
 - [ ] `cargo clippy --workspace -- -D warnings` passes
@@ -151,6 +160,7 @@ Before tagging a release:
 - [ ] docs/docs.html has no stale references
 - [ ] Plugin version matches in both `claude-plugin/` and `.claude-plugin/marketplace.json`
 - [ ] GitHub Pages build succeeds (check the deploy workflow)
+- [ ] Commit message follows format: `release: vX.Y.Z — description` (triggers auto-tag)
 
 ### Git history hygiene
 

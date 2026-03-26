@@ -1,0 +1,80 @@
+name: Auto-tag releases
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  auto-tag:
+    name: Create tag for release commits
+    runs-on: ubuntu-latest
+    # Only run when the commit message starts with "release: v"
+    if: startsWith(github.event.head_commit.message, 'release: v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from commit message
+        id: version
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          # Extract version like v0.18.0 from "release: v0.18.0 — ..."
+          VERSION=$(echo "$COMMIT_MSG" | grep -oP 'v\d+\.\d+\.\d+' | head -1)
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not extract version from commit message"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Detected version: $VERSION"
+
+      - name: Verify version consistency
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          CARGO_VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')
+          NPM_VERSION=$(jq -r .version npm/package.json)
+          INSTALL_VERSION=$(grep '^VERSION=' docs/install.sh | sed 's/VERSION=//')
+
+          echo "Tag version:      $VERSION"
+          echo "Cargo.toml:       v$CARGO_VERSION"
+          echo "npm/package.json: v$NPM_VERSION"
+          echo "docs/install.sh:  v$INSTALL_VERSION"
+
+          ERRORS=0
+          if [ "v$CARGO_VERSION" != "$VERSION" ]; then
+            echo "::error::Cargo.toml version (v$CARGO_VERSION) does not match tag ($VERSION)"
+            ERRORS=1
+          fi
+          if [ "v$NPM_VERSION" != "$VERSION" ]; then
+            echo "::error::npm/package.json version (v$NPM_VERSION) does not match tag ($VERSION)"
+            ERRORS=1
+          fi
+          if [ "v$INSTALL_VERSION" != "$VERSION" ]; then
+            echo "::error::docs/install.sh version (v$INSTALL_VERSION) does not match tag ($VERSION)"
+            ERRORS=1
+          fi
+          if [ $ERRORS -ne 0 ]; then
+            echo "::error::Version mismatch detected — fix versions before release"
+            exit 1
+          fi
+          echo "All versions consistent."
+
+      - name: Check tag does not already exist
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "Tag $VERSION already exists — skipping"
+            echo "SKIP=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Create and push tag
+        if: env.SKIP != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git tag "$VERSION"
+          git push origin "$VERSION"
+          echo "::notice::Created and pushed tag $VERSION — Release workflow will trigger automatically"
