@@ -666,6 +666,40 @@ impl TantivyIndex {
 
         Ok(results)
     }
+
+    /// Read all (file_path, content) pairs from the index.
+    ///
+    /// Used to rebuild file-level trigram indexes when chunk_meta content is
+    /// empty (compact persistence mode).
+    pub fn all_file_path_content_pairs(&self) -> Result<Vec<(String, String)>> {
+        let searcher = self.reader.searcher();
+        let mut results = Vec::new();
+
+        for segment_reader in searcher.segment_readers() {
+            let store_reader = segment_reader.get_store_reader(1)?;
+            for doc_id in 0..segment_reader.max_doc() {
+                if segment_reader.is_deleted(doc_id) {
+                    continue;
+                }
+                let doc: tantivy::TantivyDocument = store_reader.get(doc_id)?;
+                let file_path = doc
+                    .get_first(self.fields.file_path)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let content = doc
+                    .get_first(self.fields.content)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !file_path.is_empty() && !content.is_empty() {
+                    results.push((file_path, content));
+                }
+            }
+        }
+
+        Ok(results)
+    }
 }
 
 // ---------------------------------------------------------------------------

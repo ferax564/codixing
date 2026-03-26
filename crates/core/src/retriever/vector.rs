@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use tantivy::schema::Value;
 
 use crate::embedder::Embedder;
 use crate::error::Result;
+use crate::index::TantivyIndex;
 use crate::vector::VectorIndex;
 
 use super::{ChunkMeta, Retriever, SearchQuery, SearchResult};
@@ -11,11 +13,14 @@ use super::{ChunkMeta, Retriever, SearchQuery, SearchResult};
 /// Vector-based retriever using HNSW approximate nearest-neighbour search.
 ///
 /// Embeds the query string, finds the nearest chunk vectors, then hydrates
-/// each result from the `chunk_meta` table.
+/// each result from the `chunk_meta` table. When `chunk_meta.content` is
+/// empty (compact persistence mode), content is fetched from Tantivy stored
+/// fields via the optional `tantivy` reference.
 pub struct VectorRetriever<'a> {
     embedder: Arc<Embedder>,
     vector: &'a VectorIndex,
     chunk_meta: &'a DashMap<u64, ChunkMeta>,
+    tantivy: Option<&'a TantivyIndex>,
 }
 
 impl<'a> VectorRetriever<'a> {
@@ -29,7 +34,43 @@ impl<'a> VectorRetriever<'a> {
             embedder,
             vector,
             chunk_meta,
+            tantivy: None,
         }
+    }
+
+    /// Create a VectorRetriever with a Tantivy fallback for content retrieval.
+    pub fn with_tantivy(
+        embedder: Arc<Embedder>,
+        vector: &'a VectorIndex,
+        chunk_meta: &'a DashMap<u64, ChunkMeta>,
+        tantivy: &'a TantivyIndex,
+    ) -> Self {
+        Self {
+            embedder,
+            vector,
+            chunk_meta,
+            tantivy: Some(tantivy),
+        }
+    }
+
+    /// Resolve content for a chunk: prefer in-memory, fall back to Tantivy.
+    fn resolve_content(&self, chunk_id: u64, meta_content: &str) -> String {
+        if !meta_content.is_empty() {
+            return meta_content.to_string();
+        }
+        // Fall back to Tantivy stored fields.
+        if let Some(tantivy) = self.tantivy {
+            let ids: std::collections::HashSet<u64> = [chunk_id].into_iter().collect();
+            if let Ok(docs) = tantivy.lookup_chunks_by_ids(&ids) {
+                let fields = tantivy.fields();
+                if let Some(doc) = docs.into_iter().next() {
+                    if let Some(content) = doc.get_first(fields.content).and_then(|v| v.as_str()) {
+                        return content.to_string();
+                    }
+                }
+            }
+        }
+        String::new()
     }
 }
 
@@ -61,6 +102,8 @@ impl Retriever for VectorRetriever<'_> {
             // Convert cosine distance to a similarity score (higher = better).
             let score = 1.0 - distance;
 
+            let content = self.resolve_content(chunk_id, &meta.content);
+
             results.push(SearchResult {
                 chunk_id: chunk_id.to_string(),
                 file_path: meta.file_path.clone(),
@@ -70,7 +113,7 @@ impl Retriever for VectorRetriever<'_> {
                 line_end: meta.line_end,
                 signature: meta.signature.clone(),
                 scope_chain: meta.scope_chain.clone(),
-                content: meta.content.clone(),
+                content,
             });
         }
 

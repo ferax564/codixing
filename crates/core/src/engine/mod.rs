@@ -41,7 +41,7 @@ use crate::language::{Language, SemanticEntity, detect_language};
 use crate::parser::Parser;
 use crate::persistence::{FileHashEntry, IndexMeta, IndexStore};
 use crate::reranker::Reranker;
-use crate::retriever::ChunkMeta;
+use crate::retriever::{ChunkMeta, ChunkMetaCompact};
 use crate::session::SessionState;
 use crate::shared_session::SharedSession;
 use crate::symbols::persistence::{deserialize_symbols, serialize_symbols};
@@ -255,7 +255,8 @@ pub struct Engine {
     /// Optional cross-encoder reranker (BGE-Reranker-Base) for the `deep` strategy.
     pub(super) reranker: Option<Arc<Reranker>>,
     /// Trigram index for sub-millisecond exact substring search (Strategy::Exact).
-    pub(super) trigram: crate::index::TrigramIndex,
+    /// Lazy-loaded from disk on first use via OnceLock.
+    pub(super) trigram: std::sync::OnceLock<crate::index::TrigramIndex>,
     /// Session state for tracking agent interactions.
     session: Arc<SessionState>,
     /// Shared session store for multi-agent context sharing.
@@ -265,7 +266,8 @@ pub struct Engine {
     /// [`CodixingError::ReadOnly`].
     read_only: bool,
     /// File-level trigram index for fast grep pre-filtering.
-    pub(super) file_trigram: FileTrigramIndex,
+    /// Lazy-loaded from disk on first use via OnceLock.
+    pub(super) file_trigram: std::sync::OnceLock<FileTrigramIndex>,
     /// Lazy-initialised git recency map (file path → last commit timestamp).
     recency_map: std::sync::OnceLock<std::collections::HashMap<String, i64>>,
     /// When this engine was last loaded/reloaded from disk (mtime of `meta.json`).
@@ -430,10 +432,10 @@ impl Engine {
             .collect();
         store.save_tree_hashes_v2(&v2_hashes)?;
 
-        // Persist chunk_meta.
-        let meta_pairs: Vec<(u64, ChunkMeta)> = chunk_meta_map
+        // Persist chunk_meta in compact format (without content — content lives in Tantivy).
+        let meta_pairs: Vec<(u64, ChunkMetaCompact)> = chunk_meta_map
             .iter()
-            .map(|e| (*e.key(), e.value().clone()))
+            .map(|e| (*e.key(), ChunkMetaCompact::from(e.value())))
             .collect();
         let meta_bytes = bitcode::serialize(&meta_pairs).map_err(|e| {
             CodixingError::Serialization(format!("failed to serialize chunk_meta: {e}"))
@@ -484,22 +486,26 @@ impl Engine {
         session.cleanup_old_sessions();
 
         // Build trigram index from chunk metadata for Strategy::Exact fast-path.
-        let mut trigram = crate::index::TrigramIndex::new();
-        trigram.build_batch(
+        let mut trigram_idx = crate::index::TrigramIndex::new();
+        trigram_idx.build_batch(
             chunk_meta_map
                 .iter()
                 .map(|e| (*e.key(), e.value().content.clone())),
         );
         // Persist chunk trigram so open() can load it instead of rebuilding.
-        if let Err(e) = trigram.save_binary(&store.chunk_trigram_path()) {
+        if let Err(e) = trigram_idx.save_binary(&store.chunk_trigram_path()) {
             warn!(error = %e, "failed to persist chunk trigram index");
         }
+        let trigram = std::sync::OnceLock::new();
+        let _ = trigram.set(trigram_idx);
 
         // Build file trigram from full file content (no chunk-boundary gaps).
-        let file_trigram = build_file_trigram_from_content(&file_contents);
-        if let Err(e) = file_trigram.save_binary(&store.file_trigram_path()) {
+        let ft_idx = build_file_trigram_from_content(&file_contents);
+        if let Err(e) = ft_idx.save_binary(&store.file_trigram_path()) {
             warn!(error = %e, "failed to persist file trigram index");
         }
+        let file_trigram = std::sync::OnceLock::new();
+        let _ = file_trigram.set(ft_idx);
 
         Ok(Self {
             config,
@@ -573,17 +579,10 @@ impl Engine {
         let parser = Parser::new();
         let meta = store.load_meta()?;
 
-        // Restore chunk_meta.
+        // Restore chunk_meta (compact format first, fall back to legacy with content).
         let chunk_meta: DashMap<u64, ChunkMeta> = if store.chunk_meta_path().exists() {
             let bytes = store.load_chunk_meta_bytes()?;
-            let pairs: Vec<(u64, ChunkMeta)> = bitcode::deserialize(&bytes).map_err(|e| {
-                CodixingError::Serialization(format!("failed to deserialize chunk_meta: {e}"))
-            })?;
-            let map = DashMap::new();
-            for (k, v) in pairs {
-                map.insert(k, v);
-            }
-            map
+            deserialize_chunk_meta(&bytes)?
         } else {
             DashMap::new()
         };
@@ -690,44 +689,7 @@ impl Engine {
             .ok()
             .and_then(|m| m.modified().ok());
 
-        // Load persisted chunk trigram index; fall back to rebuilding from chunk content.
-        let trigram = if store.chunk_trigram_path().exists() {
-            match crate::index::TrigramIndex::load_binary(&store.chunk_trigram_path()) {
-                Ok(idx) => idx,
-                Err(e) => {
-                    warn!(error = %e, "failed to load chunk trigram index; rebuilding from chunks");
-                    let mut t = crate::index::TrigramIndex::new();
-                    t.build_batch(
-                        chunk_meta
-                            .iter()
-                            .map(|e| (*e.key(), e.value().content.clone())),
-                    );
-                    t
-                }
-            }
-        } else {
-            info!(
-                "no persisted chunk trigram index; rebuilding from chunks (re-run `codixing init` to persist)"
-            );
-            let mut t = crate::index::TrigramIndex::new();
-            for entry in chunk_meta.iter() {
-                t.add(*entry.key(), &entry.value().content);
-            }
-            t
-        };
-
-        // Try loading persisted file trigram; fall back to building from chunks.
-        let file_trigram = if store.file_trigram_path().exists() {
-            match FileTrigramIndex::load_binary(&store.file_trigram_path()) {
-                Ok(idx) => idx,
-                Err(e) => {
-                    warn!(error = %e, "failed to load file trigram index; rebuilding from chunks");
-                    build_file_trigram(&chunk_meta)
-                }
-            }
-        } else {
-            build_file_trigram(&chunk_meta)
-        };
+        // Trigram indexes are lazy-loaded on first use via OnceLock.
 
         Ok(Self {
             config,
@@ -741,11 +703,11 @@ impl Engine {
             chunk_meta,
             graph,
             reranker,
-            trigram,
+            trigram: std::sync::OnceLock::new(),
             session,
             shared_session: SharedSession::default_new(),
             read_only,
-            file_trigram,
+            file_trigram: std::sync::OnceLock::new(),
             recency_map: std::sync::OnceLock::new(),
             last_load_time: meta_mtime,
             reload_interval: std::time::Duration::from_secs(30),
@@ -781,17 +743,10 @@ impl Engine {
         let parser = Parser::new();
         let meta = store.load_meta()?;
 
-        // Restore chunk_meta.
+        // Restore chunk_meta (compact format first, fall back to legacy with content).
         let chunk_meta: DashMap<u64, ChunkMeta> = if store.chunk_meta_path().exists() {
             let bytes = store.load_chunk_meta_bytes()?;
-            let pairs: Vec<(u64, ChunkMeta)> = bitcode::deserialize(&bytes).map_err(|e| {
-                CodixingError::Serialization(format!("failed to deserialize chunk_meta: {e}"))
-            })?;
-            let map = DashMap::new();
-            for (k, v) in pairs {
-                map.insert(k, v);
-            }
-            map
+            deserialize_chunk_meta(&bytes)?
         } else {
             DashMap::new()
         };
@@ -894,43 +849,7 @@ impl Engine {
             .ok()
             .and_then(|m| m.modified().ok());
 
-        // Load persisted chunk trigram index; fall back to rebuilding from chunk content.
-        let trigram = if store.chunk_trigram_path().exists() {
-            match crate::index::TrigramIndex::load_binary(&store.chunk_trigram_path()) {
-                Ok(idx) => idx,
-                Err(e) => {
-                    warn!(error = %e, "failed to load chunk trigram index; rebuilding from chunks");
-                    let mut t = crate::index::TrigramIndex::new();
-                    t.build_batch(
-                        chunk_meta
-                            .iter()
-                            .map(|e| (*e.key(), e.value().content.clone())),
-                    );
-                    t
-                }
-            }
-        } else {
-            info!(
-                "no persisted chunk trigram index; rebuilding from chunks (re-run `codixing init` to persist)"
-            );
-            let mut t = crate::index::TrigramIndex::new();
-            for entry in chunk_meta.iter() {
-                t.add(*entry.key(), &entry.value().content);
-            }
-            t
-        };
-
-        let file_trigram = if store.file_trigram_path().exists() {
-            match FileTrigramIndex::load_binary(&store.file_trigram_path()) {
-                Ok(idx) => idx,
-                Err(e) => {
-                    warn!(error = %e, "failed to load file trigram index; rebuilding from chunks");
-                    build_file_trigram(&chunk_meta)
-                }
-            }
-        } else {
-            build_file_trigram(&chunk_meta)
-        };
+        // Trigram indexes are lazy-loaded on first use via OnceLock.
 
         Ok(Self {
             config,
@@ -944,11 +863,11 @@ impl Engine {
             chunk_meta,
             graph,
             reranker,
-            trigram,
+            trigram: std::sync::OnceLock::new(),
             session,
             shared_session: SharedSession::default_new(),
             read_only: true,
-            file_trigram,
+            file_trigram: std::sync::OnceLock::new(),
             recency_map: std::sync::OnceLock::new(),
             last_load_time: meta_mtime,
             reload_interval: std::time::Duration::from_secs(30),
@@ -972,6 +891,40 @@ impl Engine {
     pub(super) fn get_recency_map(&self) -> &std::collections::HashMap<String, i64> {
         self.recency_map
             .get_or_init(|| recency::build_recency_map(self.store.root(), 180))
+    }
+
+    /// Get or lazily load the chunk-level trigram index from disk.
+    pub(super) fn get_trigram(&self) -> &crate::index::TrigramIndex {
+        self.trigram.get_or_init(|| {
+            if self.store.chunk_trigram_path().exists() {
+                match crate::index::TrigramIndex::load_binary(&self.store.chunk_trigram_path()) {
+                    Ok(idx) => idx,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to load chunk trigram; rebuilding");
+                        rebuild_trigram_from_tantivy(&self.tantivy)
+                    }
+                }
+            } else {
+                rebuild_trigram_from_tantivy(&self.tantivy)
+            }
+        })
+    }
+
+    /// Get or lazily load the file-level trigram index from disk.
+    pub(super) fn get_file_trigram(&self) -> &FileTrigramIndex {
+        self.file_trigram.get_or_init(|| {
+            if self.store.file_trigram_path().exists() {
+                match FileTrigramIndex::load_binary(&self.store.file_trigram_path()) {
+                    Ok(idx) => idx,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to load file trigram; rebuilding");
+                        build_file_trigram_from_tantivy(&self.tantivy)
+                    }
+                }
+            } else {
+                build_file_trigram_from_tantivy(&self.tantivy)
+            }
+        })
     }
 
     /// Set the minimum interval between reload-staleness checks.
@@ -1027,15 +980,13 @@ impl Engine {
             self.symbols = deserialize_symbols(&bytes)?;
         }
 
-        // Reload chunk_meta.
+        // Reload chunk_meta (compact format first, fall back to legacy).
         if self.store.chunk_meta_path().exists() {
             let bytes = self.store.load_chunk_meta_bytes()?;
-            let pairs: Vec<(u64, ChunkMeta)> = bitcode::deserialize(&bytes).map_err(|e| {
-                CodixingError::Serialization(format!("failed to deserialize chunk_meta: {e}"))
-            })?;
+            let loaded = deserialize_chunk_meta(&bytes)?;
             self.chunk_meta.clear();
-            for (k, v) in pairs {
-                self.chunk_meta.insert(k, v);
+            for entry in loaded.iter() {
+                self.chunk_meta.insert(*entry.key(), entry.value().clone());
             }
         }
 
@@ -1048,8 +999,10 @@ impl Engine {
                 .or_insert(0) += 1;
         }
 
-        // Rebuild file trigram index.
-        self.file_trigram = build_file_trigram(&self.chunk_meta);
+        // Rebuild file trigram index from Tantivy (chunk_meta may have empty content).
+        let ft = build_file_trigram_from_tantivy(&self.tantivy);
+        self.file_trigram = std::sync::OnceLock::new();
+        let _ = self.file_trigram.set(ft);
 
         // Reload graph.
         self.graph = match self.store.load_graph() {
@@ -1092,11 +1045,10 @@ impl Engine {
             }
         }
 
-        // Rebuild trigram index from updated chunk metadata.
-        self.trigram = crate::index::TrigramIndex::new();
-        for entry in self.chunk_meta.iter() {
-            self.trigram.add(*entry.key(), &entry.value().content);
-        }
+        // Rebuild trigram index from Tantivy content (chunk_meta may have empty content).
+        let t = rebuild_trigram_from_tantivy(&self.tantivy);
+        self.trigram = std::sync::OnceLock::new();
+        let _ = self.trigram.set(t);
 
         // Refresh the Tantivy reader so it picks up new segments.
         self.tantivy.refresh_reader()?;
@@ -1163,6 +1115,32 @@ impl Engine {
     /// across multiple engine references in daemon mode).
     pub fn set_shared_session(&mut self, shared: SharedSession) {
         self.shared_session = shared;
+    }
+
+    /// Retrieve chunk content from Tantivy stored fields.
+    ///
+    /// Used when `chunk_meta.content` is empty (compact persistence mode).
+    /// Returns the content string, or `None` if the chunk is not found.
+    pub fn get_chunk_content(&self, chunk_id: u64) -> Option<String> {
+        let ids: std::collections::HashSet<u64> = [chunk_id].into_iter().collect();
+        let docs = self.tantivy.lookup_chunks_by_ids(&ids).ok()?;
+        let fields = self.tantivy.fields();
+        docs.into_iter().next().and_then(|doc| {
+            doc.get_first(fields.content)
+                .and_then(|v| tantivy::schema::Value::as_str(&v))
+                .map(|s| s.to_string())
+        })
+    }
+
+    /// Retrieve chunk content, first checking the in-memory `chunk_meta` map
+    /// and falling back to Tantivy stored fields if the content is empty.
+    pub fn resolve_chunk_content(&self, chunk_id: u64) -> Option<String> {
+        if let Some(meta) = self.chunk_meta.get(&chunk_id) {
+            if !meta.content.is_empty() {
+                return Some(meta.content.clone());
+            }
+        }
+        self.get_chunk_content(chunk_id)
     }
 
     /// Get combined callers + callees for a file (used for graph-propagated session boost).
@@ -1424,15 +1402,39 @@ fn build_file_trigram_from_content(file_contents: &DashMap<String, Vec<u8>>) -> 
     idx
 }
 
-/// Build a [`FileTrigramIndex`] from chunk metadata already in memory.
+/// Build a chunk [`TrigramIndex`] from Tantivy stored fields.
 ///
-/// Fallback used at `open()` / `reload()` when full file content is not
-/// available and the persisted file trigram index is missing.
-fn build_file_trigram(chunk_meta: &DashMap<u64, ChunkMeta>) -> FileTrigramIndex {
+/// Used as a fallback when the persisted chunk trigram index is missing and
+/// chunk_meta has empty content (compact persistence mode).
+fn rebuild_trigram_from_tantivy(tantivy: &TantivyIndex) -> crate::index::TrigramIndex {
+    let mut t = crate::index::TrigramIndex::new();
+    match tantivy.all_chunk_ids_and_content() {
+        Ok(pairs) => {
+            t.build_batch(pairs.into_iter());
+        }
+        Err(e) => {
+            warn!(error = %e, "failed to read Tantivy content for trigram rebuild");
+        }
+    }
+    t
+}
+
+/// Build a [`FileTrigramIndex`] from Tantivy stored fields.
+///
+/// Groups chunk content by file path and builds the file-level trigram index.
+/// Used as a fallback when persisted file trigram is missing and chunk_meta
+/// has empty content (compact persistence mode).
+fn build_file_trigram_from_tantivy(tantivy: &TantivyIndex) -> FileTrigramIndex {
     let mut idx = FileTrigramIndex::new();
-    for entry in chunk_meta.iter() {
-        let m = entry.value();
-        idx.add(&m.file_path, m.content.as_bytes());
+    match tantivy.all_file_path_content_pairs() {
+        Ok(pairs) => {
+            for (file_path, content) in &pairs {
+                idx.add(file_path, content.as_bytes());
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "failed to read Tantivy content for file trigram rebuild");
+        }
     }
     idx
 }
@@ -1532,6 +1534,43 @@ fn make_embed_text(meta: &ChunkMeta, contextual: bool) -> String {
     }
     let prefix = build_context_prefix(meta);
     format!("{prefix}{}", meta.content)
+}
+
+/// Deserialize `chunk_meta.bin` with backward compatibility.
+///
+/// Tries compact format (`Vec<(u64, ChunkMetaCompact)>`) first. If that fails,
+/// falls back to legacy format (`Vec<(u64, ChunkMeta)>`) which includes content.
+fn deserialize_chunk_meta(bytes: &[u8]) -> Result<DashMap<u64, ChunkMeta>> {
+    // Try compact format first (v2 — no content field).
+    if let Ok(pairs) = bitcode::deserialize::<Vec<(u64, ChunkMetaCompact)>>(bytes) {
+        let map = DashMap::new();
+        for (k, compact) in pairs {
+            map.insert(k, ChunkMeta::from(compact));
+        }
+        return Ok(map);
+    }
+
+    // Fall back to legacy format (v1 — includes content).
+    let pairs: Vec<(u64, ChunkMeta)> = bitcode::deserialize(bytes).map_err(|e| {
+        CodixingError::Serialization(format!("failed to deserialize chunk_meta: {e}"))
+    })?;
+    let map = DashMap::new();
+    for (k, v) in pairs {
+        map.insert(k, v);
+    }
+    Ok(map)
+}
+
+/// Serialize chunk_meta in compact format (without content).
+pub(super) fn serialize_chunk_meta_compact(
+    chunk_meta: &DashMap<u64, ChunkMeta>,
+) -> Result<Vec<u8>> {
+    let meta_pairs: Vec<(u64, ChunkMetaCompact)> = chunk_meta
+        .iter()
+        .map(|e| (*e.key(), ChunkMetaCompact::from(e.value())))
+        .collect();
+    bitcode::serialize(&meta_pairs)
+        .map_err(|e| CodixingError::Serialization(format!("failed to serialize chunk_meta: {e}")))
 }
 
 /// Build a context prefix for a chunk to improve embedding quality.

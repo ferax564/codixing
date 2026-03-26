@@ -16,7 +16,7 @@ use crate::symbols::persistence::serialize_symbols;
 
 use super::{
     Engine, GitSyncStats, SyncStats, git_diff_since, git_head_commit, make_embed_text,
-    normalize_path, symbol_from_entity, unix_timestamp_string,
+    normalize_path, serialize_chunk_meta_compact, symbol_from_entity, unix_timestamp_string,
 };
 
 impl Engine {
@@ -29,17 +29,23 @@ impl Engine {
         if self.read_only {
             return Err(CodixingError::ReadOnly);
         }
+        // Force-init lazy trigram indexes so they're available for mutation.
+        let _ = self.get_trigram();
+        let _ = self.get_file_trigram();
         self.reindex_file_impl(path, true)?;
         self.tantivy.commit()?;
         // file_trigram already updated incrementally in reindex_file_impl.
         if let Err(e) = self
-            .file_trigram
+            .get_file_trigram()
             .save_binary(&self.store.file_trigram_path())
         {
             warn!(error = %e, "failed to persist file trigram index");
         }
         // chunk trigram also updated incrementally; persist to disk.
-        if let Err(e) = self.trigram.save_binary(&self.store.chunk_trigram_path()) {
+        if let Err(e) = self
+            .get_trigram()
+            .save_binary(&self.store.chunk_trigram_path())
+        {
             warn!(error = %e, "failed to persist chunk trigram index");
         }
         Ok(())
@@ -86,17 +92,18 @@ impl Engine {
             vec_idx.remove_file(&rel_str)?;
         }
         // Remove old chunk_meta entries for this file and update trigram index.
-        let mut removed_ids = Vec::new();
+        // Collect content before removal so trigram.remove() can clean up posting lists.
+        let mut removed: Vec<(u64, String)> = Vec::new();
         self.chunk_meta.retain(|k, v| {
             if v.file_path == rel_str {
-                removed_ids.push(*k);
+                removed.push((*k, v.content.clone()));
                 false
             } else {
                 true
             }
         });
-        for id in removed_ids {
-            self.trigram.remove(id);
+        for (id, content) in &removed {
+            self.trigram.get_mut().unwrap().remove(*id, content);
         }
 
         // Read and re-process.
@@ -132,7 +139,10 @@ impl Engine {
             );
 
             // Update trigram index for Strategy::Exact fast-path.
-            self.trigram.add(chunk.id, &chunk.content);
+            self.trigram
+                .get_mut()
+                .unwrap()
+                .add(chunk.id, &chunk.content);
         }
 
         for entity in &result.entities {
@@ -212,8 +222,8 @@ impl Engine {
         self.file_chunk_counts.insert(rel_str.clone(), chunks.len());
 
         // Incremental file trigram update: remove old, add new from full content.
-        self.file_trigram.remove_file(&rel_str);
-        self.file_trigram.add(&rel_str, &source);
+        self.file_trigram.get_mut().unwrap().remove_file(&rel_str);
+        self.file_trigram.get_mut().unwrap().add(&rel_str, &source);
 
         // Update graph edges for this file using the already-parsed tree.
         // PageRank is only recomputed when do_graph_finalize=true (single-file
@@ -329,20 +339,20 @@ impl Engine {
             vec_idx.remove_file(rel_str)?;
         }
         // Remove chunk_meta entries and update trigram index.
-        let mut removed_ids = Vec::new();
+        let mut removed: Vec<(u64, String)> = Vec::new();
         self.chunk_meta.retain(|k, v| {
             if v.file_path == rel_str {
-                removed_ids.push(*k);
+                removed.push((*k, v.content.clone()));
                 false
             } else {
                 true
             }
         });
-        for id in removed_ids {
-            self.trigram.remove(id);
+        for (id, content) in &removed {
+            self.trigram.get_mut().unwrap().remove(*id, content);
         }
         // Incremental file trigram removal.
-        self.file_trigram.remove_file(rel_str);
+        self.file_trigram.get_mut().unwrap().remove_file(rel_str);
 
         // Remove graph node + incident edges (PageRank deferred to caller).
         if let Some(ref mut graph) = self.graph {
@@ -358,6 +368,9 @@ impl Engine {
         if self.read_only {
             return Err(CodixingError::ReadOnly);
         }
+        // Force-init lazy trigram indexes so they're available for mutation.
+        let _ = self.get_trigram();
+        let _ = self.get_file_trigram();
         let rel_str = self.config.normalize_path(path).unwrap_or_else(|| {
             normalize_path(path.strip_prefix(&self.config.root).unwrap_or(path))
         });
@@ -366,12 +379,15 @@ impl Engine {
         self.tantivy.commit()?;
         // file_trigram already updated incrementally in remove_file_inner.
         if let Err(e) = self
-            .file_trigram
+            .get_file_trigram()
             .save_binary(&self.store.file_trigram_path())
         {
             warn!(error = %e, "failed to persist file trigram index");
         }
-        if let Err(e) = self.trigram.save_binary(&self.store.chunk_trigram_path()) {
+        if let Err(e) = self
+            .get_trigram()
+            .save_binary(&self.store.chunk_trigram_path())
+        {
             warn!(error = %e, "failed to persist chunk trigram index");
         }
 
@@ -413,6 +429,10 @@ impl Engine {
             return Ok(());
         }
 
+        // Force-init lazy trigram indexes so they're available for mutation.
+        let _ = self.get_trigram();
+        let _ = self.get_file_trigram();
+
         for change in changes {
             match change.kind {
                 ChangeKind::Modified => {
@@ -444,12 +464,15 @@ impl Engine {
         // file_trigram already updated incrementally per-file above.
         // Persist the updated index.
         if let Err(e) = self
-            .file_trigram
+            .get_file_trigram()
             .save_binary(&self.store.file_trigram_path())
         {
             warn!(error = %e, "failed to persist file trigram index");
         }
-        if let Err(e) = self.trigram.save_binary(&self.store.chunk_trigram_path()) {
+        if let Err(e) = self
+            .get_trigram()
+            .save_binary(&self.store.chunk_trigram_path())
+        {
             warn!(error = %e, "failed to persist chunk trigram index");
         }
 
@@ -947,15 +970,8 @@ impl Engine {
             .collect();
         self.store.save_tree_hashes_v2(&v2_hashes)?;
 
-        // Persist chunk_meta.
-        let meta_pairs: Vec<(u64, ChunkMeta)> = self
-            .chunk_meta
-            .iter()
-            .map(|e| (*e.key(), e.value().clone()))
-            .collect();
-        let meta_bytes = bitcode::serialize(&meta_pairs).map_err(|e| {
-            CodixingError::Serialization(format!("failed to serialize chunk_meta: {e}"))
-        })?;
+        // Persist chunk_meta in compact format (without content).
+        let meta_bytes = serialize_chunk_meta_compact(&self.chunk_meta)?;
         self.store.save_chunk_meta_bytes(&meta_bytes)?;
 
         // Persist vector index.
@@ -1008,14 +1024,7 @@ impl Engine {
         let sym_bytes = serialize_symbols(&self.symbols)?;
         self.store.save_symbols_bytes(&sym_bytes)?;
 
-        let meta_pairs: Vec<(u64, ChunkMeta)> = self
-            .chunk_meta
-            .iter()
-            .map(|e| (*e.key(), e.value().clone()))
-            .collect();
-        let meta_bytes = bitcode::serialize(&meta_pairs).map_err(|e| {
-            CodixingError::Serialization(format!("failed to serialize chunk_meta: {e}"))
-        })?;
+        let meta_bytes = serialize_chunk_meta_compact(&self.chunk_meta)?;
         self.store.save_chunk_meta_bytes(&meta_bytes)?;
 
         if let Some(ref vec_idx) = self.vector {
