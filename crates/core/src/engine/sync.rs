@@ -86,17 +86,18 @@ impl Engine {
             vec_idx.remove_file(&rel_str)?;
         }
         // Remove old chunk_meta entries for this file and update trigram index.
-        let mut removed_ids = Vec::new();
+        // Collect content before removal so trigram.remove() can clean up posting lists.
+        let mut removed: Vec<(u64, String)> = Vec::new();
         self.chunk_meta.retain(|k, v| {
             if v.file_path == rel_str {
-                removed_ids.push(*k);
+                removed.push((*k, v.content.clone()));
                 false
             } else {
                 true
             }
         });
-        for id in removed_ids {
-            self.trigram.remove(id);
+        for (id, content) in &removed {
+            self.trigram.remove(*id, content);
         }
 
         // Read and re-process.
@@ -329,17 +330,17 @@ impl Engine {
             vec_idx.remove_file(rel_str)?;
         }
         // Remove chunk_meta entries and update trigram index.
-        let mut removed_ids = Vec::new();
+        let mut removed: Vec<(u64, String)> = Vec::new();
         self.chunk_meta.retain(|k, v| {
             if v.file_path == rel_str {
-                removed_ids.push(*k);
+                removed.push((*k, v.content.clone()));
                 false
             } else {
                 true
             }
         });
-        for id in removed_ids {
-            self.trigram.remove(id);
+        for (id, content) in &removed {
+            self.trigram.remove(*id, content);
         }
         // Incremental file trigram removal.
         self.file_trigram.remove_file(rel_str);

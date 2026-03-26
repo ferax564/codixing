@@ -8,5 +8,5 @@ pub mod vector;
 
 pub use self::tantivy::TantivyIndex;
 pub use mmap_vector::MmapVectorIndex;
-pub use trigram::{TrigramIndex, TrigramMatch};
+pub use trigram::TrigramIndex;
 pub use vector::{BruteForceVectorIndex, VectorIndex, VectorSearchResult};
