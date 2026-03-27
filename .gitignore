@@ -64,5 +64,7 @@ benchmarks/__pycache__/
 .claude/worktrees/
 .worktrees/
 
-# Internal plans and strategy documents (local only)
+# Internal plans, specs, and strategy documents (local only)
 plans/
+docs/superpowers/specs/
+docs/superpowers/plans/
