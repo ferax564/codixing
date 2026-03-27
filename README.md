@@ -17,7 +17,7 @@ claude plugin marketplace add ferax564/codixing
 claude plugin install codixing@codixing
 ```
 
-Restart Claude Code after installing. You get 53 MCP tools plus `/codixing-setup`, `/codixing-explore`, and `/codixing-review`.
+Restart Claude Code after installing. You get 54 MCP tools plus `/codixing-setup`, `/codixing-explore`, and `/codixing-review`.
 
 Alternatively, register just the MCP server without the plugin:
 
@@ -211,7 +211,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Hybrid search** — BM25 + optional vector embeddings, fused with Reciprocal Rank Fusion
 - **Symbol-level call graph** — Function-to-function call edges extracted from AST, including Rust trait dispatch, Python class inheritance, and TypeScript interface implementations
 - **Dependency graph** — Import + call extraction, PageRank scoring, Personalized PageRank for focus-aware maps
-- **53 MCP tools** — Search, graph traversal, file operations, code review, git analysis, session memory, federation discovery
+- **54 MCP tools** — Search, graph traversal, file operations, code review, git analysis, session memory, federation discovery
 - **Daemon mode** — Engine stays in memory, auto-starts on first connection, Unix socket (macOS/Linux) or named pipe (Windows) IPC, file watcher for live index updates, 30-min idle timeout
 - **Field-weighted BM25** — Configurable per-field boosting (entity_names 3×, signature 2×, scope_chain 1.5×, content 1×)
 - **Search pipeline** — Composable search stages (definition boost, test demotion, path match, graph boost, recency boost, deduplication, truncation) with 6 strategies including trigram exact-match
@@ -219,6 +219,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Git recency signal** — Mildly boosts recently modified files (+10% linear decay over 180 days) via lazy-loaded git log timestamps
 - **Overlapping chunks** — Bridge chunks at AST-aware chunk boundaries capture cross-function context; configurable `overlap_ratio` (default 0.0)
 - **File path boosting** — Detects explicit file paths and backtick code references in queries and boosts matching results (2.5×)
+- **Kernel-scale performance** — Tested on the Linux kernel (73K files, 30M lines): 1.57s cold-start search, 0.79s warm. Mmap symbol table (zero-deserialization), compact chunk metadata (11× smaller), lazy trigram loading
 - **Trigram pre-filtering** — File-level trigram inverted index (Russ Cox/trigrep technique) skips files before disk I/O; **110× faster** literal grep at 1K files, **52× faster** at 10K files; persistent bitcode storage, regex HIR walking with OR-branch support, parallel rayon verification
 - **LSP rename + semantic tokens** — Cross-file rename refactoring with conflict detection; semantic highlighting for Rust, Python, TypeScript, Go
 - **Streaming embeddings** — Fixed-window batch processing (256 chunks) with progress reporting; incremental vector reuse via content hashing
@@ -274,7 +275,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 826+ tests
+cargo test --workspace        # 834+ tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```

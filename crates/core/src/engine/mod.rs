@@ -45,6 +45,7 @@ use crate::retriever::{ChunkMeta, ChunkMetaCompact};
 use crate::session::SessionState;
 use crate::shared_session::SharedSession;
 use crate::symbols::persistence::{deserialize_symbols, serialize_symbols};
+use crate::symbols::writer::write_mmap_symbols;
 use crate::symbols::{Symbol, SymbolTable};
 use crate::vector::VectorIndex;
 
@@ -417,6 +418,13 @@ impl Engine {
         let sym_bytes = serialize_symbols(&symbols)?;
         store.save_symbols_bytes(&sym_bytes)?;
 
+        // Also write the mmap-format v2 for zero-deserialization open().
+        if let Some(in_mem) = symbols.as_in_memory() {
+            if let Err(e) = write_mmap_symbols(in_mem, &store.symbols_v2_path()) {
+                warn!(error = %e, "failed to write symbols_v2.bin (non-fatal)");
+            }
+        }
+
         let hashes: Vec<(PathBuf, u64)> = parser.cache().content_hashes().into_iter().collect();
         store.save_tree_hashes(&hashes)?;
 
@@ -568,8 +576,24 @@ impl Engine {
             Err(e) => return Err(e),
         };
 
-        // Restore symbols.
-        let symbols = if store.symbols_path().exists() {
+        // Restore symbols: try mmap v2 first, fall back to bitcode v1.
+        let symbols = if store.symbols_v2_path().exists() {
+            match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path()) {
+                Ok(mmap_table) => {
+                    debug!("loaded symbols_v2.bin via mmap (zero-deser)");
+                    SymbolTable::Mmap(mmap_table)
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to load symbols_v2.bin — falling back to symbols.bin");
+                    if store.symbols_path().exists() {
+                        let bytes = store.load_symbols_bytes()?;
+                        deserialize_symbols(&bytes)?
+                    } else {
+                        SymbolTable::new()
+                    }
+                }
+            }
+        } else if store.symbols_path().exists() {
             let bytes = store.load_symbols_bytes()?;
             deserialize_symbols(&bytes)?
         } else {
@@ -732,8 +756,24 @@ impl Engine {
         let tantivy =
             TantivyIndex::open_read_only_with_config(&store.tantivy_dir(), config.bm25.clone())?;
 
-        // Restore symbols.
-        let symbols = if store.symbols_path().exists() {
+        // Restore symbols: try mmap v2 first, fall back to bitcode v1.
+        let symbols = if store.symbols_v2_path().exists() {
+            match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path()) {
+                Ok(mmap_table) => {
+                    debug!("loaded symbols_v2.bin via mmap (zero-deser, read-only)");
+                    SymbolTable::Mmap(mmap_table)
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to load symbols_v2.bin — falling back to symbols.bin");
+                    if store.symbols_path().exists() {
+                        let bytes = store.load_symbols_bytes()?;
+                        deserialize_symbols(&bytes)?
+                    } else {
+                        SymbolTable::new()
+                    }
+                }
+            }
+        } else if store.symbols_path().exists() {
             let bytes = store.load_symbols_bytes()?;
             deserialize_symbols(&bytes)?
         } else {
@@ -974,8 +1014,22 @@ impl Engine {
     /// Reloads symbols, chunk metadata, the dependency graph, the vector
     /// index (if present), and refreshes the Tantivy reader.
     fn reload_from_disk(&mut self) -> Result<()> {
-        // Reload symbols.
-        if self.store.symbols_path().exists() {
+        // Reload symbols: try mmap v2 first, fall back to bitcode v1.
+        if self.store.symbols_v2_path().exists() {
+            match crate::symbols::mmap::MmapSymbolTable::load(&self.store.symbols_v2_path()) {
+                Ok(mmap_table) => {
+                    debug!("reloaded symbols_v2.bin via mmap");
+                    self.symbols = SymbolTable::Mmap(mmap_table);
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to reload symbols_v2.bin — trying symbols.bin");
+                    if self.store.symbols_path().exists() {
+                        let bytes = self.store.load_symbols_bytes()?;
+                        self.symbols = deserialize_symbols(&bytes)?;
+                    }
+                }
+            }
+        } else if self.store.symbols_path().exists() {
             let bytes = self.store.load_symbols_bytes()?;
             self.symbols = deserialize_symbols(&bytes)?;
         }
@@ -2698,6 +2752,7 @@ pub fn unique_new_function() -> bool {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore)] // Mmap file locking on Windows can prevent reader reload
     fn read_only_engine_reloads_after_writer_update() {
         let (dir, root) = setup_project();
         let mut config = IndexConfig::new(&root);

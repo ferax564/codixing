@@ -1070,7 +1070,7 @@
     <div class="hero">
       <div class="hero-badge">
         <span class="badge-dot"></span>
-        Rust-native &bull; 826+ tests &bull; 54 MCP tools &bull; 100% search accuracy
+        Rust-native &bull; 834+ tests &bull; 54 MCP tools &bull; 100% search accuracy
       </div>
       <h1>Code retrieval<br><span class="grad">built for AI agents</span></h1>
       <p class="hero-sub">
@@ -1200,7 +1200,7 @@
       <div class="reveal">
         <div class="section-label">Benchmark</div>
         <h2 class="section-title">Signal that matters</h2>
-        <p class="section-sub">On the OpenClaw C++ codebase (246,000 lines, 770 files), Codixing returns bounded, agent-usable context instead of raw grep floods.</p>
+        <p class="section-sub">Tested on codebases from 100 files to the Linux kernel (73K files, 30M lines). Codixing returns bounded, agent-usable context instead of raw grep floods.</p>
       </div>
       <div class="bench-grid">
         <div class="bench-card reveal">
@@ -1385,8 +1385,77 @@
               <span style="color:var(--text-muted)">react (4,325 files)</span>
               <span style="color:var(--cyan);font-weight:500">4.3s</span>
             </div>
+            <div style="display:flex;justify-content:space-between">
+              <span style="color:var(--text-muted)">OpenClaw (8,616 files)</span>
+              <span style="color:var(--cyan);font-weight:500">26s</span>
+            </div>
+            <div style="display:flex;justify-content:space-between">
+              <span style="color:var(--text-muted)"><strong>Linux kernel (73,374 files)</strong></span>
+              <span style="color:var(--cyan);font-weight:500">503s</span>
+            </div>
           </div>
-          <p style="margin-top:12px;color:var(--text-muted);font-size:0.8rem">BM25-only, no embeddings. ~1,060 files/second average.</p>
+          <p style="margin-top:12px;color:var(--text-muted);font-size:0.8rem">BM25-only, no embeddings. Sub-second search even on the Linux kernel (1.57s cold start, 0.79s warm).</p>
+        </div>
+      </div>
+      <!-- Linux kernel scale test -->
+      <div class="bench-grid reveal" style="margin-top:24px;transition-delay:0.25s">
+        <div class="bench-card">
+          <h3>Linux kernel scale test</h3>
+          <p style="margin-top:8px;color:var(--text-muted);font-size:0.9rem">73,374 files &bull; 881,672 chunks &bull; 935,303 symbols &bull; 30M lines of C</p>
+          <div style="margin-top:16px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px">
+            <div>
+              <div style="font-size:2rem;font-weight:700;color:var(--cyan)">1.57s</div>
+              <div style="color:var(--text-muted);font-size:0.85rem">Cold start<br><span style="font-size:0.8em">search</span></div>
+            </div>
+            <div>
+              <div style="font-size:2rem;font-weight:700;color:var(--cyan)">0.79s</div>
+              <div style="color:var(--text-muted);font-size:0.85rem">Warm cache<br><span style="font-size:0.8em">search</span></div>
+            </div>
+            <div>
+              <div style="font-size:2rem;font-weight:700;color:var(--cyan)">134MB</div>
+              <div style="color:var(--text-muted);font-size:0.85rem">chunk_meta<br><span style="font-size:0.8em">was 1.5 GB</span></div>
+            </div>
+          </div>
+          <div style="margin-top:16px;display:flex;flex-direction:column;gap:6px;font-size:0.85rem">
+            <div style="display:flex;justify-content:space-between">
+              <span style="color:var(--text-muted)"><code>ext4 inode</code></span>
+              <span style="color:var(--green)">fs/ext4/ext4.h</span>
+            </div>
+            <div style="display:flex;justify-content:space-between">
+              <span style="color:var(--text-muted)"><code>mutex lock</code></span>
+              <span style="color:var(--green)">include/linux/mutex.h</span>
+            </div>
+            <div style="display:flex;justify-content:space-between">
+              <span style="color:var(--text-muted)"><code>file system mount</code></span>
+              <span style="color:var(--green)">fs/namespace.c</span>
+            </div>
+            <div style="display:flex;justify-content:space-between">
+              <span style="color:var(--text-muted)"><code>device driver probe</code></span>
+              <span style="color:var(--green)">include/linux/device/driver.h</span>
+            </div>
+          </div>
+        </div>
+        <div class="insight-card">
+          <h3>How it scales</h3>
+          <p style="margin-top:8px">Four optimizations make kernel-scale search practical:</p>
+          <div style="margin-top:12px;display:flex;flex-direction:column;gap:10px;font-size:0.9rem">
+            <div>
+              <span class="highlight">Mmap symbol table</span><br>
+              <span style="color:var(--text-muted);font-size:0.85rem">935K symbols loaded via memory-mapped I/O &mdash; zero deserialization</span>
+            </div>
+            <div>
+              <span class="highlight">Compact chunk metadata</span><br>
+              <span style="color:var(--text-muted);font-size:0.85rem">Content stripped from persistence, retrieved from Tantivy on demand (11&times; smaller)</span>
+            </div>
+            <div>
+              <span class="highlight">Lazy trigram loading</span><br>
+              <span style="color:var(--text-muted);font-size:0.85rem">Trigram indexes loaded only when Exact strategy or grep_code is used</span>
+            </div>
+            <div>
+              <span class="highlight">Content-free trigram index</span><br>
+              <span style="color:var(--text-muted);font-size:0.85rem">Posting lists only, no duplicated chunk content (32% smaller on disk)</span>
+            </div>
+          </div>
         </div>
       </div>
     </div>

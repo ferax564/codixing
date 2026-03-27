@@ -1,4 +1,6 @@
+pub mod mmap;
 pub mod persistence;
+pub mod writer;
 
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -30,16 +32,16 @@ pub struct Symbol {
     pub scope: Vec<String>,
 }
 
-/// Concurrent symbol table backed by `DashMap`.
+/// Mutable, concurrent symbol table backed by `DashMap`.
 ///
-/// Keys are symbol names; values are vectors of all symbols sharing that name
-/// (there may be multiple definitions across files).
-pub struct SymbolTable {
-    symbols: DashMap<String, Vec<Symbol>>,
+/// Used during `init` and `sync` when the table needs to be mutated.
+/// Converted to/from the mmap format for persistence.
+pub struct InMemorySymbolTable {
+    pub(crate) symbols: DashMap<String, Vec<Symbol>>,
 }
 
-impl SymbolTable {
-    /// Create an empty symbol table.
+impl InMemorySymbolTable {
+    /// Create an empty in-memory symbol table.
     pub fn new() -> Self {
         Self {
             symbols: DashMap::new(),
@@ -55,22 +57,17 @@ impl SymbolTable {
     }
 
     /// Remove all symbols originating from a given file path.
-    ///
-    /// Iterates every entry and filters out symbols matching `file_path`.
-    /// Entries left with an empty Vec are removed entirely.
     pub fn remove_file(&self, file_path: &str) {
-        // Collect keys to avoid holding shard locks during mutation
         let keys: Vec<String> = self.symbols.iter().map(|r| r.key().clone()).collect();
         for key in keys {
             self.symbols.entry(key).and_modify(|syms| {
                 syms.retain(|s| s.file_path != file_path);
             });
         }
-        // Remove entries with empty Vecs
         self.symbols.retain(|_, v| !v.is_empty());
     }
 
-    /// Exact name lookup. Returns all symbols with the given name.
+    /// Exact name lookup.
     pub fn lookup(&self, name: &str) -> Vec<Symbol> {
         self.symbols
             .get(name)
@@ -78,7 +75,7 @@ impl SymbolTable {
             .unwrap_or_default()
     }
 
-    /// Prefix lookup -- find all symbols whose name starts with `prefix`.
+    /// Prefix lookup.
     pub fn lookup_prefix(&self, prefix: &str) -> Vec<Symbol> {
         let mut results = Vec::new();
         for entry in self.symbols.iter() {
@@ -89,10 +86,7 @@ impl SymbolTable {
         results
     }
 
-    /// Filter symbols by name pattern and optional file path.
-    ///
-    /// Performs case-insensitive substring matching on symbol names.
-    /// If `file` is provided, also filters by file_path.
+    /// Filter by name pattern and optional file path (case-insensitive).
     pub fn filter(&self, pattern: &str, file: Option<&str>) -> Vec<Symbol> {
         let pattern_lower = pattern.to_lowercase();
         let mut results = Vec::new();
@@ -131,13 +125,144 @@ impl SymbolTable {
         all
     }
 
-    /// Build a symbol table from a flat Vec (after deserialization).
+    /// Build from a flat Vec (after deserialization).
     pub fn from_symbols(symbols: Vec<Symbol>) -> Self {
         let table = Self::new();
         for symbol in symbols {
             table.insert(symbol);
         }
         table
+    }
+}
+
+impl Default for InMemorySymbolTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Symbol table that is either mutable in-memory (`DashMap`) or read-only
+/// memory-mapped (`symbols_v2.bin`).
+///
+/// All read methods dispatch to the active variant. Mutation methods
+/// (`insert`, `remove_file`) require the `InMemory` variant and will
+/// panic if called on the `Mmap` variant (callers must convert first
+/// via [`SymbolTable::ensure_mutable`]).
+pub enum SymbolTable {
+    /// Mutable variant used during `init` and `sync`.
+    InMemory(InMemorySymbolTable),
+    /// Read-only memory-mapped variant used during `open`.
+    Mmap(mmap::MmapSymbolTable),
+}
+
+impl SymbolTable {
+    /// Create a new empty (in-memory) symbol table.
+    pub fn new() -> Self {
+        Self::InMemory(InMemorySymbolTable::new())
+    }
+
+    /// Insert a symbol (requires InMemory variant).
+    ///
+    /// # Panics
+    ///
+    /// Panics if this is the `Mmap` variant. Call [`ensure_mutable`] first.
+    pub fn insert(&self, symbol: Symbol) {
+        match self {
+            Self::InMemory(t) => t.insert(symbol),
+            Self::Mmap(_) => panic!("cannot insert into mmap symbol table — call ensure_mutable()"),
+        }
+    }
+
+    /// Remove all symbols for a file (requires InMemory variant).
+    ///
+    /// # Panics
+    ///
+    /// Panics if this is the `Mmap` variant. Call [`ensure_mutable`] first.
+    pub fn remove_file(&self, file_path: &str) {
+        match self {
+            Self::InMemory(t) => t.remove_file(file_path),
+            Self::Mmap(_) => {
+                panic!("cannot remove from mmap symbol table — call ensure_mutable()")
+            }
+        }
+    }
+
+    /// Exact name lookup.
+    pub fn lookup(&self, name: &str) -> Vec<Symbol> {
+        match self {
+            Self::InMemory(t) => t.lookup(name),
+            Self::Mmap(t) => t.lookup(name),
+        }
+    }
+
+    /// Prefix lookup.
+    pub fn lookup_prefix(&self, prefix: &str) -> Vec<Symbol> {
+        match self {
+            Self::InMemory(t) => t.lookup_prefix(prefix),
+            Self::Mmap(t) => t.lookup_prefix(prefix),
+        }
+    }
+
+    /// Filter by name pattern and optional file path.
+    pub fn filter(&self, pattern: &str, file: Option<&str>) -> Vec<Symbol> {
+        match self {
+            Self::InMemory(t) => t.filter(pattern, file),
+            Self::Mmap(t) => t.filter(pattern, file),
+        }
+    }
+
+    /// Total number of unique symbol names.
+    pub fn len(&self) -> usize {
+        match self {
+            Self::InMemory(t) => t.len(),
+            Self::Mmap(t) => t.len(),
+        }
+    }
+
+    /// Returns `true` if the table contains no symbols.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::InMemory(t) => t.is_empty(),
+            Self::Mmap(t) => t.is_empty(),
+        }
+    }
+
+    /// All symbols as a flat Vec.
+    pub fn all_symbols(&self) -> Vec<Symbol> {
+        match self {
+            Self::InMemory(t) => t.all_symbols(),
+            Self::Mmap(t) => t.all_symbols(),
+        }
+    }
+
+    /// Build from a flat Vec (creates InMemory variant).
+    pub fn from_symbols(symbols: Vec<Symbol>) -> Self {
+        Self::InMemory(InMemorySymbolTable::from_symbols(symbols))
+    }
+
+    /// Convert an `Mmap` variant to `InMemory` so mutation methods work.
+    ///
+    /// If already `InMemory`, this is a no-op. If `Mmap`, reads all symbols
+    /// from the mmap and rebuilds the `DashMap`.
+    pub fn ensure_mutable(&mut self) {
+        if matches!(self, Self::InMemory(_)) {
+            return;
+        }
+        let all = self.all_symbols();
+        *self = Self::from_symbols(all);
+    }
+
+    /// Returns `true` if this is the in-memory variant.
+    pub fn is_in_memory(&self) -> bool {
+        matches!(self, Self::InMemory(_))
+    }
+
+    /// Returns a reference to the inner `InMemorySymbolTable`, if applicable.
+    pub fn as_in_memory(&self) -> Option<&InMemorySymbolTable> {
+        match self {
+            Self::InMemory(t) => Some(t),
+            Self::Mmap(_) => None,
+        }
     }
 }
 
@@ -398,5 +523,224 @@ mod tests {
         assert_eq!(table.len(), 2); // "one" and "two"
         assert_eq!(table.lookup("one").len(), 2);
         assert_eq!(table.lookup("two").len(), 1);
+    }
+
+    #[test]
+    fn ensure_mutable_converts_mmap_to_inmemory() {
+        // Just test that ensure_mutable on InMemory is a no-op
+        let mut table = SymbolTable::new();
+        table.insert(make_symbol(
+            "x",
+            "a.rs",
+            EntityKind::Function,
+            Language::Rust,
+        ));
+        assert!(table.is_in_memory());
+        table.ensure_mutable();
+        assert!(table.is_in_memory());
+        assert_eq!(table.len(), 1);
+    }
+
+    #[test]
+    fn mmap_roundtrip() {
+        let in_mem = InMemorySymbolTable::new();
+        in_mem.insert(make_symbol(
+            "alpha",
+            "src/lib.rs",
+            EntityKind::Function,
+            Language::Rust,
+        ));
+        in_mem.insert(make_symbol(
+            "Beta",
+            "src/types.py",
+            EntityKind::Class,
+            Language::Python,
+        ));
+        in_mem.insert(make_symbol(
+            "alpha",
+            "src/other.rs",
+            EntityKind::Method,
+            Language::Go,
+        ));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("symbols_v2.bin");
+        writer::write_mmap_symbols(&in_mem, &path).unwrap();
+
+        let loaded = mmap::MmapSymbolTable::load(&path).unwrap();
+        let table = SymbolTable::Mmap(loaded);
+
+        // Check counts
+        assert_eq!(table.len(), 2); // "alpha" and "Beta"
+
+        // Exact lookup
+        let alphas = table.lookup("alpha");
+        assert_eq!(alphas.len(), 2);
+
+        let betas = table.lookup("Beta");
+        assert_eq!(betas.len(), 1);
+        assert_eq!(betas[0].language, Language::Python);
+        assert_eq!(betas[0].kind, EntityKind::Class);
+        assert_eq!(betas[0].file_path, "src/types.py");
+
+        // Case-insensitive lookup works (hash uses lowercase)
+        let betas_lower = table.lookup("beta");
+        assert_eq!(betas_lower.len(), 1);
+
+        // Filter
+        let a_filter = table.filter("alph", None);
+        assert_eq!(a_filter.len(), 2);
+
+        // Filter with file constraint
+        let a_in_lib = table.filter("alpha", Some("src/lib.rs"));
+        assert_eq!(a_in_lib.len(), 1);
+        assert_eq!(a_in_lib[0].file_path, "src/lib.rs");
+
+        // Non-existent lookup
+        assert!(table.lookup("nonexistent").is_empty());
+    }
+
+    #[test]
+    fn mmap_empty_table_roundtrip() {
+        let in_mem = InMemorySymbolTable::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("symbols_v2.bin");
+        writer::write_mmap_symbols(&in_mem, &path).unwrap();
+
+        let loaded = mmap::MmapSymbolTable::load(&path).unwrap();
+        assert!(loaded.is_empty());
+        assert_eq!(loaded.len(), 0);
+        assert!(loaded.lookup("anything").is_empty());
+        assert!(loaded.filter("", None).is_empty());
+    }
+
+    #[test]
+    fn mmap_preserves_all_symbol_fields() {
+        let in_mem = InMemorySymbolTable::new();
+        in_mem.insert(Symbol {
+            name: "complex_func".to_string(),
+            kind: EntityKind::Function,
+            language: Language::Rust,
+            file_path: "src/engine/mod.rs".to_string(),
+            line_start: 42,
+            line_end: 100,
+            byte_start: 1234,
+            byte_end: 5678,
+            signature: Some("fn complex_func(x: i32, y: &str) -> Result<()>".to_string()),
+            scope: vec!["engine".to_string(), "Engine".to_string()],
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("symbols_v2.bin");
+        writer::write_mmap_symbols(&in_mem, &path).unwrap();
+
+        let loaded = mmap::MmapSymbolTable::load(&path).unwrap();
+        let syms = loaded.lookup("complex_func");
+        assert_eq!(syms.len(), 1);
+        let s = &syms[0];
+        assert_eq!(s.name, "complex_func");
+        assert_eq!(s.kind, EntityKind::Function);
+        assert_eq!(s.language, Language::Rust);
+        assert_eq!(s.file_path, "src/engine/mod.rs");
+        assert_eq!(s.line_start, 42);
+        assert_eq!(s.line_end, 100);
+        assert_eq!(s.byte_start, 1234);
+        assert_eq!(s.byte_end, 5678);
+        assert_eq!(
+            s.signature.as_deref(),
+            Some("fn complex_func(x: i32, y: &str) -> Result<()>")
+        );
+        assert_eq!(s.scope, vec!["engine", "Engine"]);
+    }
+
+    #[test]
+    fn mmap_lookup_prefix() {
+        let in_mem = InMemorySymbolTable::new();
+        in_mem.insert(make_symbol(
+            "parse_config",
+            "src/config.rs",
+            EntityKind::Function,
+            Language::Rust,
+        ));
+        in_mem.insert(make_symbol(
+            "parse_args",
+            "src/cli.rs",
+            EntityKind::Function,
+            Language::Rust,
+        ));
+        in_mem.insert(make_symbol(
+            "build_index",
+            "src/index.rs",
+            EntityKind::Function,
+            Language::Rust,
+        ));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("symbols_v2.bin");
+        writer::write_mmap_symbols(&in_mem, &path).unwrap();
+
+        let loaded = mmap::MmapSymbolTable::load(&path).unwrap();
+        let table = SymbolTable::Mmap(loaded);
+
+        let mut found = table.lookup_prefix("parse_");
+        found.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].name, "parse_args");
+        assert_eq!(found[1].name, "parse_config");
+
+        assert!(table.lookup_prefix("zzz_").is_empty());
+    }
+
+    #[test]
+    fn mmap_no_signature() {
+        let in_mem = InMemorySymbolTable::new();
+        in_mem.insert(Symbol {
+            name: "nosig".to_string(),
+            kind: EntityKind::Variable,
+            language: Language::Python,
+            file_path: "x.py".to_string(),
+            line_start: 1,
+            line_end: 1,
+            byte_start: 0,
+            byte_end: 10,
+            signature: None,
+            scope: vec![],
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("symbols_v2.bin");
+        writer::write_mmap_symbols(&in_mem, &path).unwrap();
+
+        let loaded = mmap::MmapSymbolTable::load(&path).unwrap();
+        let syms = loaded.lookup("nosig");
+        assert_eq!(syms.len(), 1);
+        assert!(syms[0].signature.is_none());
+    }
+
+    #[test]
+    fn mmap_ensure_mutable_converts() {
+        let in_mem = InMemorySymbolTable::new();
+        in_mem.insert(make_symbol(
+            "x",
+            "a.rs",
+            EntityKind::Function,
+            Language::Rust,
+        ));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("symbols_v2.bin");
+        writer::write_mmap_symbols(&in_mem, &path).unwrap();
+
+        let loaded = mmap::MmapSymbolTable::load(&path).unwrap();
+        let mut table = SymbolTable::Mmap(loaded);
+
+        assert!(!table.is_in_memory());
+        table.ensure_mutable();
+        assert!(table.is_in_memory());
+        assert_eq!(table.len(), 1);
+
+        // Now we can mutate
+        table.insert(make_symbol("y", "b.rs", EntityKind::Struct, Language::Rust));
+        assert_eq!(table.len(), 2);
     }
 }
