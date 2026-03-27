@@ -219,6 +219,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Git recency signal** — Mildly boosts recently modified files (+10% linear decay over 180 days) via lazy-loaded git log timestamps
 - **Overlapping chunks** — Bridge chunks at AST-aware chunk boundaries capture cross-function context; configurable `overlap_ratio` (default 0.0)
 - **File path boosting** — Detects explicit file paths and backtick code references in queries and boosts matching results (2.5×)
+- **Kernel-scale performance** — Tested on the Linux kernel (73K files, 30M lines): 1.57s cold-start search, 0.79s warm. Mmap symbol table (zero-deserialization), compact chunk metadata (11× smaller), lazy trigram loading
 - **Trigram pre-filtering** — File-level trigram inverted index (Russ Cox/trigrep technique) skips files before disk I/O; **110× faster** literal grep at 1K files, **52× faster** at 10K files; persistent bitcode storage, regex HIR walking with OR-branch support, parallel rayon verification
 - **LSP rename + semantic tokens** — Cross-file rename refactoring with conflict detection; semantic highlighting for Rust, Python, TypeScript, Go
 - **Streaming embeddings** — Fixed-window batch processing (256 chunks) with progress reporting; incremental vector reuse via content hashing
