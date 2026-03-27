@@ -1,0 +1,74 @@
+name: Auto-tag release
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  tag:
+    name: Create version tag from release commit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: startsWith(github.event.head_commit.message, 'release: v')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from commit message
+        id: version
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          # Extract vX.Y.Z from "release: vX.Y.Z — description"
+          VERSION=$(echo "$COMMIT_MSG" | grep -oP 'v\d+\.\d+\.\d+' | head -1)
+          if [ -z "$VERSION" ]; then
+            echo "No version found in commit message"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Detected version: $VERSION"
+
+      - name: Verify version consistency
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          EXPECTED="${VERSION#v}"
+          CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | grep -oP '\d+\.\d+\.\d+')
+          NPM_VERSION=$(grep '"version"' npm/package.json | grep -oP '\d+\.\d+\.\d+')
+          INSTALL_VERSION=$(grep 'VERSION=' docs/install.sh | grep -oP '\d+\.\d+\.\d+')
+
+          ERRORS=0
+          for PAIR in "Cargo.toml:$CARGO_VERSION" "npm/package.json:$NPM_VERSION" "docs/install.sh:$INSTALL_VERSION"; do
+            FILE="${PAIR%%:*}"
+            ACTUAL="${PAIR#*:}"
+            if [ "$ACTUAL" != "$EXPECTED" ]; then
+              echo "ERROR: $FILE has $ACTUAL, expected $EXPECTED"
+              ERRORS=$((ERRORS + 1))
+            fi
+          done
+
+          if [ $ERRORS -gt 0 ]; then
+            echo "Version mismatch — aborting tag creation."
+            exit 1
+          fi
+          echo "All version locations consistent: $EXPECTED"
+
+      - name: Check tag doesn't already exist
+        id: check
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+            echo "Tag $VERSION already exists, skipping"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create and push tag
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          git tag "$VERSION"
+          git push origin "$VERSION"
+          echo "Tagged and pushed $VERSION"
