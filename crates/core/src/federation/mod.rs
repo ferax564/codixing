@@ -176,7 +176,7 @@ impl FederatedEngine {
 
         // Fast path: already loaded.
         {
-            let guard = slot.engine.read().expect("engine lock poisoned");
+            let guard = slot.engine.read().unwrap_or_else(|e| e.into_inner());
             if guard.is_some() {
                 // Touch LRU.
                 self.touch_lru(slot_index);
@@ -198,7 +198,7 @@ impl FederatedEngine {
         // to avoid potential deadlocks).
         self.maybe_evict();
 
-        let mut guard = slot.engine.write().expect("engine lock poisoned");
+        let mut guard = slot.engine.write().unwrap_or_else(|e| e.into_inner());
         // Double-check after acquiring the write lock.
         if guard.is_some() {
             self.touch_lru(slot_index);
@@ -230,7 +230,7 @@ impl FederatedEngine {
 
     /// Move `slot_index` to the back of the LRU queue (most recently used).
     fn touch_lru(&self, slot_index: usize) {
-        let mut lru = self.lru_order.lock().expect("lru lock poisoned");
+        let mut lru = self.lru_order.lock().unwrap_or_else(|e| e.into_inner());
         lru.retain(|&i| i != slot_index);
         lru.push_back(slot_index);
     }
@@ -238,11 +238,11 @@ impl FederatedEngine {
     /// If the number of loaded engines exceeds `max_resident`, evict the LRU
     /// engine.
     fn maybe_evict(&self) {
-        let mut lru = self.lru_order.lock().expect("lru lock poisoned");
+        let mut lru = self.lru_order.lock().unwrap_or_else(|e| e.into_inner());
         while lru.len() >= self.config.max_resident {
             if let Some(victim) = lru.pop_front() {
                 let slot = &self.slots[victim];
-                let mut guard = slot.engine.write().expect("engine lock poisoned");
+                let mut guard = slot.engine.write().unwrap_or_else(|e| e.into_inner());
                 if guard.is_some() {
                     info!(
                         project = %slot.name,
@@ -264,7 +264,7 @@ impl FederatedEngine {
                 continue;
             }
 
-            let guard = slot.engine.read().expect("engine lock poisoned");
+            let guard = slot.engine.read().unwrap_or_else(|e| e.into_inner());
             if let Some(engine) = guard.as_ref() {
                 match engine.search(query.clone()) {
                     Ok(results) => {
@@ -300,7 +300,7 @@ impl FederatedEngine {
                 continue;
             }
 
-            let guard = slot.engine.read().expect("engine lock poisoned");
+            let guard = slot.engine.read().unwrap_or_else(|e| e.into_inner());
             if let Some(engine) = guard.as_ref() {
                 match engine.symbols(name, None) {
                     Ok(symbols) => {
@@ -330,7 +330,7 @@ impl FederatedEngine {
         let mut total_symbols = 0usize;
 
         for slot in &self.slots {
-            let guard = slot.engine.read().expect("engine lock poisoned");
+            let guard = slot.engine.read().unwrap_or_else(|e| e.into_inner());
             if let Some(engine) = guard.as_ref() {
                 loaded_count += 1;
                 let s = engine.stats();
@@ -354,7 +354,7 @@ impl FederatedEngine {
         self.slots
             .iter()
             .map(|slot| {
-                let guard = slot.engine.read().expect("engine lock poisoned");
+                let guard = slot.engine.read().unwrap_or_else(|e| e.into_inner());
                 let (loaded, file_count) = match guard.as_ref() {
                     Some(engine) => (true, engine.stats().file_count),
                     None => (false, 0),
