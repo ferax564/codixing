@@ -451,3 +451,214 @@ async fn graph_callers_returns_response() {
     assert!(json["count"].as_u64().is_some());
     assert!(json["files"].as_array().is_some());
 }
+
+#[tokio::test]
+async fn reindex_file_returns_ok() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = make_test_engine(dir.path());
+    let app = build_router(new_state(engine));
+
+    let file_path = dir.path().join("src/main.rs");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/index/reindex")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "file_path": file_path.to_str().unwrap()
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["status"], "ok");
+    assert!(json["elapsed_ms"].as_u64().is_some());
+}
+
+#[tokio::test]
+async fn remove_file_returns_ok() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = make_test_engine(dir.path());
+    let app = build_router(new_state(engine));
+
+    let file_path = dir.path().join("src/main.rs");
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/index/file")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "file_path": file_path.to_str().unwrap()
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["status"], "ok");
+}
+
+#[tokio::test]
+async fn repo_map_returns_response() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = make_test_engine(dir.path());
+    let app = build_router(new_state(engine));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/graph/repo-map")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "token_budget": 2048
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert!(json["map"].is_null() || json["map"].is_string());
+}
+
+#[tokio::test]
+async fn graph_callees_returns_response() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = make_test_engine(dir.path());
+    let app = build_router(new_state(engine));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/graph/callees?file=src/main.rs&depth=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert!(json["files"].as_array().is_some());
+}
+
+#[tokio::test]
+async fn graph_call_graph_returns_response() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = make_test_engine(dir.path());
+    let app = build_router(new_state(engine));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/graph/call-graph")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert!(json["edges"].as_array().is_some());
+}
+
+#[tokio::test]
+async fn graph_export_returns_response() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = make_test_engine(dir.path());
+    let app = build_router(new_state(engine));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/graph/export")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert!(json["nodes"].as_array().is_some());
+    assert!(json["edges"].as_array().is_some());
+}
+
+#[tokio::test]
+async fn graph_view_returns_html() {
+    let dir = tempfile::tempdir().unwrap();
+    let engine = make_test_engine(dir.path());
+    let app = build_router(new_state(engine));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/graph/view")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8(body.to_vec()).unwrap();
+
+    assert!(
+        html.contains("<html") || html.contains("<!DOCTYPE"),
+        "expected HTML response, got: {}",
+        &html[..html.len().min(200)]
+    );
+}

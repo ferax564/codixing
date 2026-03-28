@@ -107,7 +107,7 @@ impl HnswVectorIndex {
         for entry in data.entries {
             index.add(entry.chunk_id, entry.vector)?;
         }
-        *index.hnsw_cache.write().unwrap() = index.build_snapshot();
+        *index.hnsw_cache.write().unwrap_or_else(|e| e.into_inner()) = index.build_snapshot();
         Ok(index)
     }
 
@@ -174,7 +174,7 @@ impl VectorIndex for HnswVectorIndex {
             self.id_to_idx.insert(chunk_id, idx);
         }
         // Invalidate the HNSW graph.
-        *self.hnsw_cache.write().unwrap() = None;
+        *self.hnsw_cache.write().unwrap_or_else(|e| e.into_inner()) = None;
         Ok(())
     }
 
@@ -185,7 +185,7 @@ impl VectorIndex for HnswVectorIndex {
         for (idx, entry) in self.entries.iter().enumerate() {
             self.id_to_idx.insert(entry.chunk_id, idx);
         }
-        *self.hnsw_cache.write().unwrap() = None;
+        *self.hnsw_cache.write().unwrap_or_else(|e| e.into_inner()) = None;
         Ok(())
     }
 
@@ -196,7 +196,7 @@ impl VectorIndex for HnswVectorIndex {
 
         // Fast path: try a read lock first (allows concurrent searches).
         {
-            let cache = self.hnsw_cache.read().unwrap();
+            let cache = self.hnsw_cache.read().unwrap_or_else(|e| e.into_inner());
             if cache.is_some() {
                 return Self::search_snapshot(cache.as_ref().unwrap(), query, k);
             }
@@ -204,7 +204,7 @@ impl VectorIndex for HnswVectorIndex {
 
         // Slow path: snapshot is None, acquire write lock to rebuild.
         {
-            let mut cache = self.hnsw_cache.write().unwrap();
+            let mut cache = self.hnsw_cache.write().unwrap_or_else(|e| e.into_inner());
             // Double-check: another thread may have rebuilt while we waited.
             if cache.is_none() {
                 *cache = self.build_snapshot();
@@ -212,7 +212,7 @@ impl VectorIndex for HnswVectorIndex {
         }
 
         // Now read lock again for the search.
-        let cache = self.hnsw_cache.read().unwrap();
+        let cache = self.hnsw_cache.read().unwrap_or_else(|e| e.into_inner());
         Self::search_snapshot(cache.as_ref().unwrap(), query, k)
     }
 
@@ -224,9 +224,9 @@ impl VectorIndex for HnswVectorIndex {
         use rayon::prelude::*;
         // Ensure the HNSW graph is built before parallel queries use read locks.
         {
-            let needs_build = self.hnsw_cache.read().unwrap().is_none();
+            let needs_build = self.hnsw_cache.read().unwrap_or_else(|e| e.into_inner()).is_none();
             if needs_build {
-                let mut cache = self.hnsw_cache.write().unwrap();
+                let mut cache = self.hnsw_cache.write().unwrap_or_else(|e| e.into_inner());
                 if cache.is_none() {
                     *cache = self.build_snapshot();
                 }
@@ -279,7 +279,7 @@ impl VectorIndex for HnswVectorIndex {
             }
         }
         // Pre-build the HNSW graph after loading.
-        *index.hnsw_cache.write().unwrap() = index.build_snapshot();
+        *index.hnsw_cache.write().unwrap_or_else(|e| e.into_inner()) = index.build_snapshot();
         Ok(index)
     }
 }

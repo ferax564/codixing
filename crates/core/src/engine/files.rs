@@ -200,7 +200,7 @@ impl Engine {
             }
 
             if !file_matches.is_empty() {
-                let mut guard = results.lock().unwrap();
+                let mut guard = results.lock().unwrap_or_else(|e| e.into_inner());
                 guard.extend(file_matches);
                 if guard.len() >= limit {
                     done.store(true, Ordering::Relaxed);
@@ -208,7 +208,7 @@ impl Engine {
             }
         });
 
-        let mut matches = results.into_inner().unwrap();
+        let mut matches = results.into_inner().unwrap_or_else(|e| e.into_inner());
         // Sort by file path + line number for deterministic output.
         matches.sort_by(|a, b| {
             a.file_path
@@ -322,7 +322,7 @@ impl Engine {
                 }
             }
             if !file_matches.is_empty() {
-                let mut guard = results.lock().unwrap();
+                let mut guard = results.lock().unwrap_or_else(|e| e.into_inner());
                 guard.extend(file_matches);
                 if guard.len() >= limit {
                     done.store(true, Ordering::Relaxed);
@@ -330,7 +330,7 @@ impl Engine {
             }
         });
 
-        let mut matches = results.into_inner().unwrap();
+        let mut matches = results.into_inner().unwrap_or_else(|e| e.into_inner());
         matches.sort_by(|a, b| {
             a.file_path
                 .cmp(&b.file_path)

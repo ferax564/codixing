@@ -12,6 +12,8 @@ use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
 use tracing::info;
 
 use crate::error::{CodixingError, Result};
+use crate::retriever::SearchResult;
+use crate::retriever::reranker::Reranker as RerankerTrait;
 
 /// Wrapper around a fastembed [`TextRerank`] cross-encoder model.
 ///
@@ -62,5 +64,34 @@ impl Reranker {
         // Sort by score descending — highest relevance first.
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         Ok(scored)
+    }
+}
+
+impl RerankerTrait for Reranker {
+    fn rerank(
+        &self,
+        query: &str,
+        results: &[SearchResult],
+        top_k: usize,
+    ) -> std::result::Result<Vec<SearchResult>, CodixingError> {
+        if results.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let docs: Vec<String> = results.iter().map(|r| r.content.clone()).collect();
+        // Use the inherent method (fully qualified) to avoid infinite recursion.
+        let ranked = Reranker::rerank(self, query, &docs)?;
+
+        let mut reranked: Vec<SearchResult> = ranked
+            .into_iter()
+            .map(|(idx, score)| {
+                let mut r = results[idx].clone();
+                r.score = score;
+                r
+            })
+            .collect();
+
+        reranked.truncate(top_k);
+        Ok(reranked)
     }
 }

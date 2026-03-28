@@ -9,7 +9,7 @@ allowed-tools: Bash, Read, Glob, Grep
 
 # Codixing Setup
 
-Set up the Codixing code retrieval engine for the current project. This gives you AST-aware search, dependency graph intelligence, and 53 MCP tools.
+Set up the Codixing code retrieval engine for the current project. This gives you AST-aware search, dependency graph intelligence, and 54 MCP tools.
 
 ## Steps
 

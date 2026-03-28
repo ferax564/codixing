@@ -15,10 +15,11 @@ use crate::retriever::ChunkMeta;
 use crate::symbols::persistence::serialize_symbols;
 use crate::symbols::writer::write_mmap_symbols;
 
-use super::{
-    Engine, GitSyncStats, SyncStats, git_diff_since, git_head_commit, make_embed_text,
-    normalize_path, serialize_chunk_meta_compact, symbol_from_entity, unix_timestamp_string,
+use super::indexing::{
+    make_embed_text, normalize_path, serialize_chunk_meta_compact, symbol_from_entity,
+    unix_timestamp_string,
 };
+use super::{Engine, GitSyncStats, SyncStats, git_diff_since, git_head_commit};
 
 impl Engine {
     /// Re-index a single file (after modification).
@@ -292,7 +293,8 @@ impl Engine {
                 if r.kind != ReferenceKind::Call {
                     continue;
                 }
-                let caller_idx = super::find_enclosing_function(&func_defs_sorted, r.line);
+                let caller_idx =
+                    super::indexing::find_enclosing_function(&func_defs_sorted, r.line);
                 let caller_idx = match caller_idx {
                     Some(idx) => idx,
                     None => continue,
@@ -507,7 +509,7 @@ impl Engine {
         if self.read_only {
             return Err(CodixingError::ReadOnly);
         }
-        use super::embed_and_index_chunks;
+        use super::indexing::embed_and_index_chunks;
 
         let embedder = self
             .embedder
@@ -588,7 +590,7 @@ impl Engine {
             .into_iter()
             .collect();
 
-        let current_files = super::walk_source_files(&self.config.root, &self.config)?;
+        let current_files = super::indexing::walk_source_files(&self.config.root, &self.config)?;
 
         let mut changes: Vec<FileChange> = Vec::new();
         let mut seen: HashSet<std::path::PathBuf> = HashSet::new();
@@ -721,7 +723,7 @@ impl Engine {
             .into_iter()
             .collect();
 
-        let current_files = super::walk_source_files(&self.config.root, &self.config)?;
+        let current_files = super::indexing::walk_source_files(&self.config.root, &self.config)?;
 
         on_progress(&format!(
             "found {} files, detecting changes",

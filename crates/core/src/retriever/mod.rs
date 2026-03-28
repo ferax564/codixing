@@ -1,6 +1,7 @@
 pub mod bm25;
 pub mod hybrid;
 pub mod mmr;
+pub mod reranker;
 pub mod vector;
 
 use serde::{Deserialize, Serialize};

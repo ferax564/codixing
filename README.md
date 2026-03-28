@@ -119,7 +119,7 @@ codixing sync
 
 ## MCP Tools
 
-49 tools across 7 categories (54 with federation):
+54 tools across 7 categories:
 
 | Category | Tools |
 |----------|-------|
@@ -275,7 +275,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 834+ tests
+cargo test --workspace        # 845+ tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```
