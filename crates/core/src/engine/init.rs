@@ -26,11 +26,12 @@ use crate::symbols::persistence::{deserialize_symbols, serialize_symbols};
 use crate::symbols::writer::write_mmap_symbols;
 use crate::vector::VectorIndex;
 
-use super::{
-    Engine, IndexContext, add_call_edges, build_file_trigram_from_content, build_graph,
-    embed_and_index_chunks, git_head_commit, populate_symbol_graph, process_file,
-    unix_timestamp_string, walk_source_files,
+use super::indexing::{
+    IndexContext, add_call_edges, build_file_trigram_from_content, build_graph,
+    embed_and_index_chunks, populate_symbol_graph, process_file, unix_timestamp_string,
+    walk_source_files,
 };
+use super::{Engine, git_head_commit};
 
 impl Engine {
     /// Initialize a new index for the project at `root`.
@@ -360,7 +361,7 @@ impl Engine {
         // Restore chunk_meta (compact format first, fall back to legacy with content).
         let chunk_meta: DashMap<u64, ChunkMeta> = if store.chunk_meta_path().exists() {
             let bytes = store.load_chunk_meta_bytes()?;
-            super::deserialize_chunk_meta(&bytes)?
+            super::indexing::deserialize_chunk_meta(&bytes)?
         } else {
             DashMap::new()
         };
@@ -540,7 +541,7 @@ impl Engine {
         // Restore chunk_meta (compact format first, fall back to legacy with content).
         let chunk_meta: DashMap<u64, ChunkMeta> = if store.chunk_meta_path().exists() {
             let bytes = store.load_chunk_meta_bytes()?;
-            super::deserialize_chunk_meta(&bytes)?
+            super::indexing::deserialize_chunk_meta(&bytes)?
         } else {
             DashMap::new()
         };
