@@ -85,6 +85,7 @@ mod tests {
             line_start: 0,
             line_end: 10,
             signature: String::new(),
+            scope_chain: Vec::new(),
             content: format!("content of {chunk_id}"),
         }
     }
