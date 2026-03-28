@@ -77,3 +77,19 @@ url = "https://github.com/google/leveldb"
 lang = "cpp"
 description = "Key-value store (~20K LoC C++)"
 shallow = true
+
+# ── Self (local, no clone needed) ──────────────────────────────────
+[[repo]]
+name = "codixing"
+url = "local"
+lang = "rust"
+description = "Code search engine (~15K LoC Rust)"
+shallow = false
+
+# ── Large Rust ─────────────────────────────────────────────────────
+[[repo]]
+name = "bevy"
+url = "https://github.com/bevyengine/bevy"
+lang = "rust"
+description = "Game engine (~500K LoC Rust)"
+shallow = true
