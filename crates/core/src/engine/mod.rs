@@ -28,7 +28,6 @@ use serde::Serialize;
 use crate::config::IndexConfig;
 use crate::embedder::Embedder;
 #[cfg(test)]
-#[cfg(test)]
 use crate::error::CodixingError;
 use crate::graph::CodeGraph;
 use crate::index::TantivyIndex;
