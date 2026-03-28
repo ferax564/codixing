@@ -85,7 +85,7 @@ impl SharedSession {
 
     /// Record a session event. Evicts the oldest event if over capacity.
     pub fn record(&self, event: SharedSessionEvent) {
-        let mut events = self.events.write().expect("shared session lock poisoned");
+        let mut events = self.events.write().unwrap_or_else(|e| e.into_inner());
         if events.len() >= self.max_events {
             events.pop_front();
         }
@@ -97,7 +97,7 @@ impl SharedSession {
     /// The boost is the sum of per-event base scores, each multiplied by an
     /// exponential decay factor: `base_score * exp(-elapsed_minutes / decay_minutes)`.
     pub fn get_file_boost(&self, file_path: &str) -> f32 {
-        let events = self.events.read().expect("shared session lock poisoned");
+        let events = self.events.read().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         let mut boost: f32 = 0.0;
 
@@ -130,7 +130,7 @@ impl SharedSession {
 
     /// Return the top files ranked by recent activity across all agents.
     pub fn get_hot_files(&self, limit: usize) -> Vec<(String, f32)> {
-        let events = self.events.read().expect("shared session lock poisoned");
+        let events = self.events.read().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
 
         // Accumulate scores per file.
@@ -166,7 +166,7 @@ impl SharedSession {
 
     /// Return events for a specific agent, most recent first.
     pub fn get_agent_context(&self, agent_id: &str) -> Vec<SharedSessionEvent> {
-        let events = self.events.read().expect("shared session lock poisoned");
+        let events = self.events.read().unwrap_or_else(|e| e.into_inner());
         events
             .iter()
             .rev()
@@ -177,7 +177,7 @@ impl SharedSession {
 
     /// List agents with recent activity (events within the decay window).
     pub fn active_agents(&self) -> Vec<String> {
-        let events = self.events.read().expect("shared session lock poisoned");
+        let events = self.events.read().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
         let cutoff_minutes = self.decay_minutes * 2.0;
 
@@ -196,10 +196,7 @@ impl SharedSession {
 
     /// Total number of events currently stored.
     pub fn event_count(&self) -> usize {
-        self.events
-            .read()
-            .expect("shared session lock poisoned")
-            .len()
+        self.events.read().unwrap_or_else(|e| e.into_inner()).len()
     }
 }
 
