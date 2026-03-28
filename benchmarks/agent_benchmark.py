@@ -33,6 +33,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ResultMessage,
 )
+from claude_agent_sdk.types import ToolUseBlock, ToolResultBlock
 
 ROOT = Path(__file__).resolve().parent.parent
 CODIXING_MCP = ROOT / "target" / "release" / "codixing-mcp"
@@ -156,13 +157,8 @@ async def run_agent_task(
         prompt=task["prompt"],
     )
 
-    # Tool call tracking via hook
+    # Tool call tracking from message content blocks
     tool_calls_log: list[str] = []
-
-    async def on_post_tool_use(input_data, tool_use_id, context):
-        tool_name = input_data.get("tool_name", "unknown")
-        tool_calls_log.append(tool_name)
-        return {}
 
     # MCP config for codixing mode
     mcp_config: dict = {}
@@ -195,13 +191,14 @@ async def run_agent_task(
                 max_turns=30,
                 model=model,
                 system_prompt=system,
-                hooks={
-                    "PostToolUse": [
-                        HookMatcher(matcher=".*", hooks=[on_post_tool_use])
-                    ]
-                },
             ),
         ):
+            # Count tool calls from assistant message content blocks
+            if isinstance(message, AssistantMessage):
+                for block in message.content:
+                    if isinstance(block, ToolUseBlock):
+                        tool_calls_log.append(block.name)
+
             if isinstance(message, ResultMessage):
                 result.result_text = message.result or ""
                 result.num_turns = message.num_turns
