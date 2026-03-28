@@ -1,6 +1,7 @@
 mod files;
 mod focus_map;
 mod graph;
+mod init;
 mod orphans;
 pub(crate) mod pipeline;
 pub mod recency;
@@ -34,18 +35,18 @@ use crate::error::{CodixingError, Result};
 use crate::graph::extract::{extract_definitions, extract_references};
 use crate::graph::extractor::RawImport;
 use crate::graph::types::{ReferenceKind, SymbolKind};
-use crate::graph::{CallExtractor, CodeGraph, ImportExtractor, ImportResolver, compute_pagerank};
+use crate::graph::{CallExtractor, CodeGraph, ImportExtractor, ImportResolver};
 use crate::index::TantivyIndex;
 use crate::index::trigram::FileTrigramIndex;
 use crate::language::{Language, SemanticEntity, detect_language};
 use crate::parser::Parser;
-use crate::persistence::{FileHashEntry, IndexMeta, IndexStore};
+use crate::persistence::IndexStore;
 use crate::reranker::Reranker;
 use crate::retriever::{ChunkMeta, ChunkMetaCompact};
 use crate::session::SessionState;
 use crate::shared_session::SharedSession;
-use crate::symbols::persistence::{deserialize_symbols, serialize_symbols};
-use crate::symbols::writer::write_mmap_symbols;
+use crate::symbols::persistence::deserialize_symbols;
+
 use crate::symbols::{Symbol, SymbolTable};
 use crate::vector::VectorIndex;
 
@@ -280,650 +281,6 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Initialize a new index for the project at `root`.
-    ///
-    /// Walks the directory tree, parses all supported source files in parallel
-    /// using rayon, chunks them with the cAST algorithm, indexes chunks in
-    /// Tantivy, optionally embeds them into the HNSW index, and populates the
-    /// symbol table. All state is persisted to the `.codixing/` directory.
-    pub fn init(root: impl AsRef<Path>, config: IndexConfig) -> Result<Self> {
-        let root = root
-            .as_ref()
-            .canonicalize()
-            .map_err(|e| CodixingError::Config(format!("cannot resolve root path: {e}")))?;
-
-        let store = IndexStore::init(&root, &config)?;
-        let tantivy =
-            TantivyIndex::create_in_dir_with_config(&store.tantivy_dir(), config.bm25.clone())?;
-        let parser = Parser::new();
-        let symbols = SymbolTable::new();
-
-        // Initialise the embedder (if enabled).
-        let embedder: Option<Arc<Embedder>> = if config.embedding.enabled {
-            match Embedder::new(&config.embedding.model) {
-                Ok(e) => {
-                    info!(dims = e.dims, "embedding model loaded");
-                    Some(Arc::new(e))
-                }
-                Err(e) => {
-                    warn!(error = %e, "failed to load embedding model; running BM25-only");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        let dims = embedder.as_ref().map(|e| e.dims).unwrap_or(0);
-        let mut vector: Option<VectorIndex> = if embedder.is_some() {
-            Some(VectorIndex::new(dims, config.embedding.quantize)?)
-        } else {
-            None
-        };
-
-        let files = walk_source_files(&root, &config)?;
-        info!(file_count = files.len(), "discovered source files");
-
-        let chunk_count = AtomicUsize::new(0);
-        let file_chunk_map = DashMap::<String, usize>::new();
-        let chunk_meta_map = DashMap::<u64, ChunkMeta>::new();
-
-        // Collect embeddings per file for later batch insertion.
-        // We process files in parallel for parse/chunk/index, but embedding
-        // batch is collected and inserted after the parallel phase.
-        let pending_embeds: DashMap<u64, String> = DashMap::new(); // chunk_id → content
-        // Import lists extracted during parse — reused by build_graph to avoid
-        // a second file-read + parse pass (each file is parsed exactly once).
-        let pending_imports: DashMap<String, (Vec<RawImport>, Language)> = DashMap::new();
-        // Call names extracted during parse — resolved into Calls edges after
-        // the symbol table is fully populated (end of parallel phase).
-        let pending_calls: DashMap<String, Vec<String>> = DashMap::new();
-        let file_contents: DashMap<String, Vec<u8>> = DashMap::new();
-
-        let ctx = IndexContext {
-            root: &root,
-            config: &config,
-            parser: &parser,
-            tantivy: &tantivy,
-            symbols: &symbols,
-            chunk_count: &chunk_count,
-            file_chunk_map: &file_chunk_map,
-            chunk_meta_map: &chunk_meta_map,
-            pending_embeds: &pending_embeds,
-            pending_imports: &pending_imports,
-            pending_calls: &pending_calls,
-            file_contents: &file_contents,
-        };
-
-        // Process files in parallel: parse → chunk → index → extract symbols.
-        files.par_iter().for_each(|path| {
-            if let Err(e) = process_file(path, &ctx) {
-                warn!(path = %path.display(), error = %e, "skipping file");
-            }
-        });
-
-        tantivy.commit()?;
-
-        // Batch-embed all chunks if the embedder is available.
-        if let Some(emb) = &embedder {
-            if let Some(vec_idx) = &mut vector {
-                embed_and_index_chunks(
-                    &pending_embeds,
-                    &chunk_meta_map,
-                    emb,
-                    vec_idx,
-                    config.embedding.contextual_embeddings,
-                    &root,
-                )?;
-            }
-        }
-
-        let total_chunks = chunk_count.load(Ordering::Relaxed);
-        let total_symbols = symbols.len();
-        let vector_count = vector.as_ref().map(|v| v.len()).unwrap_or(0);
-
-        // Convert DashMaps to owned types.
-        let file_chunk_counts: HashMap<String, usize> = file_chunk_map.into_iter().collect();
-
-        // Build dependency graph using pre-extracted import lists (no re-parse).
-        let graph = if config.graph.enabled {
-            let mut g = build_graph(&files, &root, &config, &parser, &pending_imports);
-            // Resolve call-site edges using the now-complete symbol table.
-            add_call_edges(&mut g, &symbols, &pending_calls);
-            // Populate the symbol-level inner graph with function-level call edges.
-            populate_symbol_graph(&mut g, &files, &root, &config);
-            let scores = compute_pagerank(&g, config.graph.damping, config.graph.iterations);
-            g.apply_pagerank(&scores);
-            let flat = g.to_flat();
-            if let Err(e) = store.save_graph(&flat) {
-                warn!(error = %e, "failed to persist graph");
-            }
-            if let Err(e) = store.save_symbol_graph(&g) {
-                warn!(error = %e, "failed to persist symbol graph");
-            }
-            Some(g)
-        } else {
-            None
-        };
-
-        let (graph_nodes, graph_edges) = graph
-            .as_ref()
-            .map(|g| {
-                let s = g.stats();
-                (s.node_count, s.edge_count)
-            })
-            .unwrap_or((0, 0));
-
-        // Persist everything.
-        let sym_bytes = serialize_symbols(&symbols)?;
-        store.save_symbols_bytes(&sym_bytes)?;
-
-        // Also write the mmap-format v2 for zero-deserialization open().
-        if let Some(in_mem) = symbols.as_in_memory() {
-            if let Err(e) = write_mmap_symbols(in_mem, &store.symbols_v2_path()) {
-                warn!(error = %e, "failed to write symbols_v2.bin (non-fatal)");
-            }
-        }
-
-        let hashes: Vec<(PathBuf, u64)> = parser.cache().content_hashes().into_iter().collect();
-        store.save_tree_hashes(&hashes)?;
-
-        // Also write v2 hashes with mtime+size for fast sync pre-filtering.
-        let v2_hashes: Vec<(PathBuf, FileHashEntry)> = hashes
-            .iter()
-            .map(|(path, hash)| {
-                let (mtime, size) = fs::metadata(path)
-                    .map(|m| (m.modified().ok(), m.len()))
-                    .unwrap_or((None, 0));
-                (path.clone(), FileHashEntry::new(*hash, mtime, size))
-            })
-            .collect();
-        store.save_tree_hashes_v2(&v2_hashes)?;
-
-        // Persist chunk_meta in compact format (without content — content lives in Tantivy).
-        let meta_pairs: Vec<(u64, ChunkMetaCompact)> = chunk_meta_map
-            .iter()
-            .map(|e| (*e.key(), ChunkMetaCompact::from(e.value())))
-            .collect();
-        let meta_bytes = bitcode::serialize(&meta_pairs).map_err(|e| {
-            CodixingError::Serialization(format!("failed to serialize chunk_meta: {e}"))
-        })?;
-        store.save_chunk_meta_bytes(&meta_bytes)?;
-
-        // Persist vector index.
-        if let Some(ref vec_idx) = vector {
-            vec_idx.save(&store.vector_index_path(), &store.file_chunks_path())?;
-        }
-
-        // Record the current git HEAD so git_sync() can diff from this point.
-        let git_commit = git_head_commit(&root);
-        let idx_meta = IndexMeta {
-            version: "0.3.0".to_string(),
-            file_count: files.len(),
-            chunk_count: total_chunks,
-            symbol_count: total_symbols,
-            last_indexed: unix_timestamp_string(),
-            git_commit,
-        };
-        store.save_meta(&idx_meta)?;
-
-        info!(
-            files = files.len(),
-            chunks = total_chunks,
-            symbols = total_symbols,
-            vectors = vector_count,
-            graph_nodes,
-            graph_edges,
-            "index initialized"
-        );
-
-        // Load reranker if requested (opt-in: model is ~270 MB).
-        let reranker = if config.embedding.reranker_enabled {
-            match Reranker::new() {
-                Ok(r) => Some(Arc::new(r)),
-                Err(e) => {
-                    warn!(error = %e, "failed to load reranker; deep strategy will fall back to thorough");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        let session = Arc::new(SessionState::with_root(true, &root));
-        session.cleanup_old_sessions();
-
-        // Build trigram index from chunk metadata for Strategy::Exact fast-path.
-        let mut trigram_idx = crate::index::TrigramIndex::new();
-        trigram_idx.build_batch(
-            chunk_meta_map
-                .iter()
-                .map(|e| (*e.key(), e.value().content.clone())),
-        );
-        // Persist chunk trigram so open() can load it instead of rebuilding.
-        if let Err(e) = trigram_idx.save_binary(&store.chunk_trigram_path()) {
-            warn!(error = %e, "failed to persist chunk trigram index");
-        }
-        let trigram = std::sync::OnceLock::new();
-        let _ = trigram.set(trigram_idx);
-
-        // Build file trigram from full file content (no chunk-boundary gaps).
-        let ft_idx = build_file_trigram_from_content(&file_contents);
-        if let Err(e) = ft_idx.save_binary(&store.file_trigram_path()) {
-            warn!(error = %e, "failed to persist file trigram index");
-        }
-        let file_trigram = std::sync::OnceLock::new();
-        let _ = file_trigram.set(ft_idx);
-
-        Ok(Self {
-            config,
-            store,
-            parser,
-            tantivy,
-            symbols,
-            file_chunk_counts,
-            embedder,
-            vector,
-            chunk_meta: chunk_meta_map,
-            graph,
-            reranker,
-            trigram,
-            session,
-            shared_session: SharedSession::default_new(),
-            read_only: false,
-            file_trigram,
-            recency_map: std::sync::OnceLock::new(),
-            last_load_time: None,
-            reload_interval: std::time::Duration::from_secs(30),
-            last_staleness_check: None,
-        })
-    }
-
-    /// Open an existing index from the `.codixing/` directory.
-    ///
-    /// If another process holds the Tantivy write lock, the engine
-    /// automatically falls back to **read-only mode** so that concurrent
-    /// instances can still serve search queries. Write operations will
-    /// return [`CodixingError::ReadOnly`] in that case.
-    /// Restores the Tantivy index, symbol table, chunk metadata, and optional
-    /// vector index from disk.
-    pub fn open(root: impl AsRef<Path>) -> Result<Self> {
-        let root = root
-            .as_ref()
-            .canonicalize()
-            .map_err(|e| CodixingError::Config(format!("cannot resolve root path: {e}")))?;
-
-        let store = IndexStore::open(&root)?;
-        let config = store.load_config()?;
-
-        // Try read-write first; fall back to read-only on lock conflict.
-        let bm25_config = config.bm25.clone();
-        let (tantivy, read_only) = match TantivyIndex::open_in_dir_with_config(
-            &store.tantivy_dir(),
-            bm25_config.clone(),
-        ) {
-            Ok(idx) => (idx, false),
-            Err(CodixingError::Tantivy(ref e))
-                if e.to_string().contains("lock")
-                    || e.to_string().contains("Lock")
-                    || e.to_string().contains("already") =>
-            {
-                info!("write lock held by another process — falling back to read-only mode");
-                let idx =
-                    TantivyIndex::open_read_only_with_config(&store.tantivy_dir(), bm25_config)?;
-                (idx, true)
-            }
-            Err(e) => return Err(e),
-        };
-
-        // Restore symbols: try mmap v2 first, fall back to bitcode v1.
-        let symbols = if store.symbols_v2_path().exists() {
-            match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path()) {
-                Ok(mmap_table) => {
-                    debug!("loaded symbols_v2.bin via mmap (zero-deser)");
-                    SymbolTable::Mmap(mmap_table)
-                }
-                Err(e) => {
-                    warn!(error = %e, "failed to load symbols_v2.bin — falling back to symbols.bin");
-                    if store.symbols_path().exists() {
-                        let bytes = store.load_symbols_bytes()?;
-                        deserialize_symbols(&bytes)?
-                    } else {
-                        SymbolTable::new()
-                    }
-                }
-            }
-        } else if store.symbols_path().exists() {
-            let bytes = store.load_symbols_bytes()?;
-            deserialize_symbols(&bytes)?
-        } else {
-            SymbolTable::new()
-        };
-
-        let parser = Parser::new();
-        let meta = store.load_meta()?;
-
-        // Restore chunk_meta (compact format first, fall back to legacy with content).
-        let chunk_meta: DashMap<u64, ChunkMeta> = if store.chunk_meta_path().exists() {
-            let bytes = store.load_chunk_meta_bytes()?;
-            deserialize_chunk_meta(&bytes)?
-        } else {
-            DashMap::new()
-        };
-
-        // Rebuild file_chunk_counts from chunk_meta (derived view, not separately persisted).
-        let mut file_chunk_counts: HashMap<String, usize> = HashMap::new();
-        for entry in chunk_meta.iter() {
-            *file_chunk_counts
-                .entry(entry.value().file_path.clone())
-                .or_insert(0) += 1;
-        }
-
-        // Restore vector index if it exists.
-        let (embedder, vector) = if config.embedding.enabled
-            && store.vector_index_path().exists()
-            && store.file_chunks_path().exists()
-        {
-            match Embedder::new(&config.embedding.model) {
-                Ok(e) => {
-                    let dims = e.dims;
-                    let vec_idx = VectorIndex::load(
-                        &store.vector_index_path(),
-                        &store.file_chunks_path(),
-                        dims,
-                        config.embedding.quantize,
-                    )?;
-                    (Some(Arc::new(e)), Some(vec_idx))
-                }
-                Err(e) => {
-                    warn!(error = %e, "failed to load embedding model; running BM25-only");
-                    (None, None)
-                }
-            }
-        } else {
-            (None, None)
-        };
-
-        // Restore graph.
-        let graph = match store.load_graph() {
-            Ok(Some(data)) => {
-                let mut g = CodeGraph::from_flat(data);
-                // Merge the symbol-level graph if persisted.
-                match store.load_symbol_graph() {
-                    Ok(Some(sym_graph)) => {
-                        g.inner = sym_graph.inner;
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        warn!(error = %e, "failed to load symbol graph");
-                    }
-                }
-                Some(g)
-            }
-            Ok(None) => None,
-            Err(e) => {
-                warn!(error = %e, "failed to load graph; running without graph intelligence");
-                None
-            }
-        };
-
-        let (graph_nodes, graph_edges) = graph
-            .as_ref()
-            .map(|g| {
-                let s = g.stats();
-                (s.node_count, s.edge_count)
-            })
-            .unwrap_or((0, 0));
-
-        info!(
-            files = meta.file_count,
-            chunks = meta.chunk_count,
-            symbols = meta.symbol_count,
-            vectors = vector.as_ref().map(|v| v.len()).unwrap_or(0),
-            graph_nodes,
-            graph_edges,
-            "index opened"
-        );
-
-        // Load reranker if requested.
-        let reranker = if config.embedding.reranker_enabled {
-            match Reranker::new() {
-                Ok(r) => Some(Arc::new(r)),
-                Err(e) => {
-                    warn!(error = %e, "failed to load reranker; deep strategy will fall back to thorough");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        let session = Arc::new(SessionState::with_root(true, &root));
-        session.cleanup_old_sessions();
-
-        if read_only {
-            info!("engine opened in read-only mode — search works, writes disabled");
-        }
-
-        // Record the on-disk mtime of meta.json for read-only staleness detection.
-        let meta_mtime = store
-            .codixing_dir()
-            .join("meta.json")
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok());
-
-        // Trigram indexes are lazy-loaded on first use via OnceLock.
-
-        Ok(Self {
-            config,
-            store,
-            parser,
-            tantivy,
-            symbols,
-            file_chunk_counts,
-            embedder,
-            vector,
-            chunk_meta,
-            graph,
-            reranker,
-            trigram: std::sync::OnceLock::new(),
-            session,
-            shared_session: SharedSession::default_new(),
-            read_only,
-            file_trigram: std::sync::OnceLock::new(),
-            recency_map: std::sync::OnceLock::new(),
-            last_load_time: meta_mtime,
-            reload_interval: std::time::Duration::from_secs(30),
-            last_staleness_check: None,
-        })
-    }
-
-    /// Open an existing index in **read-only mode**.
-    ///
-    /// This is useful when another process holds the Tantivy write lock.
-    /// All search and read operations work normally; write operations
-    /// (`reindex_file`, `remove_file`, `sync`, `apply_changes`) return
-    /// [`CodixingError::ReadOnly`].
-    pub fn open_read_only(root: impl AsRef<Path>) -> Result<Self> {
-        let root = root
-            .as_ref()
-            .canonicalize()
-            .map_err(|e| CodixingError::Config(format!("cannot resolve root path: {e}")))?;
-
-        let store = IndexStore::open(&root)?;
-        let config = store.load_config()?;
-        let tantivy =
-            TantivyIndex::open_read_only_with_config(&store.tantivy_dir(), config.bm25.clone())?;
-
-        // Restore symbols: try mmap v2 first, fall back to bitcode v1.
-        let symbols = if store.symbols_v2_path().exists() {
-            match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path()) {
-                Ok(mmap_table) => {
-                    debug!("loaded symbols_v2.bin via mmap (zero-deser, read-only)");
-                    SymbolTable::Mmap(mmap_table)
-                }
-                Err(e) => {
-                    warn!(error = %e, "failed to load symbols_v2.bin — falling back to symbols.bin");
-                    if store.symbols_path().exists() {
-                        let bytes = store.load_symbols_bytes()?;
-                        deserialize_symbols(&bytes)?
-                    } else {
-                        SymbolTable::new()
-                    }
-                }
-            }
-        } else if store.symbols_path().exists() {
-            let bytes = store.load_symbols_bytes()?;
-            deserialize_symbols(&bytes)?
-        } else {
-            SymbolTable::new()
-        };
-
-        let parser = Parser::new();
-        let meta = store.load_meta()?;
-
-        // Restore chunk_meta (compact format first, fall back to legacy with content).
-        let chunk_meta: DashMap<u64, ChunkMeta> = if store.chunk_meta_path().exists() {
-            let bytes = store.load_chunk_meta_bytes()?;
-            deserialize_chunk_meta(&bytes)?
-        } else {
-            DashMap::new()
-        };
-
-        // Rebuild file_chunk_counts from chunk_meta.
-        let mut file_chunk_counts: HashMap<String, usize> = HashMap::new();
-        for entry in chunk_meta.iter() {
-            *file_chunk_counts
-                .entry(entry.value().file_path.clone())
-                .or_insert(0) += 1;
-        }
-
-        // Restore vector index if it exists.
-        let (embedder, vector) = if config.embedding.enabled
-            && store.vector_index_path().exists()
-            && store.file_chunks_path().exists()
-        {
-            match Embedder::new(&config.embedding.model) {
-                Ok(e) => {
-                    let dims = e.dims;
-                    let vec_idx = VectorIndex::load(
-                        &store.vector_index_path(),
-                        &store.file_chunks_path(),
-                        dims,
-                        config.embedding.quantize,
-                    )?;
-                    (Some(Arc::new(e)), Some(vec_idx))
-                }
-                Err(e) => {
-                    warn!(error = %e, "failed to load embedding model; running BM25-only");
-                    (None, None)
-                }
-            }
-        } else {
-            (None, None)
-        };
-
-        // Restore graph.
-        let graph = match store.load_graph() {
-            Ok(Some(data)) => {
-                let mut g = CodeGraph::from_flat(data);
-                // Merge the symbol-level graph if persisted.
-                match store.load_symbol_graph() {
-                    Ok(Some(sym_graph)) => {
-                        g.inner = sym_graph.inner;
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        warn!(error = %e, "failed to load symbol graph");
-                    }
-                }
-                Some(g)
-            }
-            Ok(None) => None,
-            Err(e) => {
-                warn!(error = %e, "failed to load graph; running without graph intelligence");
-                None
-            }
-        };
-
-        let (graph_nodes, graph_edges) = graph
-            .as_ref()
-            .map(|g| {
-                let s = g.stats();
-                (s.node_count, s.edge_count)
-            })
-            .unwrap_or((0, 0));
-
-        info!(
-            files = meta.file_count,
-            chunks = meta.chunk_count,
-            symbols = meta.symbol_count,
-            vectors = vector.as_ref().map(|v| v.len()).unwrap_or(0),
-            graph_nodes,
-            graph_edges,
-            "index opened in read-only mode"
-        );
-
-        // Load reranker if requested.
-        let reranker = if config.embedding.reranker_enabled {
-            match Reranker::new() {
-                Ok(r) => Some(Arc::new(r)),
-                Err(e) => {
-                    warn!(error = %e, "failed to load reranker; deep strategy will fall back to thorough");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        let session = Arc::new(SessionState::with_root(true, &root));
-        session.cleanup_old_sessions();
-
-        // Record the on-disk mtime of meta.json for read-only staleness detection.
-        let meta_mtime = store
-            .codixing_dir()
-            .join("meta.json")
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok());
-
-        // Trigram indexes are lazy-loaded on first use via OnceLock.
-
-        Ok(Self {
-            config,
-            store,
-            parser,
-            tantivy,
-            symbols,
-            file_chunk_counts,
-            embedder,
-            vector,
-            chunk_meta,
-            graph,
-            reranker,
-            trigram: std::sync::OnceLock::new(),
-            session,
-            shared_session: SharedSession::default_new(),
-            read_only: true,
-            file_trigram: std::sync::OnceLock::new(),
-            recency_map: std::sync::OnceLock::new(),
-            last_load_time: meta_mtime,
-            reload_interval: std::time::Duration::from_secs(30),
-            last_staleness_check: None,
-        })
-    }
-
-    /// Return `true` if this engine was opened in read-only mode.
-    ///
-    /// In read-only mode, all search and read operations work normally but
-    /// write operations (`reindex_file`, `remove_file`, `sync`, etc.) return
-    /// [`CodixingError::ReadOnly`].
-    pub fn is_read_only(&self) -> bool {
-        self.read_only
-    }
-
     /// Return the git recency map, lazily building it on first access.
     ///
     /// The map covers the last 180 days and maps relative file paths to
@@ -1422,33 +779,35 @@ impl Engine {
 // ---------------------------------------------------------------------------
 
 /// Shared context passed to `process_file` to avoid too-many-arguments.
-struct IndexContext<'a> {
-    root: &'a Path,
-    config: &'a IndexConfig,
-    parser: &'a Parser,
-    tantivy: &'a TantivyIndex,
-    symbols: &'a SymbolTable,
-    chunk_count: &'a AtomicUsize,
-    file_chunk_map: &'a DashMap<String, usize>,
-    chunk_meta_map: &'a DashMap<u64, ChunkMeta>,
+pub(super) struct IndexContext<'a> {
+    pub(super) root: &'a Path,
+    pub(super) config: &'a IndexConfig,
+    pub(super) parser: &'a Parser,
+    pub(super) tantivy: &'a TantivyIndex,
+    pub(super) symbols: &'a SymbolTable,
+    pub(super) chunk_count: &'a AtomicUsize,
+    pub(super) file_chunk_map: &'a DashMap<String, usize>,
+    pub(super) chunk_meta_map: &'a DashMap<u64, ChunkMeta>,
     /// Pending chunks to embed: chunk_id → content.
-    pending_embeds: &'a DashMap<u64, String>,
+    pub(super) pending_embeds: &'a DashMap<u64, String>,
     /// Imports extracted during parsing, keyed by relative path.
     /// Reused by `build_graph` to avoid re-reading/re-parsing files.
-    pending_imports: &'a DashMap<String, (Vec<RawImport>, Language)>,
+    pub(super) pending_imports: &'a DashMap<String, (Vec<RawImport>, Language)>,
     /// Call names extracted during parsing: rel_path → Vec<callee_name>.
     /// Resolved into `EdgeKind::Calls` edges after the symbol table is complete.
-    pending_calls: &'a DashMap<String, Vec<String>>,
+    pub(super) pending_calls: &'a DashMap<String, Vec<String>>,
     /// Full file content accumulated during parallel indexing for building
     /// a chunk-boundary-free file trigram index.
-    file_contents: &'a DashMap<String, Vec<u8>>,
+    pub(super) file_contents: &'a DashMap<String, Vec<u8>>,
 }
 
 /// Build a [`FileTrigramIndex`] from full file content.
 ///
 /// Uses `file_contents` (complete file bytes accumulated during indexing)
 /// to avoid missing trigrams that straddle chunk boundaries.
-fn build_file_trigram_from_content(file_contents: &DashMap<String, Vec<u8>>) -> FileTrigramIndex {
+pub(super) fn build_file_trigram_from_content(
+    file_contents: &DashMap<String, Vec<u8>>,
+) -> FileTrigramIndex {
     let mut idx = FileTrigramIndex::new();
     for entry in file_contents.iter() {
         idx.add(entry.key(), entry.value());
@@ -1460,7 +819,7 @@ fn build_file_trigram_from_content(file_contents: &DashMap<String, Vec<u8>>) -> 
 ///
 /// Used as a fallback when the persisted chunk trigram index is missing and
 /// chunk_meta has empty content (compact persistence mode).
-fn rebuild_trigram_from_tantivy(tantivy: &TantivyIndex) -> crate::index::TrigramIndex {
+pub(super) fn rebuild_trigram_from_tantivy(tantivy: &TantivyIndex) -> crate::index::TrigramIndex {
     let mut t = crate::index::TrigramIndex::new();
     match tantivy.all_chunk_ids_and_content() {
         Ok(pairs) => {
@@ -1478,7 +837,7 @@ fn rebuild_trigram_from_tantivy(tantivy: &TantivyIndex) -> crate::index::Trigram
 /// Groups chunk content by file path and builds the file-level trigram index.
 /// Used as a fallback when persisted file trigram is missing and chunk_meta
 /// has empty content (compact persistence mode).
-fn build_file_trigram_from_tantivy(tantivy: &TantivyIndex) -> FileTrigramIndex {
+pub(super) fn build_file_trigram_from_tantivy(tantivy: &TantivyIndex) -> FileTrigramIndex {
     let mut idx = FileTrigramIndex::new();
     match tantivy.all_file_path_content_pairs() {
         Ok(pairs) => {
@@ -1494,7 +853,7 @@ fn build_file_trigram_from_tantivy(tantivy: &TantivyIndex) -> FileTrigramIndex {
 }
 
 /// Process a single file: parse → chunk → index → extract symbols.
-fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
+pub(super) fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
     let source = fs::read(path)?;
     let result = ctx.parser.parse_file(path, &source)?;
 
@@ -1582,7 +941,7 @@ fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
 /// file path, language, scope chain, and entity names — the "contextual
 /// chunk embedding" technique that gives the embedding model positional and
 /// semantic context, improving retrieval quality by ~35 %.
-fn make_embed_text(meta: &ChunkMeta, contextual: bool) -> String {
+pub(super) fn make_embed_text(meta: &ChunkMeta, contextual: bool) -> String {
     if !contextual {
         return meta.content.clone();
     }
@@ -1594,7 +953,7 @@ fn make_embed_text(meta: &ChunkMeta, contextual: bool) -> String {
 ///
 /// Tries compact format (`Vec<(u64, ChunkMetaCompact)>`) first. If that fails,
 /// falls back to legacy format (`Vec<(u64, ChunkMeta)>`) which includes content.
-fn deserialize_chunk_meta(bytes: &[u8]) -> Result<DashMap<u64, ChunkMeta>> {
+pub(super) fn deserialize_chunk_meta(bytes: &[u8]) -> Result<DashMap<u64, ChunkMeta>> {
     // Try compact format first (v2 — no content field).
     if let Ok(pairs) = bitcode::deserialize::<Vec<(u64, ChunkMetaCompact)>>(bytes) {
         let map = DashMap::new();
@@ -1633,7 +992,7 @@ pub(super) fn serialize_chunk_meta_compact(
 /// entity names so the embedding model knows the chunk's location in the
 /// codebase. The prefix is prepended to chunk content before embedding but
 /// is **not** stored in the index — only the raw content is persisted.
-fn build_context_prefix(meta: &ChunkMeta) -> String {
+pub(super) fn build_context_prefix(meta: &ChunkMeta) -> String {
     let mut header = format!("File: {} | Language: {}", meta.file_path, meta.language);
     if !meta.scope_chain.is_empty() {
         header.push_str(&format!(" | Scope: {}", meta.scope_chain.join(" > ")));
@@ -1650,7 +1009,7 @@ fn build_context_prefix(meta: &ChunkMeta) -> String {
 /// Controls how many chunks are embedded and indexed per iteration.
 /// Keeps peak memory bounded: only `STREAM_BATCH_SIZE` text strings and
 /// their corresponding embedding vectors are alive at any given time.
-const STREAM_BATCH_SIZE: usize = 256;
+pub(super) const STREAM_BATCH_SIZE: usize = 256;
 
 /// Batch-embed all pending chunks and add them to the vector index.
 ///
@@ -1669,7 +1028,7 @@ const STREAM_BATCH_SIZE: usize = 256;
 ///
 /// Files that exceed the context window (or when contextual mode is on) fall
 /// back to the original independent per-chunk embedding.
-fn embed_and_index_chunks(
+pub(super) fn embed_and_index_chunks(
     pending: &DashMap<u64, String>,
     chunk_meta: &DashMap<u64, ChunkMeta>,
     embedder: &Embedder,
@@ -1690,7 +1049,7 @@ fn embed_and_index_chunks(
 
 /// Inner implementation of [`embed_and_index_chunks`] with an optional
 /// progress callback `(embedded_so_far, total_chunks)`.
-fn embed_and_index_chunks_with_progress<F>(
+pub(super) fn embed_and_index_chunks_with_progress<F>(
     pending: &DashMap<u64, String>,
     chunk_meta: &DashMap<u64, ChunkMeta>,
     embedder: &Embedder,
@@ -1874,7 +1233,7 @@ where
 /// When `config.extra_roots` is non-empty, all extra roots are also walked.
 /// Returned paths are absolute; callers use `config.normalize_path()` to
 /// produce the final relative (possibly-prefixed) string key.
-fn walk_source_files(root: &Path, config: &IndexConfig) -> Result<Vec<PathBuf>> {
+pub(super) fn walk_source_files(root: &Path, config: &IndexConfig) -> Result<Vec<PathBuf>> {
     use ignore::WalkBuilder;
 
     let mut files = Vec::new();
@@ -1938,7 +1297,7 @@ fn walk_source_files(root: &Path, config: &IndexConfig) -> Result<Vec<PathBuf>> 
 /// Only adds an edge when exactly one file (other than the caller) defines a
 /// symbol with the given name — this conservative heuristic avoids false edges
 /// from ubiquitous names like `new`, `parse`, or `fmt`.
-fn add_call_edges(
+pub(super) fn add_call_edges(
     graph: &mut CodeGraph,
     symbols: &SymbolTable,
     pending_calls: &DashMap<String, Vec<String>>,
@@ -1985,7 +1344,7 @@ fn add_call_edges(
 /// complement the coarser file-level import/call edges.
 ///
 /// Must be called after the parallel parse phase so that all files are available.
-fn populate_symbol_graph(
+pub(super) fn populate_symbol_graph(
     graph: &mut CodeGraph,
     files: &[PathBuf],
     root: &Path,
@@ -2136,7 +1495,7 @@ fn populate_symbol_graph(
 /// last function that starts at or before the given line, provided the line
 /// is before the NEXT function's start (or end of file). This prevents
 /// attributing a call at file scope between two functions to the earlier one.
-fn find_enclosing_function(
+pub(super) fn find_enclosing_function(
     func_defs: &[(usize, petgraph::graph::NodeIndex)],
     line: usize,
 ) -> Option<petgraph::graph::NodeIndex> {
@@ -2166,7 +1525,7 @@ fn find_enclosing_function(
 ///
 /// When `import_cache` is empty (e.g. called standalone), falls back to
 /// re-reading and re-parsing each file (old behaviour).
-fn build_graph(
+pub(super) fn build_graph(
     files: &[PathBuf],
     root: &Path,
     config: &IndexConfig,
@@ -2253,7 +1612,11 @@ fn build_graph(
 }
 
 /// Convert a `SemanticEntity` to a `Symbol`.
-fn symbol_from_entity(entity: &SemanticEntity, file_path: &str, language: Language) -> Symbol {
+pub(super) fn symbol_from_entity(
+    entity: &SemanticEntity,
+    file_path: &str,
+    language: Language,
+) -> Symbol {
     Symbol {
         name: entity.name.clone(),
         kind: entity.kind.clone(),
@@ -2269,12 +1632,12 @@ fn symbol_from_entity(entity: &SemanticEntity, file_path: &str, language: Langua
 }
 
 /// Normalize a path to a forward-slash string for consistent cross-platform storage.
-fn normalize_path(path: &Path) -> String {
+pub(super) fn normalize_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
 /// Simple unix timestamp as a human-readable string.
-fn unix_timestamp_string() -> String {
+pub(super) fn unix_timestamp_string() -> String {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs().to_string())
