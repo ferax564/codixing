@@ -6,6 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-03-28
+
+### Changed
+- **Refactor:** Split `engine/mod.rs` (2,981 lines) into 4 focused submodules: `init.rs`, `indexing.rs`, `reload.rs`, `validation.rs` — mod.rs now ~1,100 lines
+- **Fix:** Replace 28 lock `.expect()`/`.unwrap()` calls with poison-recovery across SharedSession, FederatedEngine, HNSW, and parallel grep
+- **Feat:** Implement `Reranker` trait on concrete fastembed Reranker struct, unifying the reranker interface
+- **Test:** Add 7 HTTP server integration tests (reindex, remove, repo-map, callees, call-graph, export, view) — 20/21 routes now covered
+- **Docs:** Fix tool count inconsistency (was 49/53/54, now consistently 54), update test counts to 845+
+
+## [0.19.0] — 2026-03-27
+
+### Changed
+- **Perf:** Kernel-scale performance — 11× smaller chunk_meta, lazy trigram loading via OnceLock, content dedup
+- **Perf:** Mmap symbol table — zero-deserialization loading from flat binary
+- **Perf:** 306× faster trigram build via batch mode + disk persistence
+
+## [0.18.0] — 2026-03-25
+
+### Added
+- Multi-query RRF fusion for natural language queries
+- Recency boost stage (+10% linear decay over 180 days)
+- File path boosting (2.5× for explicit paths and backtick refs)
+- Overlapping chunks at AST boundaries
+
+## [0.17.0] — 2026-03-24
+
+### Added
+- Trigram pre-filtering for grep_code (110× faster at 1K files)
+
+### Fixed
+- Windows CI permanently fixed (single-threaded test runner)
+
+## [0.16.0] — 2026-03-23
+
+### Added
+- 15 features: field BM25, search pipeline, LSP rename, complexity diagnostics, semantic tokens, CI coverage, federation auto-discovery, daemon mode, and more
+- HTTP server with 21 REST endpoints + SSE streaming
+- VS Code extension
+
 ## [0.15.1] — 2026-03-22
 
 ### Fixed
