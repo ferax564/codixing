@@ -1,0 +1,127 @@
+# Agent benchmark tasks — natural language prompts for real Claude agent sessions
+# Categories: symbol_lookup, code_understanding, call_graph, impact_analysis, architecture
+
+# ═══════════════════════════════════════════════════════════════════════
+# CODIXING (self, ~15K lines Rust)
+# ═══════════════════════════════════════════════════════════════════════
+
+[[agent_task]]
+repo = "codixing"
+id = "agent-codixing-1"
+category = "symbol_lookup"
+prompt = "Find where the Engine struct is defined and show me its fields and methods."
+acceptance = { contains = ["pub struct Engine", "engine"] }
+
+[[agent_task]]
+repo = "codixing"
+id = "agent-codixing-2"
+category = "call_graph"
+prompt = "What functions call symbol_callers in the codebase? List all call sites with file paths."
+acceptance = { contains = ["symbol_callers"] }
+
+[[agent_task]]
+repo = "codixing"
+id = "agent-codixing-3"
+category = "code_understanding"
+prompt = "Explain how the search pipeline works: what happens when a user calls code_search? Trace from the MCP tool handler through to the engine."
+acceptance = { contains = ["search", "engine"] }
+
+[[agent_task]]
+repo = "codixing"
+id = "agent-codixing-4"
+category = "impact_analysis"
+prompt = "If I changed the SearchResult struct, what files and functions would be affected?"
+acceptance = { contains = ["SearchResult"] }
+
+# ═══════════════════════════════════════════════════════════════════════
+# TOKIO (~100K lines Rust)
+# ═══════════════════════════════════════════════════════════════════════
+
+[[agent_task]]
+repo = "tokio"
+id = "agent-tokio-1"
+category = "symbol_lookup"
+prompt = "Find the definition of the Runtime struct in tokio. Show me its fields."
+acceptance = { contains = ["Runtime", "runtime"] }
+
+[[agent_task]]
+repo = "tokio"
+id = "agent-tokio-2"
+category = "code_understanding"
+prompt = "How does task spawning work in tokio? Trace from spawn() through the scheduler to actual execution."
+acceptance = { contains = ["spawn", "task"] }
+
+[[agent_task]]
+repo = "tokio"
+id = "agent-tokio-3"
+category = "call_graph"
+prompt = "Find all callers of JoinHandle::abort. What code paths lead to task cancellation?"
+acceptance = { contains = ["abort", "JoinHandle"] }
+
+# ═══════════════════════════════════════════════════════════════════════
+# BEVY (~500K lines Rust)
+# ═══════════════════════════════════════════════════════════════════════
+
+[[agent_task]]
+repo = "bevy"
+id = "agent-bevy-1"
+category = "symbol_lookup"
+prompt = "Find where the Query struct is defined in Bevy ECS. Show its type parameters and key methods."
+acceptance = { contains = ["Query", "bevy_ecs"] }
+
+[[agent_task]]
+repo = "bevy"
+id = "agent-bevy-2"
+category = "call_graph"
+prompt = "What systems or functions call Query::get in the Bevy codebase? List all call sites."
+acceptance = { contains = ["Query", "get"] }
+
+[[agent_task]]
+repo = "bevy"
+id = "agent-bevy-3"
+category = "architecture"
+prompt = "Give me an overview of Bevy's module structure. What are the main crates and what does each do?"
+acceptance = { contains = ["bevy_ecs", "bevy_app"] }
+
+[[agent_task]]
+repo = "bevy"
+id = "agent-bevy-4"
+category = "impact_analysis"
+prompt = "If I changed the signature of App::add_systems, what would break? List all affected files."
+acceptance = { contains = ["App", "add_systems"] }
+
+# ═══════════════════════════════════════════════════════════════════════
+# DJANGO (~300K lines Python)
+# ═══════════════════════════════════════════════════════════════════════
+
+[[agent_task]]
+repo = "django"
+id = "agent-django-1"
+category = "code_understanding"
+prompt = "How does Django's ORM query compilation work? Trace from QuerySet.filter() to the SQL generation."
+acceptance = { contains = ["QuerySet", "sql"] }
+
+[[agent_task]]
+repo = "django"
+id = "agent-django-2"
+category = "call_graph"
+prompt = "Find all code that calls Model.save(). What validation and signal dispatching happens?"
+acceptance = { contains = ["save", "Model"] }
+
+# ═══════════════════════════════════════════════════════════════════════
+# REACT (~200K lines JS)
+# ═══════════════════════════════════════════════════════════════════════
+
+[[agent_task]]
+repo = "react"
+id = "agent-react-1"
+category = "code_understanding"
+prompt = "How does React's reconciliation algorithm work? Explain the fiber tree and the work loop."
+acceptance = { contains = ["fiber", "reconcil"] }
+
+[[agent_task]]
+repo = "react"
+id = "agent-react-2"
+category = "symbol_lookup"
+prompt = "Find the definition of useState hook. Show the implementation, not just the public API."
+acceptance = { contains = ["useState"] }
