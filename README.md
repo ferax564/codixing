@@ -201,6 +201,8 @@ code --install-extension codixing.vsix
 
 **SWE-bench Lite** (300 tasks, 12 repos): Recall@5 = 74.3% (vs grep 41.3%).
 
+**Retrieval accuracy** (Codixing benchmark suite): Codixing R@10 = 0.607 vs grep R@10 = 0.315.
+
 See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts.
 
 ---
@@ -219,10 +221,10 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Git recency signal** — Mildly boosts recently modified files (+10% linear decay over 180 days) via lazy-loaded git log timestamps
 - **Overlapping chunks** — Bridge chunks at AST-aware chunk boundaries capture cross-function context; configurable `overlap_ratio` (default 0.0)
 - **File path boosting** — Detects explicit file paths and backtick code references in queries and boosts matching results (2.5×)
-- **Kernel-scale performance** — Tested on the Linux kernel (73K files, 30M lines): 1.57s cold-start search, 0.79s warm. Mmap symbol table (zero-deserialization), compact chunk metadata (11× smaller), lazy trigram loading
+- **Kernel-scale performance** — Tested on the Linux kernel (73K files, 30M lines): 1.57s cold-start search, 0.79s warm. Mmap symbol table AND trigram index (zero-deserialization), compact chunk metadata (11× smaller), lazy trigram loading
 - **Trigram pre-filtering** — File-level trigram inverted index (Russ Cox/trigrep technique) skips files before disk I/O; **110× faster** literal grep at 1K files, **52× faster** at 10K files; persistent bitcode storage, regex HIR walking with OR-branch support, parallel rayon verification
 - **LSP rename + semantic tokens** — Cross-file rename refactoring with conflict detection; semantic highlighting for Rust, Python, TypeScript, Go
-- **Queue-based embedding** — Optional RustQueue-backed pipeline with crash recovery, parallel ONNX workers (N× throughput), and deferred embedding (`--defer-embeddings`)
+- **Queue-based embedding** — Optional RustQueue-backed pipeline with crash recovery, parallel ONNX workers (N× throughput), deferred embedding (`--defer-embeddings`), and streaming mpsc pattern that fixes OOM on large repos
 - **Streaming embeddings** — Fixed-window batch processing (256 chunks) with progress reporting; incremental vector reuse via content hashing
 - **Federation auto-discovery** — Auto-detects Cargo, npm, pnpm, Go workspaces, git submodules, and nested projects
 - **Read-only concurrent access** — Multiple instances share the same index; periodic reload detects writer updates automatically
@@ -233,6 +235,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **GitHub Action** — Automated code review with impact analysis on PRs
 - **Token budgets** — All output respects token limits; adaptive truncation at score cliffs
 - **Cross-repo federation** — Unified search across multiple indexed projects with CLI management and workspace auto-discovery (`codixing federation init/add/remove/list/search/discover`)
+- **Cross-package import graph** — `cross-imports` command finds files in one directory that import from another via single O(E) graph walk
 - **HTTP API server** — REST endpoints (search, symbols, grep, hotspots, complexity, outline, graph) with SSE streaming (`crates/server/`)
 - **Single binary** — No JVM, no Docker, no external databases, no API keys. macOS, Linux, and Windows
 
@@ -276,7 +279,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 855+ tests
+cargo test --workspace        # 858+ tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```

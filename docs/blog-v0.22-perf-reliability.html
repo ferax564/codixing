@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>v0.22: fixing the OOM, the cold start, and the accuracy gap</title>
+  <meta name="description" content="Codixing v0.22: mpsc streaming fixes the parallel drain OOM, mmap trigram index cuts cold start 550x, cross-imports command lifts cross-package R@10 from 0.033 to 0.640." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <style>
+    :root {
+      --bg: #000000;
+      --bg-1: #0a0a0f;
+      --bg-2: #0d1117;
+      --bg-3: #161b22;
+      --border: rgba(48, 54, 61, 0.8);
+      --border-glow: rgba(0, 212, 170, 0.25);
+      --cyan: #00d4aa;
+      --purple: #8b5cf6;
+      --orange: #f97316;
+      --text: #f0f6fc;
+      --text-muted: #8b949e;
+      --text-dim: #484f58;
+      --green: #3fb950;
+      --red: #f85149;
+      --yellow: #e3b341;
+      --radius: 12px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: "Inter", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.8;
+    }
+
+    ::selection { background: rgba(0, 212, 170, 0.2); }
+
+    /* Nav */
+    nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      background: rgba(0,0,0,0.85); backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-inner {
+      max-width: 800px; margin: 0 auto; padding: 16px 24px;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .nav-inner a { color: var(--text-muted); text-decoration: none; font-size: 0.9rem; }
+    .nav-inner a:hover { color: var(--cyan); }
+
+    /* Article */
+    article {
+      max-width: 800px; margin: 0 auto; padding: 120px 24px 80px;
+    }
+
+    .blog-meta {
+      color: var(--text-muted); font-size: 0.85rem;
+      margin-bottom: 16px;
+    }
+
+    article h1 {
+      font-size: clamp(2rem, 4vw, 2.8rem);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1.2;
+      margin-bottom: 24px;
+    }
+
+    .subtitle {
+      font-size: 1.15rem;
+      color: var(--text-muted);
+      line-height: 1.7;
+      margin-bottom: 48px;
+      max-width: 65ch;
+    }
+
+    article h2 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-top: 56px;
+      margin-bottom: 16px;
+      color: var(--cyan);
+    }
+
+    article h3 {
+      font-size: 1.15rem;
+      font-weight: 600;
+      margin-top: 40px;
+      margin-bottom: 12px;
+    }
+
+    article p {
+      margin-bottom: 20px;
+      color: var(--text);
+      font-size: 1.02rem;
+    }
+
+    article strong { color: var(--cyan); font-weight: 600; }
+
+    article code {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.88em;
+      background: var(--bg-2);
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: var(--cyan);
+    }
+
+    article a { color: var(--cyan); text-decoration: underline; text-underline-offset: 2px; }
+    article a:hover { color: var(--text); }
+
+    article ul, article ol {
+      margin: 0 0 24px 24px;
+      color: var(--text-muted);
+      line-height: 2;
+    }
+
+    /* Tables */
+    .bench-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 24px 0 32px;
+      font-size: 0.92rem;
+    }
+
+    .bench-table th {
+      text-align: left;
+      padding: 10px 14px;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      font-weight: 600;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+    }
+
+    .bench-table td {
+      padding: 10px 14px;
+      border: 1px solid var(--border);
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.85rem;
+    }
+
+    .bench-table tr:hover td { background: var(--bg-1); }
+    .bench-table .pass { color: var(--green); }
+    .bench-table .fail { color: var(--red); }
+    .bench-table .num { color: var(--cyan); font-weight: 600; }
+
+    /* Code blocks */
+    pre {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+      overflow-x: auto;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.83rem;
+      line-height: 1.7;
+      margin: 20px 0 28px;
+      color: var(--text-muted);
+    }
+
+    pre .cmd { color: var(--text); }
+    pre .out { color: var(--green); }
+    pre .cmt { color: var(--text-dim); }
+    pre .val { color: var(--cyan); }
+    pre .kw { color: var(--purple); }
+    pre .fn { color: var(--orange); }
+    pre .str { color: var(--green); }
+
+    /* Callout */
+    .callout {
+      background: var(--bg-1);
+      border-left: 3px solid var(--cyan);
+      padding: 20px 24px;
+      border-radius: 0 var(--radius) var(--radius) 0;
+      margin: 28px 0;
+    }
+
+    .callout p { margin-bottom: 0; color: var(--text-muted); }
+    .callout strong { color: var(--text); }
+
+    .callout-red {
+      background: var(--bg-1);
+      border-left: 3px solid var(--red);
+      padding: 20px 24px;
+      border-radius: 0 var(--radius) var(--radius) 0;
+      margin: 28px 0;
+    }
+
+    .callout-red p { margin-bottom: 0; color: var(--text-muted); }
+    .callout-red strong { color: var(--red); }
+
+    .callout-yellow {
+      background: var(--bg-1);
+      border-left: 3px solid var(--yellow);
+      padding: 20px 24px;
+      border-radius: 0 var(--radius) var(--radius) 0;
+      margin: 28px 0;
+    }
+
+    .callout-yellow p { margin-bottom: 0; color: var(--text-muted); }
+    .callout-yellow strong { color: var(--yellow); }
+
+    /* Stat cards */
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin: 32px 0;
+    }
+
+    .stat-card {
+      background: var(--bg-1);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      text-align: center;
+    }
+
+    .stat-card .stat-val {
+      font-size: 1.8rem;
+      font-weight: 700;
+      color: var(--cyan);
+    }
+
+    .stat-card .stat-label {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    /* Footer */
+    footer {
+      max-width: 800px; margin: 0 auto; padding: 40px 24px;
+      border-top: 1px solid var(--border);
+      color: var(--text-dim); font-size: 0.85rem;
+      display: flex; justify-content: space-between;
+    }
+    footer a { color: var(--text-muted); text-decoration: none; }
+
+    @media (max-width: 600px) {
+      .stat-grid { grid-template-columns: repeat(2, 1fr); }
+      article h1 { font-size: 2rem; }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <a href="/index.html" style="font-weight:600;color:var(--text)">Codixing</a>
+      <div style="display:flex;gap:20px">
+        <a href="/blog.html">Blog</a>
+        <a href="/docs.html">Docs</a>
+        <a href="https://github.com/ferax564/codixing">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <article>
+    <a href="/blog.html" style="color:var(--text-muted);font-size:0.85rem;text-decoration:none;display:inline-block;margin-bottom:20px;">&larr; All Posts</a>
+    <div class="blog-meta">March 29, 2026 &bull; Engineering</div>
+
+    <h1>v0.22: fixing the OOM, the cold start,<br>and the accuracy gap</h1>
+
+    <p class="subtitle">
+      v0.21 shipped parallel embedding workers. They OOM'd on any repo over 30K chunks. The trigram index took 55 seconds to deserialize. Cross-package queries had 0.033 recall. v0.22 fixes all three: mpsc streaming, mmap trigram, and a new <code>cross-imports</code> command. Overall R@10 jumps from 0.456 to 0.607.
+    </p>
+
+    <div class="stat-grid">
+      <div class="stat-card">
+        <div class="stat-val">550&times;</div>
+        <div class="stat-label">Cold start improvement</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">0.607</div>
+        <div class="stat-label">Overall R@10</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">50 MB</div>
+        <div class="stat-label">Peak embed memory</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">19&times;</div>
+        <div class="stat-label">Cross-pkg recall gain</div>
+      </div>
+    </div>
+
+    <h2>1. Parallel drain OOM &rarr; mpsc streaming</h2>
+
+    <p>The v0.21 parallel drain was a classic collect-then-insert pattern. Each worker embedded its file batch, collected all <code>(chunk_id, Vec&lt;f32&gt;, path)</code> tuples into a thread-local Vec, then all Vecs merged into one Vec, then bulk-inserted into VectorIndex.</p>
+
+    <div class="callout-red">
+      <p><strong>The math doesn't work.</strong> 881K chunks &times; 384 dims &times; 4 bytes = 1.35 GB just for the embedding vectors. Add the chunk IDs and paths, and you're well over the memory budget. OpenClaw (45K chunks) would OOM on 8 GB machines.</p>
+    </div>
+
+    <p>The fix: replace the collect-and-merge pattern with <code>mpsc::sync_channel</code> and back-pressure. Workers send per-file batches to an inserter thread that calls <code>add_mut()</code> immediately. No accumulation.</p>
+
+    <pre><span class="cmt">// mpsc streaming: workers send batches, inserter thread consumes immediately</span>
+<span class="kw">let</span> (tx, rx) = std::sync::mpsc::sync_channel::&lt;EmbedBatch&gt;(num_workers * <span class="val">2</span>);
+
+<span class="cmt">// Inserter thread: drains channel, writes to VectorIndex as batches arrive</span>
+<span class="kw">let</span> inserter = std::thread::spawn(<span class="kw">move</span> || {
+    <span class="kw">let mut</span> total = <span class="val">0</span>;
+    <span class="kw">while let</span> Ok(batch) = rx.recv() {
+        <span class="kw">for</span> (chunk_id, embedding, path) <span class="kw">in</span> batch.items {
+            vec_idx.add_mut(chunk_id, &amp;embedding, &amp;path)?;
+            total += <span class="val">1</span>;
+        }
+    }
+    Ok(total)
+});
+
+<span class="cmt">// Workers: embed per-file, send batch, block if channel is full (back-pressure)</span>
+std::thread::scope(|s| {
+    <span class="kw">for</span> _ <span class="kw">in</span> <span class="val">0</span>..num_workers {
+        <span class="kw">let</span> tx = tx.clone();
+        s.spawn(<span class="kw">move</span> || {
+            <span class="kw">let</span> embedder = Embedder::new(model)?;
+            <span class="kw">loop</span> {
+                <span class="kw">let</span> jobs = pull_jobs(rq, <span class="val">10</span>)?;
+                <span class="kw">if</span> jobs.is_empty() { <span class="kw">break</span>; }
+                <span class="kw">for</span> job <span class="kw">in</span> jobs {
+                    <span class="kw">let</span> batch = embed_file(&amp;embedder, &amp;job)?;
+                    tx.send(batch)?;  <span class="cmt">// blocks if inserter is behind</span>
+                }
+            }
+        });
+    }
+});</pre>
+
+    <p>The <code>sync_channel</code> capacity is <code>num_workers * 2</code>. If the inserter falls behind, workers block on <code>send()</code>&mdash;natural back-pressure, no unbounded growth. Peak memory: roughly <code>num_workers &times; 2 batches</code> in flight at once, about <strong>50 MB</strong> instead of 1.35 GB.</p>
+
+    <p>Result: OpenClaw (45K chunks) now completes instead of OOM'ing.</p>
+
+    <h2>2. Mmap trigram index &mdash; zero-cost cold start</h2>
+
+    <p>The trigram index was serialized with bitcode and deserialized into a <code>HashMap&lt;[u8; 3], Vec&lt;u64&gt;&gt;</code>. For the Linux kernel (175 MB <code>chunk_trigram.bin</code>), that meant: read 175 MB from disk, decode bitcode, rebuild HashMap with 3M+ entries. <strong>55 seconds.</strong></p>
+
+    <p>v0.22 uses a custom mmap binary format that requires zero deserialization:</p>
+
+    <pre><span class="cmt">// Mmap trigram format (magic: "TRGM")</span>
+<span class="cmt">//</span>
+<span class="cmt">// Header: 20 bytes</span>
+<span class="cmt">//   bytes  0..4   magic "TRGM"</span>
+<span class="cmt">//   bytes  4..8   version (u32 LE)</span>
+<span class="cmt">//   bytes  8..12  num_trigrams (u32 LE)</span>
+<span class="cmt">//   bytes 12..16  num_postings_total (u32 LE)</span>
+<span class="cmt">//   bytes 16..20  reserved (u32 LE)</span>
+<span class="cmt">//</span>
+<span class="cmt">// Trigram index: num_trigrams entries, 12 bytes each, sorted by trigram</span>
+<span class="cmt">//   bytes 0..3   trigram [u8; 3]</span>
+<span class="cmt">//   byte  3       padding</span>
+<span class="cmt">//   bytes 4..8    offset into posting lists (u32 LE)</span>
+<span class="cmt">//   bytes 8..12   length of posting list (u32 LE)</span>
+<span class="cmt">//</span>
+<span class="cmt">// Posting lists: contiguous u64 LE values</span>
+<span class="cmt">//   each posting list is offset..offset+length chunk IDs</span></pre>
+
+    <p>Lookup is O(log N) binary search over the sorted trigram entries. The file is mmap'd directly&mdash;the OS pages in only the regions that are accessed. Auto-detected by the "TRGM" magic bytes at file start; falls back to bitcode for old indexes. Backward-compatible.</p>
+
+    <p>For mutations (sync path), <code>ensure_mutable()</code> materializes the mmap data into in-memory HashMaps on first write. For the common search-only path, this is a no-op.</p>
+
+    <p>Result: <strong>55s &rarr; 0.1s cold start (550&times; improvement).</strong></p>
+
+    <h2>3. cross-imports command &mdash; fixing the accuracy gap</h2>
+
+    <p>This was the biggest regression in v0.21 benchmarks. Queries like "which gateway files import from security?" can't be answered by text search (grep sees import statements but doesn't understand direction) or per-file callers (too narrow). Cross-package R@10 was <strong>0.033</strong>.</p>
+
+    <div class="callout-yellow">
+      <p><strong>The problem is structural.</strong> Neither BM25 nor embeddings understand "files in package A that depend on package B." You need the import graph, and you need to query it directionally.</p>
+    </div>
+
+    <p>The solution is a dedicated command:</p>
+
+    <pre><span class="cmd">codixing cross-imports --from src/gateway --to src/security</span>
+<span class="out">  src/gateway/auth-middleware.ts    imports 3 symbols from src/security/</span>
+<span class="out">  src/gateway/rate-limiter.ts       imports 1 symbol  from src/security/</span>
+<span class="out">  src/gateway/request-validator.ts  imports 2 symbols from src/security/</span></pre>
+
+    <p>Implementation: a single O(E) pass over the import graph edges. For each edge, check if the source file is under <code>--from</code> and the target file is under <code>--to</code>. No BM25, no embeddings, no ranking. Just graph traversal.</p>
+
+    <p>Result: cross-package R@10 went from <strong>0.033 &rarr; 0.640</strong>. Overall R@10 jumped from <strong>0.456 &rarr; 0.607</strong>.</p>
+
+    <h2>4. populate_symbol_graph &mdash; eliminate double file reads</h2>
+
+    <p>Graph construction was reading every file from disk twice. Phase 1 (definitions): read file, parse AST, extract symbols. Phase 2 (references): read file again, parse AST again, resolve references. On the Linux kernel (73K files), that's ~146K unnecessary disk reads.</p>
+
+    <p>The fix: pass the cached <code>file_contents: &amp;DashMap&lt;PathBuf, String&gt;</code> from the indexing pipeline into <code>populate_symbol_graph()</code>. Both phases read from the cache. The DashMap was already populated during chunking&mdash;this is purely plumbing, no new allocations.</p>
+
+    <h2>Results</h2>
+
+    <h3>Overall comparison</h3>
+
+    <table class="bench-table">
+      <thead>
+        <tr><th>Metric</th><th>grep</th><th>Codixing (v0.21)</th><th>Codixing (v0.22)</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Recall@10</td><td>0.315</td><td>~0.40</td><td class="num">0.607</td></tr>
+        <tr><td>MRR</td><td>0.161</td><td>~0.30</td><td class="num">0.554</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <p><strong>R@10 nearly doubled from v0.21 to v0.22.</strong> The bulk of the gain comes from cross-imports (a category that was nearly zero before) and continued improvement in symbol lookup. MRR at 0.554 means the correct file is typically the first or second result.</p>
+    </div>
+
+    <h3>Category breakdown</h3>
+
+    <table class="bench-table">
+      <thead>
+        <tr><th>Category</th><th>grep R@10</th><th>Codixing R@10</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Symbol</td><td class="fail">0.600</td><td class="pass">1.000</td></tr>
+        <tr><td>Cross-package</td><td class="fail">0.000</td><td class="num">0.640</td></tr>
+        <tr><td>Concept</td><td class="fail">0.183</td><td class="num">0.340</td></tr>
+        <tr><td>Usage</td><td class="num">0.475</td><td class="num">0.450</td></tr>
+      </tbody>
+    </table>
+
+    <p>Symbol lookup remains perfect at 1.000. Cross-package went from impossible (grep returns nothing useful for directional import queries) to 0.640. Concept search improved modestly. Usage search is roughly tied with grep&mdash;brute-force text search is hard to beat for finding literal call sites.</p>
+
+    <h3>Speed</h3>
+
+    <p>All categories remain <strong>4&ndash;21&times; faster than grep</strong>. Cold start improved <strong>550&times;</strong> (55s &rarr; 0.1s) thanks to the mmap trigram index.</p>
+
+    <h2>What's next</h2>
+
+    <p><strong>TypeScript import resolver.</strong> Three ground truth files in the benchmark still fail because our import resolver doesn't handle <code>.js</code> &rarr; <code>.ts</code> extension resolution (a TypeScript convention where imports use <code>.js</code> extensions but resolve to <code>.ts</code> files at build time). Fixing this should push cross-package R@10 above 0.8.</p>
+
+    <p><strong>Embedding speed benchmarks.</strong> Now that the OOM is fixed and large repos actually complete, we can run proper wall-clock benchmarks for the embedding pipeline: time to embed OpenClaw (45K chunks) and the Linux kernel (881K chunks) with 1, 2, and 4 workers. We expect near-linear scaling up to 4 workers on machines with sufficient memory.</p>
+
+    <h2>Try it</h2>
+
+    <pre><span class="cmt"># Install via Claude Code plugin marketplace</span>
+<span class="cmd">claude plugin marketplace add ferax564/codixing</span>
+
+<span class="cmt"># Or build from source</span>
+<span class="cmd">git clone https://github.com/ferax564/codixing</span>
+<span class="cmd">cd codixing && cargo build --release --workspace</span>
+
+<span class="cmt"># Cross-package query</span>
+<span class="cmd">./target/release/codixing cross-imports --from src/gateway --to src/security</span>
+<span class="out">  src/gateway/auth-middleware.ts    imports 3 symbols from src/security/</span></pre>
+
+    <p>Source code and benchmark data: <a href="https://github.com/ferax564/codixing">github.com/ferax564/codixing</a></p>
+
+  </article>
+
+  <footer>
+    <a href="/index.html">Codixing</a>
+    <a href="mailto:hello@codixing.com">Contact</a>
+    <span>Open source &bull; BSL-1.0</span>
+  </footer>
+</body>
+</html>

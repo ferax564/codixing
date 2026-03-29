@@ -136,10 +136,11 @@ pub async fn drain_embed_queue(
 /// Drain the embedding queue with N parallel workers.
 ///
 /// Each worker creates its own `Embedder` (separate ONNX session) and pulls
-/// jobs from the queue concurrently. Embeddings are collected in thread-local
-/// buffers, then bulk-inserted into the VectorIndex after all workers finish.
+/// jobs from the queue concurrently. Embeddings are streamed to the main thread
+/// via a bounded `mpsc::sync_channel` and inserted immediately, keeping peak
+/// memory proportional to `num_workers × batch_size` instead of total chunks.
 ///
-/// Memory cost: ~200 MB per worker (BGE-Small ONNX session).
+/// Memory cost: ~200 MB per worker (BGE-Small ONNX session) + channel buffer.
 /// Expected speedup: close to N× on the embedding step.
 pub fn drain_embed_queue_parallel(
     rq: &Arc<RustQueue>,
@@ -160,21 +161,30 @@ pub fn drain_embed_queue_parallel(
 
     tracing::info!(workers = num_workers, "starting parallel embedding drain");
 
-    // Phase 1: N workers embed in parallel, collect (id, vec, path) tuples.
-    let collected: Vec<(u64, Vec<f32>, String)> = std::thread::scope(|s| {
+    // Bounded channel: workers send per-file embedding batches to the inserter.
+    // Back-pressure: if the inserter falls behind, workers block on send().
+    // Peak memory ≈ num_workers × 2 batches × avg_chunks_per_file × 384 × 4 bytes.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<(u64, Vec<f32>, String)>>(num_workers * 2);
+
+    let mut total = 0usize;
+    let mut first_error: Option<CodixingError> = None;
+
+    std::thread::scope(|s| {
+        // Spawn N embedding workers.
         let handles: Vec<_> = (0..num_workers)
             .map(|worker_id| {
-                s.spawn(move || {
+                let tx = tx.clone();
+                s.spawn(move || -> Result<usize> {
                     let embedder = match Embedder::new(model) {
                         Ok(e) => e,
                         Err(e) => {
                             tracing::warn!(worker = worker_id, error = %e, "failed to create embedder");
-                            return Ok(Vec::new());
+                            return Ok(0);
                         }
                     };
                     tracing::debug!(worker = worker_id, "embedding worker started");
 
-                    let mut local: Vec<(u64, Vec<f32>, String)> = Vec::new();
+                    let mut count = 0usize;
                     loop {
                         let jobs = block_on_async(async {
                             rq.pull("embeddings", WORKER_PULL_BATCH).await.map_err(queue_err)
@@ -194,7 +204,10 @@ pub fn drain_embed_queue_parallel(
                                 &chunk_ids,
                             ) {
                                 Ok(vecs) => {
-                                    local.extend(vecs);
+                                    count += vecs.len();
+                                    // Stream batch to inserter; ignore SendError
+                                    // (inserter dropped — shouldn't happen).
+                                    let _ = tx.send(vecs);
                                     block_on_async(async {
                                         rq.ack(job.id, None).await.map_err(queue_err)
                                     })?;
@@ -207,35 +220,49 @@ pub fn drain_embed_queue_parallel(
                             }
                         }
                     }
-                    tracing::debug!(worker = worker_id, chunks = local.len(), "worker done");
-                    Ok::<_, CodixingError>(local)
+                    tracing::debug!(worker = worker_id, chunks = count, "worker done");
+                    Ok(count)
                 })
             })
             .collect();
 
-        let mut all = Vec::new();
+        // Drop original sender so rx.iter() terminates when all workers finish.
+        drop(tx);
+
+        // Main thread: receive batches and insert into VectorIndex immediately.
+        for batch in rx {
+            for (chunk_id, embedding, file_path) in &batch {
+                if let Err(e) = vec_idx.add_mut(*chunk_id, embedding, file_path) {
+                    tracing::warn!(error = %e, chunk_id, "failed to add vector");
+                }
+            }
+            total += batch.len();
+        }
+
+        // Collect worker errors.
         for h in handles {
             match h.join() {
-                Ok(Ok(vecs)) => all.extend(vecs),
-                Ok(Err(e)) => return Err(e),
-                Err(_) => return Err(CodixingError::Embedding("worker thread panicked".into())),
+                Ok(Err(e)) => {
+                    if first_error.is_none() {
+                        first_error = Some(e);
+                    }
+                }
+                Err(_) => {
+                    if first_error.is_none() {
+                        first_error =
+                            Some(CodixingError::Embedding("worker thread panicked".into()));
+                    }
+                }
+                Ok(Ok(_)) => {}
             }
         }
-        Ok(all)
-    })?;
+    });
 
-    let total = collected.len();
-    tracing::info!(
-        chunks = total,
-        "parallel embedding complete, inserting vectors"
-    );
-
-    // Phase 2: Sequential bulk insert into VectorIndex.
-    for (chunk_id, embedding, file_path) in &collected {
-        if let Err(e) = vec_idx.add_mut(*chunk_id, embedding, file_path) {
-            tracing::warn!(error = %e, chunk_id, "failed to add vector");
-        }
+    if let Some(e) = first_error {
+        return Err(e);
     }
+
+    tracing::info!(chunks = total, "parallel embedding complete");
 
     Ok(total)
 }

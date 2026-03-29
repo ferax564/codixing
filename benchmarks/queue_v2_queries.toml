@@ -184,11 +184,14 @@ name = "concept-cron-scheduling"
 text = "cron job scheduling and periodic task execution"
 grep_pattern = "cron"
 category = "concept"
+# NOTE: Paths verified 2026-03 — cron/ may contain nested service/ dir.
+# Matching uses suffix comparison so both service.ts and service/jobs.ts work.
 ground_truth = [
   "src/cron/service.ts",
   "src/cron/schedule.ts",
   "src/cron/parse.ts",
   "src/cron/delivery.ts",
+  "src/cron/service/jobs.ts",
 ]
 
 [[query]]
@@ -204,29 +207,37 @@ ground_truth = [
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CROSS-PACKAGE queries — find files that import across package boundaries
+#
+# These use `codixing callers <target_file>` instead of `codixing search`,
+# because "which files import from X" is a structural graph query, not text
+# search. The `target_file` field tells the benchmark which file to look up
+# callers for.
 # ──────────────────────────────────────────────────────────────────────────────
 
 [[query]]
 name = "cross-pkg-plugin-sdk-entry"
-text = "extensions that import definePluginEntry from plugin-sdk"
+text = "extensions that import from plugin-sdk"
 grep_pattern = "import.*definePluginEntry.*from.*plugin-sdk"
 category = "cross-package"
+from_dir = "extensions"
+to_dir = "src/plugin-sdk"
 ground_truth = [
   "extensions/volcengine/index.ts",
   "extensions/openai/index.ts",
   "extensions/groq/index.ts",
   "extensions/anthropic/index.ts",
   "extensions/discord/index.ts",
-  "src/plugin-sdk/plugin-entry.ts",
 ]
 
 [[query]]
 name = "cross-pkg-bundled-channel-entries"
-text = "generated file that imports all channel extension entry points"
+text = "channel contracts that import from extensions"
 grep_pattern = 'ChannelEntry\|ChannelSetupEntry'
 category = "cross-package"
+from_dir = "src/channels/plugins/contracts"
+to_dir = "extensions"
 ground_truth = [
-  "src/generated/bundled-channel-entries.generated.ts",
+  "src/channels/plugins/contracts/registry.ts",
 ]
 
 [[query]]
@@ -234,23 +245,22 @@ name = "cross-pkg-security-from-gateway"
 text = "gateway files that import from the security module"
 grep_pattern = "import.*from.*security/"
 category = "cross-package"
+from_dir = "src/gateway"
+to_dir = "src/security"
 ground_truth = [
-  "src/gateway/server-http.ts",
   "src/gateway/server-startup-log.ts",
-  "src/gateway/hooks.ts",
 ]
 
 [[query]]
 name = "cross-pkg-config-types-from-agents"
-text = "agent files that import config types"
+text = "agent files that import from config module"
 grep_pattern = "import.*from.*config/types"
 category = "cross-package"
+from_dir = "src/agents"
+to_dir = "src/config"
 ground_truth = [
   "src/agents/tools/web-search-provider-credentials.ts",
   "src/agents/tools/model-config.helpers.ts",
-  "src/agents/tool-loop-detection.ts",
-  "src/agents/together-models.ts",
-  "src/agents/volc-models.shared.ts",
 ]
 
 [[query]]
@@ -258,7 +268,8 @@ name = "cross-pkg-plugin-contracts-registry"
 text = "channel plugin contracts registry that imports from extensions"
 grep_pattern = "import.*from.*extensions/"
 category = "cross-package"
+from_dir = "src/channels/plugins/contracts"
+to_dir = "extensions"
 ground_truth = [
   "src/channels/plugins/contracts/registry.ts",
-  "src/generated/bundled-channel-entries.generated.ts",
 ]

@@ -14,9 +14,32 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use memmap2::Mmap;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{CodixingError, Result};
+
+// ── Mmap format constants ────────────────────────────────────────────────────
+
+/// Magic bytes for the mmap trigram format: "TRGM" as little-endian u32.
+const MMAP_MAGIC: u32 = 0x5452474D;
+
+/// Current mmap format version.
+const MMAP_VERSION: u32 = 1;
+
+/// Header size: magic(4) + version(4) + trigram_count(4) + chunk_count(4) + total_postings(4).
+const MMAP_HEADER_SIZE: usize = 20;
+
+/// Size of one trigram index entry: trigram(3) + pad(1) + posting_start(4) + posting_count(4).
+const MMAP_ENTRY_SIZE: usize = 12;
+
+/// Memory-mapped backing store for zero-deserialization trigram loading.
+struct MmapBacking {
+    mmap: Mmap,
+    trigram_count: u32,
+    index_offset: usize,
+    postings_offset: usize,
+}
 
 /// Serializable representation of the trigram index data (v2: no content).
 #[derive(Serialize, Deserialize)]
@@ -37,11 +60,19 @@ struct TrigramIndexDataLegacy {
 ///
 /// Content is NOT stored here — callers must verify candidate matches using
 /// an external content source (chunk_meta or Tantivy stored fields).
+///
+/// Supports two storage backends:
+/// - **In-memory** (`HashMap`): used during index construction and bitcode-loaded indexes.
+/// - **Memory-mapped** (`MmapBacking`): zero-deserialization load from the mmap binary format.
+///   Eliminates the 55-second cold start on large repos (e.g. 175 MB chunk_trigram.bin).
 pub struct TrigramIndex {
     /// Mapping from trigram to sorted list of chunk IDs containing that trigram.
+    /// Empty when `mmap` is `Some` (search dispatches to the mmap path).
     index: HashMap<[u8; 3], Vec<u64>>,
     /// Number of distinct chunks indexed (for len/is_empty).
     chunk_count: usize,
+    /// Memory-mapped backing for zero-copy search (set by `load_mmap`).
+    mmap: Option<MmapBacking>,
 }
 
 impl TrigramIndex {
@@ -50,6 +81,36 @@ impl TrigramIndex {
         Self {
             index: HashMap::new(),
             chunk_count: 0,
+            mmap: None,
+        }
+    }
+
+    /// Materialize mmap-backed data into the in-memory HashMap for mutation.
+    ///
+    /// Called automatically before any mutating operation (add, remove, save).
+    /// No-op if already in-memory.
+    fn ensure_mutable(&mut self) {
+        if let Some(backing) = self.mmap.take() {
+            let data = &backing.mmap[..];
+            self.index.reserve(backing.trigram_count as usize);
+            for i in 0..backing.trigram_count as usize {
+                let off = backing.index_offset + i * MMAP_ENTRY_SIZE;
+                let trigram = [data[off], data[off + 1], data[off + 2]];
+                let start = u32::from_le_bytes(data[off + 4..off + 8].try_into().unwrap()) as usize;
+                let count =
+                    u32::from_le_bytes(data[off + 8..off + 12].try_into().unwrap()) as usize;
+
+                let posting_base = backing.postings_offset + start * 8;
+                let ids: Vec<u64> = (0..count)
+                    .map(|j| {
+                        let o = posting_base + j * 8;
+                        u64::from_le_bytes(data[o..o + 8].try_into().unwrap())
+                    })
+                    .collect();
+
+                self.index.insert(trigram, ids);
+            }
+            // backing (and its Mmap) is dropped here
         }
     }
 
@@ -58,6 +119,7 @@ impl TrigramIndex {
     ///
     /// For bulk loading, prefer [`build_batch`] which defers sorting to the end.
     pub fn add(&mut self, chunk_id: u64, content: &str) {
+        self.ensure_mutable();
         self.chunk_count += 1;
         self.add_trigrams(chunk_id, content.as_bytes());
         // Sort + dedup posting lists touched by this chunk.
@@ -112,6 +174,7 @@ impl TrigramIndex {
     /// The caller must provide the chunk's content so we know which trigrams
     /// to clean up from the posting lists.
     pub fn remove(&mut self, chunk_id: u64, content: &str) {
+        self.ensure_mutable();
         let bytes = content.as_bytes();
         if bytes.len() < 3 {
             self.chunk_count = self.chunk_count.saturating_sub(1);
@@ -138,25 +201,30 @@ impl TrigramIndex {
     ///
     /// Returns empty if the query is shorter than 3 bytes.
     pub fn search(&self, query: &str) -> Vec<u64> {
+        if let Some(ref backing) = self.mmap {
+            return Self::mmap_search(backing, query);
+        }
+        Self::inmemory_search(&self.index, query)
+    }
+
+    /// In-memory search: intersect HashMap posting lists.
+    fn inmemory_search(index: &HashMap<[u8; 3], Vec<u64>>, query: &str) -> Vec<u64> {
         let query_bytes = query.as_bytes();
         if query_bytes.len() < 3 {
             return Vec::new();
         }
 
-        // Extract query trigrams
         let mut trigrams = Vec::with_capacity(query_bytes.len() - 2);
         for i in 0..query_bytes.len() - 2 {
             trigrams.push([query_bytes[i], query_bytes[i + 1], query_bytes[i + 2]]);
         }
 
-        // Look up posting lists; if any trigram is missing, no matches possible
         let mut posting_lists: Vec<&Vec<u64>> =
-            trigrams.iter().filter_map(|t| self.index.get(t)).collect();
+            trigrams.iter().filter_map(|t| index.get(t)).collect();
         if posting_lists.len() != trigrams.len() {
             return Vec::new();
         }
 
-        // Intersect posting lists, starting with the shortest for efficiency
         posting_lists.sort_by_key(|l| l.len());
         let mut candidates = posting_lists[0].clone();
         for list in &posting_lists[1..] {
@@ -169,6 +237,96 @@ impl TrigramIndex {
         candidates
     }
 
+    /// Mmap-backed search: binary-search the sorted trigram index, read posting
+    /// lists directly from mapped memory.
+    fn mmap_search(backing: &MmapBacking, query: &str) -> Vec<u64> {
+        let query_bytes = query.as_bytes();
+        if query_bytes.len() < 3 {
+            return Vec::new();
+        }
+
+        let mut trigrams = Vec::with_capacity(query_bytes.len() - 2);
+        for i in 0..query_bytes.len() - 2 {
+            trigrams.push([query_bytes[i], query_bytes[i + 1], query_bytes[i + 2]]);
+        }
+
+        // For each query trigram, binary-search the index to find its posting list.
+        struct PostingRef {
+            start: u32,
+            count: u32,
+        }
+        let mut posting_refs: Vec<PostingRef> = Vec::with_capacity(trigrams.len());
+        for tri in &trigrams {
+            match Self::mmap_lookup_trigram(backing, tri) {
+                Some((start, count)) => posting_refs.push(PostingRef { start, count }),
+                None => return Vec::new(), // trigram absent → no matches
+            }
+        }
+
+        // Intersect posting lists, starting from the shortest.
+        posting_refs.sort_by_key(|r| r.count);
+
+        let mut candidates =
+            Self::mmap_read_posting_list(backing, posting_refs[0].start, posting_refs[0].count);
+        for pr in &posting_refs[1..] {
+            let list = Self::mmap_read_posting_list(backing, pr.start, pr.count);
+            candidates.retain(|id| list.binary_search(id).is_ok());
+            if candidates.is_empty() {
+                break;
+            }
+        }
+
+        candidates
+    }
+
+    /// Binary-search the mmap trigram index for a specific trigram.
+    /// Returns `(posting_start, posting_count)` if found.
+    fn mmap_lookup_trigram(backing: &MmapBacking, trigram: &[u8; 3]) -> Option<(u32, u32)> {
+        let data = &backing.mmap[..];
+        let count = backing.trigram_count as usize;
+        let base = backing.index_offset;
+
+        let mut lo = 0usize;
+        let mut hi = count;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let off = base + mid * MMAP_ENTRY_SIZE;
+            if off + MMAP_ENTRY_SIZE > data.len() {
+                return None; // corrupted index
+            }
+            let key = [data[off], data[off + 1], data[off + 2]];
+            match key.cmp(trigram) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Greater => hi = mid,
+                std::cmp::Ordering::Equal => {
+                    let start = u32::from_le_bytes(data[off + 4..off + 8].try_into().unwrap());
+                    let cnt = u32::from_le_bytes(data[off + 8..off + 12].try_into().unwrap());
+                    return Some((start, cnt));
+                }
+            }
+        }
+        None
+    }
+
+    /// Read a posting list from the mmap postings section.
+    ///
+    /// Returns empty if the requested range exceeds the mmap bounds
+    /// (corrupted or partially written index).
+    fn mmap_read_posting_list(backing: &MmapBacking, start: u32, count: u32) -> Vec<u64> {
+        let data = &backing.mmap[..];
+        let base = backing.postings_offset + (start as usize) * 8;
+        let end = base + (count as usize) * 8;
+        if end > data.len() {
+            return Vec::new();
+        }
+        (0..count as usize)
+            .map(|i| {
+                let off = base + i * 8;
+                u64::from_le_bytes(data[off..off + 8].try_into().unwrap())
+            })
+            .collect()
+    }
+
     /// Returns the number of indexed chunks.
     pub fn len(&self) -> usize {
         self.chunk_count
@@ -176,11 +334,15 @@ impl TrigramIndex {
 
     /// Returns true if the index contains no chunks.
     pub fn is_empty(&self) -> bool {
-        self.chunk_count == 0
+        self.len() == 0
     }
 
     /// Save the trigram index to a binary (bitcode) file.
     pub fn save_binary(&self, path: &Path) -> Result<()> {
+        // If still mmap-backed, no mutations happened — file on disk is current.
+        if self.mmap.is_some() {
+            return Ok(());
+        }
         let data = TrigramIndexData {
             index: self.index.iter().map(|(k, v)| (*k, v.clone())).collect(),
         };
@@ -191,12 +353,95 @@ impl TrigramIndex {
         Ok(())
     }
 
-    /// Load the trigram index from a binary (bitcode) file.
+    /// Save the trigram index in the mmap-friendly binary format.
     ///
-    /// Handles both v2 (no content) and legacy (with content) formats.
+    /// The format is designed for zero-deserialization loading via memory mapping:
+    /// sorted trigram entries with offsets into a contiguous postings array.
+    /// Load time drops from ~55s (bitcode + HashMap rebuild) to near-zero.
+    ///
+    /// ## Binary format
+    ///
+    /// ```text
+    /// [Header: 20 bytes, little-endian]
+    ///   magic:          u32 = 0x5452474D ("TRGM")
+    ///   version:        u32 = 1
+    ///   trigram_count:  u32
+    ///   chunk_count:    u32
+    ///   total_postings: u32
+    ///
+    /// [Trigram Index: trigram_count × 12 bytes, sorted by trigram bytes]
+    ///   trigram:        [u8; 3]
+    ///   _pad:           u8
+    ///   posting_start:  u32 (index into postings array, in u64 units)
+    ///   posting_count:  u32
+    ///
+    /// [Postings: total_postings × 8 bytes]
+    ///   Contiguous u64 chunk IDs (sorted within each list)
+    /// ```
+    pub fn save_mmap_binary(&self, path: &Path) -> Result<()> {
+        // If still mmap-backed, no mutations happened — file on disk is current.
+        if self.mmap.is_some() {
+            return Ok(());
+        }
+        // Sort trigrams for binary search at load time.
+        let mut entries: Vec<([u8; 3], &Vec<u64>)> =
+            self.index.iter().map(|(k, v)| (*k, v)).collect();
+        entries.sort_by_key(|(k, _)| *k);
+
+        let trigram_count = entries.len() as u32;
+        let total_postings: u32 = entries.iter().map(|(_, v)| v.len() as u32).sum();
+
+        let total_size = MMAP_HEADER_SIZE
+            + (trigram_count as usize) * MMAP_ENTRY_SIZE
+            + (total_postings as usize) * 8;
+        let mut buf = Vec::with_capacity(total_size);
+
+        // Header.
+        buf.extend_from_slice(&MMAP_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&MMAP_VERSION.to_le_bytes());
+        buf.extend_from_slice(&trigram_count.to_le_bytes());
+        buf.extend_from_slice(&(self.chunk_count as u32).to_le_bytes());
+        buf.extend_from_slice(&total_postings.to_le_bytes());
+
+        // Trigram index entries.
+        let mut posting_offset = 0u32;
+        for (trigram, ids) in &entries {
+            buf.extend_from_slice(trigram);
+            buf.push(0); // padding
+            buf.extend_from_slice(&posting_offset.to_le_bytes());
+            buf.extend_from_slice(&(ids.len() as u32).to_le_bytes());
+            posting_offset += ids.len() as u32;
+        }
+
+        // Postings.
+        for (_, ids) in &entries {
+            for &id in *ids {
+                buf.extend_from_slice(&id.to_le_bytes());
+            }
+        }
+
+        std::fs::write(path, buf)?;
+        Ok(())
+    }
+
+    /// Load the trigram index from a binary file.
+    ///
+    /// Detects the format by peeking at magic bytes:
+    /// - `TRGM` magic → mmap format (zero-copy, near-instant load)
+    /// - Otherwise → bitcode deserialization (legacy/v2)
     pub fn load_binary(path: &Path) -> Result<Self> {
+        // Peek at first 4 bytes to detect format.
+        let mut magic = [0u8; 4];
+        {
+            use std::io::Read;
+            let mut f = std::fs::File::open(path)?;
+            if f.read(&mut magic).unwrap_or(0) == 4 && magic == MMAP_MAGIC.to_le_bytes() {
+                return Self::load_mmap(path);
+            }
+        }
+
+        // Fall back to bitcode deserialization.
         let bytes = std::fs::read(path)?;
-        // Try v2 format first (no content), fall back to legacy.
         if let Ok(data) = bitcode::deserialize::<TrigramIndexData>(&bytes) {
             let chunk_count = data
                 .index
@@ -207,6 +452,7 @@ impl TrigramIndex {
             Ok(Self {
                 index: data.index.into_iter().collect(),
                 chunk_count,
+                mmap: None,
             })
         } else if let Ok(data) = bitcode::deserialize::<TrigramIndexDataLegacy>(&bytes) {
             let chunk_count = data
@@ -218,12 +464,68 @@ impl TrigramIndex {
             Ok(Self {
                 index: data.index.into_iter().collect(),
                 chunk_count,
+                mmap: None,
             })
         } else {
             Err(CodixingError::Serialization(
                 "failed to deserialize trigram index: unknown format".to_string(),
             ))
         }
+    }
+
+    /// Load the trigram index via memory mapping (zero deserialization).
+    fn load_mmap(path: &Path) -> Result<Self> {
+        let file = std::fs::File::open(path)?;
+        let file_len = file.metadata()?.len() as usize;
+
+        if file_len < MMAP_HEADER_SIZE {
+            return Err(CodixingError::Serialization(
+                "trigram mmap file too small for header".to_string(),
+            ));
+        }
+
+        // SAFETY: Read-only Mmap over a file we opened read-only.
+        let mmap = unsafe { Mmap::map(&file) }.map_err(|e| {
+            CodixingError::Serialization(format!("failed to mmap trigram file: {e}"))
+        })?;
+
+        let magic = u32::from_le_bytes(mmap[0..4].try_into().unwrap());
+        if magic != MMAP_MAGIC {
+            return Err(CodixingError::Serialization(format!(
+                "invalid trigram magic: expected 0x{MMAP_MAGIC:08X}, got 0x{magic:08X}"
+            )));
+        }
+        let version = u32::from_le_bytes(mmap[4..8].try_into().unwrap());
+        if version != MMAP_VERSION {
+            return Err(CodixingError::Serialization(format!(
+                "unsupported trigram version: expected {MMAP_VERSION}, got {version}"
+            )));
+        }
+
+        let trigram_count = u32::from_le_bytes(mmap[8..12].try_into().unwrap());
+        let chunk_count = u32::from_le_bytes(mmap[12..16].try_into().unwrap());
+        let total_postings = u32::from_le_bytes(mmap[16..20].try_into().unwrap());
+
+        let index_offset = MMAP_HEADER_SIZE;
+        let postings_offset = index_offset + (trigram_count as usize) * MMAP_ENTRY_SIZE;
+        let expected_size = postings_offset + (total_postings as usize) * 8;
+
+        if file_len < expected_size {
+            return Err(CodixingError::Serialization(format!(
+                "trigram mmap file truncated: expected {expected_size} bytes, got {file_len}"
+            )));
+        }
+
+        Ok(Self {
+            index: HashMap::new(),
+            chunk_count: chunk_count as usize,
+            mmap: Some(MmapBacking {
+                mmap,
+                trigram_count,
+                index_offset,
+                postings_offset,
+            }),
+        })
     }
 }
 
@@ -809,6 +1111,72 @@ mod tests {
 
         assert_eq!(loaded.len(), 0);
         assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn mmap_save_and_load_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trigram_mmap.bin");
+
+        let mut idx = TrigramIndex::new();
+        idx.add(1, "fn process_batch(items: &[Item]) { todo!() }");
+        idx.add(2, "fn main() { process_batch(&items); }");
+        idx.add(3, "fn unrelated_function() {}");
+
+        idx.save_mmap_binary(&path).unwrap();
+        let loaded = TrigramIndex::load_binary(&path).unwrap();
+
+        // Loaded via mmap: search works, HashMap is empty.
+        assert!(loaded.mmap.is_some());
+        assert_eq!(loaded.len(), 3);
+
+        let mut orig = idx.search("process_batch");
+        let mut loaded_ids = loaded.search("process_batch");
+        orig.sort();
+        loaded_ids.sort();
+        assert_eq!(orig, loaded_ids);
+
+        // No-match queries return empty.
+        assert!(loaded.search("nonexistent_symbol").is_empty());
+        // Short queries return empty.
+        assert!(loaded.search("ab").is_empty());
+    }
+
+    #[test]
+    fn mmap_empty_index_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trigram_mmap_empty.bin");
+
+        let idx = TrigramIndex::new();
+        idx.save_mmap_binary(&path).unwrap();
+        let loaded = TrigramIndex::load_binary(&path).unwrap();
+
+        assert_eq!(loaded.len(), 0);
+        assert!(loaded.is_empty());
+        assert!(loaded.search("anything").is_empty());
+    }
+
+    #[test]
+    fn mmap_ensure_mutable_preserves_data() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trigram_mmap_mut.bin");
+
+        let mut idx = TrigramIndex::new();
+        idx.add(1, "fn process_batch() {}");
+        idx.add(2, "fn other_batch() {}");
+        idx.save_mmap_binary(&path).unwrap();
+
+        let mut loaded = TrigramIndex::load_binary(&path).unwrap();
+        assert!(loaded.mmap.is_some());
+
+        // Mutate: this triggers ensure_mutable().
+        loaded.remove(1, "fn process_batch() {}");
+        assert!(loaded.mmap.is_none()); // materialized
+
+        // Only chunk 2 should remain.
+        let candidates = loaded.search("batch");
+        assert!(!candidates.contains(&1));
+        assert!(candidates.contains(&2));
     }
 
     #[test]

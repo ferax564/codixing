@@ -146,6 +146,20 @@ enum Command {
         depth: usize,
     },
 
+    /// Find files in one directory that import from another directory.
+    ///
+    /// Answers cross-package queries like "which gateway files import from
+    /// the security module?" by walking the import graph.
+    CrossImports {
+        /// Source directory (files that do the importing).
+        #[arg(long)]
+        from: String,
+
+        /// Target directory (module being imported from).
+        #[arg(long)]
+        to: String,
+    },
+
     /// Find all code locations that reference a symbol (call sites, imports, usages).
     Usages {
         /// Symbol name to search for (exact or partial identifier).
@@ -386,6 +400,7 @@ async fn main() -> Result<()> {
         Command::Callers { file, depth } => cmd_callers(file, depth),
         Command::Callees { file, depth } => cmd_callees(file, depth),
         Command::Dependencies { file, depth } => cmd_dependencies(file, depth),
+        Command::CrossImports { from, to } => cmd_cross_imports(from, to),
         Command::Usages {
             symbol,
             limit,
@@ -758,6 +773,33 @@ fn cmd_dependencies(file: String, depth: usize) -> Result<()> {
         println!("{d}");
     }
     eprintln!("\n{} transitive dependency/dependencies found.", deps.len());
+    Ok(())
+}
+
+fn cmd_cross_imports(from: String, to: String) -> Result<()> {
+    let root = std::env::current_dir().context("cannot determine current directory")?;
+    let engine = Engine::open(&root).with_context(|| {
+        format!(
+            "no index found at {} — run `codixing init` first",
+            root.display()
+        )
+    })?;
+
+    let files = engine.cross_imports(&from, &to);
+    if files.is_empty() {
+        eprintln!("No files in \"{}\" import from \"{}\"", from, to);
+        return Ok(());
+    }
+
+    for f in &files {
+        println!("{f}");
+    }
+    eprintln!(
+        "\n{} file(s) in \"{}\" import from \"{}\".",
+        files.len(),
+        from,
+        to
+    );
     Ok(())
 }
 

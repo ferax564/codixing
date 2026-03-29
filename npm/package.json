@@ -1,6 +1,6 @@
 {
   "name": "codixing-mcp",
-  "version": "0.21.1",
+  "version": "0.22.0",
   "description": "Code retrieval engine for AI agents — MCP server",
   "bin": {
     "codixing-mcp": "index.js"

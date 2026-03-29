@@ -55,6 +55,17 @@ impl Engine {
         self.transitive_callees(file_path, depth)
     }
 
+    /// Find files under `from_prefix` that import any file under `to_prefix`.
+    ///
+    /// Answers module-level cross-package queries like "which gateway files
+    /// import from the security module?"
+    pub fn cross_imports(&self, from_prefix: &str, to_prefix: &str) -> Vec<String> {
+        self.graph
+            .as_ref()
+            .map(|g| g.cross_imports(from_prefix, to_prefix))
+            .unwrap_or_default()
+    }
+
     /// Return graph statistics, or `None` if the graph has not been built.
     pub fn graph_stats(&self) -> Option<GraphStats> {
         self.graph.as_ref().map(|g| g.stats())
