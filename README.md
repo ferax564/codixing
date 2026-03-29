@@ -284,9 +284,4 @@ cargo fmt --check
 
 ## License
 
-Codixing Business Source License 1.0. Free for:
-- Open-source projects
-- Personal and educational use
-- Teams of 5 or fewer developers
-
-Commercial license required for larger teams. Contact [hello@codixing.com](mailto:hello@codixing.com).
+Licensed under the [Apache License, Version 2.0](LICENSE). See [LICENSE](LICENSE) for the full text.
