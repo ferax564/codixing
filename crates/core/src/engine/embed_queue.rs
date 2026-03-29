@@ -18,6 +18,12 @@ use std::sync::Arc;
 /// and use the direct sync path (no redb I/O, no JSON serialization).
 pub const QUEUE_THRESHOLD: usize = 1000;
 
+/// Number of jobs to pull per batch when draining the queue.
+const DRAIN_PULL_BATCH: u32 = 50;
+
+/// Number of jobs each parallel worker pulls per iteration.
+const WORKER_PULL_BATCH: u32 = 10;
+
 /// Map RustQueue errors into CodixingError::Embedding.
 fn queue_err(e: impl std::fmt::Display) -> CodixingError {
     CodixingError::Embedding(format!("queue error: {e}"))
@@ -76,7 +82,7 @@ pub async fn push_file_embed_jobs(
 
 /// Drain the embedding queue, processing all pending jobs.
 ///
-/// Pulls jobs in batches of 50, embeds each file using late chunking
+/// Pulls jobs in batches of [`DRAIN_PULL_BATCH`], embeds each file using late chunking
 /// (with per-chunk fallback via `embed_single_file`), and inserts vectors.
 /// Returns the total number of chunks embedded.
 pub async fn drain_embed_queue(
@@ -90,7 +96,10 @@ pub async fn drain_embed_queue(
     let mut total_embedded = 0;
 
     loop {
-        let jobs = rq.pull("embeddings", 50).await.map_err(queue_err)?;
+        let jobs = rq
+            .pull("embeddings", DRAIN_PULL_BATCH)
+            .await
+            .map_err(queue_err)?;
         if jobs.is_empty() {
             break;
         }
@@ -146,7 +155,6 @@ pub fn drain_embed_queue_parallel(
     tracing::info!(workers = num_workers, "starting parallel embedding drain");
 
     // Phase 1: N workers embed in parallel, collect (id, vec, path) tuples.
-    let rq_ref = rq;
     let collected: Vec<(u64, Vec<f32>, String)> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..num_workers)
             .map(|worker_id| {
@@ -163,7 +171,7 @@ pub fn drain_embed_queue_parallel(
                     let mut local: Vec<(u64, Vec<f32>, String)> = Vec::new();
                     loop {
                         let jobs = block_on_async(async {
-                            rq_ref.pull("embeddings", 10).await.map_err(queue_err)
+                            rq.pull("embeddings", WORKER_PULL_BATCH).await.map_err(queue_err)
                         })?;
                         if jobs.is_empty() {
                             break;
@@ -189,12 +197,12 @@ pub fn drain_embed_queue_parallel(
                                 Ok(vecs) => {
                                     local.extend(vecs);
                                     block_on_async(async {
-                                        rq_ref.ack(job.id, None).await.map_err(queue_err)
+                                        rq.ack(job.id, None).await.map_err(queue_err)
                                     })?;
                                 }
                                 Err(e) => {
                                     let _ = block_on_async(async {
-                                        rq_ref.fail(job.id, &e.to_string()).await
+                                        rq.fail(job.id, &e.to_string()).await
                                     });
                                 }
                             }
@@ -231,4 +239,52 @@ pub fn drain_embed_queue_parallel(
     }
 
     Ok(total)
+}
+
+/// Embed pending chunks using the best available path.
+///
+/// - If `rq` is available and `pending.len() >= QUEUE_THRESHOLD`: use the queue
+///   with parallel workers.
+/// - Otherwise: use the direct sync path via `embed_and_index_chunks`.
+#[allow(clippy::too_many_arguments)]
+pub fn embed_pending(
+    rq: Option<&Arc<RustQueue>>,
+    pending: &DashMap<u64, String>,
+    chunk_meta: &DashMap<u64, ChunkMeta>,
+    embedder: &Embedder,
+    vec_idx: &mut VectorIndex,
+    contextual: bool,
+    root: &Path,
+    model: &crate::config::EmbeddingModel,
+) -> Result<()> {
+    if let Some(rq) = rq {
+        if pending.len() >= QUEUE_THRESHOLD {
+            let num_workers = std::thread::available_parallelism()
+                .map(|n| n.get().min(4))
+                .unwrap_or(1);
+            block_on_async(async {
+                let pushed = push_file_embed_jobs(rq, pending, chunk_meta).await?;
+                tracing::info!(jobs = pushed, "embedding jobs queued");
+                Ok::<(), crate::error::CodixingError>(())
+            })?;
+            let total = drain_embed_queue_parallel(
+                rq,
+                model,
+                chunk_meta,
+                vec_idx,
+                contextual,
+                root,
+                num_workers,
+            )?;
+            tracing::info!(
+                chunks = total,
+                workers = num_workers,
+                "embedding complete via queue"
+            );
+            return Ok(());
+        }
+    }
+    super::indexing::embed_and_index_chunks(
+        pending, chunk_meta, embedder, vec_idx, contextual, root,
+    )
 }

@@ -509,7 +509,6 @@ impl Engine {
         if self.read_only {
             return Err(CodixingError::ReadOnly);
         }
-        use super::indexing::embed_and_index_chunks;
 
         let embedder = self
             .embedder
@@ -551,53 +550,20 @@ impl Engine {
 
         #[cfg(feature = "rustqueue")]
         {
-            if let Some(ref rq) = self.embed_queue {
-                if pending.len() >= super::embed_queue::QUEUE_THRESHOLD {
-                    super::embed_queue::block_on_async(async {
-                        let pushed = super::embed_queue::push_file_embed_jobs(
-                            rq,
-                            &pending,
-                            &self.chunk_meta,
-                        )
-                        .await?;
-                        info!(jobs = pushed, "re-embedding jobs queued");
-
-                        let total = super::embed_queue::drain_embed_queue(
-                            rq,
-                            &embedder,
-                            &self.chunk_meta,
-                            vec_idx,
-                            contextual,
-                            self.store.root(),
-                        )
-                        .await?;
-                        info!(chunks = total, "re-embedding complete via queue");
-                        Ok::<(), crate::error::CodixingError>(())
-                    })?;
-                } else {
-                    embed_and_index_chunks(
-                        &pending,
-                        &self.chunk_meta,
-                        &embedder,
-                        vec_idx,
-                        contextual,
-                        self.store.root(),
-                    )?;
-                }
-            } else {
-                embed_and_index_chunks(
-                    &pending,
-                    &self.chunk_meta,
-                    &embedder,
-                    vec_idx,
-                    contextual,
-                    self.store.root(),
-                )?;
-            }
+            super::embed_queue::embed_pending(
+                self.embed_queue.as_ref(),
+                &pending,
+                &self.chunk_meta,
+                &embedder,
+                vec_idx,
+                contextual,
+                self.store.root(),
+                &self.config.embedding.model,
+            )?;
         }
         #[cfg(not(feature = "rustqueue"))]
         {
-            embed_and_index_chunks(
+            super::indexing::embed_and_index_chunks(
                 &pending,
                 &self.chunk_meta,
                 &embedder,

@@ -28,8 +28,7 @@ use crate::vector::VectorIndex;
 
 use super::indexing::{
     IndexContext, add_call_edges, build_file_trigram_from_content, build_graph,
-    embed_and_index_chunks, populate_symbol_graph, process_file, unix_timestamp_string,
-    walk_source_files,
+    populate_symbol_graph, process_file, unix_timestamp_string, walk_source_files,
 };
 use super::{Engine, git_head_commit};
 
@@ -148,80 +147,20 @@ impl Engine {
             if let Some(vec_idx) = &mut vector {
                 #[cfg(feature = "rustqueue")]
                 {
-                    if let Some(ref rq) = embed_queue {
-                        if pending_embeds.len() >= super::embed_queue::QUEUE_THRESHOLD {
-                            // Queue path: file-grouped jobs with late chunking.
-                            super::embed_queue::block_on_async(async {
-                                let pushed = super::embed_queue::push_file_embed_jobs(
-                                    rq,
-                                    &pending_embeds,
-                                    &chunk_meta_map,
-                                )
-                                .await?;
-                                info!(jobs = pushed, "embedding jobs queued");
-                                Ok::<(), crate::error::CodixingError>(())
-                            })?;
-
-                            // Drain with parallel workers when hardware allows.
-                            let num_workers = std::thread::available_parallelism()
-                                .map(|n| n.get().min(4))
-                                .unwrap_or(1);
-
-                            if num_workers > 1 {
-                                let total = super::embed_queue::drain_embed_queue_parallel(
-                                    rq,
-                                    &config.embedding.model,
-                                    &chunk_meta_map,
-                                    vec_idx,
-                                    config.embedding.contextual_embeddings,
-                                    &root,
-                                    num_workers,
-                                )?;
-                                info!(
-                                    chunks = total,
-                                    workers = num_workers,
-                                    "embedding complete via parallel queue"
-                                );
-                            } else {
-                                super::embed_queue::block_on_async(async {
-                                    let total = super::embed_queue::drain_embed_queue(
-                                        rq,
-                                        emb,
-                                        &chunk_meta_map,
-                                        vec_idx,
-                                        config.embedding.contextual_embeddings,
-                                        &root,
-                                    )
-                                    .await?;
-                                    info!(chunks = total, "embedding complete via queue");
-                                    Ok::<(), crate::error::CodixingError>(())
-                                })?;
-                            }
-                        } else {
-                            // Below threshold: direct sync path (no queue overhead).
-                            embed_and_index_chunks(
-                                &pending_embeds,
-                                &chunk_meta_map,
-                                emb,
-                                vec_idx,
-                                config.embedding.contextual_embeddings,
-                                &root,
-                            )?;
-                        }
-                    } else {
-                        embed_and_index_chunks(
-                            &pending_embeds,
-                            &chunk_meta_map,
-                            emb,
-                            vec_idx,
-                            config.embedding.contextual_embeddings,
-                            &root,
-                        )?;
-                    }
+                    super::embed_queue::embed_pending(
+                        embed_queue.as_ref(),
+                        &pending_embeds,
+                        &chunk_meta_map,
+                        emb,
+                        vec_idx,
+                        config.embedding.contextual_embeddings,
+                        &root,
+                        &config.embedding.model,
+                    )?;
                 }
                 #[cfg(not(feature = "rustqueue"))]
                 {
-                    embed_and_index_chunks(
+                    super::indexing::embed_and_index_chunks(
                         &pending_embeds,
                         &chunk_meta_map,
                         emb,

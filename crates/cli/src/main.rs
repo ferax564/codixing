@@ -460,6 +460,25 @@ fn cmd_init(
 
     let engine = Engine::init(&root, config).with_context(|| "failed to initialize index")?;
 
+    // Re-enable embeddings in the saved config so `codixing embed` works later.
+    // Engine::init() persists config.json early, and defer_embeddings set
+    // enabled=false. Without this fix, `codixing embed` would fail because
+    // Engine::open() reads the saved config and skips loading the embedder.
+    if defer_embeddings {
+        let config_path = root.join(".codixing").join("config.json");
+        if let Ok(text) = std::fs::read_to_string(&config_path) {
+            if let Ok(mut saved) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(emb) = saved.get_mut("embedding") {
+                    emb["enabled"] = serde_json::Value::Bool(true);
+                    let _ = std::fs::write(
+                        &config_path,
+                        serde_json::to_string_pretty(&saved).unwrap_or_default(),
+                    );
+                }
+            }
+        }
+    }
+
     let stats = engine.stats();
     let elapsed = start.elapsed();
 
