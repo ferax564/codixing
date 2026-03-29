@@ -45,7 +45,7 @@ def build_codixing():
     """Build codixing release binary."""
     print("Building codixing (release)...")
     subprocess.run(
-        ["cargo", "build", "--release", "-p", "codixing-cli"],
+        ["cargo", "build", "--release", "-p", "codixing"],
         cwd=REPO_ROOT, check=True, capture_output=True,
     )
 
@@ -81,7 +81,7 @@ def codixing_search(repo_path: Path, query: str, strategy: str, top_k: int = 10)
     """Run codixing search and return file paths from results."""
     out, _ = run(
         [str(CODIXING), "search", query, "--strategy", strategy,
-         "--top", str(top_k), "--format", "json"],
+         "--limit", str(top_k), "--json"],
         cwd=str(repo_path),
     )
     try:
@@ -186,7 +186,7 @@ def run_ttfs_benchmark(repo_path: Path, repo_name: str) -> dict:
     print(f"  TTFS {repo_name} (standard init)...")
     start = time.monotonic()
     run([str(CODIXING), "init", ".", "--no-embeddings"], cwd=str(repo_path), timeout=300)
-    run([str(CODIXING), "search", "function", "--top", "1"], cwd=str(repo_path))
+    run([str(CODIXING), "search", "function", "--limit", "1"], cwd=str(repo_path))
     standard_ttfs = time.monotonic() - start
 
     # Deferred init (--defer-embeddings)
@@ -194,7 +194,7 @@ def run_ttfs_benchmark(repo_path: Path, repo_name: str) -> dict:
     print(f"  TTFS {repo_name} (deferred embeddings)...")
     start = time.monotonic()
     run([str(CODIXING), "init", ".", "--defer-embeddings"], cwd=str(repo_path), timeout=300)
-    run([str(CODIXING), "search", "function", "--top", "1"], cwd=str(repo_path))
+    run([str(CODIXING), "search", "function", "--limit", "1"], cwd=str(repo_path))
     deferred_ttfs = time.monotonic() - start
 
     return {
