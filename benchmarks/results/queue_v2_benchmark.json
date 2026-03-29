@@ -357,169 +357,169 @@
         {
           "query": "symbol-channel-plugin",
           "category": "symbol",
-          "grep_ms": 1321.5,
-          "codixing_ms": 90.8,
+          "grep_ms": 771.8,
+          "codixing_ms": 52.6,
           "codixing_strategy": "symbol_lookup"
         },
         {
           "query": "symbol-gateway-server",
           "category": "symbol",
-          "grep_ms": 520.2,
-          "codixing_ms": 53.0,
+          "grep_ms": 538.1,
+          "codixing_ms": 55.2,
           "codixing_strategy": "symbol_lookup"
         },
         {
           "query": "symbol-context-engine-interface",
           "category": "symbol",
-          "grep_ms": 551.4,
-          "codixing_ms": 51.4,
+          "grep_ms": 593.6,
+          "codixing_ms": 50.8,
           "codixing_strategy": "symbol_lookup"
         },
         {
           "query": "symbol-openclaw-config",
           "category": "symbol",
-          "grep_ms": 529.6,
-          "codixing_ms": 53.2,
+          "grep_ms": 568.7,
+          "codixing_ms": 61.7,
           "codixing_strategy": "symbol_lookup"
         },
         {
           "query": "symbol-tool-policy-like",
           "category": "symbol",
-          "grep_ms": 540.0,
-          "codixing_ms": 52.3,
+          "grep_ms": 562.3,
+          "codixing_ms": 53.1,
           "codixing_strategy": "symbol_lookup"
         },
         {
           "query": "usage-redact-sensitive-text",
           "category": "usage",
-          "grep_ms": 1010.0,
-          "codixing_ms": 60.8,
+          "grep_ms": 1008.7,
+          "codixing_ms": 56.9,
           "codixing_strategy": "usages"
         },
         {
           "query": "usage-create-auth-rate-limiter",
           "category": "usage",
-          "grep_ms": 1022.6,
-          "codixing_ms": 55.5,
+          "grep_ms": 1016.7,
+          "codixing_ms": 56.3,
           "codixing_strategy": "usages"
         },
         {
           "query": "usage-channel-plugin-imports",
           "category": "usage",
-          "grep_ms": 1043.4,
-          "codixing_ms": 50.8,
+          "grep_ms": 986.8,
+          "codixing_ms": 54.0,
           "codixing_strategy": "usages"
         },
         {
           "query": "usage-context-engine-imports",
           "category": "usage",
-          "grep_ms": 1084.1,
-          "codixing_ms": 49.0,
+          "grep_ms": 1041.5,
+          "codixing_ms": 47.1,
           "codixing_strategy": "usages"
         },
         {
           "query": "usage-load-config",
           "category": "usage",
-          "grep_ms": 1036.5,
-          "codixing_ms": 47.0,
+          "grep_ms": 1014.9,
+          "codixing_ms": 49.7,
           "codixing_strategy": "usages"
         },
         {
           "query": "concept-security-audit",
           "category": "concept",
-          "grep_ms": 672.9,
-          "codixing_ms": 262.2,
+          "grep_ms": 713.2,
+          "codixing_ms": 245.7,
           "codixing_strategy": "fast"
         },
         {
           "query": "concept-rate-limiting",
           "category": "concept",
-          "grep_ms": 1323.6,
-          "codixing_ms": 246.0,
+          "grep_ms": 1318.4,
+          "codixing_ms": 236.4,
           "codixing_strategy": "fast"
         },
         {
           "query": "concept-secret-redaction",
           "category": "concept",
-          "grep_ms": 723.5,
-          "codixing_ms": 235.6,
+          "grep_ms": 716.0,
+          "codixing_ms": 243.7,
           "codixing_strategy": "fast"
         },
         {
           "query": "concept-cron-scheduling",
           "category": "concept",
-          "grep_ms": 663.2,
-          "codixing_ms": 224.2,
+          "grep_ms": 646.9,
+          "codixing_ms": 228.9,
           "codixing_strategy": "fast"
         },
         {
           "query": "concept-system-prompt-composition",
           "category": "concept",
-          "grep_ms": 1230.1,
-          "codixing_ms": 242.5,
+          "grep_ms": 1265.6,
+          "codixing_ms": 245.2,
           "codixing_strategy": "fast"
         },
         {
           "query": "cross-pkg-plugin-sdk-entry",
           "category": "cross-package",
-          "grep_ms": 1048.5,
-          "codixing_ms": 75.3,
+          "grep_ms": 1089.0,
+          "codixing_ms": 82.2,
           "codixing_strategy": "explore"
         },
         {
           "query": "cross-pkg-bundled-channel-entries",
           "category": "cross-package",
-          "grep_ms": 1150.7,
-          "codixing_ms": 74.8,
+          "grep_ms": 1127.7,
+          "codixing_ms": 73.2,
           "codixing_strategy": "explore"
         },
         {
           "query": "cross-pkg-security-from-gateway",
           "category": "cross-package",
-          "grep_ms": 1304.2,
-          "codixing_ms": 72.7,
+          "grep_ms": 1218.8,
+          "codixing_ms": 78.5,
           "codixing_strategy": "explore"
         },
         {
           "query": "cross-pkg-config-types-from-agents",
           "category": "cross-package",
-          "grep_ms": 1250.9,
-          "codixing_ms": 70.5,
+          "grep_ms": 1274.6,
+          "codixing_ms": 75.8,
           "codixing_strategy": "explore"
         },
         {
           "query": "cross-pkg-plugin-contracts-registry",
           "category": "cross-package",
-          "grep_ms": 1220.7,
-          "codixing_ms": 71.2,
+          "grep_ms": 1260.4,
+          "codixing_ms": 74.6,
           "codixing_strategy": "explore"
         }
       ],
       "summary": {
         "grep": {
-          "avg_ms": 962.4,
-          "min_ms": 520.2,
-          "max_ms": 1323.6
+          "avg_ms": 936.7,
+          "min_ms": 538.1,
+          "max_ms": 1318.4
         },
         "codixing explore": {
-          "avg_ms": 72.9,
-          "min_ms": 70.5,
-          "max_ms": 75.3
+          "avg_ms": 76.9,
+          "min_ms": 73.2,
+          "max_ms": 82.2
         },
         "codixing fast": {
-          "avg_ms": 242.1,
-          "min_ms": 224.2,
-          "max_ms": 262.2
+          "avg_ms": 240.0,
+          "min_ms": 228.9,
+          "max_ms": 245.7
         },
         "codixing symbol_lookup": {
-          "avg_ms": 60.1,
-          "min_ms": 51.4,
-          "max_ms": 90.8
+          "avg_ms": 54.7,
+          "min_ms": 50.8,
+          "max_ms": 61.7
         },
         "codixing usages": {
-          "avg_ms": 52.6,
-          "min_ms": 47.0,
-          "max_ms": 60.8
+          "avg_ms": 52.8,
+          "min_ms": 47.1,
+          "max_ms": 56.9
         }
       }
     }
@@ -527,15 +527,15 @@
   "indexing": [
     {
       "repo": "openclaw",
-      "bm25_init_seconds": 26.5
+      "bm25_init_seconds": 26.95
     }
   ],
   "ttfs": [
     {
       "repo": "openclaw",
-      "standard_ttfs_seconds": 24.81,
-      "deferred_ttfs_seconds": 25.27,
-      "speedup": 1.0
+      "standard_ttfs_seconds": 29.25,
+      "deferred_ttfs_seconds": 31.04,
+      "speedup": 0.9
     }
   ]
 }
