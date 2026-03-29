@@ -8,7 +8,8 @@ const https = require("https");
 
 const VERSION = require("./package.json").version;
 const BIN_DIR = join(__dirname, "bin");
-const BINARY_NAME = "codixing-mcp";
+const IS_WINDOWS = process.platform === "win32";
+const BINARY_NAME = IS_WINDOWS ? "codixing-mcp.exe" : "codixing-mcp";
 const BINARY_PATH = join(BIN_DIR, BINARY_NAME);
 
 const PLATFORM_MAP = {
@@ -16,6 +17,7 @@ const PLATFORM_MAP = {
   "darwin-x64": "codixing-mcp-macos-x86_64",
   "linux-x64": "codixing-mcp-linux-x86_64",
   "linux-arm64": "codixing-mcp-linux-aarch64",
+  "win32-x64": "codixing-mcp-windows-x86_64.exe",
 };
 
 function getDownloadUrl() {
@@ -59,7 +61,7 @@ async function install() {
   process.stderr.write(`codixing-mcp: downloading v${VERSION} from ${url}\n`);
   try {
     await download(url, BINARY_PATH);
-    chmodSync(BINARY_PATH, 0o755);
+    if (!IS_WINDOWS) chmodSync(BINARY_PATH, 0o755);
     process.stderr.write(`codixing-mcp: installed successfully\n`);
   } catch (err) {
     process.stderr.write(`codixing-mcp: download failed: ${err.message}\n`);
