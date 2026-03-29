@@ -1,8 +1,9 @@
-//! Queue-based embedding pipeline backed by RustQueue.
+//! Queue-based embedding pipeline v2 backed by RustQueue.
 //!
-//! Instead of embedding chunks synchronously, this module pushes batches
-//! as jobs to a RustQueue instance. A worker loop pulls and processes them.
-//! Unfinished jobs survive crashes and resume on restart.
+//! File-grouped jobs with late chunking support. Each job represents one
+//! source file and its chunk IDs. The worker reads the file, attempts late
+//! chunking, and falls back to per-chunk embedding. Unfinished jobs survive
+//! crashes and resume on restart.
 
 use crate::embedder::Embedder;
 use crate::error::{CodixingError, Result};
@@ -10,7 +11,12 @@ use crate::retriever::ChunkMeta;
 use crate::vector::VectorIndex;
 use dashmap::DashMap;
 use rustqueue::RustQueue;
+use std::path::Path;
 use std::sync::Arc;
+
+/// Repos with fewer pending chunks than this skip the queue entirely
+/// and use the direct sync path (no redb I/O, no JSON serialization).
+pub const QUEUE_THRESHOLD: usize = 1000;
 
 /// Map RustQueue errors into CodixingError::Embedding.
 fn queue_err(e: impl std::fmt::Display) -> CodixingError {
@@ -19,9 +25,6 @@ fn queue_err(e: impl std::fmt::Display) -> CodixingError {
 
 /// Run an async future from synchronous code, regardless of whether
 /// a tokio runtime is already active.
-///
-/// - Inside an existing runtime: uses `block_in_place` + `block_on`.
-/// - Outside any runtime: spins up a temporary current-thread runtime.
 pub(super) fn block_on_async<F, T>(fut: F) -> T
 where
     F: std::future::Future<Output = T>,
@@ -35,10 +38,97 @@ where
     }
 }
 
-/// Push embedding work as batched jobs to the `"embeddings"` queue.
+/// Push one job per source file to the `"embeddings"` queue.
+///
+/// Groups pending chunk IDs by file path from `chunk_meta`, then pushes
+/// a `"late-chunk-file"` job for each file. Returns the number of jobs pushed.
+pub async fn push_file_embed_jobs(
+    rq: &Arc<RustQueue>,
+    pending: &DashMap<u64, String>,
+    chunk_meta: &DashMap<u64, ChunkMeta>,
+) -> Result<usize> {
+    let mut file_chunks: std::collections::HashMap<String, Vec<u64>> =
+        std::collections::HashMap::new();
+    for entry in pending.iter() {
+        if let Some(meta) = chunk_meta.get(entry.key()) {
+            file_chunks
+                .entry(meta.file_path.clone())
+                .or_default()
+                .push(*entry.key());
+        }
+    }
+
+    let mut job_count = 0;
+    for (file_path, chunk_ids) in &file_chunks {
+        rq.push(
+            "embeddings",
+            "late-chunk-file",
+            serde_json::json!({ "file": file_path, "ids": chunk_ids }),
+            None,
+        )
+        .await
+        .map_err(queue_err)?;
+        job_count += 1;
+    }
+
+    Ok(job_count)
+}
+
+/// Drain the embedding queue, processing all pending jobs.
+///
+/// Pulls jobs in batches of 50, embeds each file using late chunking
+/// (with per-chunk fallback via `embed_single_file`), and inserts vectors.
+/// Returns the total number of chunks embedded.
+pub async fn drain_embed_queue(
+    rq: &Arc<RustQueue>,
+    embedder: &Embedder,
+    chunk_meta: &DashMap<u64, ChunkMeta>,
+    vec_idx: &mut VectorIndex,
+    contextual: bool,
+    root: &Path,
+) -> Result<usize> {
+    let mut total_embedded = 0;
+
+    loop {
+        let jobs = rq.pull("embeddings", 50).await.map_err(queue_err)?;
+        if jobs.is_empty() {
+            break;
+        }
+
+        for job in &jobs {
+            let file_path: String = serde_json::from_value(job.data["file"].clone())
+                .map_err(|e| CodixingError::Embedding(format!("bad job payload: {e}")))?;
+            let chunk_ids: Vec<u64> = serde_json::from_value(job.data["ids"].clone())
+                .map_err(|e| CodixingError::Embedding(format!("bad job payload: {e}")))?;
+
+            match super::indexing::embed_single_file(
+                embedder, chunk_meta, vec_idx, contextual, root, &file_path, &chunk_ids,
+            ) {
+                Ok(n) => {
+                    total_embedded += n;
+                    rq.ack(job.id, None).await.map_err(queue_err)?;
+                }
+                Err(e) => {
+                    let _ = rq.fail(job.id, &e.to_string()).await;
+                }
+            }
+        }
+    }
+
+    Ok(total_embedded)
+}
+
+// ── v1 backward-compatibility shims ──────────────────────────────────────
+// These are kept temporarily for callers in init.rs and sync.rs that have
+// not yet been migrated to the v2 push_file_embed_jobs / drain_embed_queue
+// API. They will be removed by Tasks 3 and 4.
+
+/// Push embedding work as batched jobs to the `"embeddings"` queue (v1).
 ///
 /// Each job payload contains a list of chunk IDs to embed.
 /// Returns the number of jobs pushed.
+///
+/// **Deprecated**: use [`push_file_embed_jobs`] instead.
 pub async fn push_embed_jobs(
     rq: &Arc<RustQueue>,
     pending: &DashMap<u64, String>,
@@ -63,12 +153,9 @@ pub async fn push_embed_jobs(
     Ok(job_count)
 }
 
-/// Process a single round of embedding jobs from the queue.
+/// Process a single round of embedding jobs from the queue (v1).
 ///
-/// Pulls up to `max_jobs` from the `"embeddings"` queue, embeds each batch,
-/// and stores vectors in the index. Acks on success, fails on error.
-///
-/// Returns the number of chunks embedded in this round.
+/// **Deprecated**: use [`drain_embed_queue`] instead.
 pub async fn run_embed_worker_batch(
     rq: &Arc<RustQueue>,
     embedder: &Embedder,
