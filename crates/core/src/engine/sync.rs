@@ -46,7 +46,7 @@ impl Engine {
         // chunk trigram also updated incrementally; persist to disk.
         if let Err(e) = self
             .get_trigram()
-            .save_binary(&self.store.chunk_trigram_path())
+            .save_mmap_binary(&self.store.chunk_trigram_path())
         {
             warn!(error = %e, "failed to persist chunk trigram index");
         }
@@ -389,7 +389,7 @@ impl Engine {
         }
         if let Err(e) = self
             .get_trigram()
-            .save_binary(&self.store.chunk_trigram_path())
+            .save_mmap_binary(&self.store.chunk_trigram_path())
         {
             warn!(error = %e, "failed to persist chunk trigram index");
         }
@@ -475,7 +475,7 @@ impl Engine {
         }
         if let Err(e) = self
             .get_trigram()
-            .save_binary(&self.store.chunk_trigram_path())
+            .save_mmap_binary(&self.store.chunk_trigram_path())
         {
             warn!(error = %e, "failed to persist chunk trigram index");
         }

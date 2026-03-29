@@ -612,8 +612,9 @@ pub(super) fn add_call_edges(
 
 /// Populate the symbol-level inner graph with definitions and call references.
 ///
-/// Reads each source file, extracts function/struct/enum definitions and call
-/// references via tree-sitter, then inserts them as nodes and edges into the
+/// Reads each source file from `file_contents` (falling back to disk if not
+/// present), extracts function/struct/enum definitions and call references via
+/// tree-sitter, then inserts them as nodes and edges into the
 /// `CodeGraph::inner` graph.  This gives precise symbol->symbol call edges that
 /// complement the coarser file-level import/call edges.
 ///
@@ -623,8 +624,21 @@ pub(super) fn populate_symbol_graph(
     files: &[PathBuf],
     root: &Path,
     config: &IndexConfig,
+    file_contents: &DashMap<String, Vec<u8>>,
 ) {
     use std::collections::HashMap;
+
+    /// Read file source: try `file_contents` cache first, fall back to disk.
+    fn read_source(
+        abs_path: &Path,
+        rel_str: &str,
+        file_contents: &DashMap<String, Vec<u8>>,
+    ) -> Option<String> {
+        if let Some(bytes) = file_contents.get(rel_str) {
+            return String::from_utf8(bytes.value().clone()).ok();
+        }
+        fs::read_to_string(abs_path).ok()
+    }
 
     // Phase 1: Extract definitions from all files to build a name->NodeIndex map.
     let mut name_to_indices: HashMap<String, Vec<petgraph::graph::NodeIndex>> = HashMap::new();
@@ -634,13 +648,13 @@ pub(super) fn populate_symbol_graph(
             Some(l) => l,
             None => continue,
         };
-        let source = match fs::read_to_string(abs_path) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
         let rel_str = config
             .normalize_path(abs_path)
             .unwrap_or_else(|| normalize_path(abs_path.strip_prefix(root).unwrap_or(abs_path)));
+        let source = match read_source(abs_path, &rel_str, file_contents) {
+            Some(s) => s,
+            None => continue,
+        };
 
         let defs = extract_definitions(&source, &rel_str, &lang);
         for def in &defs {
@@ -659,13 +673,13 @@ pub(super) fn populate_symbol_graph(
             Some(l) => l,
             None => continue,
         };
-        let source = match fs::read_to_string(abs_path) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
         let rel_str = config
             .normalize_path(abs_path)
             .unwrap_or_else(|| normalize_path(abs_path.strip_prefix(root).unwrap_or(abs_path)));
+        let source = match read_source(abs_path, &rel_str, file_contents) {
+            Some(s) => s,
+            None => continue,
+        };
 
         let refs = extract_references(&source, &rel_str, &lang);
 

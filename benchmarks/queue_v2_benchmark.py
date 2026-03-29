@@ -184,6 +184,40 @@ def codixing_usages(repo_path: Path, symbol: str, top_k: int = 10) -> tuple[list
     return files, elapsed_ms
 
 
+def codixing_callers(repo_path: Path, target_file: str, top_k: int = 10) -> tuple[list[str], float]:
+    """Run codixing callers and return (deduplicated file paths, elapsed_ms).
+
+    Parses the callers output to extract file paths of files that reference
+    the target file. Used for cross-package queries that ask "which files
+    import from X" — a structural graph query.
+    """
+    out, elapsed = run(
+        [str(CODIXING), "callers", target_file, "--limit", str(top_k * 3)],
+        cwd=str(repo_path),
+    )
+    elapsed_ms = round(elapsed * 1000, 1)
+    seen: set[str] = set()
+    files: list[str] = []
+    for line in out.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("FILE") or stripped.startswith("---") or "caller(s)" in stripped.lower():
+            continue
+        # Try to extract file path from various output formats.
+        # Format 1: "src/foo.ts [L10-L20] ..." (callers table)
+        bracket_idx = stripped.find(" [L")
+        if bracket_idx >= 0:
+            fp = stripped[:bracket_idx].strip()
+        else:
+            # Format 2: first whitespace-delimited token is a file path
+            fp = stripped.split()[0] if stripped else ""
+        if fp and fp not in seen and ("/" in fp or fp.endswith(".ts") or fp.endswith(".tsx")):
+            seen.add(fp)
+            files.append(fp)
+            if len(files) >= top_k:
+                break
+    return files, elapsed_ms
+
+
 def codixing_search(repo_path: Path, query: str, strategy: str, top_k: int = 10) -> tuple[list[str], float]:
     """Run codixing search and return (DEDUPLICATED file paths, elapsed_ms).
 
@@ -251,12 +285,13 @@ def score_results(returned: list[str], ground_truth: list[str]) -> dict:
 # - symbol: symbol_lookup (codixing symbols — finds definitions, not just references)
 # - usage: usages (dedicated codixing usages subcommand)
 # - concept: fast (BM25 + vectors, semantic search)
-# - cross-package: explore (BM25 + graph expansion, follows import edges)
+# - cross-package: callers (codixing callers — structural graph query for imports)
+#                  Falls back to usages (symbol field) or explore (text search)
 CATEGORY_STRATEGY = {
     "symbol": "symbol_lookup",
     "usage": "usages",
     "concept": "fast",
-    "cross-package": "explore",
+    "cross-package": "callers",
 }
 
 
@@ -285,15 +320,24 @@ def run_accuracy_benchmark(repo_path: Path) -> dict:
         # Route to the right codixing tool based on strategy:
         # - symbol_lookup: codixing symbols (finds definitions, prioritises over imports)
         # - usages: dedicated codixing usages subcommand with symbol name
-        # - explore: BM25 + graph expansion (follows import edges for cross-package)
+        # - callers: codixing callers (structural graph query for cross-package imports)
+        #   Falls back to usages (if symbol field) or explore (text search)
         # - fast/other: use NL text (semantic search)
         if strategy == "symbol_lookup":
             codixing_files, codixing_ms = codixing_symbols(repo_path, q["grep_pattern"])
         elif strategy == "usages":
             usages_symbol = q.get("symbol", q["grep_pattern"])
             codixing_files, codixing_ms = codixing_usages(repo_path, usages_symbol)
-        elif strategy == "explore":
-            codixing_files, codixing_ms = codixing_search(repo_path, q["text"], strategy)
+        elif strategy == "callers":
+            target = q.get("target_file", "")
+            if target:
+                codixing_files, codixing_ms = codixing_callers(repo_path, target)
+            elif q.get("symbol"):
+                # No target_file but has symbol — use usages instead
+                codixing_files, codixing_ms = codixing_usages(repo_path, q["symbol"])
+            else:
+                # Fallback to explore strategy for text-based cross-package queries
+                codixing_files, codixing_ms = codixing_search(repo_path, q["text"], "explore")
         else:
             codixing_files, codixing_ms = codixing_search(repo_path, q["text"], strategy)
 
@@ -380,6 +424,47 @@ def clean_index(repo_path: Path):
     index_dir = repo_path / ".codixing"
     if index_dir.exists():
         subprocess.run(["rm", "-rf", str(index_dir)], check=True)
+
+
+def run_embedding_speed_benchmark(repo_path: Path, repo_name: str) -> dict:
+    """Measure embedding speed: sync (1 worker) vs parallel (4 workers).
+
+    Runs full init with embeddings using BgeSmallEn. Compares the default
+    parallel embedding path against single-worker sync path.
+    Requires the rustqueue feature.
+    """
+    results: dict = {"repo": repo_name}
+
+    # Sync (1 worker): init with CODIXING_EMBED_WORKERS=1
+    clean_index(repo_path)
+    print(f"  Embedding {repo_name} (sync, 1 worker)...")
+    env = {**dict(subprocess.os.environ), "CODIXING_EMBED_WORKERS": "1"}
+    start = time.monotonic()
+    subprocess.run(
+        [str(CODIXING), "init", ".", "--model", "bge-small-en"],
+        cwd=str(repo_path), timeout=1800, capture_output=True, env=env,
+    )
+    sync_time = time.monotonic() - start
+    results["sync_1worker_seconds"] = round(sync_time, 2)
+
+    # Parallel (4 workers)
+    clean_index(repo_path)
+    print(f"  Embedding {repo_name} (parallel, 4 workers)...")
+    env["CODIXING_EMBED_WORKERS"] = "4"
+    start = time.monotonic()
+    subprocess.run(
+        [str(CODIXING), "init", ".", "--model", "bge-small-en"],
+        cwd=str(repo_path), timeout=1800, capture_output=True, env=env,
+    )
+    parallel_time = time.monotonic() - start
+    results["parallel_4worker_seconds"] = round(parallel_time, 2)
+
+    if parallel_time > 0:
+        results["speedup"] = round(sync_time / parallel_time, 2)
+    else:
+        results["speedup"] = 0
+
+    return results
 
 
 def run_indexing_benchmark(repo_path: Path, repo_name: str) -> dict:
@@ -516,6 +601,19 @@ def generate_report(data: dict) -> str:
             )
         lines.append("")
 
+    if "embedding_speed" in data and data["embedding_speed"]:
+        es = data["embedding_speed"]
+        lines.append("## Embedding Speed (sync vs parallel)\n")
+        lines.append(f"**Repo:** {es.get('repo', 'unknown')}\n")
+        lines.append("| Workers | Time (s) | Speedup |")
+        lines.append("|---------|---------|---------|")
+        lines.append(f"| 1 (sync) | {es.get('sync_1worker_seconds', 'N/A')} | 1.0x |")
+        lines.append(
+            f"| 4 (parallel) | {es.get('parallel_4worker_seconds', 'N/A')} | "
+            f"{es.get('speedup', 'N/A')}x |"
+        )
+        lines.append("")
+
     return "\n".join(lines)
 
 
@@ -525,6 +623,8 @@ def main():
     parser.add_argument("--repo", choices=["openclaw", "linux", "both"], default="both")
     parser.add_argument("--skip-accuracy", action="store_true",
                         help="Skip search accuracy benchmark (useful for linux)")
+    parser.add_argument("--skip-embedding", action="store_true",
+                        help="Skip embedding speed benchmark")
     parser.add_argument("--skip-build", action="store_true")
     args = parser.parse_args()
 
@@ -565,6 +665,11 @@ def main():
     data["ttfs"] = []
     for repo_name in repos:
         data["ttfs"].append(run_ttfs_benchmark(REPOS[repo_name], repo_name))
+
+    # Axis 4: Embedding Speed (sync vs parallel)
+    if not args.skip_embedding and "openclaw" in repos:
+        print("\n=== Axis 4: Embedding Speed (sync vs parallel) ===")
+        data["embedding_speed"] = run_embedding_speed_benchmark(REPOS["openclaw"], "openclaw")
 
     # Save results
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)

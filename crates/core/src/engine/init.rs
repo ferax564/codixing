@@ -189,7 +189,7 @@ impl Engine {
                     // Resolve call-site edges using the now-complete symbol table.
                     add_call_edges(&mut g, &symbols, &pending_calls);
                     // Populate the symbol-level inner graph with function-level call edges.
-                    populate_symbol_graph(&mut g, &files, &root, &config);
+                    populate_symbol_graph(&mut g, &files, &root, &config, &file_contents);
                     let scores =
                         compute_pagerank(&g, config.graph.damping, config.graph.iterations);
                     g.apply_pagerank(&scores);
@@ -223,7 +223,7 @@ impl Engine {
         }
 
         // Persist trigram indexes.
-        if let Err(e) = trigram_idx.save_binary(&store.chunk_trigram_path()) {
+        if let Err(e) = trigram_idx.save_mmap_binary(&store.chunk_trigram_path()) {
             warn!(error = %e, "failed to persist chunk trigram index");
         }
         if let Err(e) = ft_idx.save_binary(&store.file_trigram_path()) {
