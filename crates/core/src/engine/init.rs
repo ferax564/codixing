@@ -149,36 +149,40 @@ impl Engine {
                 #[cfg(feature = "rustqueue")]
                 {
                     if let Some(ref rq) = embed_queue {
-                        // Queue-based path: push jobs, then drain synchronously.
-                        super::embed_queue::block_on_async(async {
-                            let batch_size = super::indexing::STREAM_BATCH_SIZE;
-                            let pushed = super::embed_queue::push_embed_jobs(
-                                rq,
-                                &pending_embeds,
-                                batch_size,
-                            )
-                            .await?;
-                            info!(jobs = pushed, "embedding jobs queued");
+                        if pending_embeds.len() >= super::embed_queue::QUEUE_THRESHOLD {
+                            // Queue path: file-grouped jobs with late chunking.
+                            super::embed_queue::block_on_async(async {
+                                let pushed = super::embed_queue::push_file_embed_jobs(
+                                    rq,
+                                    &pending_embeds,
+                                    &chunk_meta_map,
+                                )
+                                .await?;
+                                info!(jobs = pushed, "embedding jobs queued");
 
-                            let mut total = 0;
-                            loop {
-                                let done = super::embed_queue::run_embed_worker_batch(
+                                let total = super::embed_queue::drain_embed_queue(
                                     rq,
                                     emb,
                                     &chunk_meta_map,
                                     vec_idx,
                                     config.embedding.contextual_embeddings,
-                                    10,
+                                    &root,
                                 )
                                 .await?;
-                                if done == 0 {
-                                    break;
-                                }
-                                total += done;
-                            }
-                            info!(chunks = total, "embedding complete via queue");
-                            Ok::<(), crate::error::CodixingError>(())
-                        })?;
+                                info!(chunks = total, "embedding complete via queue");
+                                Ok::<(), crate::error::CodixingError>(())
+                            })?;
+                        } else {
+                            // Below threshold: direct sync path (no queue overhead).
+                            embed_and_index_chunks(
+                                &pending_embeds,
+                                &chunk_meta_map,
+                                emb,
+                                vec_idx,
+                                config.embedding.contextual_embeddings,
+                                &root,
+                            )?;
+                        }
                     } else {
                         embed_and_index_chunks(
                             &pending_embeds,

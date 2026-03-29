@@ -552,31 +552,38 @@ impl Engine {
         #[cfg(feature = "rustqueue")]
         {
             if let Some(ref rq) = self.embed_queue {
-                super::embed_queue::block_on_async(async {
-                    let batch_size = super::indexing::STREAM_BATCH_SIZE;
-                    let pushed =
-                        super::embed_queue::push_embed_jobs(rq, &pending, batch_size).await?;
-                    info!(jobs = pushed, "re-embedding jobs queued");
+                if pending.len() >= super::embed_queue::QUEUE_THRESHOLD {
+                    super::embed_queue::block_on_async(async {
+                        let pushed = super::embed_queue::push_file_embed_jobs(
+                            rq,
+                            &pending,
+                            &self.chunk_meta,
+                        )
+                        .await?;
+                        info!(jobs = pushed, "re-embedding jobs queued");
 
-                    let mut total = 0;
-                    loop {
-                        let done = super::embed_queue::run_embed_worker_batch(
+                        let total = super::embed_queue::drain_embed_queue(
                             rq,
                             &embedder,
                             &self.chunk_meta,
                             vec_idx,
                             contextual,
-                            10,
+                            self.store.root(),
                         )
                         .await?;
-                        if done == 0 {
-                            break;
-                        }
-                        total += done;
-                    }
-                    info!(chunks = total, "re-embedding complete via queue");
-                    Ok::<(), crate::error::CodixingError>(())
-                })?;
+                        info!(chunks = total, "re-embedding complete via queue");
+                        Ok::<(), crate::error::CodixingError>(())
+                    })?;
+                } else {
+                    embed_and_index_chunks(
+                        &pending,
+                        &self.chunk_meta,
+                        &embedder,
+                        vec_idx,
+                        contextual,
+                        self.store.root(),
+                    )?;
+                }
             } else {
                 embed_and_index_chunks(
                     &pending,
