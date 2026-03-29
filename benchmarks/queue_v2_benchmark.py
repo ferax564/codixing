@@ -192,7 +192,7 @@ def codixing_callers(repo_path: Path, target_file: str, top_k: int = 10) -> tupl
     import from X" — a structural graph query.
     """
     out, elapsed = run(
-        [str(CODIXING), "callers", target_file, "--limit", str(top_k * 3)],
+        [str(CODIXING), "callers", target_file],
         cwd=str(repo_path),
     )
     elapsed_ms = round(elapsed * 1000, 1)

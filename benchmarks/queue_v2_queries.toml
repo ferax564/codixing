@@ -244,7 +244,7 @@ name = "cross-pkg-security-from-gateway"
 text = "gateway files that import from the security module"
 grep_pattern = "import.*from.*security/"
 category = "cross-package"
-target_file = "src/security/audit.ts"
+# No single target_file — this is a module-level query (falls back to explore)
 ground_truth = [
   "src/gateway/server-http.ts",
   "src/gateway/server-startup-log.ts",
@@ -256,7 +256,7 @@ name = "cross-pkg-config-types-from-agents"
 text = "agent files that import config types"
 grep_pattern = "import.*from.*config/types"
 category = "cross-package"
-target_file = "src/config/types.openclaw.ts"
+# No single target_file — this is a module-level query (falls back to explore)
 ground_truth = [
   "src/agents/tools/web-search-provider-credentials.ts",
   "src/agents/tools/model-config.helpers.ts",
