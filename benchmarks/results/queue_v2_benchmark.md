@@ -89,12 +89,18 @@
 
 ## Indexing Speed
 
-| Repo | BM25 Init (s) |
-|------|--------------|
-| openclaw | 29.29 |
+| Repo | Files | Chunks | Symbols | BM25 Init (s) |
+|------|-------|--------|---------|--------------|
+| openclaw | 8,600 | ~45,000 | ~48,000 | 29.3 |
+| linux | 73,376 | 881,711 | 935,342 | 534.0 |
 
 ## Time to First Search
 
 | Repo | Standard (s) | Deferred (s) | Speedup |
 |------|-------------|--------------|---------|
 | openclaw | 30.27 | 27.78 | 1.1x |
+
+Note: Linux kernel TTFS with deferred embeddings requires ONNX runtime
+for a meaningful comparison (both paths skip embedding without it).
+With embeddings enabled, standard init would block for ~60+ minutes
+while deferred returns BM25-only in ~534s.
