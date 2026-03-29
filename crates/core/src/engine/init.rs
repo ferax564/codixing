@@ -28,8 +28,7 @@ use crate::vector::VectorIndex;
 
 use super::indexing::{
     IndexContext, add_call_edges, build_file_trigram_from_content, build_graph,
-    embed_and_index_chunks, populate_symbol_graph, process_file, unix_timestamp_string,
-    walk_source_files,
+    populate_symbol_graph, process_file, unix_timestamp_string, walk_source_files,
 };
 use super::{Engine, git_head_commit};
 
@@ -148,51 +147,20 @@ impl Engine {
             if let Some(vec_idx) = &mut vector {
                 #[cfg(feature = "rustqueue")]
                 {
-                    if let Some(ref rq) = embed_queue {
-                        // Queue-based path: push jobs, then drain synchronously.
-                        super::embed_queue::block_on_async(async {
-                            let batch_size = super::indexing::STREAM_BATCH_SIZE;
-                            let pushed = super::embed_queue::push_embed_jobs(
-                                rq,
-                                &pending_embeds,
-                                batch_size,
-                            )
-                            .await?;
-                            info!(jobs = pushed, "embedding jobs queued");
-
-                            let mut total = 0;
-                            loop {
-                                let done = super::embed_queue::run_embed_worker_batch(
-                                    rq,
-                                    emb,
-                                    &chunk_meta_map,
-                                    vec_idx,
-                                    config.embedding.contextual_embeddings,
-                                    10,
-                                )
-                                .await?;
-                                if done == 0 {
-                                    break;
-                                }
-                                total += done;
-                            }
-                            info!(chunks = total, "embedding complete via queue");
-                            Ok::<(), crate::error::CodixingError>(())
-                        })?;
-                    } else {
-                        embed_and_index_chunks(
-                            &pending_embeds,
-                            &chunk_meta_map,
-                            emb,
-                            vec_idx,
-                            config.embedding.contextual_embeddings,
-                            &root,
-                        )?;
-                    }
+                    super::embed_queue::embed_pending(
+                        embed_queue.as_ref(),
+                        &pending_embeds,
+                        &chunk_meta_map,
+                        emb,
+                        vec_idx,
+                        config.embedding.contextual_embeddings,
+                        &root,
+                        &config.embedding.model,
+                    )?;
                 }
                 #[cfg(not(feature = "rustqueue"))]
                 {
-                    embed_and_index_chunks(
+                    super::indexing::embed_and_index_chunks(
                         &pending_embeds,
                         &chunk_meta_map,
                         emb,
@@ -211,26 +179,56 @@ impl Engine {
         // Convert DashMaps to owned types.
         let file_chunk_counts: HashMap<String, usize> = file_chunk_map.into_iter().collect();
 
-        // Build dependency graph using pre-extracted import lists (no re-parse).
-        let graph = if config.graph.enabled {
-            let mut g = build_graph(&files, &root, &config, &parser, &pending_imports);
-            // Resolve call-site edges using the now-complete symbol table.
-            add_call_edges(&mut g, &symbols, &pending_calls);
-            // Populate the symbol-level inner graph with function-level call edges.
-            populate_symbol_graph(&mut g, &files, &root, &config);
-            let scores = compute_pagerank(&g, config.graph.damping, config.graph.iterations);
-            g.apply_pagerank(&scores);
+        // Build graph and trigram indexes in parallel — they read from shared
+        // DashMaps but don't write to each other.
+        let (graph, (trigram_idx, ft_idx)) = rayon::join(
+            || {
+                // Graph construction
+                if config.graph.enabled {
+                    let mut g = build_graph(&files, &root, &config, &parser, &pending_imports);
+                    // Resolve call-site edges using the now-complete symbol table.
+                    add_call_edges(&mut g, &symbols, &pending_calls);
+                    // Populate the symbol-level inner graph with function-level call edges.
+                    populate_symbol_graph(&mut g, &files, &root, &config);
+                    let scores =
+                        compute_pagerank(&g, config.graph.damping, config.graph.iterations);
+                    g.apply_pagerank(&scores);
+                    Some(g)
+                } else {
+                    None
+                }
+            },
+            || {
+                // Trigram index construction (chunk + file level)
+                let mut tri = crate::index::TrigramIndex::new();
+                tri.build_batch(
+                    chunk_meta_map
+                        .iter()
+                        .map(|e| (*e.key(), e.value().content.clone())),
+                );
+                let ft = build_file_trigram_from_content(&file_contents);
+                (tri, ft)
+            },
+        );
+
+        // Persist graph.
+        if let Some(ref g) = graph {
             let flat = g.to_flat();
             if let Err(e) = store.save_graph(&flat) {
                 warn!(error = %e, "failed to persist graph");
             }
-            if let Err(e) = store.save_symbol_graph(&g) {
+            if let Err(e) = store.save_symbol_graph(g) {
                 warn!(error = %e, "failed to persist symbol graph");
             }
-            Some(g)
-        } else {
-            None
-        };
+        }
+
+        // Persist trigram indexes.
+        if let Err(e) = trigram_idx.save_binary(&store.chunk_trigram_path()) {
+            warn!(error = %e, "failed to persist chunk trigram index");
+        }
+        if let Err(e) = ft_idx.save_binary(&store.file_trigram_path()) {
+            warn!(error = %e, "failed to persist file trigram index");
+        }
 
         let (graph_nodes, graph_edges) = graph
             .as_ref()
@@ -320,25 +318,8 @@ impl Engine {
         let session = Arc::new(SessionState::with_root(true, &root));
         session.cleanup_old_sessions();
 
-        // Build trigram index from chunk metadata for Strategy::Exact fast-path.
-        let mut trigram_idx = crate::index::TrigramIndex::new();
-        trigram_idx.build_batch(
-            chunk_meta_map
-                .iter()
-                .map(|e| (*e.key(), e.value().content.clone())),
-        );
-        // Persist chunk trigram so open() can load it instead of rebuilding.
-        if let Err(e) = trigram_idx.save_binary(&store.chunk_trigram_path()) {
-            warn!(error = %e, "failed to persist chunk trigram index");
-        }
         let trigram = std::sync::OnceLock::new();
         let _ = trigram.set(trigram_idx);
-
-        // Build file trigram from full file content (no chunk-boundary gaps).
-        let ft_idx = build_file_trigram_from_content(&file_contents);
-        if let Err(e) = ft_idx.save_binary(&store.file_trigram_path()) {
-            warn!(error = %e, "failed to persist file trigram index");
-        }
         let file_trigram = std::sync::OnceLock::new();
         let _ = file_trigram.set(ft_idx);
 
@@ -564,6 +545,11 @@ impl Engine {
             .and_then(|m| m.modified().ok());
 
         // Trigram indexes are lazy-loaded on first use via OnceLock.
+        // The 175MB chunk trigram takes ~55s to deserialize — too slow for
+        // eager loading. Stays lazy so open() is fast; only paid on first
+        // exact-strategy search.
+        let trigram = std::sync::OnceLock::new();
+        let file_trigram = std::sync::OnceLock::new();
 
         Ok(Self {
             config,
@@ -579,11 +565,11 @@ impl Engine {
             chunk_meta,
             graph,
             reranker,
-            trigram: std::sync::OnceLock::new(),
+            trigram,
             session,
             shared_session: SharedSession::default_new(),
             read_only,
-            file_trigram: std::sync::OnceLock::new(),
+            file_trigram,
             recency_map: std::sync::OnceLock::new(),
             last_load_time: meta_mtime,
             reload_interval: std::time::Duration::from_secs(30),

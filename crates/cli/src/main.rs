@@ -51,6 +51,12 @@ enum Command {
         /// the `deep` strategy. Increases startup time by ~2 s.
         #[arg(long)]
         reranker: bool,
+
+        /// Skip embedding during init — index with BM25 only, embed later
+        /// with `codixing embed`. Useful for large repos where you want
+        /// search available immediately.
+        #[arg(long)]
+        defer_embeddings: bool,
     },
 
     /// Search the code index.
@@ -344,7 +350,16 @@ async fn main() -> Result<()> {
             no_embeddings,
             model,
             reranker,
-        } => cmd_init(path, also, languages, no_embeddings, model, reranker),
+            defer_embeddings,
+        } => cmd_init(
+            path,
+            also,
+            languages,
+            no_embeddings,
+            model,
+            reranker,
+            defer_embeddings,
+        ),
         Command::Search {
             query,
             limit,
@@ -392,6 +407,7 @@ fn cmd_init(
     no_embeddings: bool,
     model: Option<String>,
     reranker: bool,
+    defer_embeddings: bool,
 ) -> Result<()> {
     let root = path
         .canonicalize()
@@ -423,6 +439,10 @@ fn cmd_init(
     if reranker {
         config.embedding.reranker_enabled = true;
     }
+    if defer_embeddings {
+        config.embedding.enabled = false;
+        eprintln!("Deferring embeddings — BM25 index only. Run `codixing embed` to add vectors.");
+    }
 
     if config.extra_roots.is_empty() {
         eprintln!("Indexing {}...", root.display());
@@ -439,6 +459,25 @@ fn cmd_init(
     let start = Instant::now();
 
     let engine = Engine::init(&root, config).with_context(|| "failed to initialize index")?;
+
+    // Re-enable embeddings in the saved config so `codixing embed` works later.
+    // Engine::init() persists config.json early, and defer_embeddings set
+    // enabled=false. Without this fix, `codixing embed` would fail because
+    // Engine::open() reads the saved config and skips loading the embedder.
+    if defer_embeddings {
+        let config_path = root.join(".codixing").join("config.json");
+        if let Ok(text) = std::fs::read_to_string(&config_path) {
+            if let Ok(mut saved) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(emb) = saved.get_mut("embedding") {
+                    emb["enabled"] = serde_json::Value::Bool(true);
+                    let _ = std::fs::write(
+                        &config_path,
+                        serde_json::to_string_pretty(&saved).unwrap_or_default(),
+                    );
+                }
+            }
+        }
+    }
 
     let stats = engine.stats();
     let elapsed = start.elapsed();

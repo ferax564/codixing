@@ -258,6 +258,161 @@ pub(super) fn build_context_prefix(meta: &ChunkMeta) -> String {
 /// their corresponding embedding vectors are alive at any given time.
 pub(super) const STREAM_BATCH_SIZE: usize = 256;
 
+/// Inner implementation for per-file embedding with late chunking.
+///
+/// The `sink` closure receives `(chunk_id, embedding, file_path)` for each
+/// embedded chunk. Both [`embed_single_file`] and [`embed_file_collect`]
+/// delegate to this function, differing only in what the sink does.
+fn embed_single_file_inner(
+    embedder: &Embedder,
+    chunk_meta: &DashMap<u64, ChunkMeta>,
+    contextual: bool,
+    root: &Path,
+    file_path: &str,
+    chunk_ids: &[u64],
+    sink: &mut dyn FnMut(u64, Vec<f32>, &str),
+) -> Result<usize> {
+    let mut embedded = 0;
+
+    // ── Late chunking attempt ─────────────────────────────────────────
+    if !contextual {
+        let abs_path = root.join(file_path);
+        if let Ok(file_text) = fs::read_to_string(&abs_path) {
+            // Capture line_start eagerly to avoid DashMap lookups during sort.
+            let mut ordered: Vec<(u64, String, u64)> = chunk_ids
+                .iter()
+                .filter_map(|id| {
+                    chunk_meta
+                        .get(id)
+                        .map(|m| (*id, m.content.clone(), m.line_start))
+                })
+                .collect();
+            ordered.sort_by_key(|(_, _, line_start)| *line_start);
+
+            let mut byte_ranges: Vec<(usize, usize)> = Vec::with_capacity(ordered.len());
+            let mut search_from = 0usize;
+            let mut all_found = true;
+            for (_, content, _) in &ordered {
+                if let Some(pos) = file_text[search_from..].find(content.as_str()) {
+                    let start = search_from + pos;
+                    let end = start + content.len();
+                    byte_ranges.push((start, end));
+                    search_from = end;
+                } else {
+                    tracing::debug!(
+                        path = %file_path,
+                        "chunk content not found in file, falling back"
+                    );
+                    all_found = false;
+                    break;
+                }
+            }
+
+            if all_found {
+                match embedder.embed_file_late_chunking(&file_text, &byte_ranges) {
+                    Ok(Some(embeddings)) => {
+                        for ((id, _, _), embedding) in ordered.iter().zip(embeddings.into_iter()) {
+                            sink(*id, embedding, file_path);
+                            embedded += 1;
+                        }
+                        return Ok(embedded);
+                    }
+                    Ok(None) => {
+                        tracing::debug!(path = %file_path, "late chunking not applicable");
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, path = %file_path, "late chunking failed");
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Fallback: independent per-chunk embedding ─────────────────────
+    for window in chunk_ids.chunks(STREAM_BATCH_SIZE) {
+        let texts: Vec<String> = window
+            .iter()
+            .map(|id| {
+                chunk_meta
+                    .get(id)
+                    .map(|m| make_embed_text(&m, contextual))
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        let embeddings = embedder.embed(texts)?;
+
+        for (chunk_id, embedding) in window.iter().zip(embeddings.into_iter()) {
+            let fp = chunk_meta
+                .get(chunk_id)
+                .map(|m| m.file_path.clone())
+                .unwrap_or_default();
+            sink(*chunk_id, embedding, &fp);
+            embedded += 1;
+        }
+    }
+
+    Ok(embedded)
+}
+
+/// Embed all chunks from a single file, using late chunking when possible.
+///
+/// Tries `embed_file_late_chunking` first. If the file is too long or the
+/// backend doesn't support it, falls back to independent per-chunk embedding
+/// in `STREAM_BATCH_SIZE` windows.
+///
+/// Returns the number of chunks embedded.
+pub(super) fn embed_single_file(
+    embedder: &Embedder,
+    chunk_meta: &DashMap<u64, ChunkMeta>,
+    vec_idx: &mut VectorIndex,
+    contextual: bool,
+    root: &Path,
+    file_path: &str,
+    chunk_ids: &[u64],
+) -> Result<usize> {
+    embed_single_file_inner(
+        embedder,
+        chunk_meta,
+        contextual,
+        root,
+        file_path,
+        chunk_ids,
+        &mut |id, embedding, fp| {
+            if let Err(e) = vec_idx.add_mut(id, &embedding, fp) {
+                tracing::warn!(error = %e, chunk_id = id, "failed to add vector");
+            }
+        },
+    )
+}
+
+/// Like [`embed_single_file`] but collects `(chunk_id, embedding, file_path)` tuples
+/// instead of inserting into a VectorIndex. Used by parallel workers that collect
+/// embeddings independently and bulk-insert after all workers finish.
+#[cfg(feature = "rustqueue")]
+pub(super) fn embed_file_collect(
+    embedder: &Embedder,
+    chunk_meta: &DashMap<u64, ChunkMeta>,
+    contextual: bool,
+    root: &Path,
+    file_path: &str,
+    chunk_ids: &[u64],
+) -> Result<Vec<(u64, Vec<f32>, String)>> {
+    let mut collected = Vec::new();
+    embed_single_file_inner(
+        embedder,
+        chunk_meta,
+        contextual,
+        root,
+        file_path,
+        chunk_ids,
+        &mut |id, embedding, fp| {
+            collected.push((id, embedding, fp.to_string()));
+        },
+    )?;
+    Ok(collected)
+}
+
 /// Batch-embed all pending chunks and add them to the vector index.
 ///
 /// Processes chunks in fixed-size windows of [`STREAM_BATCH_SIZE`] to bound
@@ -309,7 +464,6 @@ where
     F: Fn(usize, usize),
 {
     let entries: Vec<u64> = pending.iter().map(|e| *e.key()).collect();
-
     if entries.is_empty() {
         return Ok(());
     }
@@ -319,151 +473,24 @@ where
 
     info!(count = total_chunks, contextual, "embedding chunks");
 
-    // ── Late chunking pass ────────────────────────────────────────────────
-    //
-    // Group chunks by file, read each file once, and try late chunking.
-    // Contextual embeddings prepend a metadata prefix per chunk, which
-    // changes the text that gets embedded, so late chunking (which operates
-    // on the raw file text) is skipped in contextual mode.
-    //
-    // Chunk IDs that were successfully late-chunked are collected in
-    // `done_ids` so the fallback pass can skip them.
-    let mut done_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
-
-    if !contextual {
-        // Group chunk IDs by file path.
-        let mut file_chunks: HashMap<String, Vec<u64>> = HashMap::new();
-        for &id in &entries {
-            if let Some(meta) = chunk_meta.get(&id) {
-                file_chunks
-                    .entry(meta.file_path.clone())
-                    .or_default()
-                    .push(id);
-            }
-        }
-
-        for (file_path, chunk_ids) in &file_chunks {
-            // Read the file from disk.
-            let abs_path = root.join(file_path);
-            let file_text = match fs::read_to_string(&abs_path) {
-                Ok(t) => t,
-                Err(e) => {
-                    debug!(path = %file_path, error = %e, "cannot read file for late chunking, falling back");
-                    continue;
-                }
-            };
-
-            // Build byte ranges for each chunk.  We locate each chunk's
-            // content within the file text by searching from the end of the
-            // previous chunk to handle duplicate content gracefully.
-            //
-            // Sort chunks by line_start so the search is monotonic.
-            let mut ordered: Vec<(u64, String)> = chunk_ids
-                .iter()
-                .filter_map(|id| chunk_meta.get(id).map(|m| (*id, m.content.clone())))
-                .collect();
-            // Sort by line_start for stable ordering.
-            ordered.sort_by_key(|(id, _)| chunk_meta.get(id).map(|m| m.line_start).unwrap_or(0));
-
-            let mut byte_ranges: Vec<(usize, usize)> = Vec::with_capacity(ordered.len());
-            let mut search_from = 0usize;
-            let mut all_found = true;
-            for (_id, content) in &ordered {
-                if let Some(pos) = file_text[search_from..].find(content.as_str()) {
-                    let start = search_from + pos;
-                    let end = start + content.len();
-                    byte_ranges.push((start, end));
-                    search_from = end;
-                } else {
-                    // Content not found — this can happen if the file changed
-                    // between indexing and embedding.  Fall back for the
-                    // entire file.
-                    debug!(
-                        path = %file_path,
-                        "chunk content not found in file, falling back to independent embedding"
-                    );
-                    all_found = false;
-                    break;
-                }
-            }
-
-            if !all_found {
-                continue;
-            }
-
-            // Attempt late chunking.
-            match embedder.embed_file_late_chunking(&file_text, &byte_ranges) {
-                Ok(Some(embeddings)) => {
-                    debug!(
-                        path = %file_path,
-                        chunks = embeddings.len(),
-                        "late-chunked embeddings"
-                    );
-                    for ((id, _content), embedding) in ordered.iter().zip(embeddings.into_iter()) {
-                        if let Err(e) = vec_idx.add_mut(*id, &embedding, file_path) {
-                            warn!(error = %e, chunk_id = id, "failed to add vector");
-                        }
-                        done_ids.insert(*id);
-                        embedded_so_far += 1;
-                    }
-                    // Report progress after each file's late-chunked batch.
-                    if let Some(ref cb) = progress_callback {
-                        cb(embedded_so_far, total_chunks);
-                    }
-                }
-                Ok(None) => {
-                    // File too long or backend doesn't support it — fall through.
-                    debug!(path = %file_path, "late chunking not applicable, falling back");
-                }
-                Err(e) => {
-                    warn!(error = %e, path = %file_path, "late chunking failed, falling back");
-                }
-            }
+    // Group chunk IDs by file path.
+    let mut file_chunks: HashMap<String, Vec<u64>> = HashMap::new();
+    for &id in &entries {
+        if let Some(meta) = chunk_meta.get(&id) {
+            file_chunks
+                .entry(meta.file_path.clone())
+                .or_default()
+                .push(id);
         }
     }
 
-    // ── Fallback: independent per-chunk embedding (streaming) ─────────────
-    let remaining: Vec<u64> = entries
-        .iter()
-        .filter(|id| !done_ids.contains(id))
-        .copied()
-        .collect();
-
-    if !remaining.is_empty() {
-        debug!(
-            late_chunked = done_ids.len(),
-            independent = remaining.len(),
-            "embedding remaining chunks independently"
-        );
-
-        for window in remaining.chunks(STREAM_BATCH_SIZE) {
-            let texts: Vec<String> = window
-                .iter()
-                .map(|id| {
-                    chunk_meta
-                        .get(id)
-                        .map(|m| make_embed_text(&m, contextual))
-                        .unwrap_or_default()
-                })
-                .collect();
-
-            let embeddings = embedder.embed(texts)?;
-
-            for (chunk_id, embedding) in window.iter().zip(embeddings.into_iter()) {
-                let file_path = chunk_meta
-                    .get(chunk_id)
-                    .map(|m| m.file_path.clone())
-                    .unwrap_or_default();
-                if let Err(e) = vec_idx.add_mut(*chunk_id, &embedding, &file_path) {
-                    warn!(error = %e, chunk_id, "failed to add vector");
-                }
-                embedded_so_far += 1;
-            }
-
-            // Report progress after each streaming window.
-            if let Some(ref cb) = progress_callback {
-                cb(embedded_so_far, total_chunks);
-            }
+    for (file_path, chunk_ids) in &file_chunks {
+        let done = embed_single_file(
+            embedder, chunk_meta, vec_idx, contextual, root, file_path, chunk_ids,
+        )?;
+        embedded_so_far += done;
+        if let Some(ref cb) = progress_callback {
+            cb(embedded_so_far, total_chunks);
         }
     }
 

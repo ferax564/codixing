@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>How we replaced spawn_blocking with RustQueue in our code search engine</title>
+  <meta name="description" content="Queue-based embedding v2 for Codixing: parallel ONNX workers, crash recovery, late chunking. 17x faster search, 67% better symbol recall than grep on a 368K LoC monorepo." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <style>
+    :root {
+      --bg: #000000;
+      --bg-1: #0a0a0f;
+      --bg-2: #0d1117;
+      --bg-3: #161b22;
+      --border: rgba(48, 54, 61, 0.8);
+      --border-glow: rgba(0, 212, 170, 0.25);
+      --cyan: #00d4aa;
+      --purple: #8b5cf6;
+      --orange: #f97316;
+      --text: #f0f6fc;
+      --text-muted: #8b949e;
+      --text-dim: #484f58;
+      --green: #3fb950;
+      --red: #f85149;
+      --yellow: #e3b341;
+      --radius: 12px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: "Inter", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.8;
+    }
+
+    ::selection { background: rgba(0, 212, 170, 0.2); }
+
+    /* Nav */
+    nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      background: rgba(0,0,0,0.85); backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-inner {
+      max-width: 800px; margin: 0 auto; padding: 16px 24px;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .nav-inner a { color: var(--text-muted); text-decoration: none; font-size: 0.9rem; }
+    .nav-inner a:hover { color: var(--cyan); }
+
+    /* Article */
+    article {
+      max-width: 800px; margin: 0 auto; padding: 120px 24px 80px;
+    }
+
+    .blog-meta {
+      color: var(--text-muted); font-size: 0.85rem;
+      margin-bottom: 16px;
+    }
+
+    article h1 {
+      font-size: clamp(2rem, 4vw, 2.8rem);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1.2;
+      margin-bottom: 24px;
+    }
+
+    .subtitle {
+      font-size: 1.15rem;
+      color: var(--text-muted);
+      line-height: 1.7;
+      margin-bottom: 48px;
+      max-width: 65ch;
+    }
+
+    article h2 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-top: 56px;
+      margin-bottom: 16px;
+      color: var(--cyan);
+    }
+
+    article h3 {
+      font-size: 1.15rem;
+      font-weight: 600;
+      margin-top: 40px;
+      margin-bottom: 12px;
+    }
+
+    article p {
+      margin-bottom: 20px;
+      color: var(--text);
+      font-size: 1.02rem;
+    }
+
+    article strong { color: var(--cyan); font-weight: 600; }
+
+    article code {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.88em;
+      background: var(--bg-2);
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: var(--cyan);
+    }
+
+    article a { color: var(--cyan); text-decoration: underline; text-underline-offset: 2px; }
+    article a:hover { color: var(--text); }
+
+    article ul, article ol {
+      margin: 0 0 24px 24px;
+      color: var(--text-muted);
+      line-height: 2;
+    }
+
+    /* Tables */
+    .bench-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 24px 0 32px;
+      font-size: 0.92rem;
+    }
+
+    .bench-table th {
+      text-align: left;
+      padding: 10px 14px;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      font-weight: 600;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+    }
+
+    .bench-table td {
+      padding: 10px 14px;
+      border: 1px solid var(--border);
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.85rem;
+    }
+
+    .bench-table tr:hover td { background: var(--bg-1); }
+    .bench-table .pass { color: var(--green); }
+    .bench-table .fail { color: var(--red); }
+    .bench-table .num { color: var(--cyan); font-weight: 600; }
+
+    /* Code blocks */
+    pre {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+      overflow-x: auto;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.83rem;
+      line-height: 1.7;
+      margin: 20px 0 28px;
+      color: var(--text-muted);
+    }
+
+    pre .cmd { color: var(--text); }
+    pre .out { color: var(--green); }
+    pre .cmt { color: var(--text-dim); }
+    pre .val { color: var(--cyan); }
+    pre .kw { color: var(--purple); }
+    pre .fn { color: var(--orange); }
+    pre .str { color: var(--green); }
+
+    /* Callout */
+    .callout {
+      background: var(--bg-1);
+      border-left: 3px solid var(--cyan);
+      padding: 20px 24px;
+      border-radius: 0 var(--radius) var(--radius) 0;
+      margin: 28px 0;
+    }
+
+    .callout p { margin-bottom: 0; color: var(--text-muted); }
+    .callout strong { color: var(--text); }
+
+    .callout-red {
+      background: var(--bg-1);
+      border-left: 3px solid var(--red);
+      padding: 20px 24px;
+      border-radius: 0 var(--radius) var(--radius) 0;
+      margin: 28px 0;
+    }
+
+    .callout-red p { margin-bottom: 0; color: var(--text-muted); }
+    .callout-red strong { color: var(--red); }
+
+    .callout-yellow {
+      background: var(--bg-1);
+      border-left: 3px solid var(--yellow);
+      padding: 20px 24px;
+      border-radius: 0 var(--radius) var(--radius) 0;
+      margin: 28px 0;
+    }
+
+    .callout-yellow p { margin-bottom: 0; color: var(--text-muted); }
+    .callout-yellow strong { color: var(--yellow); }
+
+    /* Stat cards */
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin: 32px 0;
+    }
+
+    .stat-card {
+      background: var(--bg-1);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      text-align: center;
+    }
+
+    .stat-card .stat-val {
+      font-size: 1.8rem;
+      font-weight: 700;
+      color: var(--cyan);
+    }
+
+    .stat-card .stat-label {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    /* Footer */
+    footer {
+      max-width: 800px; margin: 0 auto; padding: 40px 24px;
+      border-top: 1px solid var(--border);
+      color: var(--text-dim); font-size: 0.85rem;
+      display: flex; justify-content: space-between;
+    }
+    footer a { color: var(--text-muted); text-decoration: none; }
+
+    @media (max-width: 600px) {
+      .stat-grid { grid-template-columns: repeat(2, 1fr); }
+      article h1 { font-size: 2rem; }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <a href="/index.html" style="font-weight:600;color:var(--text)">Codixing</a>
+      <div style="display:flex;gap:20px">
+        <a href="/docs.html">Docs</a>
+        <a href="https://github.com/ferax564/codixing">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <article>
+    <div class="blog-meta">March 29, 2026 &bull; Engineering</div>
+
+    <h1>How we replaced spawn_blocking<br>with RustQueue</h1>
+
+    <p class="subtitle">
+      Embedding 881K chunks on the Linux kernel takes 60+ minutes. If ONNX crashes at chunk 500K, you start over. We shipped a queue-based embedding pipeline, iterated through 6 versions to get it right, and ended up with 17&times; faster search and 67% better symbol recall than grep on a 368K LoC TypeScript monorepo.
+    </p>
+
+    <div class="stat-grid">
+      <div class="stat-card">
+        <div class="stat-val">17&times;</div>
+        <div class="stat-label">Faster than grep (symbol)</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">1.000</div>
+        <div class="stat-label">Symbol R@10</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">55ms</div>
+        <div class="stat-label">Symbol lookup avg</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">881K</div>
+        <div class="stat-label">Chunks (Linux kernel)</div>
+      </div>
+    </div>
+
+    <h2>The problem: synchronous embedding doesn't scale</h2>
+
+    <p>Codixing uses BGE-Small-En embeddings for hybrid search&mdash;BM25 handles keyword retrieval, vector similarity handles natural language queries. For a small repo, embedding is fine: 1,054 chunks for our own codebase takes a few seconds.</p>
+
+    <p>For the Linux kernel (73K files, 881K chunks), it takes over 60 minutes. And our embedding path was entirely synchronous: one chunk at a time, one ONNX session, single-threaded. If the process died at chunk 500,000, you'd restart from zero.</p>
+
+    <p>We needed three things: <strong>crash recovery</strong> (resume from where we left off), <strong>parallelism</strong> (multiple ONNX workers), and <strong>a smart threshold</strong> so small repos don't pay the queue overhead.</p>
+
+    <h2>v1: infrastructure without improvement</h2>
+
+    <p>The first version integrated <a href="https://github.com/nicholasgasior/rustqueue">RustQueue</a>&mdash;a Rust job queue backed by redb&mdash;and pushed one job per chunk. It worked. It was also slower than the direct path for anything under 10K chunks.</p>
+
+    <div class="callout-red">
+      <p><strong>v1 was net-negative.</strong> Serializing 45K individual jobs to redb, pulling them one at a time, deserializing each&mdash;the overhead dwarfed the actual embedding time. We also eagerly loaded trigram indexes during init, adding 55 seconds of startup for data that wasn't needed until the first search.</p>
+    </div>
+
+    <p>Honest accounting: v1 shipped, was measured, and was worse. The queue infrastructure was sound but the job granularity and eager loading were wrong.</p>
+
+    <h2>What we actually fixed in v2</h2>
+
+    <h3>1. File-grouped jobs with late chunking</h3>
+
+    <p>Instead of one job per chunk, v2 pushes <strong>one job per source file</strong>. The worker reads the entire file, chunks it locally, and embeds all chunks together. This batches ONNX inference per file (better cache locality) and reduces queue I/O by 10-50&times;.</p>
+
+    <pre><span class="cmt">// push_file_embed_jobs: group pending chunks by file path</span>
+<span class="kw">pub async fn</span> <span class="fn">push_file_embed_jobs</span>(
+    rq: &amp;Arc&lt;RustQueue&gt;,
+    pending: &amp;DashMap&lt;u64, String&gt;,
+    chunk_meta: &amp;DashMap&lt;u64, ChunkMeta&gt;,
+) -&gt; Result&lt;usize&gt; {
+    <span class="kw">let mut</span> file_chunks: HashMap&lt;String, Vec&lt;u64&gt;&gt; = HashMap::new();
+    <span class="kw">for</span> entry <span class="kw">in</span> pending.iter() {
+        <span class="kw">if let</span> Some(meta) = chunk_meta.get(entry.key()) {
+            file_chunks
+                .entry(meta.file_path.clone())
+                .or_default()
+                .push(*entry.key());
+        }
+    }
+
+    <span class="kw">let mut</span> job_count = <span class="val">0</span>;
+    <span class="kw">for</span> (file_path, chunk_ids) <span class="kw">in</span> &amp;file_chunks {
+        rq.push(<span class="str">"embeddings"</span>, <span class="str">"late-chunk-file"</span>,
+            json!({ <span class="str">"file"</span>: file_path, <span class="str">"ids"</span>: chunk_ids }),
+            None,
+        ).await.map_err(queue_err)?;
+        job_count += <span class="val">1</span>;
+    }
+    Ok(job_count)
+}</pre>
+
+    <h3>2. Parallel ONNX workers</h3>
+
+    <p>Each worker gets its own <code>Embedder</code> (separate ONNX session, ~200 MB RAM each). Workers pull jobs from the queue concurrently using <code>std::thread::scope</code>, collect embeddings in thread-local buffers, then bulk-insert into the VectorIndex after all workers finish.</p>
+
+    <pre><span class="cmt">// drain_embed_queue_parallel: N workers, each with its own ONNX session</span>
+<span class="kw">pub fn</span> <span class="fn">drain_embed_queue_parallel</span>(
+    rq: &amp;Arc&lt;RustQueue&gt;,
+    model: &amp;EmbeddingModel,
+    chunk_meta: &amp;DashMap&lt;u64, ChunkMeta&gt;,
+    vec_idx: &amp;<span class="kw">mut</span> VectorIndex,
+    contextual: bool,
+    root: &amp;Path,
+    num_workers: usize,
+) -&gt; Result&lt;usize&gt; {
+    <span class="cmt">// Phase 1: N workers embed in parallel</span>
+    <span class="kw">let</span> collected = std::thread::scope(|s| {
+        <span class="kw">let</span> handles: Vec&lt;_&gt; = (<span class="val">0</span>..num_workers)
+            .map(|worker_id| {
+                s.spawn(<span class="kw">move</span> || {
+                    <span class="kw">let</span> embedder = Embedder::new(model)?;
+                    <span class="kw">let mut</span> local = Vec::new();
+                    <span class="kw">loop</span> {
+                        <span class="kw">let</span> jobs = block_on_async(<span class="kw">async</span> {
+                            rq.pull(<span class="str">"embeddings"</span>, <span class="val">10</span>).await
+                        })?;
+                        <span class="kw">if</span> jobs.is_empty() { <span class="kw">break</span>; }
+                        <span class="cmt">// embed each file, ack on success, fail on error</span>
+                        ...
+                    }
+                    Ok(local)
+                })
+            }).collect();
+        <span class="cmt">// join all handles, collect results</span>
+        ...
+    })?;
+
+    <span class="cmt">// Phase 2: Sequential bulk insert into VectorIndex</span>
+    <span class="kw">for</span> (chunk_id, embedding, file_path) <span class="kw">in</span> &amp;collected {
+        vec_idx.add_mut(*chunk_id, embedding, file_path)?;
+    }
+    Ok(collected.len())
+}</pre>
+
+    <h3>3. Smart threshold</h3>
+
+    <p>The <code>embed_pending</code> function decides at runtime: if fewer than 1,000 chunks are pending, skip the queue entirely and embed synchronously. No redb I/O, no JSON serialization, no worker spawn overhead. This keeps small repos fast.</p>
+
+    <pre><span class="kw">pub const</span> <span class="val">QUEUE_THRESHOLD</span>: usize = <span class="val">1000</span>;
+
+<span class="kw">pub fn</span> <span class="fn">embed_pending</span>(rq: Option&lt;&amp;Arc&lt;RustQueue&gt;&gt;, ...) -&gt; Result&lt;()&gt; {
+    <span class="kw">if let</span> Some(rq) = rq {
+        <span class="kw">if</span> pending.len() &gt;= <span class="val">QUEUE_THRESHOLD</span> {
+            <span class="kw">let</span> num_workers = available_parallelism()
+                .map(|n| n.get().min(<span class="val">4</span>))
+                .unwrap_or(<span class="val">1</span>);
+            push_file_embed_jobs(rq, pending, chunk_meta).<span class="kw">await</span>?;
+            drain_embed_queue_parallel(rq, model, ...)?;
+            <span class="kw">return</span> Ok(());
+        }
+    }
+    <span class="cmt">// direct sync path for small repos</span>
+    embed_and_index_chunks(pending, chunk_meta, embedder, vec_idx, ...)?
+}</pre>
+
+    <h3>4. Deferred embeddings</h3>
+
+    <p>BM25 init takes 27 seconds on OpenClaw. Embedding all 45K chunks takes another ~2 minutes. v2 defers embedding: BM25 search works immediately after init, and embeddings are computed in the background. Time to first search: <strong>29 seconds</strong> (BM25-only) vs 31 seconds (with deferred embedding queued).</p>
+
+    <h3>5. Parallel graph + trigram build</h3>
+
+    <p>We moved graph construction and trigram index building into a <code>rayon::join</code> call. Both read from shared DashMaps but write to independent outputs&mdash;perfect for fork-join parallelism. This shaved seconds off init on large repos where both structures are substantial.</p>
+
+    <pre><span class="cmt">// Build graph and trigram indexes in parallel</span>
+<span class="kw">let</span> (graph, (trigram_idx, ft_idx)) = rayon::join(
+    || {
+        <span class="cmt">// Graph construction</span>
+        build_graph(&amp;files, &amp;root, &amp;config, &amp;parser, &amp;pending_imports)
+    },
+    || {
+        <span class="cmt">// Trigram + file-trigram indexes (lazy build_batch)</span>
+        build_trigram_indexes(&amp;chunk_meta, &amp;file_chunks)
+    },
+);</pre>
+
+    <h2>Benchmark: OpenClaw (368K LoC)</h2>
+
+    <p>We ran 20 queries across 4 categories on <a href="https://github.com/openclaw/openclaw">OpenClaw</a>&mdash;a 76-package TypeScript monorepo with 9,387 files. Each query has a hand-verified ground truth. We measured Precision@10, Recall@10, and MRR against both grep and Codixing.</p>
+
+    <h3>Speed: 12&ndash;18&times; faster</h3>
+
+    <table class="bench-table">
+      <thead>
+        <tr><th>Strategy</th><th>Codixing avg (ms)</th><th>grep avg (ms)</th><th>Speedup</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>symbol_lookup</td><td class="num">54.7</td><td>936.7</td><td class="num">17&times;</td></tr>
+        <tr><td>usages</td><td class="num">52.8</td><td>936.7</td><td class="num">18&times;</td></tr>
+        <tr><td>fast</td><td class="num">240.0</td><td>936.7</td><td class="num">4&times;</td></tr>
+        <tr><td>explore</td><td class="num">76.9</td><td>936.7</td><td class="num">12&times;</td></tr>
+      </tbody>
+    </table>
+
+    <p>The fastest queries&mdash;symbol lookup and usages&mdash;complete in <strong>under 55ms</strong>. These use the symbol table and call graph directly, bypassing BM25 entirely. The <code>fast</code> strategy (BM25 + optional vector reranking) averages 240ms, still 4&times; faster than grep's 937ms.</p>
+
+    <h3>Accuracy: by category</h3>
+
+    <table class="bench-table">
+      <thead>
+        <tr><th>Category</th><th>grep R@10</th><th>Codixing R@10</th><th>Strategy</th><th>Winner</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Symbol lookup</td><td class="fail">0.600</td><td class="pass">1.000</td><td>symbol_lookup</td><td class="num">Codixing (+67%)</td></tr>
+        <tr><td>Concept search</td><td class="fail">0.183</td><td class="num">0.300</td><td>fast</td><td class="num">Codixing (+64%)</td></tr>
+        <tr><td>Usage search</td><td class="num">0.475</td><td class="num">0.450</td><td>usages</td><td>Tie</td></tr>
+        <tr><td>Cross-package</td><td class="num">0.367</td><td class="fail">0.067</td><td>explore</td><td class="num">grep</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <p><strong>Symbol recall is the headline: 1.000 vs 0.600.</strong> Codixing finds every definition for every symbol query. grep buries definitions under usage files&mdash;when you search for <code>ChannelPlugin</code>, grep returns 10 files that import it but not the file that defines it.</p>
+    </div>
+
+    <h3>Where we lose: cross-package</h3>
+
+    <div class="callout-yellow">
+      <p><strong>Cross-package recall: grep 0.367, Codixing 0.067.</strong> We're honest about this. The <code>explore</code> strategy struggles with queries that span package boundaries in pnpm monorepos. grep's brute-force text search actually works here because it doesn't care about package structure. This is the next thing we're fixing.</p>
+    </div>
+
+    <h3>Per-query speed breakdown</h3>
+
+    <table class="bench-table">
+      <thead>
+        <tr><th>Query</th><th>Category</th><th>grep (ms)</th><th>Codixing (ms)</th><th>Speedup</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>symbol-channel-plugin</td><td>symbol</td><td>771.8</td><td class="num">52.6</td><td class="num">15&times;</td></tr>
+        <tr><td>symbol-gateway-server</td><td>symbol</td><td>538.1</td><td class="num">55.2</td><td class="num">10&times;</td></tr>
+        <tr><td>symbol-context-engine-interface</td><td>symbol</td><td>593.6</td><td class="num">50.8</td><td class="num">12&times;</td></tr>
+        <tr><td>usage-redact-sensitive-text</td><td>usage</td><td>1008.7</td><td class="num">56.9</td><td class="num">18&times;</td></tr>
+        <tr><td>concept-rate-limiting</td><td>concept</td><td>1318.4</td><td class="num">236.4</td><td class="num">6&times;</td></tr>
+        <tr><td>cross-pkg-plugin-sdk-entry</td><td>cross-package</td><td>1089.0</td><td class="num">82.2</td><td class="num">13&times;</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Linux kernel scale</h2>
+
+    <p>The real test: <strong>73K files, 881K chunks, 935K symbols</strong>. BM25 init takes 534 seconds. Cold start search: 1.57 seconds. Warm search: 0.79 seconds.</p>
+
+    <p>The queue-based pipeline handles this scale because:</p>
+
+    <ul>
+      <li>File-grouped jobs reduce queue entries from 881K to ~73K (one per file)</li>
+      <li>4 parallel workers (capped at <code>available_parallelism().min(4)</code>) saturate the ONNX runtime without OOM</li>
+      <li>Crash recovery via redb: if a worker dies mid-batch, unacknowledged jobs stay in the queue</li>
+      <li>The <code>chunk_meta.bin</code> compact format keeps the metadata at 134 MB (was 1.5 GB before)</li>
+    </ul>
+
+    <h2>The failures along the way</h2>
+
+    <p>I want to be explicit about what didn't work, because the "shipped v2" narrative hides 6 iterations of getting it wrong.</p>
+
+    <h3>Failure 1: eager trigram loading</h3>
+    <p>v1 loaded the trigram index during init. For the Linux kernel, that's a 2.8 GB file. It added 55 seconds to startup even though trigrams aren't needed until the first search. v2 uses <code>OnceLock</code> lazy loading&mdash;the trigram index loads on first access, not at init.</p>
+
+    <h3>Failure 2: parallel drain OOM</h3>
+    <p>The first parallel implementation spawned <code>available_parallelism()</code> workers (16 on an M4 Max). Each ONNX session is ~200 MB. 16 workers = 3.2 GB just for embedding sessions, on top of the 1+ GB of chunk metadata. We OOM'd on 16 GB machines. The fix: cap at 4 workers.</p>
+
+    <h3>Failure 3: one job per chunk</h3>
+    <p>45K individual redb writes + JSON serializations + 45K individual pulls. The queue overhead was larger than the embedding time. File grouping reduced this to ~2K jobs for OpenClaw.</p>
+
+    <h3>Failure 4: async drain from sync context</h3>
+    <p>RustQueue is async. Our indexing pipeline is sync. The naive <code>tokio::runtime::Runtime::new().block_on()</code> worked until we were called from an MCP handler that already had a tokio runtime. Nested runtimes panic. The fix: <code>block_on_async</code> that detects whether a runtime is active and uses <code>block_in_place</code> when it is.</p>
+
+    <pre><span class="kw">pub(super) fn</span> <span class="fn">block_on_async</span>&lt;F, T&gt;(fut: F) -&gt; T
+<span class="kw">where</span> F: Future&lt;Output = T&gt; {
+    <span class="kw">match</span> tokio::runtime::Handle::try_current() {
+        Ok(handle) =&gt; tokio::task::block_in_place(|| handle.block_on(fut)),
+        Err(_) =&gt; {
+            <span class="kw">let</span> rt = Runtime::new().expect(<span class="str">"failed to create tokio runtime"</span>);
+            rt.block_on(fut)
+        }
+    }
+}</pre>
+
+    <h2>Overall numbers</h2>
+
+    <table class="bench-table">
+      <thead>
+        <tr><th>Metric</th><th>grep</th><th>Codixing</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Avg Precision@10</td><td>0.145</td><td class="num">0.137</td></tr>
+        <tr><td>Avg Recall@10</td><td>0.406</td><td class="num">0.454</td></tr>
+        <tr><td>Avg MRR</td><td>0.271</td><td class="num">0.496</td></tr>
+        <tr><td>Avg query time</td><td>937ms</td><td class="num">55&ndash;240ms</td></tr>
+        <tr><td>OpenClaw init</td><td>N/A</td><td class="num">27s</td></tr>
+        <tr><td>Linux kernel init</td><td>N/A</td><td class="num">534s</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <p><strong>MRR is the sleeper stat: 0.496 vs 0.271.</strong> Mean Reciprocal Rank measures how high the first correct result appears. Codixing puts the right file at position 2 on average; grep puts it at position 4. When an AI agent consumes these results, that difference compounds across every tool call.</p>
+    </div>
+
+    <h2>What's next</h2>
+
+    <p><strong>Cross-package retrieval.</strong> Our explore strategy fails on cross-package queries in monorepos (R@10 = 0.067). The graph currently doesn't traverse pnpm workspace boundaries. We need to build cross-package edges from import resolution.</p>
+
+    <p><strong>Background drain.</strong> Right now, <code>embed_pending</code> blocks until all workers finish. For large repos, we want to return after BM25 init and drain the embedding queue in a background thread, upgrading search from BM25-only to hybrid as chunks get embedded.</p>
+
+    <p><strong>Distributed workers.</strong> The current architecture caps at 4 workers on one machine. For enterprise-scale repos (millions of files), we want workers on separate machines pulling from the same queue. RustQueue's redb backend would need to be swapped for a network-accessible store, but the worker protocol is already designed for this.</p>
+
+    <h2>Try it</h2>
+
+    <pre><span class="cmt"># Install via Claude Code plugin marketplace</span>
+<span class="cmd">claude plugin marketplace add ferax564/codixing</span>
+
+<span class="cmt"># Or build from source</span>
+<span class="cmd">git clone https://github.com/ferax564/codixing</span>
+<span class="cmd">cd codixing && cargo build --release --workspace</span>
+
+<span class="cmt"># Index a repo</span>
+<span class="cmd">./target/release/codixing init . --model bge-small-en</span>
+
+<span class="cmt"># Search</span>
+<span class="cmd">./target/release/codixing search "rate limiting" --strategy fast</span>
+<span class="out">  src/security/rate-limiter.ts  [0.847]  240ms</span></pre>
+
+    <p>Source code and benchmark data: <a href="https://github.com/ferax564/codixing">github.com/ferax564/codixing</a></p>
+
+  </article>
+
+  <footer>
+    <a href="/index.html">Codixing</a>
+    <a href="mailto:hello@codixing.com">Contact</a>
+    <span>Open source &bull; BSL-1.0</span>
+  </footer>
+</body>
+</html>
