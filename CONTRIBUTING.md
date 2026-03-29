@@ -12,7 +12,7 @@ For individuals: add a comment to your PR with the text:
 
 > I have read and agree to the Contributor License Agreement in CLA.md.
 
-For corporate contributors, contact the maintainers directly.
+For corporate contributors, email **cla@codixing.com**.
 
 ---
 
@@ -27,7 +27,7 @@ For corporate contributors, contact the maintainers directly.
 ### Build
 
 ```bash
-git clone https://github.com/your-org/codixing
+git clone https://github.com/ferax564/codixing
 cd codixing
 cargo build --workspace
 ```
