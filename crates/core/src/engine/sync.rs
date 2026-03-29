@@ -548,14 +548,57 @@ impl Engine {
         let pending: DashMap<u64, String> =
             unembedded.iter().map(|&id| (id, String::new())).collect();
         let contextual = self.config.embedding.contextual_embeddings;
-        embed_and_index_chunks(
-            &pending,
-            &self.chunk_meta,
-            &embedder,
-            vec_idx,
-            contextual,
-            self.store.root(),
-        )?;
+
+        #[cfg(feature = "rustqueue")]
+        {
+            if let Some(ref rq) = self.embed_queue {
+                super::embed_queue::block_on_async(async {
+                    let batch_size = super::indexing::STREAM_BATCH_SIZE;
+                    let pushed =
+                        super::embed_queue::push_embed_jobs(rq, &pending, batch_size).await?;
+                    info!(jobs = pushed, "re-embedding jobs queued");
+
+                    let mut total = 0;
+                    loop {
+                        let done = super::embed_queue::run_embed_worker_batch(
+                            rq,
+                            &embedder,
+                            &self.chunk_meta,
+                            vec_idx,
+                            contextual,
+                            10,
+                        )
+                        .await?;
+                        if done == 0 {
+                            break;
+                        }
+                        total += done;
+                    }
+                    info!(chunks = total, "re-embedding complete via queue");
+                    Ok::<(), crate::error::CodixingError>(())
+                })?;
+            } else {
+                embed_and_index_chunks(
+                    &pending,
+                    &self.chunk_meta,
+                    &embedder,
+                    vec_idx,
+                    contextual,
+                    self.store.root(),
+                )?;
+            }
+        }
+        #[cfg(not(feature = "rustqueue"))]
+        {
+            embed_and_index_chunks(
+                &pending,
+                &self.chunk_meta,
+                &embedder,
+                vec_idx,
+                contextual,
+                self.store.root(),
+            )?;
+        }
 
         self.save()?;
         Ok(unembedded.len())

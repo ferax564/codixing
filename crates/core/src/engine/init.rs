@@ -68,6 +68,31 @@ impl Engine {
             None
         };
 
+        // Initialise the embedding job queue (if rustqueue feature is enabled
+        // and embeddings are active).
+        #[cfg(feature = "rustqueue")]
+        let embed_queue: Option<Arc<rustqueue::RustQueue>> = if embedder.is_some() {
+            let queue_path = root.join(".codixing").join("embed_queue.db");
+            match rustqueue::RustQueue::redb(&queue_path) {
+                Ok(builder) => match builder.build() {
+                    Ok(rq) => {
+                        info!("embedding job queue initialised");
+                        Some(Arc::new(rq))
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "failed to build embedding queue; using sync path");
+                        None
+                    }
+                },
+                Err(e) => {
+                    warn!(error = %e, "failed to open embedding queue; using sync path");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let dims = embedder.as_ref().map(|e| e.dims).unwrap_or(0);
         let mut vector: Option<VectorIndex> = if embedder.is_some() {
             Some(VectorIndex::new(dims, config.embedding.quantize)?)
@@ -121,14 +146,61 @@ impl Engine {
         // Batch-embed all chunks if the embedder is available.
         if let Some(emb) = &embedder {
             if let Some(vec_idx) = &mut vector {
-                embed_and_index_chunks(
-                    &pending_embeds,
-                    &chunk_meta_map,
-                    emb,
-                    vec_idx,
-                    config.embedding.contextual_embeddings,
-                    &root,
-                )?;
+                #[cfg(feature = "rustqueue")]
+                {
+                    if let Some(ref rq) = embed_queue {
+                        // Queue-based path: push jobs, then drain synchronously.
+                        super::embed_queue::block_on_async(async {
+                            let batch_size = super::indexing::STREAM_BATCH_SIZE;
+                            let pushed = super::embed_queue::push_embed_jobs(
+                                rq,
+                                &pending_embeds,
+                                batch_size,
+                            )
+                            .await?;
+                            info!(jobs = pushed, "embedding jobs queued");
+
+                            let mut total = 0;
+                            loop {
+                                let done = super::embed_queue::run_embed_worker_batch(
+                                    rq,
+                                    emb,
+                                    &chunk_meta_map,
+                                    vec_idx,
+                                    config.embedding.contextual_embeddings,
+                                    10,
+                                )
+                                .await?;
+                                if done == 0 {
+                                    break;
+                                }
+                                total += done;
+                            }
+                            info!(chunks = total, "embedding complete via queue");
+                            Ok::<(), crate::error::CodixingError>(())
+                        })?;
+                    } else {
+                        embed_and_index_chunks(
+                            &pending_embeds,
+                            &chunk_meta_map,
+                            emb,
+                            vec_idx,
+                            config.embedding.contextual_embeddings,
+                            &root,
+                        )?;
+                    }
+                }
+                #[cfg(not(feature = "rustqueue"))]
+                {
+                    embed_and_index_chunks(
+                        &pending_embeds,
+                        &chunk_meta_map,
+                        emb,
+                        vec_idx,
+                        config.embedding.contextual_embeddings,
+                        &root,
+                    )?;
+                }
             }
         }
 
@@ -278,6 +350,8 @@ impl Engine {
             symbols,
             file_chunk_counts,
             embedder,
+            #[cfg(feature = "rustqueue")]
+            embed_queue,
             vector,
             chunk_meta: chunk_meta_map,
             graph,
@@ -399,6 +473,27 @@ impl Engine {
             (None, None)
         };
 
+        // Initialise the embedding job queue for re-embedding during sync.
+        #[cfg(feature = "rustqueue")]
+        let embed_queue: Option<Arc<rustqueue::RustQueue>> = if embedder.is_some() && !read_only {
+            let queue_path = store.codixing_dir().join("embed_queue.db");
+            match rustqueue::RustQueue::redb(&queue_path) {
+                Ok(builder) => match builder.build() {
+                    Ok(rq) => Some(Arc::new(rq)),
+                    Err(e) => {
+                        warn!(error = %e, "failed to build embedding queue; using sync path");
+                        None
+                    }
+                },
+                Err(e) => {
+                    warn!(error = %e, "failed to open embedding queue; using sync path");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Restore graph.
         let graph = match store.load_graph() {
             Ok(Some(data)) => {
@@ -478,6 +573,8 @@ impl Engine {
             symbols,
             file_chunk_counts,
             embedder,
+            #[cfg(feature = "rustqueue")]
+            embed_queue,
             vector,
             chunk_meta,
             graph,
@@ -654,6 +751,8 @@ impl Engine {
             symbols,
             file_chunk_counts,
             embedder,
+            #[cfg(feature = "rustqueue")]
+            embed_queue: None,
             vector,
             chunk_meta,
             graph,

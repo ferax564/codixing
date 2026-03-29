@@ -104,6 +104,9 @@ tower-lsp = "0.20"
 # Optional Qdrant vector backend (enable with --features qdrant)
 qdrant-client = { version = "1", default-features = false, features = ["serde"] }
 
+# Optional RustQueue job queue (enable with --features rustqueue)
+rustqueue = { path = "../rustqueue" }
+
 # Memory-mapped I/O
 memmap2 = "0.9"
 

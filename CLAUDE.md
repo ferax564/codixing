@@ -39,7 +39,7 @@ For broad codebase exploration, always try a Codixing tool first. Fall back to B
 
 ## Project Structure
 
-- `crates/core/` — engine: AST parsing, BM25, graph, embeddings, PageRank, test mapping, shared sessions
+- `crates/core/` — engine: AST parsing, BM25, graph, embeddings, PageRank, test mapping, shared sessions, queue-based embedding (optional `rustqueue` feature)
 - `crates/cli/` — `codixing` CLI binary
 - `crates/mcp/` — MCP server (`codixing-mcp`), 54 tools in `src/tools/` (use `--compact` or `--medium` for token reduction)
 - `crates/server/` — HTTP API server (`codixing-server`), REST endpoints with SSE streaming for sync
@@ -52,13 +52,17 @@ For broad codebase exploration, always try a Codixing tool first. Fall back to B
 
 ```bash
 cargo build --release --workspace          # build all binaries
-cargo test --workspace                      # run all tests (845+)
+cargo test --workspace                      # run all tests (855+)
 cargo clippy --workspace -- -D warnings     # lint (must pass)
 cargo fmt --check                           # format check (must pass)
 
 # Windows (no usearch):
 cargo build --workspace --no-default-features
 cargo test --workspace --no-default-features
+
+# With RustQueue queue-based embedding:
+cargo build -p codixing-core --features rustqueue
+cargo test -p codixing-core --features rustqueue
 ```
 
 ## Version Locations
