@@ -132,9 +132,9 @@
         },
         {
           "query": "symbol-gateway-server",
-          "precision_at_10": 0.0,
-          "recall_at_10": 0.0,
-          "mrr": 0.0
+          "precision_at_10": 0.1,
+          "recall_at_10": 1.0,
+          "mrr": 1.0
         },
         {
           "query": "symbol-context-engine-interface",
@@ -150,15 +150,15 @@
         },
         {
           "query": "symbol-tool-policy-like",
-          "precision_at_10": 0.2,
-          "recall_at_10": 2.0,
+          "precision_at_10": 0.1,
+          "recall_at_10": 1.0,
           "mrr": 0.5
         },
         {
           "query": "usage-redact-sensitive-text",
-          "precision_at_10": 0.1,
-          "recall_at_10": 0.125,
-          "mrr": 0.1
+          "precision_at_10": 0.0,
+          "recall_at_10": 0.0,
+          "mrr": 0.0
         },
         {
           "query": "usage-create-auth-rate-limiter",
@@ -174,8 +174,8 @@
         },
         {
           "query": "usage-context-engine-imports",
-          "precision_at_10": 0.1,
-          "recall_at_10": 0.125,
+          "precision_at_10": 0.3,
+          "recall_at_10": 0.375,
           "mrr": 1.0
         },
         {
@@ -186,8 +186,8 @@
         },
         {
           "query": "concept-security-audit",
-          "precision_at_10": 0.1,
-          "recall_at_10": 0.25,
+          "precision_at_10": 0.2,
+          "recall_at_10": 0.5,
           "mrr": 1.0
         },
         {
@@ -210,8 +210,8 @@
         },
         {
           "query": "concept-system-prompt-composition",
-          "precision_at_10": 0.3,
-          "recall_at_10": 1.0,
+          "precision_at_10": 0.1,
+          "recall_at_10": 0.333,
           "mrr": 1.0
         },
         {
@@ -254,15 +254,15 @@
         },
         {
           "query": "symbol-gateway-server",
-          "precision_at_10": 0.0,
-          "recall_at_10": 0.0,
-          "mrr": 0.0
+          "precision_at_10": 0.1,
+          "recall_at_10": 1.0,
+          "mrr": 0.167
         },
         {
           "query": "symbol-context-engine-interface",
-          "precision_at_10": 0.429,
-          "recall_at_10": 3.0,
-          "mrr": 0.2
+          "precision_at_10": 0.1,
+          "recall_at_10": 1.0,
+          "mrr": 0.333
         },
         {
           "query": "symbol-openclaw-config",
@@ -272,31 +272,31 @@
         },
         {
           "query": "symbol-tool-policy-like",
-          "precision_at_10": 0.333,
-          "recall_at_10": 3.0,
-          "mrr": 0.5
-        },
-        {
-          "query": "usage-redact-sensitive-text",
-          "precision_at_10": 0.0,
-          "recall_at_10": 0.0,
-          "mrr": 0.0
-        },
-        {
-          "query": "usage-create-auth-rate-limiter",
           "precision_at_10": 0.1,
           "recall_at_10": 1.0,
           "mrr": 0.5
         },
         {
+          "query": "usage-redact-sensitive-text",
+          "precision_at_10": 0.4,
+          "recall_at_10": 0.5,
+          "mrr": 0.333
+        },
+        {
+          "query": "usage-create-auth-rate-limiter",
+          "precision_at_10": 0.1,
+          "recall_at_10": 1.0,
+          "mrr": 0.333
+        },
+        {
           "query": "usage-channel-plugin-imports",
-          "precision_at_10": 0.111,
+          "precision_at_10": 0.1,
           "recall_at_10": 0.143,
           "mrr": 0.5
         },
         {
           "query": "usage-context-engine-imports",
-          "precision_at_10": 0.429,
+          "precision_at_10": 0.3,
           "recall_at_10": 0.375,
           "mrr": 1.0
         },
@@ -308,13 +308,13 @@
         },
         {
           "query": "concept-security-audit",
-          "precision_at_10": 0.1,
-          "recall_at_10": 0.25,
+          "precision_at_10": 0.2,
+          "recall_at_10": 0.5,
           "mrr": 1.0
         },
         {
           "query": "concept-rate-limiting",
-          "precision_at_10": 0.143,
+          "precision_at_10": 0.1,
           "recall_at_10": 0.333,
           "mrr": 1.0
         },
@@ -332,8 +332,8 @@
         },
         {
           "query": "concept-system-prompt-composition",
-          "precision_at_10": 0.3,
-          "recall_at_10": 1.0,
+          "precision_at_10": 0.1,
+          "recall_at_10": 0.333,
           "mrr": 1.0
         },
         {
@@ -376,28 +376,28 @@
       },
       "bm25": {
         "avg_precision": 0.07,
-        "avg_recall": 0.325,
-        "avg_mrr": 0.38
+        "avg_recall": 0.31,
+        "avg_mrr": 0.425
       },
       "hybrid": {
-        "avg_precision": 0.112,
-        "avg_recall": 0.488,
-        "avg_mrr": 0.36
+        "avg_precision": 0.095,
+        "avg_recall": 0.342,
+        "avg_mrr": 0.383
       }
     }
   },
   "indexing": [
     {
       "repo": "openclaw",
-      "bm25_init_seconds": 29.29
+      "bm25_init_seconds": 27.62
     }
   ],
   "ttfs": [
     {
       "repo": "openclaw",
-      "standard_ttfs_seconds": 30.27,
-      "deferred_ttfs_seconds": 27.78,
-      "speedup": 1.1
+      "standard_ttfs_seconds": 27.47,
+      "deferred_ttfs_seconds": 27.69,
+      "speedup": 1.0
     }
   ]
 }

@@ -78,36 +78,59 @@ def grep_search(repo_path: Path, pattern: str, top_k: int = 10) -> list[str]:
 
 
 def codixing_search(repo_path: Path, query: str, strategy: str, top_k: int = 10) -> list[str]:
-    """Run codixing search and return file paths from results."""
+    """Run codixing search and return DEDUPLICATED file paths (rank-ordered).
+
+    Codixing returns chunks, not files. We request extra results (3x) and
+    deduplicate to unique file paths, preserving the rank of first appearance.
+    """
     out, _ = run(
         [str(CODIXING), "search", query, "--strategy", strategy,
-         "--limit", str(top_k), "--json"],
+         "--limit", str(top_k * 3), "--json"],
         cwd=str(repo_path),
     )
     try:
         results = json.loads(out)
-        if isinstance(results, list):
-            return [r.get("file_path", r.get("file", "")) for r in results[:top_k]]
-        return []
+        if not isinstance(results, list):
+            return []
+        # Deduplicate: keep first occurrence of each file path.
+        seen: set[str] = set()
+        files: list[str] = []
+        for r in results:
+            fp = r.get("file_path", r.get("file", ""))
+            if fp and fp not in seen:
+                seen.add(fp)
+                files.append(fp)
+                if len(files) >= top_k:
+                    break
+        return files
     except (json.JSONDecodeError, TypeError):
         return []
 
 
 def score_results(returned: list[str], ground_truth: list[str]) -> dict:
-    """Compute precision@10, recall@10, MRR."""
+    """Compute file-level precision@10, recall@10, MRR.
+
+    Both `returned` and `ground_truth` are file paths. Matching uses suffix
+    comparison to handle relative vs absolute paths.
+    """
     gt_set = set(ground_truth)
 
     def is_match(returned_file: str) -> bool:
-        if returned_file in gt_set:
-            return True
         for gt in gt_set:
-            if returned_file.endswith(gt) or gt.endswith(returned_file):
+            if returned_file == gt or returned_file.endswith(gt) or gt.endswith(returned_file):
                 return True
         return False
 
-    hits = [1 if is_match(f) else 0 for f in returned[:10]]
-    precision = sum(hits) / len(hits) if hits else 0.0
-    recall = sum(hits) / len(gt_set) if gt_set else 0.0
+    top = returned[:10]
+    hits = [1 if is_match(f) else 0 for f in top]
+    precision = sum(hits) / len(top) if top else 0.0
+    # Recall: count DISTINCT ground truth files found (not total hits).
+    found_gt: set[str] = set()
+    for f in top:
+        for gt in gt_set:
+            if f == gt or f.endswith(gt) or gt.endswith(f):
+                found_gt.add(gt)
+    recall = len(found_gt) / len(gt_set) if gt_set else 0.0
     mrr = 0.0
     for i, h in enumerate(hits):
         if h:
