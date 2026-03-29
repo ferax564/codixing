@@ -10,6 +10,7 @@ Outputs:
 """
 
 import json
+import re
 import subprocess
 import sys
 import time
@@ -75,6 +76,78 @@ def grep_search(repo_path: Path, pattern: str, top_k: int = 10) -> tuple[list[st
             counts[fp] = counts.get(fp, 0) + 1
     ranked = sorted(counts.keys(), key=lambda f: counts[f], reverse=True)
     return ranked[:top_k], elapsed_ms
+
+
+def codixing_symbols(repo_path: Path, symbol: str, top_k: int = 10) -> tuple[list[str], float]:
+    """Run codixing symbols and return (file paths of definitions, elapsed_ms).
+
+    Parses the table output format:
+        KIND         NAME                FILE              LINES
+        -------------------------------------------------------
+        TypeAlias    ChannelPlugin       src/foo.ts        L76-L117
+        Import       import { ... }      src/bar.ts        L1-L2
+        ...
+
+    Prioritises definition kinds (TypeAlias, Interface, Class, Struct, Enum,
+    Function) over Import lines, so the file that *defines* a symbol ranks first.
+    Among definitions, larger line spans rank higher (canonical definitions tend
+    to be larger than local re-aliases).
+    """
+    out, elapsed = run(
+        [str(CODIXING), "symbols", symbol],
+        cwd=str(repo_path),
+    )
+    elapsed_ms = round(elapsed * 1000, 1)
+
+    DEFINITION_KINDS = {"TypeAlias", "Interface", "Class", "Struct", "Enum", "Function"}
+
+    # Collect ALL entries first, then deduplicate with priority to definitions.
+    # A file may appear multiple times (e.g., once as Import, once as TypeAlias);
+    # we want the definition entry to win.
+    file_best: dict[str, tuple[str, int]] = {}  # file -> (kind_group, line_span)
+
+    for line in out.splitlines():
+        # Skip header, separator, and empty lines
+        stripped = line.strip()
+        if not stripped or stripped.startswith("KIND") or stripped.startswith("---"):
+            continue
+
+        # Parse: KIND  NAME  FILE  LINES  (whitespace-separated columns)
+        # The NAME column may contain spaces (e.g. multi-line import blocks),
+        # but the FILE column always ends with a file extension + space + "L"
+        # We look for the pattern: <file.ext> L<start>-L<end> or L<single>
+        m = re.search(r'(\S+\.\w+)\s+L(\d+)(?:-L?(\d+))?', line)
+        if not m:
+            continue
+        fp = m.group(1)
+        line_start = int(m.group(2))
+        line_end = int(m.group(3)) if m.group(3) else line_start
+        line_span = line_end - line_start + 1
+
+        kind = stripped.split()[0] if stripped else ""
+        is_def = kind in DEFINITION_KINDS
+        kind_group = "definition" if is_def else "import"
+
+        # Keep the best entry per file: definition > import, then largest span
+        if fp not in file_best:
+            file_best[fp] = (kind_group, line_span)
+        else:
+            prev_group, prev_span = file_best[fp]
+            if kind_group == "definition" and prev_group != "definition":
+                file_best[fp] = (kind_group, line_span)
+            elif kind_group == prev_group and line_span > prev_span:
+                file_best[fp] = (kind_group, line_span)
+
+    # Split into definitions and imports, sort definitions by span descending
+    definition_entries = [(fp, span) for fp, (grp, span) in file_best.items() if grp == "definition"]
+    import_entries = [fp for fp, (grp, _) in file_best.items() if grp != "definition"]
+
+    definition_entries.sort(key=lambda x: x[1], reverse=True)
+    definition_files = [fp for fp, _ in definition_entries]
+
+    # Definitions first (largest first), then imports as fallback
+    files = definition_files + import_entries
+    return files[:top_k], elapsed_ms
 
 
 def codixing_usages(repo_path: Path, symbol: str, top_k: int = 10) -> tuple[list[str], float]:
@@ -175,14 +248,15 @@ def score_results(returned: list[str], ground_truth: list[str]) -> dict:
 
 
 # Strategy selection based on query category.
-# - symbol: exact (trigram grep with literal pattern, same as grep baseline)
+# - symbol: symbol_lookup (codixing symbols — finds definitions, not just references)
 # - usage: usages (dedicated codixing usages subcommand)
-# - concept/cross-package: fast (BM25 + vectors, semantic search)
+# - concept: fast (BM25 + vectors, semantic search)
+# - cross-package: explore (BM25 + graph expansion, follows import edges)
 CATEGORY_STRATEGY = {
-    "symbol": "exact",
+    "symbol": "symbol_lookup",
     "usage": "usages",
     "concept": "fast",
-    "cross-package": "fast",
+    "cross-package": "explore",
 }
 
 
@@ -209,14 +283,17 @@ def run_accuracy_benchmark(repo_path: Path) -> dict:
         grep_files, grep_ms = grep_search(repo_path, q["grep_pattern"])
 
         # Route to the right codixing tool based on strategy:
-        # - exact: use grep_pattern (literal match, same as grep baseline)
+        # - symbol_lookup: codixing symbols (finds definitions, prioritises over imports)
         # - usages: dedicated codixing usages subcommand with symbol name
+        # - explore: BM25 + graph expansion (follows import edges for cross-package)
         # - fast/other: use NL text (semantic search)
-        if strategy == "usages":
+        if strategy == "symbol_lookup":
+            codixing_files, codixing_ms = codixing_symbols(repo_path, q["grep_pattern"])
+        elif strategy == "usages":
             usages_symbol = q.get("symbol", q["grep_pattern"])
             codixing_files, codixing_ms = codixing_usages(repo_path, usages_symbol)
-        elif strategy == "exact":
-            codixing_files, codixing_ms = codixing_search(repo_path, q["grep_pattern"], strategy)
+        elif strategy == "explore":
+            codixing_files, codixing_ms = codixing_search(repo_path, q["text"], strategy)
         else:
             codixing_files, codixing_ms = codixing_search(repo_path, q["text"], strategy)
 
