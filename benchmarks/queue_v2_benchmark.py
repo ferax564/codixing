@@ -184,35 +184,25 @@ def codixing_usages(repo_path: Path, symbol: str, top_k: int = 10) -> tuple[list
     return files, elapsed_ms
 
 
-def codixing_callers(repo_path: Path, target_file: str, top_k: int = 10) -> tuple[list[str], float]:
-    """Run codixing callers and return (deduplicated file paths, elapsed_ms).
+def codixing_cross_imports(repo_path: Path, from_dir: str, to_dir: str, top_k: int = 10) -> tuple[list[str], float]:
+    """Run codixing cross-imports and return (file paths, elapsed_ms).
 
-    Parses the callers output to extract file paths of files that reference
-    the target file. Used for cross-package queries that ask "which files
-    import from X" — a structural graph query.
+    Uses the import graph to find files in from_dir that import any file
+    in to_dir. This is the correct tool for module-level cross-package queries.
     """
     out, elapsed = run(
-        [str(CODIXING), "callers", target_file],
+        [str(CODIXING), "cross-imports", "--from", from_dir, "--to", to_dir],
         cwd=str(repo_path),
     )
     elapsed_ms = round(elapsed * 1000, 1)
-    seen: set[str] = set()
     files: list[str] = []
     for line in out.splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith("FILE") or stripped.startswith("---") or "caller(s)" in stripped.lower():
+        # Skip summary line and empty lines
+        if not stripped or "file(s) in" in stripped or "import from" in stripped:
             continue
-        # Try to extract file path from various output formats.
-        # Format 1: "src/foo.ts [L10-L20] ..." (callers table)
-        bracket_idx = stripped.find(" [L")
-        if bracket_idx >= 0:
-            fp = stripped[:bracket_idx].strip()
-        else:
-            # Format 2: first whitespace-delimited token is a file path
-            fp = stripped.split()[0] if stripped else ""
-        if fp and fp not in seen and ("/" in fp or fp.endswith(".ts") or fp.endswith(".tsx")):
-            seen.add(fp)
-            files.append(fp)
+        if "/" in stripped or stripped.endswith(".ts") or stripped.endswith(".tsx"):
+            files.append(stripped)
             if len(files) >= top_k:
                 break
     return files, elapsed_ms
@@ -285,13 +275,12 @@ def score_results(returned: list[str], ground_truth: list[str]) -> dict:
 # - symbol: symbol_lookup (codixing symbols — finds definitions, not just references)
 # - usage: usages (dedicated codixing usages subcommand)
 # - concept: fast (BM25 + vectors, semantic search)
-# - cross-package: callers (codixing callers — structural graph query for imports)
-#                  Falls back to usages (symbol field) or explore (text search)
+# - cross-package: cross_imports (codixing cross-imports — graph edge walk)
 CATEGORY_STRATEGY = {
     "symbol": "symbol_lookup",
     "usage": "usages",
     "concept": "fast",
-    "cross-package": "callers",
+    "cross-package": "cross_imports",
 }
 
 
@@ -328,15 +317,13 @@ def run_accuracy_benchmark(repo_path: Path) -> dict:
         elif strategy == "usages":
             usages_symbol = q.get("symbol", q["grep_pattern"])
             codixing_files, codixing_ms = codixing_usages(repo_path, usages_symbol)
-        elif strategy == "callers":
-            target = q.get("target_file", "")
-            if target:
-                codixing_files, codixing_ms = codixing_callers(repo_path, target)
-            elif q.get("symbol"):
-                # No target_file but has symbol — use usages instead
-                codixing_files, codixing_ms = codixing_usages(repo_path, q["symbol"])
+        elif strategy == "cross_imports":
+            from_dir = q.get("from_dir", "")
+            to_dir = q.get("to_dir", "")
+            if from_dir and to_dir:
+                codixing_files, codixing_ms = codixing_cross_imports(repo_path, from_dir, to_dir)
             else:
-                # Fallback to explore strategy for text-based cross-package queries
+                # Fallback to explore strategy if no from/to dirs
                 codixing_files, codixing_ms = codixing_search(repo_path, q["text"], "explore")
         else:
             codixing_files, codixing_ms = codixing_search(repo_path, q["text"], strategy)

@@ -312,6 +312,30 @@ impl CodeGraph {
             .collect()
     }
 
+    /// Find files under `from_prefix` that import any file under `to_prefix`.
+    ///
+    /// Answers module-level cross-package queries like "which gateway files
+    /// import from the security module?" in a single pass over the edge list.
+    ///
+    /// Both prefixes are matched with `starts_with`, so `"src/gateway"` matches
+    /// `"src/gateway/server.ts"` and `"src/gateway/hooks.ts"`.
+    pub fn cross_imports(&self, from_prefix: &str, to_prefix: &str) -> Vec<String> {
+        let mut result = std::collections::HashSet::new();
+        for edge in self.graph.edge_references() {
+            let source = &self.graph[edge.source()];
+            let target = &self.graph[edge.target()];
+            if source.file_path.starts_with(from_prefix)
+                && target.file_path.starts_with(to_prefix)
+                && !source.file_path.starts_with("__ext__:")
+            {
+                result.insert(source.file_path.clone());
+            }
+        }
+        let mut sorted: Vec<String> = result.into_iter().collect();
+        sorted.sort();
+        sorted
+    }
+
     /// Transitive callers (files that transitively depend on `file_path`) up to `depth` hops.
     pub fn transitive_callers(&self, file_path: &str, depth: usize) -> Vec<String> {
         self.transitive_traverse(file_path, depth, |f| self.callers(f))

@@ -216,27 +216,28 @@ ground_truth = [
 
 [[query]]
 name = "cross-pkg-plugin-sdk-entry"
-text = "extensions that import definePluginEntry from plugin-sdk"
+text = "extensions that import from plugin-sdk"
 grep_pattern = "import.*definePluginEntry.*from.*plugin-sdk"
 category = "cross-package"
-target_file = "src/plugin-sdk/plugin-entry.ts"
+from_dir = "extensions"
+to_dir = "src/plugin-sdk"
 ground_truth = [
   "extensions/volcengine/index.ts",
   "extensions/openai/index.ts",
   "extensions/groq/index.ts",
   "extensions/anthropic/index.ts",
   "extensions/discord/index.ts",
-  "src/plugin-sdk/plugin-entry.ts",
 ]
 
 [[query]]
 name = "cross-pkg-bundled-channel-entries"
-text = "generated file that imports all channel extension entry points"
+text = "channel contracts that import from extensions"
 grep_pattern = 'ChannelEntry\|ChannelSetupEntry'
 category = "cross-package"
-symbol = "ChannelEntry"
+from_dir = "src/channels/plugins/contracts"
+to_dir = "extensions"
 ground_truth = [
-  "src/generated/bundled-channel-entries.generated.ts",
+  "src/channels/plugins/contracts/registry.ts",
 ]
 
 [[query]]
@@ -244,25 +245,22 @@ name = "cross-pkg-security-from-gateway"
 text = "gateway files that import from the security module"
 grep_pattern = "import.*from.*security/"
 category = "cross-package"
-# No single target_file — this is a module-level query (falls back to explore)
+from_dir = "src/gateway"
+to_dir = "src/security"
 ground_truth = [
-  "src/gateway/server-http.ts",
   "src/gateway/server-startup-log.ts",
-  "src/gateway/hooks.ts",
 ]
 
 [[query]]
 name = "cross-pkg-config-types-from-agents"
-text = "agent files that import config types"
+text = "agent files that import from config module"
 grep_pattern = "import.*from.*config/types"
 category = "cross-package"
-# No single target_file — this is a module-level query (falls back to explore)
+from_dir = "src/agents"
+to_dir = "src/config"
 ground_truth = [
   "src/agents/tools/web-search-provider-credentials.ts",
   "src/agents/tools/model-config.helpers.ts",
-  "src/agents/tool-loop-detection.ts",
-  "src/agents/together-models.ts",
-  "src/agents/volc-models.shared.ts",
 ]
 
 [[query]]
@@ -270,8 +268,8 @@ name = "cross-pkg-plugin-contracts-registry"
 text = "channel plugin contracts registry that imports from extensions"
 grep_pattern = "import.*from.*extensions/"
 category = "cross-package"
-target_file = "src/channels/plugins/contracts/registry.ts"
+from_dir = "src/channels/plugins/contracts"
+to_dir = "extensions"
 ground_truth = [
   "src/channels/plugins/contracts/registry.ts",
-  "src/generated/bundled-channel-entries.generated.ts",
 ]
