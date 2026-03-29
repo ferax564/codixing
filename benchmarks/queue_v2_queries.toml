@@ -143,7 +143,7 @@ ground_truth = [
 [[query]]
 name = "concept-security-audit"
 text = "security audit and filesystem permission checks"
-grep_pattern = "runSecurityAudit|inspectPathPermissions|isWorldWritable"
+grep_pattern = "audit"
 category = "concept"
 ground_truth = [
   "src/security/audit.runtime.ts",
@@ -155,7 +155,7 @@ ground_truth = [
 [[query]]
 name = "concept-rate-limiting"
 text = "rate limiting and throttling implementation"
-grep_pattern = "RateLimit|rateLimiter|createFixedWindow"
+grep_pattern = 'rateLimit\|rateLimiter\|throttl'
 category = "concept"
 ground_truth = [
   "src/gateway/auth-rate-limit.ts",
@@ -166,7 +166,7 @@ ground_truth = [
 [[query]]
 name = "concept-secret-redaction"
 text = "sensitive data redaction in logs"
-grep_pattern = "redact|redactSensitiveText|redactIdentifier"
+grep_pattern = "redact"
 category = "concept"
 ground_truth = [
   "src/logging/redact.ts",
@@ -177,7 +177,7 @@ ground_truth = [
 [[query]]
 name = "concept-cron-scheduling"
 text = "cron job scheduling and periodic task execution"
-grep_pattern = "cron.*schedule|cronService|CronJob"
+grep_pattern = "cron"
 category = "concept"
 ground_truth = [
   "src/cron/service.ts",
@@ -189,7 +189,7 @@ ground_truth = [
 [[query]]
 name = "concept-system-prompt-composition"
 text = "system prompt building and composition for AI agents"
-grep_pattern = "systemPrompt|PromptMode|SystemPromptRuntimeParams"
+grep_pattern = 'systemPrompt\|PromptMode'
 category = "concept"
 ground_truth = [
   "src/agents/system-prompt.ts",
@@ -218,7 +218,7 @@ ground_truth = [
 [[query]]
 name = "cross-pkg-bundled-channel-entries"
 text = "generated file that imports all channel extension entry points"
-grep_pattern = "import.*Channel(Entry|SetupEntry).*from.*extensions/"
+grep_pattern = 'ChannelEntry\|ChannelSetupEntry'
 category = "cross-package"
 ground_truth = [
   "src/generated/bundled-channel-entries.generated.ts",

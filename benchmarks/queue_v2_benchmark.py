@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Queue Embedding v2 — Benchmark: grep vs codixing (sync) vs codixing (queue).
+"""Queue Embedding v2 — Benchmark: grep vs codixing (strategy-aware).
 
 Usage:
     python3 benchmarks/queue_v2_benchmark.py [--repo openclaw|linux|both] [--skip-accuracy]
@@ -10,7 +10,6 @@ Outputs:
 """
 
 import json
-import os
 import subprocess
 import sys
 import time
@@ -60,13 +59,14 @@ def load_queries() -> list[dict]:
     return data.get("query", [])
 
 
-def grep_search(repo_path: Path, pattern: str, top_k: int = 10) -> list[str]:
-    """Run grep and return top files ranked by match count."""
-    out, _ = run(
+def grep_search(repo_path: Path, pattern: str, top_k: int = 10) -> tuple[list[str], float]:
+    """Run grep and return (top files ranked by match count, elapsed_ms)."""
+    out, elapsed = run(
         ["grep", "-rn", "--include=*.ts", "--include=*.tsx",
          "--include=*.js", "--include=*.jsx", pattern, "."],
         cwd=str(repo_path),
     )
+    elapsed_ms = round(elapsed * 1000, 1)
     counts: dict[str, int] = {}
     for line in out.splitlines():
         parts = line.split(":", 2)
@@ -74,24 +74,25 @@ def grep_search(repo_path: Path, pattern: str, top_k: int = 10) -> list[str]:
             fp = parts[0].lstrip("./")
             counts[fp] = counts.get(fp, 0) + 1
     ranked = sorted(counts.keys(), key=lambda f: counts[f], reverse=True)
-    return ranked[:top_k]
+    return ranked[:top_k], elapsed_ms
 
 
-def codixing_search(repo_path: Path, query: str, strategy: str, top_k: int = 10) -> list[str]:
-    """Run codixing search and return DEDUPLICATED file paths (rank-ordered).
+def codixing_search(repo_path: Path, query: str, strategy: str, top_k: int = 10) -> tuple[list[str], float]:
+    """Run codixing search and return (DEDUPLICATED file paths, elapsed_ms).
 
     Codixing returns chunks, not files. We request extra results (3x) and
     deduplicate to unique file paths, preserving the rank of first appearance.
     """
-    out, _ = run(
+    out, elapsed = run(
         [str(CODIXING), "search", query, "--strategy", strategy,
          "--limit", str(top_k * 3), "--json"],
         cwd=str(repo_path),
     )
+    elapsed_ms = round(elapsed * 1000, 1)
     try:
         results = json.loads(out)
         if not isinstance(results, list):
-            return []
+            return [], elapsed_ms
         # Deduplicate: keep first occurrence of each file path.
         seen: set[str] = set()
         files: list[str] = []
@@ -102,9 +103,9 @@ def codixing_search(repo_path: Path, query: str, strategy: str, top_k: int = 10)
                 files.append(fp)
                 if len(files) >= top_k:
                     break
-        return files
+        return files, elapsed_ms
     except (json.JSONDecodeError, TypeError):
-        return []
+        return [], elapsed_ms
 
 
 def score_results(returned: list[str], ground_truth: list[str]) -> dict:
@@ -139,30 +140,52 @@ def score_results(returned: list[str], ground_truth: list[str]) -> dict:
     return {"precision_at_10": round(precision, 3), "recall_at_10": round(recall, 3), "mrr": round(mrr, 3)}
 
 
+# Strategy selection based on query category.
+# - symbol/usage: exact (trigram grep, like grep but faster)
+# - concept/cross-package: fast (BM25 + vectors, semantic search)
+CATEGORY_STRATEGY = {
+    "symbol": "exact",
+    "usage": "exact",
+    "concept": "fast",
+    "cross-package": "fast",
+}
+
+
 def run_accuracy_benchmark(repo_path: Path) -> dict:
     """Run search accuracy benchmark on OpenClaw."""
     queries = load_queries()
     if not queries:
         print("  No queries found in queue_v2_queries.toml", file=sys.stderr)
-        return {"queries": {}, "summary": {}}
+        return {"queries": {}, "summary": {}, "category_summary": {}, "timing": {}}
 
-    results = {"grep": [], "bm25": [], "hybrid": []}
+    results = {"grep": [], "codixing": []}
+    # Per-query timing: list of {query, category, grep_ms, codixing_ms, codixing_strategy}
+    timing_records: list[dict] = []
 
     for q in queries:
         gt = q.get("ground_truth", [])
         if not gt:
             continue
         name = q.get("name", "unknown")
-        print(f"  Query: {name}...")
+        category = q.get("category", "unknown")
+        strategy = CATEGORY_STRATEGY.get(category, "fast")
+        print(f"  Query: {name} (category={category}, strategy={strategy})...")
 
-        grep_files = grep_search(repo_path, q["grep_pattern"])
-        bm25_files = codixing_search(repo_path, q["text"], "instant")
-        hybrid_files = codixing_search(repo_path, q["text"], "fast")
+        grep_files, grep_ms = grep_search(repo_path, q["grep_pattern"])
+        codixing_files, codixing_ms = codixing_search(repo_path, q["text"], strategy)
 
-        results["grep"].append({"query": name, **score_results(grep_files, gt)})
-        results["bm25"].append({"query": name, **score_results(bm25_files, gt)})
-        results["hybrid"].append({"query": name, **score_results(hybrid_files, gt)})
+        results["grep"].append({"query": name, "category": category, **score_results(grep_files, gt)})
+        results["codixing"].append({"query": name, "category": category, "strategy": strategy, **score_results(codixing_files, gt)})
 
+        timing_records.append({
+            "query": name,
+            "category": category,
+            "grep_ms": grep_ms,
+            "codixing_ms": codixing_ms,
+            "codixing_strategy": strategy,
+        })
+
+    # Overall summary
     summary = {}
     for method in results:
         if results[method]:
@@ -172,7 +195,59 @@ def run_accuracy_benchmark(repo_path: Path) -> dict:
                 "avg_recall": round(sum(r["recall_at_10"] for r in results[method]) / n, 3),
                 "avg_mrr": round(sum(r["mrr"] for r in results[method]) / n, 3),
             }
-    return {"queries": results, "summary": summary}
+
+    # Per-category summary
+    categories = sorted(set(q.get("category", "unknown") for q in queries if q.get("ground_truth")))
+    category_summary: dict[str, dict] = {}
+    for cat in categories:
+        cat_grep = [r for r in results["grep"] if r["category"] == cat]
+        cat_codixing = [r for r in results["codixing"] if r["category"] == cat]
+        if cat_grep and cat_codixing:
+            n = len(cat_grep)
+            grep_p = round(sum(r["precision_at_10"] for r in cat_grep) / n, 3)
+            grep_r = round(sum(r["recall_at_10"] for r in cat_grep) / n, 3)
+            codixing_p = round(sum(r["precision_at_10"] for r in cat_codixing) / n, 3)
+            codixing_r = round(sum(r["recall_at_10"] for r in cat_codixing) / n, 3)
+            # Determine winner by recall, then precision
+            if grep_r > codixing_r or (grep_r == codixing_r and grep_p > codixing_p):
+                best = "grep"
+            elif codixing_r > grep_r or (codixing_r == grep_r and codixing_p > grep_p):
+                best = "codixing"
+            else:
+                best = "tie"
+            strategy = CATEGORY_STRATEGY.get(cat, "fast")
+            category_summary[cat] = {
+                "grep_precision": grep_p, "grep_recall": grep_r,
+                "codixing_precision": codixing_p, "codixing_recall": codixing_r,
+                "codixing_strategy": strategy, "best": best,
+            }
+
+    # Timing summary by strategy
+    timing_summary: dict[str, dict] = {}
+    # grep timing
+    grep_times = [t["grep_ms"] for t in timing_records]
+    if grep_times:
+        timing_summary["grep"] = {
+            "avg_ms": round(sum(grep_times) / len(grep_times), 1),
+            "min_ms": round(min(grep_times), 1),
+            "max_ms": round(max(grep_times), 1),
+        }
+    # codixing timing grouped by strategy
+    for strat in sorted(set(t["codixing_strategy"] for t in timing_records)):
+        strat_times = [t["codixing_ms"] for t in timing_records if t["codixing_strategy"] == strat]
+        if strat_times:
+            timing_summary[f"codixing {strat}"] = {
+                "avg_ms": round(sum(strat_times) / len(strat_times), 1),
+                "min_ms": round(min(strat_times), 1),
+                "max_ms": round(max(strat_times), 1),
+            }
+
+    return {
+        "queries": results,
+        "summary": summary,
+        "category_summary": category_summary,
+        "timing": {"per_query": timing_records, "summary": timing_summary},
+    }
 
 
 # ── Axis 2: Indexing Speed ──────────────────────────────────────────────────
@@ -235,27 +310,67 @@ def generate_report(data: dict) -> str:
     lines = ["# Queue Embedding v2 — Benchmark Results\n"]
     lines.append(f"**Date:** {time.strftime('%Y-%m-%d %H:%M')}\n")
 
-    if "accuracy" in data and data["accuracy"].get("summary"):
+    accuracy = data.get("accuracy", {})
+
+    if accuracy.get("summary"):
         lines.append("## Search Accuracy (OpenClaw)\n")
         lines.append("| Method | Precision@10 | Recall@10 | MRR |")
         lines.append("|--------|-------------|----------|-----|")
-        for method, scores in data["accuracy"]["summary"].items():
+        for method, scores in accuracy["summary"].items():
             lines.append(
                 f"| {method} | {scores['avg_precision']:.3f} | "
                 f"{scores['avg_recall']:.3f} | {scores['avg_mrr']:.3f} |"
             )
         lines.append("")
 
+        # Per-category breakdown
+        if accuracy.get("category_summary"):
+            lines.append("### By Category\n")
+            lines.append("| Category | Strategy | grep P@10 | grep R@10 | codixing P@10 | codixing R@10 | Best |")
+            lines.append("|----------|----------|----------|----------|--------------|--------------|------|")
+            for cat, cs in accuracy["category_summary"].items():
+                lines.append(
+                    f"| {cat} | {cs['codixing_strategy']} | {cs['grep_precision']:.3f} | "
+                    f"{cs['grep_recall']:.3f} | {cs['codixing_precision']:.3f} | "
+                    f"{cs['codixing_recall']:.3f} | {cs['best']} |"
+                )
+            lines.append("")
+
         # Per-query breakdown
         lines.append("### Per-Query Breakdown\n")
-        for method in ["grep", "bm25", "hybrid"]:
+        for method in ["grep", "codixing"]:
             lines.append(f"**{method}:**\n")
-            lines.append("| Query | P@10 | R@10 | MRR |")
-            lines.append("|-------|------|------|-----|")
-            for r in data["accuracy"]["queries"].get(method, []):
+            header_extra = " Strategy |" if method == "codixing" else ""
+            lines.append(f"| Query | Category |{header_extra} P@10 | R@10 | MRR |")
+            sep_extra = "----------|" if method == "codixing" else ""
+            lines.append(f"|-------|----------|{sep_extra}------|------|-----|")
+            for r in accuracy["queries"].get(method, []):
+                strat_col = f" {r.get('strategy', '')} |" if method == "codixing" else ""
                 lines.append(
-                    f"| {r['query']} | {r['precision_at_10']:.3f} | "
-                    f"{r['recall_at_10']:.3f} | {r['mrr']:.3f} |"
+                    f"| {r['query']} | {r.get('category', '')} |{strat_col} "
+                    f"{r['precision_at_10']:.3f} | {r['recall_at_10']:.3f} | {r['mrr']:.3f} |"
+                )
+            lines.append("")
+
+    # Search speed section
+    timing = accuracy.get("timing", {})
+    if timing.get("summary"):
+        lines.append("## Search Speed\n")
+        lines.append("| Method | Avg query time (ms) | Min | Max |")
+        lines.append("|--------|-------------------|-----|-----|")
+        for method, ts in timing["summary"].items():
+            lines.append(f"| {method} | {ts['avg_ms']} | {ts['min_ms']} | {ts['max_ms']} |")
+        lines.append("")
+
+        # Per-query timing
+        if timing.get("per_query"):
+            lines.append("### Per-Query Timing\n")
+            lines.append("| Query | Category | grep (ms) | codixing (ms) | Strategy |")
+            lines.append("|-------|----------|----------|--------------|----------|")
+            for t in timing["per_query"]:
+                lines.append(
+                    f"| {t['query']} | {t['category']} | {t['grep_ms']} | "
+                    f"{t['codixing_ms']} | {t['codixing_strategy']} |"
                 )
             lines.append("")
 
