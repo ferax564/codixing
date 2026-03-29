@@ -1,3 +1,5 @@
+#[cfg(feature = "rustqueue")]
+pub mod embed_queue;
 mod files;
 mod focus_map;
 mod graph;
@@ -239,6 +241,9 @@ pub struct Engine {
     pub(super) file_chunk_counts: HashMap<String, usize>,
     /// Optional fastembed model for vector embeddings.
     pub(super) embedder: Option<Arc<Embedder>>,
+    /// Optional RustQueue instance for queue-based embedding.
+    #[cfg(feature = "rustqueue")]
+    pub(super) embed_queue: Option<Arc<rustqueue::RustQueue>>,
     /// Optional usearch HNSW vector index.
     pub(super) vector: Option<VectorIndex>,
     /// Chunk metadata hydration table for vector results.

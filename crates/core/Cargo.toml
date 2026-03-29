@@ -28,11 +28,18 @@ qdrant = ["dep:qdrant-client", "dep:tokio"]
 ##   cargo build --features codixing-core/qwen3
 qwen3 = ["dep:ort-qwen3", "dep:tokenizers-qwen3", "dep:ndarray-qwen3"]
 
+## Enable the RustQueue-backed embedding pipeline.
+## Pushes embedding work as batched jobs to an embedded queue with
+## crash recovery and retry. Falls back to the sync path on failure.
+rustqueue = ["dep:rustqueue", "dep:tokio"]
+
 [dependencies]
 # Optional Qdrant backend
 qdrant-client = { workspace = true, optional = true }
-# Tokio runtime — only pulled in when the qdrant feature is enabled
+# Tokio runtime — pulled in when qdrant or rustqueue features are enabled
 tokio = { workspace = true, optional = true }
+# RustQueue job queue — pulled in when the rustqueue feature is enabled
+rustqueue = { workspace = true, optional = true }
 # Qwen3 ONNX backend — only pulled in when the qwen3 feature is enabled
 ort-qwen3      = { package = "ort",        version = "=2.0.0-rc.11", optional = true, features = ["load-dynamic", "ndarray"] }
 tokenizers-qwen3 = { package = "tokenizers", version = "0.22",         optional = true, default-features = false, features = ["onig"] }
