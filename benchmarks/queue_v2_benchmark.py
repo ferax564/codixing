@@ -77,6 +77,40 @@ def grep_search(repo_path: Path, pattern: str, top_k: int = 10) -> tuple[list[st
     return ranked[:top_k], elapsed_ms
 
 
+def codixing_usages(repo_path: Path, symbol: str, top_k: int = 10) -> tuple[list[str], float]:
+    """Run codixing usages and return (deduplicated file paths, elapsed_ms).
+
+    Parses the table output format:
+        FILE [LINES]    SCORE    PREVIEW
+        ----------------------------------------------------------
+        src/foo.ts [L0-L38]    51.326    import { ... } from ...
+        ...
+        N usage location(s) found.
+    """
+    out, elapsed = run(
+        [str(CODIXING), "usages", symbol, "--limit", str(top_k * 3)],
+        cwd=str(repo_path),
+    )
+    elapsed_ms = round(elapsed * 1000, 1)
+    seen: set[str] = set()
+    files: list[str] = []
+    for line in out.splitlines():
+        # Skip header, separator, summary, and empty lines
+        if not line.strip() or line.startswith("FILE ") or line.startswith("---") or "usage location(s) found" in line:
+            continue
+        # Extract file path: everything before " [L"
+        bracket_idx = line.find(" [L")
+        if bracket_idx < 0:
+            continue
+        fp = line[:bracket_idx].strip()
+        if fp and fp not in seen:
+            seen.add(fp)
+            files.append(fp)
+            if len(files) >= top_k:
+                break
+    return files, elapsed_ms
+
+
 def codixing_search(repo_path: Path, query: str, strategy: str, top_k: int = 10) -> tuple[list[str], float]:
     """Run codixing search and return (DEDUPLICATED file paths, elapsed_ms).
 
@@ -141,11 +175,12 @@ def score_results(returned: list[str], ground_truth: list[str]) -> dict:
 
 
 # Strategy selection based on query category.
-# - symbol/usage: exact (trigram grep, like grep but faster)
+# - symbol: exact (trigram grep with literal pattern, same as grep baseline)
+# - usage: usages (dedicated codixing usages subcommand)
 # - concept/cross-package: fast (BM25 + vectors, semantic search)
 CATEGORY_STRATEGY = {
     "symbol": "exact",
-    "usage": "exact",
+    "usage": "usages",
     "concept": "fast",
     "cross-package": "fast",
 }
@@ -172,7 +207,18 @@ def run_accuracy_benchmark(repo_path: Path) -> dict:
         print(f"  Query: {name} (category={category}, strategy={strategy})...")
 
         grep_files, grep_ms = grep_search(repo_path, q["grep_pattern"])
-        codixing_files, codixing_ms = codixing_search(repo_path, q["text"], strategy)
+
+        # Route to the right codixing tool based on strategy:
+        # - exact: use grep_pattern (literal match, same as grep baseline)
+        # - usages: dedicated codixing usages subcommand with symbol name
+        # - fast/other: use NL text (semantic search)
+        if strategy == "usages":
+            usages_symbol = q.get("symbol", q["grep_pattern"])
+            codixing_files, codixing_ms = codixing_usages(repo_path, usages_symbol)
+        elif strategy == "exact":
+            codixing_files, codixing_ms = codixing_search(repo_path, q["grep_pattern"], strategy)
+        else:
+            codixing_files, codixing_ms = codixing_search(repo_path, q["text"], strategy)
 
         results["grep"].append({"query": name, "category": category, **score_results(grep_files, gt)})
         results["codixing"].append({"query": name, "category": category, "strategy": strategy, **score_results(codixing_files, gt)})

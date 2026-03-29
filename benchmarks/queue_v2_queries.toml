@@ -66,6 +66,7 @@ ground_truth = [
 name = "usage-redact-sensitive-text"
 text = "files that call redactSensitiveText"
 grep_pattern = "import.*redactSensitiveText"
+symbol = "redactSensitiveText"
 category = "usage"
 ground_truth = [
   "src/media/fetch.ts",
@@ -82,6 +83,7 @@ ground_truth = [
 name = "usage-create-auth-rate-limiter"
 text = "files that use createAuthRateLimiter"
 grep_pattern = "import.*createAuthRateLimiter"
+symbol = "createAuthRateLimiter"
 category = "usage"
 ground_truth = [
   "src/gateway/server.impl.ts",
@@ -91,6 +93,7 @@ ground_truth = [
 name = "usage-channel-plugin-imports"
 text = "files that import ChannelPlugin type"
 grep_pattern = "import.*ChannelPlugin"
+symbol = "ChannelPlugin"
 category = "usage"
 ground_truth = [
   "src/security/audit.ts",
@@ -106,6 +109,7 @@ ground_truth = [
 name = "usage-context-engine-imports"
 text = "files that import ContextEngine"
 grep_pattern = "import.*ContextEngine"
+symbol = "ContextEngine"
 category = "usage"
 ground_truth = [
   "src/plugins/types.ts",
@@ -122,6 +126,7 @@ ground_truth = [
 name = "usage-load-config"
 text = "files that call loadConfig from config/io"
 grep_pattern = "import.*loadConfig"
+symbol = "loadConfig"
 category = "usage"
 ground_truth = [
   "src/tui/tui.ts",
