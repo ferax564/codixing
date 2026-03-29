@@ -291,6 +291,9 @@ impl TrigramIndex {
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let off = base + mid * MMAP_ENTRY_SIZE;
+            if off + MMAP_ENTRY_SIZE > data.len() {
+                return None; // corrupted index
+            }
             let key = [data[off], data[off + 1], data[off + 2]];
             match key.cmp(trigram) {
                 std::cmp::Ordering::Less => lo = mid + 1,
@@ -306,9 +309,16 @@ impl TrigramIndex {
     }
 
     /// Read a posting list from the mmap postings section.
+    ///
+    /// Returns empty if the requested range exceeds the mmap bounds
+    /// (corrupted or partially written index).
     fn mmap_read_posting_list(backing: &MmapBacking, start: u32, count: u32) -> Vec<u64> {
         let data = &backing.mmap[..];
         let base = backing.postings_offset + (start as usize) * 8;
+        let end = base + (count as usize) * 8;
+        if end > data.len() {
+            return Vec::new();
+        }
         (0..count as usize)
             .map(|i| {
                 let off = base + i * 8;
