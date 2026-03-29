@@ -159,19 +159,44 @@ impl Engine {
                                 )
                                 .await?;
                                 info!(jobs = pushed, "embedding jobs queued");
+                                Ok::<(), crate::error::CodixingError>(())
+                            })?;
 
-                                let total = super::embed_queue::drain_embed_queue(
+                            // Drain with parallel workers when hardware allows.
+                            let num_workers = std::thread::available_parallelism()
+                                .map(|n| n.get().min(4))
+                                .unwrap_or(1);
+
+                            if num_workers > 1 {
+                                let total = super::embed_queue::drain_embed_queue_parallel(
                                     rq,
-                                    emb,
+                                    &config.embedding.model,
                                     &chunk_meta_map,
                                     vec_idx,
                                     config.embedding.contextual_embeddings,
                                     &root,
-                                )
-                                .await?;
-                                info!(chunks = total, "embedding complete via queue");
-                                Ok::<(), crate::error::CodixingError>(())
-                            })?;
+                                    num_workers,
+                                )?;
+                                info!(
+                                    chunks = total,
+                                    workers = num_workers,
+                                    "embedding complete via parallel queue"
+                                );
+                            } else {
+                                super::embed_queue::block_on_async(async {
+                                    let total = super::embed_queue::drain_embed_queue(
+                                        rq,
+                                        emb,
+                                        &chunk_meta_map,
+                                        vec_idx,
+                                        config.embedding.contextual_embeddings,
+                                        &root,
+                                    )
+                                    .await?;
+                                    info!(chunks = total, "embedding complete via queue");
+                                    Ok::<(), crate::error::CodixingError>(())
+                                })?;
+                            }
                         } else {
                             // Below threshold: direct sync path (no queue overhead).
                             embed_and_index_chunks(

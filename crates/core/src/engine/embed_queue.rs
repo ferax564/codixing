@@ -117,3 +117,118 @@ pub async fn drain_embed_queue(
 
     Ok(total_embedded)
 }
+
+/// Drain the embedding queue with N parallel workers.
+///
+/// Each worker creates its own `Embedder` (separate ONNX session) and pulls
+/// jobs from the queue concurrently. Embeddings are collected in thread-local
+/// buffers, then bulk-inserted into the VectorIndex after all workers finish.
+///
+/// Memory cost: ~200 MB per worker (BGE-Small ONNX session).
+/// Expected speedup: close to N× on the embedding step.
+pub fn drain_embed_queue_parallel(
+    rq: &Arc<RustQueue>,
+    model: &crate::config::EmbeddingModel,
+    chunk_meta: &DashMap<u64, ChunkMeta>,
+    vec_idx: &mut VectorIndex,
+    contextual: bool,
+    root: &Path,
+    num_workers: usize,
+) -> Result<usize> {
+    if num_workers <= 1 {
+        // Single worker: create an embedder and use the simple async drain.
+        let embedder = Embedder::new(model)?;
+        return block_on_async(drain_embed_queue(
+            rq, &embedder, chunk_meta, vec_idx, contextual, root,
+        ));
+    }
+
+    tracing::info!(workers = num_workers, "starting parallel embedding drain");
+
+    // Phase 1: N workers embed in parallel, collect (id, vec, path) tuples.
+    let rq_ref = rq;
+    let collected: Vec<(u64, Vec<f32>, String)> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..num_workers)
+            .map(|worker_id| {
+                s.spawn(move || {
+                    let embedder = match Embedder::new(model) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            tracing::warn!(worker = worker_id, error = %e, "failed to create embedder");
+                            return Ok(Vec::new());
+                        }
+                    };
+                    tracing::debug!(worker = worker_id, "embedding worker started");
+
+                    let mut local: Vec<(u64, Vec<f32>, String)> = Vec::new();
+                    loop {
+                        let jobs = block_on_async(async {
+                            rq_ref.pull("embeddings", 10).await.map_err(queue_err)
+                        })?;
+                        if jobs.is_empty() {
+                            break;
+                        }
+                        for job in &jobs {
+                            let file_path: String =
+                                serde_json::from_value(job.data["file"].clone()).map_err(|e| {
+                                    CodixingError::Embedding(format!("bad job payload: {e}"))
+                                })?;
+                            let chunk_ids: Vec<u64> =
+                                serde_json::from_value(job.data["ids"].clone()).map_err(|e| {
+                                    CodixingError::Embedding(format!("bad job payload: {e}"))
+                                })?;
+
+                            match super::indexing::embed_file_collect(
+                                &embedder,
+                                chunk_meta,
+                                contextual,
+                                root,
+                                &file_path,
+                                &chunk_ids,
+                            ) {
+                                Ok(vecs) => {
+                                    local.extend(vecs);
+                                    block_on_async(async {
+                                        rq_ref.ack(job.id, None).await.map_err(queue_err)
+                                    })?;
+                                }
+                                Err(e) => {
+                                    let _ = block_on_async(async {
+                                        rq_ref.fail(job.id, &e.to_string()).await
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    tracing::debug!(worker = worker_id, chunks = local.len(), "worker done");
+                    Ok::<_, CodixingError>(local)
+                })
+            })
+            .collect();
+
+        let mut all = Vec::new();
+        for h in handles {
+            match h.join() {
+                Ok(Ok(vecs)) => all.extend(vecs),
+                Ok(Err(e)) => return Err(e),
+                Err(_) => return Err(CodixingError::Embedding("worker thread panicked".into())),
+            }
+        }
+        Ok(all)
+    })?;
+
+    let total = collected.len();
+    tracing::info!(
+        chunks = total,
+        "parallel embedding complete, inserting vectors"
+    );
+
+    // Phase 2: Sequential bulk insert into VectorIndex.
+    for (chunk_id, embedding, file_path) in &collected {
+        if let Err(e) = vec_idx.add_mut(*chunk_id, embedding, file_path) {
+            tracing::warn!(error = %e, chunk_id, "failed to add vector");
+        }
+    }
+
+    Ok(total)
+}
