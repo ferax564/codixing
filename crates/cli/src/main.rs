@@ -51,6 +51,12 @@ enum Command {
         /// the `deep` strategy. Increases startup time by ~2 s.
         #[arg(long)]
         reranker: bool,
+
+        /// Skip embedding during init — index with BM25 only, embed later
+        /// with `codixing embed`. Useful for large repos where you want
+        /// search available immediately.
+        #[arg(long)]
+        defer_embeddings: bool,
     },
 
     /// Search the code index.
@@ -344,7 +350,16 @@ async fn main() -> Result<()> {
             no_embeddings,
             model,
             reranker,
-        } => cmd_init(path, also, languages, no_embeddings, model, reranker),
+            defer_embeddings,
+        } => cmd_init(
+            path,
+            also,
+            languages,
+            no_embeddings,
+            model,
+            reranker,
+            defer_embeddings,
+        ),
         Command::Search {
             query,
             limit,
@@ -392,6 +407,7 @@ fn cmd_init(
     no_embeddings: bool,
     model: Option<String>,
     reranker: bool,
+    defer_embeddings: bool,
 ) -> Result<()> {
     let root = path
         .canonicalize()
@@ -422,6 +438,10 @@ fn cmd_init(
     }
     if reranker {
         config.embedding.reranker_enabled = true;
+    }
+    if defer_embeddings {
+        config.embedding.enabled = false;
+        eprintln!("Deferring embeddings — BM25 index only. Run `codixing embed` to add vectors.");
     }
 
     if config.extra_roots.is_empty() {
