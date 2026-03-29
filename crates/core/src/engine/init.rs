@@ -605,26 +605,12 @@ impl Engine {
             .ok()
             .and_then(|m| m.modified().ok());
 
-        // Pre-load chunk trigram index for fast exact search.
+        // Trigram indexes are lazy-loaded on first use via OnceLock.
+        // The 175MB chunk trigram takes ~55s to deserialize — too slow for
+        // eager loading. Stays lazy so open() is fast; only paid on first
+        // exact-strategy search.
         let trigram = std::sync::OnceLock::new();
-        if store.chunk_trigram_path().exists() {
-            match crate::index::TrigramIndex::load_binary(&store.chunk_trigram_path()) {
-                Ok(idx) => {
-                    let _ = trigram.set(idx);
-                }
-                Err(e) => warn!(error = %e, "failed to pre-load chunk trigram"),
-            }
-        }
-        // Pre-load file trigram index.
         let file_trigram = std::sync::OnceLock::new();
-        if store.file_trigram_path().exists() {
-            match crate::index::trigram::FileTrigramIndex::load_binary(&store.file_trigram_path()) {
-                Ok(idx) => {
-                    let _ = file_trigram.set(idx);
-                }
-                Err(e) => warn!(error = %e, "failed to pre-load file trigram"),
-            }
-        }
 
         Ok(Self {
             config,
