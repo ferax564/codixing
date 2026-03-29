@@ -11,7 +11,7 @@
 
 **Do not open a public GitHub issue for security vulnerabilities.**
 
-Report security issues by emailing **security@codixing.com** (or the maintainer directly if that address is not yet active — check the repository contact info).
+Report security issues by emailing **security@codixing.com**.
 
 Include:
 

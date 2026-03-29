@@ -52,4 +52,4 @@ Add the following statement as a comment on your pull request:
 
 > I have read and agree to the Contributor License Agreement in CLA.md.
 
-Corporate contributors should contact the maintainers to arrange a corporate CLA before the first PR.
+Corporate contributors should email **cla@codixing.com** to arrange a corporate CLA before the first PR.

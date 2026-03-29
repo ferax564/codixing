@@ -23,7 +23,7 @@ We are committed to making participation in this project a harassment-free exper
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be reported by contacting the project maintainers. All complaints will be reviewed and investigated promptly and fairly. Maintainers who do not follow or enforce this Code of Conduct may face temporary or permanent repercussions as determined by the project leadership.
+Instances of abusive, harassing, or otherwise unacceptable behavior may be reported by emailing **hello@codixing.com**. All complaints will be reviewed and investigated promptly and fairly. Maintainers who do not follow or enforce this Code of Conduct may face temporary or permanent repercussions as determined by the project leadership.
 
 ## Attribution
 
