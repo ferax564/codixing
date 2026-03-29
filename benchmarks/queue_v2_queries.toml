@@ -16,7 +16,7 @@
 [[query]]
 name = "symbol-channel-plugin"
 text = "ChannelPlugin type definition"
-grep_pattern = "export type ChannelPlugin"
+grep_pattern = "ChannelPlugin"
 category = "symbol"
 ground_truth = [
   "src/channels/plugins/types.plugin.ts",
@@ -25,7 +25,7 @@ ground_truth = [
 [[query]]
 name = "symbol-gateway-server"
 text = "GatewayServer type definition"
-grep_pattern = "export type GatewayServer ="
+grep_pattern = "GatewayServer"
 category = "symbol"
 ground_truth = [
   "src/gateway/server.impl.ts",
@@ -34,7 +34,7 @@ ground_truth = [
 [[query]]
 name = "symbol-context-engine-interface"
 text = "ContextEngine interface definition"
-grep_pattern = "export interface ContextEngine"
+grep_pattern = "ContextEngine"
 category = "symbol"
 ground_truth = [
   "src/context-engine/types.ts",
@@ -43,7 +43,7 @@ ground_truth = [
 [[query]]
 name = "symbol-openclaw-config"
 text = "OpenClawConfig type definition"
-grep_pattern = "export type OpenClawConfig ="
+grep_pattern = "OpenClawConfig"
 category = "symbol"
 ground_truth = [
   "src/config/types.openclaw.ts",
@@ -52,7 +52,7 @@ ground_truth = [
 [[query]]
 name = "symbol-tool-policy-like"
 text = "ToolPolicyLike type definition"
-grep_pattern = "export type ToolPolicyLike"
+grep_pattern = "ToolPolicyLike"
 category = "symbol"
 ground_truth = [
   "src/agents/tool-policy.ts",

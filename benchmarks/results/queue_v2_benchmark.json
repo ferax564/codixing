@@ -5,37 +5,37 @@
         {
           "query": "symbol-channel-plugin",
           "category": "symbol",
-          "precision_at_10": 0.333,
-          "recall_at_10": 1.0,
-          "mrr": 0.5
+          "precision_at_10": 0.0,
+          "recall_at_10": 0.0,
+          "mrr": 0.0
         },
         {
           "query": "symbol-gateway-server",
           "category": "symbol",
-          "precision_at_10": 0.5,
+          "precision_at_10": 0.1,
           "recall_at_10": 1.0,
-          "mrr": 1.0
+          "mrr": 0.111
         },
         {
           "query": "symbol-context-engine-interface",
           "category": "symbol",
-          "precision_at_10": 1.0,
+          "precision_at_10": 0.1,
           "recall_at_10": 1.0,
-          "mrr": 1.0
+          "mrr": 0.1
         },
         {
           "query": "symbol-openclaw-config",
           "category": "symbol",
-          "precision_at_10": 1.0,
-          "recall_at_10": 1.0,
-          "mrr": 1.0
+          "precision_at_10": 0.0,
+          "recall_at_10": 0.0,
+          "mrr": 0.0
         },
         {
           "query": "symbol-tool-policy-like",
           "category": "symbol",
-          "precision_at_10": 1.0,
+          "precision_at_10": 0.5,
           "recall_at_10": 1.0,
-          "mrr": 1.0
+          "mrr": 0.5
         },
         {
           "query": "usage-redact-sensitive-text",
@@ -156,7 +156,7 @@
           "query": "symbol-gateway-server",
           "category": "symbol",
           "strategy": "exact",
-          "precision_at_10": 0.1,
+          "precision_at_10": 0.333,
           "recall_at_10": 1.0,
           "mrr": 1.0
         },
@@ -166,7 +166,7 @@
           "strategy": "exact",
           "precision_at_10": 0.1,
           "recall_at_10": 1.0,
-          "mrr": 1.0
+          "mrr": 0.5
         },
         {
           "query": "symbol-openclaw-config",
@@ -180,30 +180,30 @@
           "query": "symbol-tool-policy-like",
           "category": "symbol",
           "strategy": "exact",
-          "precision_at_10": 0.1,
+          "precision_at_10": 0.5,
           "recall_at_10": 1.0,
           "mrr": 0.5
         },
         {
           "query": "usage-redact-sensitive-text",
           "category": "usage",
-          "strategy": "exact",
-          "precision_at_10": 0.0,
-          "recall_at_10": 0.0,
-          "mrr": 0.0
+          "strategy": "usages",
+          "precision_at_10": 0.5,
+          "recall_at_10": 0.625,
+          "mrr": 0.25
         },
         {
           "query": "usage-create-auth-rate-limiter",
           "category": "usage",
-          "strategy": "exact",
-          "precision_at_10": 0.1,
+          "strategy": "usages",
+          "precision_at_10": 0.143,
           "recall_at_10": 1.0,
           "mrr": 0.5
         },
         {
           "query": "usage-channel-plugin-imports",
           "category": "usage",
-          "strategy": "exact",
+          "strategy": "usages",
           "precision_at_10": 0.0,
           "recall_at_10": 0.0,
           "mrr": 0.0
@@ -211,15 +211,15 @@
         {
           "query": "usage-context-engine-imports",
           "category": "usage",
-          "strategy": "exact",
-          "precision_at_10": 0.3,
-          "recall_at_10": 0.375,
+          "strategy": "usages",
+          "precision_at_10": 0.5,
+          "recall_at_10": 0.625,
           "mrr": 1.0
         },
         {
           "query": "usage-load-config",
           "category": "usage",
-          "strategy": "exact",
+          "strategy": "usages",
           "precision_at_10": 0.0,
           "recall_at_10": 0.0,
           "mrr": 0.0
@@ -270,7 +270,7 @@
           "strategy": "fast",
           "precision_at_10": 0.2,
           "recall_at_10": 0.333,
-          "mrr": 0.5
+          "mrr": 1.0
         },
         {
           "query": "cross-pkg-bundled-channel-entries",
@@ -308,14 +308,14 @@
     },
     "summary": {
       "grep": {
-        "avg_precision": 0.302,
-        "avg_recall": 0.506,
-        "avg_mrr": 0.461
+        "avg_precision": 0.145,
+        "avg_recall": 0.406,
+        "avg_mrr": 0.271
       },
       "codixing": {
-        "avg_precision": 0.07,
-        "avg_recall": 0.31,
-        "avg_mrr": 0.425
+        "avg_precision": 0.139,
+        "avg_recall": 0.354,
+        "avg_mrr": 0.438
       }
     },
     "category_summary": {
@@ -336,19 +336,19 @@
         "best": "grep"
       },
       "symbol": {
-        "grep_precision": 0.767,
-        "grep_recall": 1.0,
-        "codixing_precision": 0.06,
+        "grep_precision": 0.14,
+        "grep_recall": 0.6,
+        "codixing_precision": 0.187,
         "codixing_recall": 0.6,
         "codixing_strategy": "exact",
-        "best": "grep"
+        "best": "codixing"
       },
       "usage": {
         "grep_precision": 0.32,
         "grep_recall": 0.475,
-        "codixing_precision": 0.08,
-        "codixing_recall": 0.275,
-        "codixing_strategy": "exact",
+        "codixing_precision": 0.229,
+        "codixing_recall": 0.45,
+        "codixing_strategy": "usages",
         "best": "grep"
       }
     },
@@ -357,159 +357,164 @@
         {
           "query": "symbol-channel-plugin",
           "category": "symbol",
-          "grep_ms": 1815.1,
-          "codixing_ms": 1569.2,
+          "grep_ms": 1607.9,
+          "codixing_ms": 2038.5,
           "codixing_strategy": "exact"
         },
         {
           "query": "symbol-gateway-server",
           "category": "symbol",
-          "grep_ms": 937.5,
-          "codixing_ms": 464.8,
+          "grep_ms": 579.2,
+          "codixing_ms": 1874.7,
           "codixing_strategy": "exact"
         },
         {
           "query": "symbol-context-engine-interface",
           "category": "symbol",
-          "grep_ms": 880.9,
-          "codixing_ms": 459.0,
+          "grep_ms": 556.6,
+          "codixing_ms": 1889.6,
           "codixing_strategy": "exact"
         },
         {
           "query": "symbol-openclaw-config",
           "category": "symbol",
-          "grep_ms": 974.7,
-          "codixing_ms": 653.7,
+          "grep_ms": 541.6,
+          "codixing_ms": 1869.9,
           "codixing_strategy": "exact"
         },
         {
           "query": "symbol-tool-policy-like",
           "category": "symbol",
-          "grep_ms": 900.8,
-          "codixing_ms": 444.2,
+          "grep_ms": 545.7,
+          "codixing_ms": 1847.8,
           "codixing_strategy": "exact"
         },
         {
           "query": "usage-redact-sensitive-text",
           "category": "usage",
-          "grep_ms": 1056.1,
-          "codixing_ms": 449.6,
-          "codixing_strategy": "exact"
+          "grep_ms": 1013.5,
+          "codixing_ms": 13.4,
+          "codixing_strategy": "usages"
         },
         {
           "query": "usage-create-auth-rate-limiter",
           "category": "usage",
-          "grep_ms": 1011.5,
-          "codixing_ms": 444.6,
-          "codixing_strategy": "exact"
+          "grep_ms": 1038.8,
+          "codixing_ms": 15.1,
+          "codixing_strategy": "usages"
         },
         {
           "query": "usage-channel-plugin-imports",
           "category": "usage",
-          "grep_ms": 987.4,
-          "codixing_ms": 450.0,
-          "codixing_strategy": "exact"
+          "grep_ms": 1006.6,
+          "codixing_ms": 10.5,
+          "codixing_strategy": "usages"
         },
         {
           "query": "usage-context-engine-imports",
           "category": "usage",
-          "grep_ms": 992.5,
-          "codixing_ms": 462.9,
-          "codixing_strategy": "exact"
+          "grep_ms": 994.4,
+          "codixing_ms": 8.6,
+          "codixing_strategy": "usages"
         },
         {
           "query": "usage-load-config",
           "category": "usage",
-          "grep_ms": 1041.1,
-          "codixing_ms": 437.1,
-          "codixing_strategy": "exact"
+          "grep_ms": 1030.6,
+          "codixing_ms": 10.3,
+          "codixing_strategy": "usages"
         },
         {
           "query": "concept-security-audit",
           "category": "concept",
-          "grep_ms": 654.9,
-          "codixing_ms": 210.8,
+          "grep_ms": 691.0,
+          "codixing_ms": 51.9,
           "codixing_strategy": "fast"
         },
         {
           "query": "concept-rate-limiting",
           "category": "concept",
-          "grep_ms": 1302.4,
-          "codixing_ms": 209.8,
+          "grep_ms": 1370.2,
+          "codixing_ms": 46.1,
           "codixing_strategy": "fast"
         },
         {
           "query": "concept-secret-redaction",
           "category": "concept",
-          "grep_ms": 715.3,
-          "codixing_ms": 228.3,
+          "grep_ms": 789.1,
+          "codixing_ms": 46.0,
           "codixing_strategy": "fast"
         },
         {
           "query": "concept-cron-scheduling",
           "category": "concept",
-          "grep_ms": 638.4,
-          "codixing_ms": 208.8,
+          "grep_ms": 724.7,
+          "codixing_ms": 44.3,
           "codixing_strategy": "fast"
         },
         {
           "query": "concept-system-prompt-composition",
           "category": "concept",
-          "grep_ms": 1254.3,
-          "codixing_ms": 241.2,
+          "grep_ms": 1316.0,
+          "codixing_ms": 38.7,
           "codixing_strategy": "fast"
         },
         {
           "query": "cross-pkg-plugin-sdk-entry",
           "category": "cross-package",
-          "grep_ms": 1035.8,
-          "codixing_ms": 229.4,
+          "grep_ms": 1124.3,
+          "codixing_ms": 50.5,
           "codixing_strategy": "fast"
         },
         {
           "query": "cross-pkg-bundled-channel-entries",
           "category": "cross-package",
-          "grep_ms": 1130.2,
-          "codixing_ms": 333.3,
+          "grep_ms": 1279.2,
+          "codixing_ms": 41.7,
           "codixing_strategy": "fast"
         },
         {
           "query": "cross-pkg-security-from-gateway",
           "category": "cross-package",
-          "grep_ms": 1209.5,
-          "codixing_ms": 267.2,
+          "grep_ms": 1261.4,
+          "codixing_ms": 53.7,
           "codixing_strategy": "fast"
         },
         {
           "query": "cross-pkg-config-types-from-agents",
           "category": "cross-package",
-          "grep_ms": 1207.9,
-          "codixing_ms": 225.3,
+          "grep_ms": 1488.7,
+          "codixing_ms": 47.9,
           "codixing_strategy": "fast"
         },
         {
           "query": "cross-pkg-plugin-contracts-registry",
           "category": "cross-package",
-          "grep_ms": 1207.9,
-          "codixing_ms": 302.0,
+          "grep_ms": 1273.4,
+          "codixing_ms": 40.2,
           "codixing_strategy": "fast"
         }
       ],
       "summary": {
         "grep": {
-          "avg_ms": 1047.7,
-          "min_ms": 638.4,
-          "max_ms": 1815.1
+          "avg_ms": 1011.6,
+          "min_ms": 541.6,
+          "max_ms": 1607.9
         },
         "codixing exact": {
-          "avg_ms": 583.5,
-          "min_ms": 437.1,
-          "max_ms": 1569.2
+          "avg_ms": 1904.1,
+          "min_ms": 1847.8,
+          "max_ms": 2038.5
         },
         "codixing fast": {
-          "avg_ms": 245.6,
-          "min_ms": 208.8,
-          "max_ms": 333.3
+          "avg_ms": 46.1,
+          "min_ms": 38.7,
+          "max_ms": 53.7
+        },
+        "codixing usages": {
+          "avg_ms": 11.6,
+          "min_ms": 8.6,
+          "max_ms": 15.1
         }
       }
     }
@@ -517,14 +522,14 @@
   "indexing": [
     {
       "repo": "openclaw",
-      "bm25_init_seconds": 27.61
+      "bm25_init_seconds": 30.86
     }
   ],
   "ttfs": [
     {
       "repo": "openclaw",
-      "standard_ttfs_seconds": 27.64,
-      "deferred_ttfs_seconds": 27.43,
+      "standard_ttfs_seconds": 32.01,
+      "deferred_ttfs_seconds": 32.05,
       "speedup": 1.0
     }
   ]
