@@ -80,6 +80,15 @@ pub async fn push_file_embed_jobs(
     Ok(job_count)
 }
 
+/// Parse a `"late-chunk-file"` job payload into `(file_path, chunk_ids)`.
+fn parse_file_job(job: &rustqueue::Job) -> Result<(String, Vec<u64>)> {
+    let file_path: String = serde_json::from_value(job.data["file"].clone())
+        .map_err(|e| CodixingError::Embedding(format!("bad job payload: {e}")))?;
+    let chunk_ids: Vec<u64> = serde_json::from_value(job.data["ids"].clone())
+        .map_err(|e| CodixingError::Embedding(format!("bad job payload: {e}")))?;
+    Ok((file_path, chunk_ids))
+}
+
 /// Drain the embedding queue, processing all pending jobs.
 ///
 /// Pulls jobs in batches of [`DRAIN_PULL_BATCH`], embeds each file using late chunking
@@ -105,10 +114,7 @@ pub async fn drain_embed_queue(
         }
 
         for job in &jobs {
-            let file_path: String = serde_json::from_value(job.data["file"].clone())
-                .map_err(|e| CodixingError::Embedding(format!("bad job payload: {e}")))?;
-            let chunk_ids: Vec<u64> = serde_json::from_value(job.data["ids"].clone())
-                .map_err(|e| CodixingError::Embedding(format!("bad job payload: {e}")))?;
+            let (file_path, chunk_ids) = parse_file_job(job)?;
 
             match super::indexing::embed_single_file(
                 embedder, chunk_meta, vec_idx, contextual, root, &file_path, &chunk_ids,
@@ -177,14 +183,7 @@ pub fn drain_embed_queue_parallel(
                             break;
                         }
                         for job in &jobs {
-                            let file_path: String =
-                                serde_json::from_value(job.data["file"].clone()).map_err(|e| {
-                                    CodixingError::Embedding(format!("bad job payload: {e}"))
-                                })?;
-                            let chunk_ids: Vec<u64> =
-                                serde_json::from_value(job.data["ids"].clone()).map_err(|e| {
-                                    CodixingError::Embedding(format!("bad job payload: {e}"))
-                                })?;
+                            let (file_path, chunk_ids) = parse_file_job(job)?;
 
                             match super::indexing::embed_file_collect(
                                 &embedder,
