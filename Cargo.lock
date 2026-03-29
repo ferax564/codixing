@@ -3438,6 +3438,7 @@ dependencies = [
 [[package]]
 name = "rustqueue"
 version = "0.2.0"
+source = "git+https://github.com/ferax564/rustqueue?tag=v0.2.0#8d57dab92f9b0b15aaa47474b920606d576e8da2"
 dependencies = [
  "anyhow",
  "async-trait",

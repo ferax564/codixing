@@ -105,7 +105,7 @@ tower-lsp = "0.20"
 qdrant-client = { version = "1", default-features = false, features = ["serde"] }
 
 # Optional RustQueue job queue (enable with --features rustqueue)
-rustqueue = { path = "../rustqueue" }
+rustqueue = { git = "https://github.com/ferax564/rustqueue", tag = "v0.2.0", default-features = false }
 
 # Memory-mapped I/O
 memmap2 = "0.9"
