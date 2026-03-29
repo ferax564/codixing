@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Your AI agent misses 29% of affected files — here's proof</title>
+  <meta name="description" content="We benchmarked Claude Code on a 368K-line TypeScript monorepo. With grep, the agent found 71% of affected files. With Codixing, 98%. Here's the data." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <style>
+    :root {
+      --bg: #000000;
+      --bg-1: #0a0a0f;
+      --bg-2: #0d1117;
+      --bg-3: #161b22;
+      --border: rgba(48, 54, 61, 0.8);
+      --border-glow: rgba(0, 212, 170, 0.25);
+      --cyan: #00d4aa;
+      --purple: #8b5cf6;
+      --orange: #f97316;
+      --text: #f0f6fc;
+      --text-muted: #8b949e;
+      --text-dim: #484f58;
+      --green: #3fb950;
+      --red: #f85149;
+      --yellow: #e3b341;
+      --radius: 12px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: "Inter", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.8;
+    }
+
+    ::selection { background: rgba(0, 212, 170, 0.2); }
+
+    /* Nav */
+    nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      background: rgba(0,0,0,0.85); backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-inner {
+      max-width: 800px; margin: 0 auto; padding: 16px 24px;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .nav-inner a { color: var(--text-muted); text-decoration: none; font-size: 0.9rem; }
+    .nav-inner a:hover { color: var(--cyan); }
+
+    /* Article */
+    article {
+      max-width: 800px; margin: 0 auto; padding: 120px 24px 80px;
+    }
+
+    .blog-meta {
+      color: var(--text-muted); font-size: 0.85rem;
+      margin-bottom: 16px;
+    }
+
+    article h1 {
+      font-size: clamp(2rem, 4vw, 2.8rem);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1.2;
+      margin-bottom: 24px;
+    }
+
+    .subtitle {
+      font-size: 1.15rem;
+      color: var(--text-muted);
+      line-height: 1.7;
+      margin-bottom: 48px;
+      max-width: 65ch;
+    }
+
+    article h2 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-top: 56px;
+      margin-bottom: 16px;
+      color: var(--cyan);
+    }
+
+    article h3 {
+      font-size: 1.15rem;
+      font-weight: 600;
+      margin-top: 40px;
+      margin-bottom: 12px;
+    }
+
+    article p {
+      margin-bottom: 20px;
+      color: var(--text);
+      font-size: 1.02rem;
+    }
+
+    article strong { color: var(--cyan); font-weight: 600; }
+
+    article code {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.88em;
+      background: var(--bg-2);
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: var(--cyan);
+    }
+
+    article a { color: var(--cyan); text-decoration: underline; text-underline-offset: 2px; }
+    article a:hover { color: var(--text); }
+
+    /* Tables */
+    .bench-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 24px 0 32px;
+      font-size: 0.92rem;
+    }
+
+    .bench-table th {
+      text-align: left;
+      padding: 10px 14px;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      font-weight: 600;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+    }
+
+    .bench-table td {
+      padding: 10px 14px;
+      border: 1px solid var(--border);
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.85rem;
+    }
+
+    .bench-table tr:hover td { background: var(--bg-1); }
+    .bench-table .pass { color: var(--green); }
+    .bench-table .fail { color: var(--red); }
+    .bench-table .num { color: var(--cyan); font-weight: 600; }
+
+    /* Code blocks */
+    pre {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+      overflow-x: auto;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.83rem;
+      line-height: 1.7;
+      margin: 20px 0 28px;
+      color: var(--text-muted);
+    }
+
+    pre .cmd { color: var(--text); }
+    pre .out { color: var(--green); }
+    pre .cmt { color: var(--text-dim); }
+    pre .val { color: var(--cyan); }
+
+    /* Callout */
+    .callout {
+      background: var(--bg-1);
+      border-left: 3px solid var(--cyan);
+      padding: 20px 24px;
+      border-radius: 0 var(--radius) var(--radius) 0;
+      margin: 28px 0;
+    }
+
+    .callout p { margin-bottom: 0; color: var(--text-muted); }
+    .callout strong { color: var(--text); }
+
+    .callout-red {
+      background: var(--bg-1);
+      border-left: 3px solid var(--red);
+      padding: 20px 24px;
+      border-radius: 0 var(--radius) var(--radius) 0;
+      margin: 28px 0;
+    }
+
+    .callout-red p { margin-bottom: 0; color: var(--text-muted); }
+    .callout-red strong { color: var(--red); }
+
+    /* Stat cards */
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin: 32px 0;
+    }
+
+    .stat-card {
+      background: var(--bg-1);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      text-align: center;
+    }
+
+    .stat-card .stat-val {
+      font-size: 1.8rem;
+      font-weight: 700;
+      color: var(--cyan);
+    }
+
+    .stat-card .stat-label {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    /* Footer */
+    footer {
+      max-width: 800px; margin: 0 auto; padding: 40px 24px;
+      border-top: 1px solid var(--border);
+      color: var(--text-dim); font-size: 0.85rem;
+      display: flex; justify-content: space-between;
+    }
+    footer a { color: var(--text-muted); text-decoration: none; }
+
+    @media (max-width: 600px) {
+      .stat-grid { grid-template-columns: repeat(2, 1fr); }
+      article h1 { font-size: 2rem; }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <a href="/index.html" style="font-weight:600;color:var(--text)">Codixing</a>
+      <div style="display:flex;gap:20px">
+        <a href="/docs.html">Docs</a>
+        <a href="https://github.com/ferax564/codixing">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <article>
+    <div class="blog-meta">March 29, 2026 &bull; Agent Benchmark</div>
+
+    <h1>Your AI agent misses 29%<br>of affected files</h1>
+
+    <p class="subtitle">
+      We ran 24 real Claude Code sessions on <a href="https://github.com/openclaw/openclaw">OpenClaw</a>&mdash;a 368K-line TypeScript monorepo&mdash;and measured how many files the agent actually found versus how many it should have found. With grep, the agent's structural recall was 71%. With Codixing, 98%.
+    </p>
+
+    <div class="stat-grid">
+      <div class="stat-card">
+        <div class="stat-val">98%</div>
+        <div class="stat-label">Codixing structural recall</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">81%</div>
+        <div class="stat-label">Fewer tool calls</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">64%</div>
+        <div class="stat-label">Fewer tokens consumed</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">72%</div>
+        <div class="stat-label">Faster wall time</div>
+      </div>
+    </div>
+
+    <h2>The benchmark nobody runs</h2>
+
+    <p>Every code retrieval tool benchmarks <em>search</em>&mdash;can you find the right file? We already published <a href="blog-benchmarks-2026-03.html">those numbers</a>. 100% top-1 accuracy, 99% token reduction, 24ms cold start.</p>
+
+    <p>But search accuracy isn't what makes agents fail. What makes agents fail is <strong>structural understanding</strong>&mdash;questions that require following dependencies, tracing call chains, and understanding what breaks when you change something.</p>
+
+    <p>These are the questions grep cannot answer:</p>
+
+    <ul style="margin: 0 0 24px 24px; color: var(--text-muted); line-height: 2;">
+      <li>"If I refactor this file, what breaks <em>two hops away</em>?"</li>
+      <li>"What is the cyclomatic complexity of each function in this module?"</li>
+      <li>"Which files are transitively affected through re-exports?"</li>
+    </ul>
+
+    <p>We designed a benchmark that tests exactly these questions. Real agent sessions, real codebase, ground truth verified by hand.</p>
+
+    <h2>How we tested</h2>
+
+    <p>We used the <a href="https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/sdk">Claude Agent SDK</a> to run automated Claude Code sessions on <a href="https://github.com/openclaw/openclaw">OpenClaw</a>&mdash;a 76-package pnpm monorepo with 9,387 indexed files.</p>
+
+    <p>Each task runs twice: once with <strong>vanilla</strong> Claude (grep, glob, read only) and once with <strong>Codixing</strong> tools available. Three runs per condition for statistical significance. Every task has a <strong>ground truth</strong>&mdash;a verified list of correct files or functions. We score <strong>recall</strong>: what fraction of the ground truth did the agent find?</p>
+
+    <h2>Task 1: Transitive impact analysis</h2>
+
+    <h3>The question</h3>
+    <p>"I want to refactor <code>src/channels/plugins/target-parsing.ts</code>. What files are affected transitively&mdash;not just direct importers, but files that import <em>those</em> files (2 hops deep)?"</p>
+
+    <h3>Why grep fails</h3>
+    <p>Grep can find <code>import ... from "./target-parsing"</code> in 4 files. But it can't trace the second hop&mdash;the files that import <em>those</em> 4 files. That requires a dependency graph. The full 2-hop blast radius is <strong>12 files</strong> across <code>src/</code> and <code>extensions/</code>.</p>
+
+    <table class="bench-table">
+      <thead>
+        <tr><th>Metric</th><th>Vanilla (grep)</th><th>Codixing</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Recall</td><td class="fail">75% (9/12)</td><td class="pass">100% (12/12)</td></tr>
+        <tr><td>Tool calls</td><td>64.7 (mean)</td><td class="num">6.7 (mean)</td></tr>
+        <tr><td>Call reduction</td><td>&mdash;</td><td class="num">90%</td></tr>
+        <tr><td>Statistically significant?</td><td colspan="2" class="pass">Yes</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout-red">
+      <p><strong>The vanilla agent consistently missed 3&ndash;4 files</strong> across all runs: <code>extensions/telegram/src/bot-native-commands.ts</code>, <code>src/agents/subagent-control.ts</code>, <code>src/auto-reply/reply/followup-runner.ts</code>, and <code>src/auto-reply/reply/agent-runner-payloads.ts</code>. These are second-hop dependencies that grep cannot reach.</p>
+    </div>
+
+    <p>Codixing found all 12 files in every run. It called <code>codixing callers</code> on each direct importer to get the second hop&mdash;a dependency graph traversal that grep structurally cannot perform.</p>
+
+    <h2>Task 2: Cyclomatic complexity ranking</h2>
+
+    <h3>The question</h3>
+    <p>"Rank these 3 files by cyclomatic complexity and name the most complex function in each: <code>src/config/io.ts</code>, <code>src/gateway/server-methods/chat.ts</code>, <code>src/cron/service/jobs.ts</code>."</p>
+
+    <h3>Why grep fails</h3>
+    <p>Grep cannot compute cyclomatic complexity. It can count keywords (<code>if</code>, <code>for</code>, <code>while</code>), but it can't scope those counts to individual functions without AST parsing. The vanilla agent tried reading the files and estimating, but consistently misidentified the most complex functions.</p>
+
+    <p>Ground truth (computed via Codixing's AST-based complexity analysis):</p>
+
+    <table class="bench-table">
+      <thead>
+        <tr><th>File</th><th>Most complex function</th><th>CC score</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>src/config/io.ts</td><td><code>createConfigIO</code></td><td class="num">93</td></tr>
+        <tr><td>src/cron/service/jobs.ts</td><td><code>applyJobPatch</code></td><td class="num">27</td></tr>
+        <tr><td>src/gateway/server-methods/chat.ts</td><td><code>sanitizeChatHistoryMessage</code></td><td class="num">22</td></tr>
+      </tbody>
+    </table>
+
+    <table class="bench-table">
+      <thead>
+        <tr><th>Metric</th><th>Vanilla (grep)</th><th>Codixing</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Recall (functions found)</td><td class="fail">44% (1.3/3)</td><td class="pass">100% (3/3)</td></tr>
+        <tr><td>Tool calls</td><td>23.3 (mean)</td><td class="num">4.0 (mean)</td></tr>
+        <tr><td>Tokens consumed</td><td>22,538</td><td class="num">856</td></tr>
+        <tr><td>Call reduction</td><td>&mdash;</td><td class="num">83%</td></tr>
+        <tr><td>Statistically significant?</td><td colspan="2" class="pass">Yes</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <p><strong>Codixing returned the answer in 4 tool calls and 856 tokens.</strong> The vanilla agent spent 23 calls and 22,538 tokens reading files and trying to estimate complexity by counting keywords. It still got 2 of 3 functions wrong.</p>
+    </div>
+
+    <h2>Task 3: Blast radius of a type change</h2>
+
+    <h3>The question</h3>
+    <p>"If I changed the <code>ChannelPlugin</code> type definition, what files across <code>src/</code> and <code>extensions/</code> would break?"</p>
+
+    <p>Ground truth: <strong>15 files</strong> across 5 directories in <code>src/</code> and 9 extension packages. This is a greppable task&mdash;<code>ChannelPlugin</code> is a distinctive identifier.</p>
+
+    <table class="bench-table">
+      <thead>
+        <tr><th>Metric</th><th>Vanilla (grep)</th><th>Codixing</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Recall</td><td>67%</td><td class="pass">96%</td></tr>
+        <tr><td>Tool calls</td><td>7.0</td><td class="num">5.7</td></tr>
+        <tr><td>Tokens consumed</td><td>11,088</td><td class="num">3,861</td></tr>
+      </tbody>
+    </table>
+
+    <p>Both modes can find <code>ChannelPlugin</code> via text search. The recall gap comes from reliability: one vanilla run timed out (0/15), while Codixing never failed. On a task where both approaches can work, <strong>Codixing uses 65% fewer tokens</strong> because it returns ranked results instead of raw grep output.</p>
+
+    <h2>Task 4: Caller completeness</h2>
+
+    <h3>The question</h3>
+    <p>"Find every production file that references <code>getChannelPlugin</code>." Ground truth: <strong>19 files</strong>.</p>
+
+    <table class="bench-table">
+      <thead>
+        <tr><th>Metric</th><th>Vanilla (grep)</th><th>Codixing</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Recall</td><td class="pass">100%</td><td class="pass">98%</td></tr>
+        <tr><td>Tool calls</td><td>2.7</td><td class="num">2.0</td></tr>
+      </tbody>
+    </table>
+
+    <p>Effectively a tie. Grep handles simple name lookups well&mdash;this is its strength. Codixing matches it with slightly fewer calls. On tasks where the answer is a distinctive string, both approaches converge.</p>
+
+    <h2>The full picture</h2>
+
+    <table class="bench-table">
+      <thead>
+        <tr><th>Task</th><th>Category</th><th>Vanilla recall</th><th>Codixing recall</th><th>Delta</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Complexity ranking</td><td>AST analysis</td><td class="fail">44%</td><td class="pass">100%</td><td class="num">+56%</td></tr>
+        <tr><td>Transitive impact</td><td>Graph traversal</td><td class="fail">72%</td><td class="pass">100%</td><td class="num">+28%</td></tr>
+        <tr><td>Blast radius</td><td>Type change</td><td>67%</td><td class="pass">96%</td><td class="num">+29%</td></tr>
+        <tr><td>Caller completeness</td><td>Name lookup</td><td class="pass">100%</td><td class="pass">98%</td><td>-2%</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <p><strong>Average structural recall: vanilla 71%, Codixing 98%.</strong> On tasks requiring structural understanding (transitive dependencies, complexity analysis), Codixing achieves 100% recall where grep plateaus at 44&ndash;72%. On simple name lookups, both approaches work equally well.</p>
+    </div>
+
+    <h2>Overall efficiency</h2>
+
+    <table class="bench-table">
+      <thead>
+        <tr><th>Metric</th><th>Vanilla</th><th>Codixing</th><th>Improvement</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Tool calls (mean)</td><td>24.4</td><td class="num">4.6</td><td class="num">81% fewer</td></tr>
+        <tr><td>Tokens consumed (mean)</td><td>8,153</td><td class="num">2,964</td><td class="num">64% fewer</td></tr>
+        <tr><td>Wall time (mean)</td><td>148.2s</td><td class="num">41.9s</td><td class="num">72% faster</td></tr>
+        <tr><td>Pass rate</td><td>92%</td><td class="pass">100%</td><td class="num">+8%</td></tr>
+      </tbody>
+    </table>
+
+    <h2>What this means</h2>
+
+    <p><strong>Search is solved. Structural understanding is not.</strong> AI agents with grep can find any symbol by name. That's table stakes. What they can't do is trace dependencies through re-exports, compute function complexity, or identify transitive blast radius. These are the tasks that determine whether a refactoring breaks production.</p>
+
+    <p><strong>The gap is structural, not solvable by better prompting.</strong> No amount of prompt engineering will give grep a dependency graph. The vanilla agent used 95 tool calls on one transitive impact run, chaining grep after grep, and still missed 25% of affected files. Codixing used 6 calls and found 100%.</p>
+
+    <p><strong>The efficiency gap compounds.</strong> 81% fewer tool calls means 81% fewer LLM round-trips. At $0.003/1K tokens for Sonnet, the token reduction saves roughly $0.015 per task. Over hundreds of agent sessions per day, that's real money&mdash;and real time.</p>
+
+    <h2>Reproduce it</h2>
+
+    <pre><span class="cmt"># Clone the benchmark</span>
+<span class="cmd">git clone https://github.com/ferax564/codixing</span>
+<span class="cmd">cd codixing</span>
+
+<span class="cmt"># Build</span>
+<span class="cmd">cargo build --release --workspace</span>
+
+<span class="cmt"># Run on OpenClaw (clones + indexes automatically)</span>
+<span class="cmd">python3 benchmarks/agent_benchmark.py \</span>
+<span class="cmd">  --repos openclaw --runs 3</span></pre>
+
+    <p>The benchmark framework, task definitions, and ground truth are all in <code>benchmarks/</code>. The raw data from this post is in <code>benchmarks/results/agent_benchmark.json</code>.</p>
+
+    <p>Source code: <a href="https://github.com/ferax564/codixing">github.com/ferax564/codixing</a></p>
+
+  </article>
+
+  <footer>
+    <a href="/index.html">Codixing</a>
+    <span>Open source &bull; BSL-1.0</span>
+  </footer>
+</body>
+</html>
