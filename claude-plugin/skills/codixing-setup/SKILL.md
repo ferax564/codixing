@@ -53,13 +53,17 @@ This requires ONNX Runtime at `~/.local/lib/libonnxruntime.dylib` (macOS) or `~/
 
 ### 4. Register MCP server with Claude Code
 
+**IMPORTANT:** Always use `--medium --no-daemon-fork` for Claude Code:
+- `--medium` exposes 17 core tools directly (no discovery overhead) — **not `--compact`**, which forces 2 extra round-trips per use
+- `--no-daemon-fork` prevents stale socket issues that silently kill the MCP connection
+
 ```bash
-claude mcp add codixing -- npx -y codixing-mcp --root .
+claude mcp add codixing -- npx -y codixing-mcp --root . --medium --no-daemon-fork
 ```
 
 ### 5. Verify
 
-Tell the user to restart Claude Code to pick up the new MCP server. After restart, all 48 Codixing tools will be available.
+Tell the user to restart Claude Code to pick up the new MCP server. After restart, 17 Codixing tools will be directly available (all 54 remain callable via `search_tools` + `get_tool_schema`).
 
 Suggest they try:
 - `code_search` for finding code

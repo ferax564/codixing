@@ -22,7 +22,7 @@ Restart Claude Code after installing. You get 54 MCP tools plus `/codixing-setup
 Alternatively, register just the MCP server without the plugin:
 
 ```bash
-claude mcp add codixing -- npx -y codixing-mcp --root .
+claude mcp add codixing -- npx -y codixing-mcp --root . --medium --no-daemon-fork
 ```
 
 ### OpenAI Codex CLI
@@ -45,7 +45,7 @@ Add to your project's `.mcp.json` (or global MCP settings):
   "mcpServers": {
     "codixing": {
       "command": "npx",
-      "args": ["-y", "codixing-mcp", "--root", "."]
+      "args": ["-y", "codixing-mcp", "--root", ".", "--medium", "--no-daemon-fork"]
     }
   }
 }

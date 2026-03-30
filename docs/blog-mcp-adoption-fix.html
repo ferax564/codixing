@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Your MCP tools aren't loading — and your agent doesn't tell you</title>
+  <meta name="description" content="We diagnosed why Claude Code silently falls back to grep instead of using Codixing MCP tools. Two flags fix it: --medium --no-daemon-fork." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <style>
+    :root {
+      --bg: #000000;
+      --bg-1: #0a0a0f;
+      --bg-2: #0d1117;
+      --bg-3: #161b22;
+      --border: rgba(48, 54, 61, 0.8);
+      --border-glow: rgba(0, 212, 170, 0.25);
+      --cyan: #00d4aa;
+      --purple: #8b5cf6;
+      --orange: #f97316;
+      --text: #f0f6fc;
+      --text-muted: #8b949e;
+      --text-dim: #484f58;
+      --green: #3fb950;
+      --red: #f85149;
+      --yellow: #e3b341;
+      --radius: 12px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: "Inter", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.8;
+    }
+
+    ::selection { background: rgba(0, 212, 170, 0.2); }
+
+    nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      background: rgba(0,0,0,0.85); backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-inner {
+      max-width: 800px; margin: 0 auto; padding: 16px 24px;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .nav-inner a { color: var(--text-muted); text-decoration: none; font-size: 0.9rem; }
+    .nav-inner a:hover { color: var(--cyan); }
+
+    article {
+      max-width: 800px; margin: 0 auto; padding: 120px 24px 80px;
+    }
+
+    .blog-meta {
+      color: var(--text-muted); font-size: 0.85rem;
+      margin-bottom: 16px;
+    }
+
+    article h1 {
+      font-size: clamp(2rem, 4vw, 2.8rem);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1.2;
+      margin-bottom: 24px;
+    }
+
+    .subtitle {
+      font-size: 1.15rem;
+      color: var(--text-muted);
+      line-height: 1.7;
+      margin-bottom: 48px;
+      max-width: 65ch;
+    }
+
+    article h2 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-top: 56px;
+      margin-bottom: 16px;
+      color: var(--cyan);
+    }
+
+    article h3 {
+      font-size: 1.15rem;
+      font-weight: 600;
+      margin-top: 40px;
+      margin-bottom: 12px;
+    }
+
+    article p {
+      margin-bottom: 20px;
+      color: var(--text);
+      font-size: 1.02rem;
+    }
+
+    article strong { color: var(--cyan); font-weight: 600; }
+
+    article code {
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.88em;
+      background: var(--bg-2);
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: var(--cyan);
+    }
+
+    article a { color: var(--cyan); text-decoration: underline; text-underline-offset: 2px; }
+    article a:hover { color: var(--text); }
+
+    .bench-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 24px 0 32px;
+      font-size: 0.92rem;
+    }
+
+    .bench-table th {
+      text-align: left;
+      padding: 10px 14px;
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      font-weight: 600;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+    }
+
+    .bench-table td {
+      padding: 10px 14px;
+      border: 1px solid var(--border);
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.85rem;
+    }
+
+    .bench-table tr:hover td { background: var(--bg-1); }
+    .bench-table .num { color: var(--cyan); font-weight: 600; }
+
+    pre {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+      overflow-x: auto;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.83rem;
+      line-height: 1.7;
+      margin: 20px 0 28px;
+      color: var(--text-muted);
+    }
+
+    pre .cmd { color: var(--text); }
+    pre .cmt { color: var(--text-dim); }
+    pre .val { color: var(--cyan); }
+
+    .callout {
+      background: var(--bg-1);
+      border-left: 3px solid var(--cyan);
+      padding: 20px 24px;
+      border-radius: 0 var(--radius) var(--radius) 0;
+      margin: 28px 0;
+    }
+
+    .callout p { margin-bottom: 0; color: var(--text-muted); }
+    .callout strong { color: var(--text); }
+
+    .callout-red {
+      background: var(--bg-1);
+      border-left: 3px solid var(--red);
+      padding: 20px 24px;
+      border-radius: 0 var(--radius) var(--radius) 0;
+      margin: 28px 0;
+    }
+
+    .callout-red p { margin-bottom: 0; color: var(--text-muted); }
+    .callout-red strong { color: var(--red); }
+
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      margin: 32px 0;
+    }
+
+    .stat-card {
+      background: var(--bg-1);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px;
+      text-align: center;
+    }
+
+    .stat-card .stat-val {
+      font-size: 1.8rem;
+      font-weight: 700;
+      color: var(--cyan);
+    }
+
+    .stat-card .stat-label {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+
+    .diagram {
+      background: var(--bg-1);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 28px;
+      margin: 28px 0;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 0.82rem;
+      line-height: 1.8;
+      color: var(--text-muted);
+      overflow-x: auto;
+    }
+
+    .diagram .label { color: var(--text); font-weight: 600; }
+    .diagram .good { color: var(--green); }
+    .diagram .bad { color: var(--red); }
+    .diagram .dim { color: var(--text-dim); }
+    .diagram .cyan { color: var(--cyan); }
+
+    footer {
+      max-width: 800px; margin: 0 auto; padding: 40px 24px;
+      border-top: 1px solid var(--border);
+      color: var(--text-dim); font-size: 0.85rem;
+      display: flex; justify-content: space-between;
+    }
+    footer a { color: var(--text-muted); text-decoration: none; }
+
+    @media (max-width: 600px) {
+      .stat-grid { grid-template-columns: 1fr; }
+      article h1 { font-size: 2rem; }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <a href="/index.html" style="font-weight:600;color:var(--text)">Codixing</a>
+      <div style="display:flex;gap:20px">
+        <a href="/blog.html">Blog</a>
+        <a href="/docs.html">Docs</a>
+        <a href="https://github.com/ferax564/codixing">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <article>
+    <a href="/blog.html" style="color:var(--text-muted);font-size:0.85rem;text-decoration:none;display:inline-block;margin-bottom:20px;">&larr; All Posts</a>
+    <div class="blog-meta">March 30, 2026 &bull; v0.22.1 &bull; MCP Configuration</div>
+
+    <h1>Your MCP tools aren't loading&mdash;<br>and your agent doesn't tell you</h1>
+
+    <p class="subtitle">
+      We spent an hour diagnosing why Claude Code kept using <code>grep</code> instead of Codixing's 54 MCP tools. The tools were configured. The binary worked. But Claude never saw them. The fix was two flags.
+    </p>
+
+    <div class="stat-grid">
+      <div class="stat-card">
+        <div class="stat-val">0/54</div>
+        <div class="stat-label">Tools visible (before fix)</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">17/54</div>
+        <div class="stat-label">Tools visible (after fix)</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">81%</div>
+        <div class="stat-label">Fewer tool calls when used</div>
+      </div>
+    </div>
+
+    <h2>The silent failure</h2>
+
+    <p>Here's the scenario: you install an MCP server, add it to <code>.mcp.json</code>, restart Claude Code, and assume it's working. You even wrote <code>MANDATORY: Always use Codixing MCP tools</code> in your CLAUDE.md. But Claude keeps using <code>Grep</code>, <code>Glob</code>, and <code>Read</code>.</p>
+
+    <p>What you don't see: Claude Code tried to connect to the MCP server at session start, the connection failed silently, and the server was dropped. Claude doesn't announce "hey, your MCP server didn't load"&mdash;it just proceeds without it.</p>
+
+    <p>We caught this by searching for our MCP tools in Claude's deferred tool list:</p>
+
+    <pre><span class="cmt"># Expected: mcp__codixing__code_search, mcp__codixing__find_symbol, ...</span>
+<span class="cmd">ToolSearch("codixing")</span>
+<span class="val">→ No matching deferred tools found</span></pre>
+
+    <p>Zero. Not a single Codixing tool loaded. Meanwhile, other MCP servers (Context7, Playwright) loaded fine.</p>
+
+    <h2>Root cause 1: Stale daemon socket</h2>
+
+    <p>The Codixing MCP server has a daemon mode that keeps the index in memory for fast subsequent calls (~1ms vs ~30ms cold start). When the daemon exits, it should clean up its socket file. But if the process crashes or gets killed, a stale <code>daemon.sock</code> stays behind.</p>
+
+    <div class="diagram">
+<span class="label">What happens at session start:</span>
+
+<span class="dim">1.</span> Claude Code spawns: <span class="cmd">codixing-mcp --root . --compact</span>
+<span class="dim">2.</span> Binary sees <span class="cmd">daemon.sock</span> exists → tries to proxy through it
+<span class="dim">3.</span> <span class="bad">Connection refused</span> (no daemon process running)
+<span class="dim">4.</span> Binary attempts to auto-fork a new daemon...
+<span class="dim">5.</span> Waits up to 1s for daemon to start (20 × 50ms)
+<span class="dim">6.</span> <span class="bad">Claude Code's MCP client times out first → drops the server</span>
+<span class="dim">7.</span> Daemon eventually starts, but nobody's listening on stdin
+<span class="dim">8.</span> Result: <span class="bad">0 tools available for the entire session</span>
+    </div>
+
+    <p><strong>Fix:</strong> <code>--no-daemon-fork</code>. MCP clients like Claude Code manage their own process lifecycle&mdash;they don't need the server to auto-fork daemons. Run in direct stdio mode and let the client handle restarts.</p>
+
+    <h2>Root cause 2: The discovery tax</h2>
+
+    <p>Even when the server loads successfully, <code>--compact</code> mode creates friction. It exposes only 2 meta-tools: <code>search_tools</code> and <code>get_tool_schema</code>. To use any real tool, Claude must:</p>
+
+    <div class="diagram">
+<span class="label">--compact: 3 round-trips per task</span>
+
+<span class="dim">Step 1:</span> <span class="cmd">search_tools("search")</span>        <span class="dim">→ discover code_search exists</span>
+<span class="dim">Step 2:</span> <span class="cmd">get_tool_schema(["code_search"])</span> <span class="dim">→ get the parameter schema</span>
+<span class="dim">Step 3:</span> <span class="cmd">code_search("Engine struct")</span>     <span class="dim">→ actually do the work</span>
+
+<span class="label">--medium: 1 round-trip per task</span>
+
+<span class="dim">Step 1:</span> <span class="cmd">code_search("Engine struct")</span>     <span class="dim">→ schema already loaded, just call it</span>
+    </div>
+
+    <p>Meanwhile, <code>Grep</code>, <code>Glob</code>, and <code>Read</code> are available immediately with full schemas. LLMs take the path of least resistance. If your tool requires 3 round-trips to use, it won't be used.</p>
+
+    <table class="bench-table">
+      <thead>
+        <tr>
+          <th>Mode</th>
+          <th>Tokens at startup</th>
+          <th>Tools visible</th>
+          <th>Round-trips per task</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>--compact</code></td>
+          <td class="num">~200</td>
+          <td>2 (meta only)</td>
+          <td class="num">3</td>
+        </tr>
+        <tr>
+          <td><code>--medium</code></td>
+          <td class="num">~2,600</td>
+          <td>17 (core tools)</td>
+          <td class="num">1</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>The ~2,400 extra tokens at startup pay for themselves after a single task.</p>
+
+    <h2>The fix: two flags</h2>
+
+<pre><span class="cmt">// .mcp.json (or plugin.json)</span>
+{
+  "<span class="val">mcpServers</span>": {
+    "<span class="val">codixing</span>": {
+      "command": "npx",
+      "args": ["-y", "codixing-mcp", "--root", ".",
+               "<span class="val">--medium</span>", "<span class="val">--no-daemon-fork</span>"]
+    }
+  }
+}</pre>
+
+    <p>That's it. <code>--medium</code> exposes 17 core tools with schemas. <code>--no-daemon-fork</code> runs in direct stdio mode. All 54 tools remain callable&mdash;the other 37 are accessible via <code>search_tools</code> + <code>get_tool_schema</code> on demand.</p>
+
+    <h2>Verified impact</h2>
+
+    <p>We ran the same benchmark tasks before and after the fix, measuring what Claude actually does with the tools available:</p>
+
+    <table class="bench-table">
+      <thead>
+        <tr>
+          <th>Benchmark</th>
+          <th>Tool calls (grep)</th>
+          <th>Tool calls (Codixing)</th>
+          <th>Reduction</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>CLI (10 tasks, Codixing repo)</td>
+          <td class="num">28</td>
+          <td class="num">10</td>
+          <td class="num">64%</td>
+        </tr>
+        <tr>
+          <td>Agent SDK (4 tasks, OpenClaw)</td>
+          <td class="num">24.4</td>
+          <td class="num">4.6</td>
+          <td class="num">81%</td>
+        </tr>
+        <tr>
+          <td>Real-world (26 tasks, 6 repos)</td>
+          <td class="num">58</td>
+          <td class="num">26</td>
+          <td class="num">55%</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <table class="bench-table">
+      <thead>
+        <tr>
+          <th>Metric</th>
+          <th>Without Codixing</th>
+          <th>With Codixing</th>
+          <th>Impact</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Tokens consumed</td>
+          <td class="num">84,606</td>
+          <td class="num">22,900</td>
+          <td class="num">73% fewer</td>
+        </tr>
+        <tr>
+          <td>Structural recall</td>
+          <td class="num">71%</td>
+          <td class="num">98%</td>
+          <td class="num">+28%</td>
+        </tr>
+        <tr>
+          <td>Wall time</td>
+          <td class="num">148s</td>
+          <td class="num">42s</td>
+          <td class="num">72% faster</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <p><strong>The adoption problem was infrastructure, not prompting.</strong> Writing "MANDATORY: use Codixing tools" in CLAUDE.md does nothing if the tools aren't loaded. Fix the connection first, then the instructions take effect.</p>
+    </div>
+
+    <h2>Lessons for MCP server authors</h2>
+
+    <h3>1. Don't auto-fork daemons in MCP stdio mode</h3>
+    <p>MCP clients manage process lifecycle. Your server should run in direct mode when invoked as a subprocess. Save daemon mode for CLI usage where users call the tool repeatedly.</p>
+
+    <h3>2. Expose enough tools to be competitive</h3>
+    <p>If your MCP server only shows 2 meta-tools, LLMs will ignore them and use built-in tools instead. Expose your 15-20 most important tools directly. The token cost is negligible compared to the adoption gain.</p>
+
+    <h3>3. Failures are silent</h3>
+    <p>Claude Code doesn't announce "your MCP server failed to load." Neither does Cursor. Neither does any client we've tested. If your server doesn't load, the agent proceeds without it and nobody notices&mdash;unless they check the tool list explicitly.</p>
+
+    <h3>4. Clean up after yourself</h3>
+    <p>If your server uses Unix sockets, named pipes, or lock files, handle stale artifacts. A socket file without a listener is worse than no socket at all&mdash;it blocks new connections with "Connection refused" instead of letting the server start fresh.</p>
+
+    <h2>Upgrading</h2>
+
+    <p>Update to v0.22.1 to get the new defaults:</p>
+
+<pre><span class="cmt"># Plugin users (recommended)</span>
+<span class="cmd">claude plugin install codixing@codixing</span>
+
+<span class="cmt"># MCP-only users</span>
+<span class="cmd">claude mcp add codixing -- npx -y codixing-mcp --root . --medium --no-daemon-fork</span></pre>
+
+    <p>If you're already on v0.22.0, just add <code>--medium --no-daemon-fork</code> to your <code>.mcp.json</code> args and restart Claude Code.</p>
+
+  </article>
+
+  <footer>
+    <span>&copy; 2026 Codixing</span>
+    <div>
+      <a href="https://github.com/ferax564/codixing">GitHub</a>
+    </div>
+  </footer>
+</body>
+</html>
