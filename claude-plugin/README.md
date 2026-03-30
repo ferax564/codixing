@@ -26,7 +26,23 @@ claude plugin add ./claude-plugin
 
 The plugin bundles the Codixing MCP server via `npx`. On first use, it downloads the `codixing-mcp` binary (~45MB) which then runs locally — no external APIs, no cloud dependencies.
 
-### Available tools (48)
+### Tool listing modes
+
+The server supports three modes for how many tools are exposed in `tools/list`:
+
+| Mode | Flag | Tools in `tools/list` | Tokens | Best for |
+|------|------|-----------------------|--------|----------|
+| **Medium** | `--medium` | 17 core tools | ~2,600 | **Claude Code (recommended)** |
+| Compact | `--compact` | 2 meta-tools only | ~200 | Token-constrained clients |
+| Full | *(none)* | All 54 tools | ~6,600 | Clients that handle large tool lists |
+
+**All 54 tools remain callable** regardless of mode — the flag only controls which tools appear in `tools/list`. With `--compact`, Claude must call `search_tools` → `get_tool_schema` → actual tool (3 round-trips). With `--medium`, the 17 most-used tools are immediately available.
+
+### Daemon mode
+
+By default, the server auto-forks a daemon process for fast subsequent calls (~1ms vs ~30ms cold start). For MCP clients like Claude Code that manage their own process lifecycle, use `--no-daemon-fork` to prevent stale socket issues.
+
+### Available tools (54)
 
 **Search**: `code_search`, `find_symbol`, `grep_code`, `search_usages`, `read_symbol`, `find_similar`, `stitch_context`
 

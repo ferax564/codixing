@@ -180,6 +180,26 @@ When adding a new crate that depends on `codixing-core`, ALWAYS:
 3. Set `default = ["usearch"]`
 4. Verify with `cargo build --workspace --no-default-features` (simulates Windows CI)
 
+## MCP Server Configuration
+
+The `.mcp.json` configures the Codixing MCP server for Claude Code. **Required flags:**
+
+- `--medium` — exposes 17 core tools directly (not `--compact` which requires 3 round-trips per use)
+- `--no-daemon-fork` — prevents stale daemon socket issues that silently kill the MCP connection
+
+Example `.mcp.json`:
+```json
+{
+  "mcpServers": {
+    "codixing": {
+      "type": "stdio",
+      "command": "./target/release/codixing-mcp",
+      "args": ["--root", ".", "--medium", "--no-daemon-fork"]
+    }
+  }
+}
+```
+
 ## MCP Index Maintenance
 
 The Codixing index lives in `.codixing/`. After significant file changes, sync it:
