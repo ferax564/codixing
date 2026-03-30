@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Your MCP tools aren't loading — and your agent doesn't tell you</title>
-  <meta name="description" content="We diagnosed why Claude Code silently falls back to grep instead of using Codixing MCP tools. Two flags fix it: --medium --no-daemon-fork." />
+  <title>Codixing vs grep: 73% fewer tokens, 98% recall — benchmarked across 6 repos</title>
+  <meta name="description" content="We benchmarked Codixing against grep across 40+ tasks on tokio, django, react, and more. 55-81% fewer tool calls, 73% fewer tokens, and 98% structural recall vs 71% with grep." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -16,7 +16,6 @@
       --bg-2: #0d1117;
       --bg-3: #161b22;
       --border: rgba(48, 54, 61, 0.8);
-      --border-glow: rgba(0, 212, 170, 0.25);
       --cyan: #00d4aa;
       --purple: #8b5cf6;
       --orange: #f97316;
@@ -31,14 +30,12 @@
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html { scroll-behavior: smooth; }
-
     body {
       font-family: "Inter", system-ui, sans-serif;
       background: var(--bg);
       color: var(--text);
       line-height: 1.8;
     }
-
     ::selection { background: rgba(0, 212, 170, 0.2); }
 
     nav {
@@ -53,180 +50,77 @@
     .nav-inner a { color: var(--text-muted); text-decoration: none; font-size: 0.9rem; }
     .nav-inner a:hover { color: var(--cyan); }
 
-    article {
-      max-width: 800px; margin: 0 auto; padding: 120px 24px 80px;
-    }
-
-    .blog-meta {
-      color: var(--text-muted); font-size: 0.85rem;
-      margin-bottom: 16px;
-    }
+    article { max-width: 800px; margin: 0 auto; padding: 120px 24px 80px; }
+    .blog-meta { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 16px; }
 
     article h1 {
       font-size: clamp(2rem, 4vw, 2.8rem);
-      font-weight: 700;
-      letter-spacing: -0.03em;
-      line-height: 1.2;
+      font-weight: 700; letter-spacing: -0.03em; line-height: 1.2;
       margin-bottom: 24px;
     }
-
     .subtitle {
-      font-size: 1.15rem;
-      color: var(--text-muted);
-      line-height: 1.7;
-      margin-bottom: 48px;
-      max-width: 65ch;
+      font-size: 1.15rem; color: var(--text-muted); line-height: 1.7;
+      margin-bottom: 48px; max-width: 65ch;
     }
-
     article h2 {
-      font-size: 1.5rem;
-      font-weight: 700;
-      letter-spacing: -0.02em;
-      margin-top: 56px;
-      margin-bottom: 16px;
-      color: var(--cyan);
+      font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em;
+      margin-top: 56px; margin-bottom: 16px; color: var(--cyan);
     }
-
-    article h3 {
-      font-size: 1.15rem;
-      font-weight: 600;
-      margin-top: 40px;
-      margin-bottom: 12px;
-    }
-
-    article p {
-      margin-bottom: 20px;
-      color: var(--text);
-      font-size: 1.02rem;
-    }
-
+    article h3 { font-size: 1.15rem; font-weight: 600; margin-top: 40px; margin-bottom: 12px; }
+    article p { margin-bottom: 20px; color: var(--text); font-size: 1.02rem; }
     article strong { color: var(--cyan); font-weight: 600; }
-
     article code {
-      font-family: "JetBrains Mono", monospace;
-      font-size: 0.88em;
-      background: var(--bg-2);
-      padding: 2px 6px;
-      border-radius: 4px;
-      color: var(--cyan);
+      font-family: "JetBrains Mono", monospace; font-size: 0.88em;
+      background: var(--bg-2); padding: 2px 6px; border-radius: 4px; color: var(--cyan);
     }
-
     article a { color: var(--cyan); text-decoration: underline; text-underline-offset: 2px; }
     article a:hover { color: var(--text); }
+    article ul, article ol { margin-bottom: 20px; padding-left: 24px; }
+    article li { margin-bottom: 8px; color: var(--text); }
 
     .bench-table {
-      width: 100%;
-      border-collapse: collapse;
-      margin: 24px 0 32px;
-      font-size: 0.92rem;
+      width: 100%; border-collapse: collapse; margin: 24px 0 32px; font-size: 0.92rem;
     }
-
     .bench-table th {
-      text-align: left;
-      padding: 10px 14px;
-      background: var(--bg-2);
-      border: 1px solid var(--border);
-      font-weight: 600;
-      font-size: 0.85rem;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: var(--text-muted);
+      text-align: left; padding: 10px 14px; background: var(--bg-2);
+      border: 1px solid var(--border); font-weight: 600; font-size: 0.85rem;
+      text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted);
     }
-
     .bench-table td {
-      padding: 10px 14px;
-      border: 1px solid var(--border);
-      font-family: "JetBrains Mono", monospace;
-      font-size: 0.85rem;
+      padding: 10px 14px; border: 1px solid var(--border);
+      font-family: "JetBrains Mono", monospace; font-size: 0.85rem;
     }
-
     .bench-table tr:hover td { background: var(--bg-1); }
     .bench-table .num { color: var(--cyan); font-weight: 600; }
+    .bench-table .pass { color: var(--green); }
+    .bench-table .fail { color: var(--red); }
+    .bench-table .muted { color: var(--text-muted); font-family: "Inter", sans-serif; }
 
     pre {
-      background: var(--bg-2);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 20px 24px;
-      overflow-x: auto;
-      font-family: "JetBrains Mono", monospace;
-      font-size: 0.83rem;
-      line-height: 1.7;
-      margin: 20px 0 28px;
-      color: var(--text-muted);
+      background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 20px 24px; overflow-x: auto; font-family: "JetBrains Mono", monospace;
+      font-size: 0.83rem; line-height: 1.7; margin: 20px 0 28px; color: var(--text-muted);
     }
-
     pre .cmd { color: var(--text); }
     pre .cmt { color: var(--text-dim); }
     pre .val { color: var(--cyan); }
 
     .callout {
-      background: var(--bg-1);
-      border-left: 3px solid var(--cyan);
-      padding: 20px 24px;
-      border-radius: 0 var(--radius) var(--radius) 0;
-      margin: 28px 0;
+      background: var(--bg-1); border-left: 3px solid var(--cyan);
+      padding: 20px 24px; border-radius: 0 var(--radius) var(--radius) 0; margin: 28px 0;
     }
-
     .callout p { margin-bottom: 0; color: var(--text-muted); }
     .callout strong { color: var(--text); }
 
-    .callout-red {
-      background: var(--bg-1);
-      border-left: 3px solid var(--red);
-      padding: 20px 24px;
-      border-radius: 0 var(--radius) var(--radius) 0;
-      margin: 28px 0;
-    }
-
-    .callout-red p { margin-bottom: 0; color: var(--text-muted); }
-    .callout-red strong { color: var(--red); }
-
     .stat-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 16px;
-      margin: 32px 0;
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin: 32px 0;
     }
-
     .stat-card {
-      background: var(--bg-1);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 20px;
-      text-align: center;
+      background: var(--bg-1); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 20px; text-align: center;
     }
-
-    .stat-card .stat-val {
-      font-size: 1.8rem;
-      font-weight: 700;
-      color: var(--cyan);
-    }
-
-    .stat-card .stat-label {
-      font-size: 0.8rem;
-      color: var(--text-muted);
-      margin-top: 4px;
-    }
-
-    .diagram {
-      background: var(--bg-1);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 28px;
-      margin: 28px 0;
-      font-family: "JetBrains Mono", monospace;
-      font-size: 0.82rem;
-      line-height: 1.8;
-      color: var(--text-muted);
-      overflow-x: auto;
-    }
-
-    .diagram .label { color: var(--text); font-weight: 600; }
-    .diagram .good { color: var(--green); }
-    .diagram .bad { color: var(--red); }
-    .diagram .dim { color: var(--text-dim); }
-    .diagram .cyan { color: var(--cyan); }
+    .stat-card .stat-val { font-size: 1.8rem; font-weight: 700; color: var(--cyan); }
+    .stat-card .stat-label { font-size: 0.8rem; color: var(--text-muted); margin-top: 4px; }
 
     footer {
       max-width: 800px; margin: 0 auto; padding: 40px 24px;
@@ -237,7 +131,7 @@
     footer a { color: var(--text-muted); text-decoration: none; }
 
     @media (max-width: 600px) {
-      .stat-grid { grid-template-columns: 1fr; }
+      .stat-grid { grid-template-columns: repeat(2, 1fr); }
       article h1 { font-size: 2rem; }
     }
   </style>
@@ -256,217 +150,426 @@
 
   <article>
     <a href="/blog.html" style="color:var(--text-muted);font-size:0.85rem;text-decoration:none;display:inline-block;margin-bottom:20px;">&larr; All Posts</a>
-    <div class="blog-meta">March 30, 2026 &bull; v0.22.1 &bull; MCP Configuration</div>
+    <div class="blog-meta">March 30, 2026 &bull; Benchmark</div>
 
-    <h1>Your MCP tools aren't loading&mdash;<br>and your agent doesn't tell you</h1>
+    <h1>Codixing vs grep: 73% fewer tokens,<br>98% structural recall</h1>
 
     <p class="subtitle">
-      We spent an hour diagnosing why Claude Code kept using <code>grep</code> instead of Codixing's 54 MCP tools. The tools were configured. The binary worked. But Claude never saw them. The fix was two flags.
+      We ran 40+ code exploration tasks on tokio, django, react, ripgrep, axum, fastapi, and a 368K-line TypeScript monorepo. Codixing uses 55&ndash;81% fewer tool calls, consumes 73% fewer tokens, and finds 98% of affected files where grep finds 71%.
     </p>
 
     <div class="stat-grid">
       <div class="stat-card">
-        <div class="stat-val">0/54</div>
-        <div class="stat-label">Tools visible (before fix)</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-val">17/54</div>
-        <div class="stat-label">Tools visible (after fix)</div>
+        <div class="stat-val">73%</div>
+        <div class="stat-label">Fewer tokens consumed</div>
       </div>
       <div class="stat-card">
         <div class="stat-val">81%</div>
-        <div class="stat-label">Fewer tool calls when used</div>
+        <div class="stat-label">Fewer tool calls</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">98%</div>
+        <div class="stat-label">Structural recall</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">72%</div>
+        <div class="stat-label">Faster wall time</div>
       </div>
     </div>
 
-    <h2>The silent failure</h2>
+    <h2>Why this benchmark matters</h2>
 
-    <p>Here's the scenario: you install an MCP server, add it to <code>.mcp.json</code>, restart Claude Code, and assume it's working. You even wrote <code>MANDATORY: Always use Codixing MCP tools</code> in your CLAUDE.md. But Claude keeps using <code>Grep</code>, <code>Glob</code>, and <code>Read</code>.</p>
+    <p>When an AI agent explores code, it pays for every tool call: ~2 seconds of API latency plus hundreds of context tokens consumed. <code>grep</code> returns raw matching lines the LLM must parse. A symbol lookup typically requires 2&ndash;4 chained calls: grep to find the file, cat to read it, grep again to find callers.</p>
 
-    <p>What you don't see: Claude Code tried to connect to the MCP server at session start, the connection failed silently, and the server was dropped. Claude doesn't announce "hey, your MCP server didn't load"&mdash;it just proceeds without it.</p>
+    <p>Codixing replaces that chain with a single structured call. The question is: how much does that actually save, and does the output quality hold up across real codebases?</p>
 
-    <p>We caught this by searching for our MCP tools in Claude's deferred tool list:</p>
+    <p>We measured three things across every task:</p>
+    <ul>
+      <li><strong>Tool calls</strong> &mdash; how many LLM round-trips the agent needs</li>
+      <li><strong>Context tokens</strong> &mdash; how much output the LLM must parse</li>
+      <li><strong>Structural recall</strong> &mdash; what percentage of ground-truth items the agent actually found</li>
+    </ul>
 
-    <pre><span class="cmt"># Expected: mcp__codixing__code_search, mcp__codixing__find_symbol, ...</span>
-<span class="cmd">ToolSearch("codixing")</span>
-<span class="val">→ No matching deferred tools found</span></pre>
+    <h2>Benchmark 1: 26 tasks across 6 open-source repos</h2>
 
-    <p>Zero. Not a single Codixing tool loaded. Meanwhile, other MCP servers (Context7, Playwright) loaded fine.</p>
-
-    <h2>Root cause 1: Stale daemon socket</h2>
-
-    <p>The Codixing MCP server has a daemon mode that keeps the index in memory for fast subsequent calls (~1ms vs ~30ms cold start). When the daemon exits, it should clean up its socket file. But if the process crashes or gets killed, a stale <code>daemon.sock</code> stays behind.</p>
-
-    <div class="diagram">
-<span class="label">What happens at session start:</span>
-
-<span class="dim">1.</span> Claude Code spawns: <span class="cmd">codixing-mcp --root . --compact</span>
-<span class="dim">2.</span> Binary sees <span class="cmd">daemon.sock</span> exists → tries to proxy through it
-<span class="dim">3.</span> <span class="bad">Connection refused</span> (no daemon process running)
-<span class="dim">4.</span> Binary attempts to auto-fork a new daemon...
-<span class="dim">5.</span> Waits up to 1s for daemon to start (20 × 50ms)
-<span class="dim">6.</span> <span class="bad">Claude Code's MCP client times out first → drops the server</span>
-<span class="dim">7.</span> Daemon eventually starts, but nobody's listening on stdin
-<span class="dim">8.</span> Result: <span class="bad">0 tools available for the entire session</span>
-    </div>
-
-    <p><strong>Fix:</strong> <code>--no-daemon-fork</code>. MCP clients like Claude Code manage their own process lifecycle&mdash;they don't need the server to auto-fork daemons. Run in direct stdio mode and let the client handle restarts.</p>
-
-    <h2>Root cause 2: The discovery tax</h2>
-
-    <p>Even when the server loads successfully, <code>--compact</code> mode creates friction. It exposes only 2 meta-tools: <code>search_tools</code> and <code>get_tool_schema</code>. To use any real tool, Claude must:</p>
-
-    <div class="diagram">
-<span class="label">--compact: 3 round-trips per task</span>
-
-<span class="dim">Step 1:</span> <span class="cmd">search_tools("search")</span>        <span class="dim">→ discover code_search exists</span>
-<span class="dim">Step 2:</span> <span class="cmd">get_tool_schema(["code_search"])</span> <span class="dim">→ get the parameter schema</span>
-<span class="dim">Step 3:</span> <span class="cmd">code_search("Engine struct")</span>     <span class="dim">→ actually do the work</span>
-
-<span class="label">--medium: 1 round-trip per task</span>
-
-<span class="dim">Step 1:</span> <span class="cmd">code_search("Engine struct")</span>     <span class="dim">→ schema already loaded, just call it</span>
-    </div>
-
-    <p>Meanwhile, <code>Grep</code>, <code>Glob</code>, and <code>Read</code> are available immediately with full schemas. LLMs take the path of least resistance. If your tool requires 3 round-trips to use, it won't be used.</p>
+    <p>We tested 26 code exploration tasks spanning symbol lookup, code understanding, call graph navigation, impact analysis, architecture overview, and bug localization.</p>
 
     <table class="bench-table">
       <thead>
         <tr>
-          <th>Mode</th>
-          <th>Tokens at startup</th>
-          <th>Tools visible</th>
-          <th>Round-trips per task</th>
+          <th>Repo</th>
+          <th>Language</th>
+          <th>Files</th>
+          <th>Symbols</th>
+          <th>Index Time</th>
         </tr>
       </thead>
       <tbody>
-        <tr>
-          <td><code>--compact</code></td>
-          <td class="num">~200</td>
-          <td>2 (meta only)</td>
-          <td class="num">3</td>
-        </tr>
-        <tr>
-          <td><code>--medium</code></td>
-          <td class="num">~2,600</td>
-          <td>17 (core tools)</td>
-          <td class="num">1</td>
-        </tr>
+        <tr><td>tokio</td><td class="muted">Rust</td><td class="num">765</td><td class="num">6,234</td><td class="num">777ms</td></tr>
+        <tr><td>ripgrep</td><td class="muted">Rust</td><td class="num">100</td><td class="num">2,006</td><td class="num">251ms</td></tr>
+        <tr><td>axum</td><td class="muted">Rust</td><td class="num">291</td><td class="num">2,309</td><td class="num">227ms</td></tr>
+        <tr><td>django</td><td class="muted">Python</td><td class="num">2,894</td><td class="num">31,830</td><td class="num">2.4s</td></tr>
+        <tr><td>fastapi</td><td class="muted">Python</td><td class="num">1,118</td><td class="num">3,419</td><td class="num">873ms</td></tr>
+        <tr><td>react</td><td class="muted">JavaScript</td><td class="num">4,325</td><td class="num">10,071</td><td class="num">4.3s</td></tr>
       </tbody>
     </table>
 
-    <p>The ~2,400 extra tokens at startup pay for themselves after a single task.</p>
-
-    <h2>The fix: two flags</h2>
-
-<pre><span class="cmt">// .mcp.json (or plugin.json)</span>
-{
-  "<span class="val">mcpServers</span>": {
-    "<span class="val">codixing</span>": {
-      "command": "npx",
-      "args": ["-y", "codixing-mcp", "--root", ".",
-               "<span class="val">--medium</span>", "<span class="val">--no-daemon-fork</span>"]
-    }
-  }
-}</pre>
-
-    <p>That's it. <code>--medium</code> exposes 17 core tools with schemas. <code>--no-daemon-fork</code> runs in direct stdio mode. All 54 tools remain callable&mdash;the other 37 are accessible via <code>search_tools</code> + <code>get_tool_schema</code> on demand.</p>
-
-    <h2>Verified impact</h2>
-
-    <p>We ran the same benchmark tasks before and after the fix, measuring what Claude actually does with the tools available:</p>
-
-    <table class="bench-table">
-      <thead>
-        <tr>
-          <th>Benchmark</th>
-          <th>Tool calls (grep)</th>
-          <th>Tool calls (Codixing)</th>
-          <th>Reduction</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr>
-          <td>CLI (10 tasks, Codixing repo)</td>
-          <td class="num">28</td>
-          <td class="num">10</td>
-          <td class="num">64%</td>
-        </tr>
-        <tr>
-          <td>Agent SDK (4 tasks, OpenClaw)</td>
-          <td class="num">24.4</td>
-          <td class="num">4.6</td>
-          <td class="num">81%</td>
-        </tr>
-        <tr>
-          <td>Real-world (26 tasks, 6 repos)</td>
-          <td class="num">58</td>
-          <td class="num">26</td>
-          <td class="num">55%</td>
-        </tr>
-      </tbody>
-    </table>
+    <h3>Aggregate results</h3>
 
     <table class="bench-table">
       <thead>
         <tr>
           <th>Metric</th>
-          <th>Without Codixing</th>
-          <th>With Codixing</th>
-          <th>Impact</th>
+          <th>grep / cat / find</th>
+          <th>Codixing</th>
+          <th>Improvement</th>
         </tr>
       </thead>
       <tbody>
         <tr>
-          <td>Tokens consumed</td>
-          <td class="num">84,606</td>
-          <td class="num">22,900</td>
+          <td>Tool calls</td>
+          <td class="num">58</td>
+          <td class="num">26</td>
+          <td class="num">55% fewer</td>
+        </tr>
+        <tr>
+          <td>Output bytes</td>
+          <td class="num">338,425</td>
+          <td class="num">91,603</td>
           <td class="num">73% fewer</td>
         </tr>
         <tr>
-          <td>Structural recall</td>
-          <td class="num">71%</td>
-          <td class="num">98%</td>
-          <td class="num">+28%</td>
+          <td>Est. context tokens</td>
+          <td class="num">~84,606</td>
+          <td class="num">~22,900</td>
+          <td class="num">73% fewer</td>
         </tr>
         <tr>
-          <td>Wall time</td>
-          <td class="num">148s</td>
-          <td class="num">42s</td>
-          <td class="num">72% faster</td>
+          <td>Est. LLM wall time</td>
+          <td class="num">~116s</td>
+          <td class="num">~52s</td>
+          <td class="num">64s saved</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Results by category</h3>
+
+    <table class="bench-table">
+      <thead>
+        <tr>
+          <th>Category</th>
+          <th>Tasks</th>
+          <th>grep calls</th>
+          <th>Codixing calls</th>
+          <th>grep bytes</th>
+          <th>Codixing bytes</th>
+          <th>Byte savings</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Symbol lookup</td><td class="num">6</td>
+          <td class="num">12</td><td class="num">6</td>
+          <td class="num">110K</td><td class="num">7.6K</td>
+          <td class="num">93%</td>
+        </tr>
+        <tr>
+          <td>Impact analysis</td><td class="num">2</td>
+          <td class="num">4</td><td class="num">2</td>
+          <td class="num">27.8K</td><td class="num">2.9K</td>
+          <td class="num">90%</td>
+        </tr>
+        <tr>
+          <td>Code understanding</td><td class="num">6</td>
+          <td class="num">18</td><td class="num">6</td>
+          <td class="num">126K</td><td class="num">19.6K</td>
+          <td class="num">84%</td>
+        </tr>
+        <tr>
+          <td>Bug localization</td><td class="num">2</td>
+          <td class="num">6</td><td class="num">2</td>
+          <td class="num">34.5K</td><td class="num">5.8K</td>
+          <td class="num">83%</td>
+        </tr>
+        <tr>
+          <td>Call graph</td><td class="num">6</td>
+          <td class="num">7</td><td class="num">6</td>
+          <td class="num">25.6K</td><td class="num">7.2K</td>
+          <td class="num">72%</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>The biggest wins are in <strong>symbol lookup</strong> (93% fewer bytes) and <strong>impact analysis</strong> (90%). These are tasks where grep returns pages of matching lines while Codixing returns a single structured answer with the definition, scope, and callers.</p>
+
+    <h3>Per-repo highlights</h3>
+
+    <table class="bench-table">
+      <thead>
+        <tr>
+          <th>Task</th>
+          <th>Repo</th>
+          <th>grep</th>
+          <th>Codixing</th>
+          <th>Savings</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="muted">Find Searcher struct</td><td>ripgrep</td>
+          <td class="num">41.3K</td><td class="num">1.5K</td><td class="num">96%</td>
+        </tr>
+        <tr>
+          <td class="muted">Find Router struct</td><td>axum</td>
+          <td class="num">27.5K</td><td class="num">1.3K</td><td class="num">95%</td>
+        </tr>
+        <tr>
+          <td class="muted">Callers of JoinHandle::abort</td><td>tokio</td>
+          <td class="num">5.8K</td><td class="num">373B</td><td class="num">94%</td>
+        </tr>
+        <tr>
+          <td class="muted">Find FiberNode definition</td><td>react</td>
+          <td class="num">7.4K</td><td class="num">543B</td><td class="num">93%</td>
+        </tr>
+        <tr>
+          <td class="muted">What depends on io module?</td><td>tokio</td>
+          <td class="num">24.6K</td><td class="num">2.1K</td><td class="num">91%</td>
+        </tr>
+        <tr>
+          <td class="muted">PCRE2 pattern matching</td><td>ripgrep</td>
+          <td class="num">55.5K</td><td class="num">2.9K</td><td class="num">95%</td>
+        </tr>
+        <tr>
+          <td class="muted">CSRF token validation</td><td>django</td>
+          <td class="num">21.6K</td><td class="num">3.5K</td><td class="num">84%</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>Benchmark 2: SWE-bench style bug localization</h2>
+
+    <p>We ran 7 bug localization tasks modeled after <a href="https://www.swebench.com/">SWE-bench</a>: given an issue description, find the correct file(s) and function(s) to modify.</p>
+
+    <table class="bench-table">
+      <thead>
+        <tr>
+          <th>Metric</th>
+          <th>grep</th>
+          <th>Codixing</th>
+          <th>Winner</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>File localization</td>
+          <td class="num">100%</td>
+          <td class="num">100%</td>
+          <td class="muted">Tie</td>
+        </tr>
+        <tr>
+          <td>Symbol localization</td>
+          <td class="num">24%</td>
+          <td class="num">67%</td>
+          <td class="num">Codixing (2.8&times;)</td>
+        </tr>
+        <tr>
+          <td>Context consumed</td>
+          <td class="num">668K</td>
+          <td class="num">42K</td>
+          <td class="num">Codixing (16&times; fewer)</td>
+        </tr>
+        <tr>
+          <td>Tool calls</td>
+          <td class="num">55</td>
+          <td class="num">14</td>
+          <td class="num">Codixing (4&times; fewer)</td>
         </tr>
       </tbody>
     </table>
 
     <div class="callout">
-      <p><strong>The adoption problem was infrastructure, not prompting.</strong> Writing "MANDATORY: use Codixing tools" in CLAUDE.md does nothing if the tools aren't loaded. Fix the connection first, then the instructions take effect.</p>
+      <p><strong>Both approaches find the right files</strong>&mdash;grep is good at that. But Codixing finds the right <em>functions</em> 2.8&times; more often, because BM25 ranking surfaces semantically relevant code chunks, not just matching lines. And it does so with <strong>16&times; less context consumed</strong>.</p>
     </div>
 
-    <h2>Lessons for MCP server authors</h2>
+    <h2>Benchmark 3: Real agent sessions with ground truth</h2>
 
-    <h3>1. Don't auto-fork daemons in MCP stdio mode</h3>
-    <p>MCP clients manage process lifecycle. Your server should run in direct mode when invoked as a subprocess. Save daemon mode for CLI usage where users call the tool repeatedly.</p>
+    <p>We ran 24 real Claude Code sessions (claude-sonnet-4-6, 3 runs per task per condition) on <a href="https://github.com/openclaw/openclaw">OpenClaw</a>&mdash;a 368K-line TypeScript monorepo&mdash;with known correct answers for every task. Each task has a ground-truth set of files/functions the agent should find.</p>
 
-    <h3>2. Expose enough tools to be competitive</h3>
-    <p>If your MCP server only shows 2 meta-tools, LLMs will ignore them and use built-in tools instead. Expose your 15-20 most important tools directly. The token cost is negligible compared to the adoption gain.</p>
+    <h3>Efficiency</h3>
 
-    <h3>3. Failures are silent</h3>
-    <p>Claude Code doesn't announce "your MCP server failed to load." Neither does Cursor. Neither does any client we've tested. If your server doesn't load, the agent proceeds without it and nobody notices&mdash;unless they check the tool list explicitly.</p>
+    <table class="bench-table">
+      <thead>
+        <tr>
+          <th>Metric</th>
+          <th>grep (mean)</th>
+          <th>Codixing (mean)</th>
+          <th>Improvement</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Tool calls</td>
+          <td class="num">24.4</td>
+          <td class="num">4.6</td>
+          <td class="num">81% fewer</td>
+        </tr>
+        <tr>
+          <td>Tokens consumed</td>
+          <td class="num">8,153</td>
+          <td class="num">2,964</td>
+          <td class="num">64% fewer</td>
+        </tr>
+        <tr>
+          <td>Wall time</td>
+          <td class="num">148.2s</td>
+          <td class="num">41.9s</td>
+          <td class="num">72% faster</td>
+        </tr>
+        <tr>
+          <td>Pass rate</td>
+          <td class="num">92%</td>
+          <td class="num">100%</td>
+          <td class="num">+8%</td>
+        </tr>
+      </tbody>
+    </table>
 
-    <h3>4. Clean up after yourself</h3>
-    <p>If your server uses Unix sockets, named pipes, or lock files, handle stale artifacts. A socket file without a listener is worse than no socket at all&mdash;it blocks new connections with "Connection refused" instead of letting the server start fresh.</p>
+    <h3>Structural recall (ground truth)</h3>
 
-    <h2>Upgrading</h2>
+    <p>Recall = fraction of ground-truth items the agent found. Higher is better.</p>
 
-    <p>Update to v0.22.1 to get the new defaults:</p>
+    <table class="bench-table">
+      <thead>
+        <tr>
+          <th>Task category</th>
+          <th>Ground truth</th>
+          <th>grep recall</th>
+          <th>Codixing recall</th>
+          <th>Delta</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Cyclomatic complexity</td>
+          <td class="muted">3 items</td>
+          <td class="num">44%</td>
+          <td class="num pass">100%</td>
+          <td class="num">+56%</td>
+        </tr>
+        <tr>
+          <td>Transitive impact</td>
+          <td class="muted">12 items</td>
+          <td class="num">72%</td>
+          <td class="num pass">100%</td>
+          <td class="num">+28%</td>
+        </tr>
+        <tr>
+          <td>Blast radius</td>
+          <td class="muted">15 items</td>
+          <td class="num">67%</td>
+          <td class="num">96%</td>
+          <td class="num">+29%</td>
+        </tr>
+        <tr>
+          <td>Caller completeness</td>
+          <td class="muted">19 items</td>
+          <td class="num pass">100%</td>
+          <td class="num">98%</td>
+          <td class="muted">-2%</td>
+        </tr>
+      </tbody>
+    </table>
 
-<pre><span class="cmt"># Plugin users (recommended)</span>
-<span class="cmd">claude plugin install codixing@codixing</span>
+    <p><strong>Average structural recall: grep 71% &rarr; Codixing 98% (+28%).</strong></p>
 
-<span class="cmt"># MCP-only users</span>
+    <p>The grep agent consistently missed files in cross-package dependencies and transitive import chains. These are precisely the cases where grep needs 5+ chained calls to trace, while Codixing's dependency graph resolves them in one.</p>
+
+    <h3>What grep missed</h3>
+
+    <p>Specific files the grep agent failed to find across repeated runs:</p>
+
+    <ul>
+      <li><strong>Complexity:</strong> <code>createConfigIO</code>, <code>sanitizeChatHistoryMessage</code> &mdash; functions with high cyclomatic complexity that don't contain obvious keywords</li>
+      <li><strong>Transitive impact:</strong> <code>extensions/telegram/src/bot-native-commands.ts</code>, <code>src/agents/subagent-control.ts</code>, <code>src/auto-reply/reply/agent-runner-payloads.ts</code> &mdash; transitively affected files that don't directly import the changed module</li>
+      <li><strong>Blast radius:</strong> 5+ extension channel files (<code>discord/shared.ts</code>, <code>imessage/channel.ts</code>, etc.) that implement a shared interface but don't grep-match the type name in an obvious way</li>
+    </ul>
+
+    <h2>When Codixing wins most</h2>
+
+    <table class="bench-table">
+      <thead>
+        <tr>
+          <th>Task type</th>
+          <th>grep approach</th>
+          <th>Codixing approach</th>
+          <th>Savings</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="muted">"What does X do and who calls it?"</td>
+          <td>4 calls: grep &rarr; cat &rarr; grep &rarr; cat</td>
+          <td>1 call: <code>explain</code></td>
+          <td class="num">75%</td>
+        </tr>
+        <tr>
+          <td class="muted">"How does scoring work?"</td>
+          <td>3 calls: grep needs exact keywords</td>
+          <td>1 call: BM25 ranked search</td>
+          <td class="num">67%</td>
+        </tr>
+        <tr>
+          <td class="muted">"What depends on module Y?"</td>
+          <td>2+ calls: grep misses indirect imports</td>
+          <td>1 call: dependency graph</td>
+          <td class="num">90%</td>
+        </tr>
+        <tr>
+          <td class="muted">"If I change this type, what breaks?"</td>
+          <td>5+ calls: grep + manual tracing</td>
+          <td>1 call: <code>predict_impact</code></td>
+          <td class="num">80%</td>
+        </tr>
+        <tr>
+          <td class="muted">"Find the most complex functions"</td>
+          <td>Impossible with grep</td>
+          <td>1 call: <code>get_complexity</code></td>
+          <td class="num">100%</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>When grep is fine</h2>
+
+    <p>Not everything needs Codixing:</p>
+
+    <ul>
+      <li><strong>Exact keyword search</strong> &mdash; <code>grep -rn 'fn foo'</code> is fast and precise</li>
+      <li><strong>Reading a known file</strong> &mdash; <code>cat file.rs</code> needs no index</li>
+      <li><strong>Small codebases</strong> &mdash; under 20 files, manual navigation is fine</li>
+      <li><strong>Simple single-pattern matching</strong> &mdash; one grep call, no chaining needed</li>
+    </ul>
+
+    <p>The crossover point is around <strong>3 chained tool calls</strong>. If the task needs grep &rarr; read &rarr; grep again, Codixing saves time. If it's a single grep, use grep.</p>
+
+    <h2>Setup</h2>
+
+<pre><span class="cmt"># Plugin (recommended &mdash; includes 3 slash commands)</span>
+<span class="cmd">claude plugin marketplace add ferax564/codixing</span>
+
+<span class="cmt"># MCP only</span>
 <span class="cmd">claude mcp add codixing -- npx -y codixing-mcp --root . --medium --no-daemon-fork</span></pre>
 
-    <p>If you're already on v0.22.0, just add <code>--medium --no-daemon-fork</code> to your <code>.mcp.json</code> args and restart Claude Code.</p>
+    <p>Use <code>--medium</code> to expose 17 core tools directly (no discovery overhead) and <code>--no-daemon-fork</code> to prevent stale socket issues. All 54 tools remain callable.</p>
+
+    <h2>Methodology</h2>
+
+    <p>All benchmarks used BM25-only indexing (no embeddings, no GPU). Indexing throughput: ~1,060 files/second. The 6-repo benchmark indexed 9,493 files with 55,869 symbols in 8.8 seconds total.</p>
+
+    <p>For the agent benchmark, we used the <a href="https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/claude-code-sdk-overview">Claude Agent SDK</a> to run identical prompts in "vanilla" mode (Grep + Glob + Read only) and "codixing" mode (Codixing MCP tools available). 3 runs per task per condition, with statistical significance testing (95% CI, non-overlapping).</p>
+
+    <p>Raw data: <a href="https://github.com/ferax564/codixing/tree/main/benchmarks/results">benchmarks/results/</a> on GitHub.</p>
 
   </article>
 
