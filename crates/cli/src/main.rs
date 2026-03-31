@@ -827,18 +827,18 @@ fn cmd_cross_imports(from: String, to: String) -> Result<()> {
         )
     })?;
 
-    let files = engine.cross_imports(&from, &to);
-    if files.is_empty() {
+    let ranked = engine.cross_imports_ranked(&from, &to, None);
+    if ranked.is_empty() {
         eprintln!("No files in \"{}\" import from \"{}\"", from, to);
         return Ok(());
     }
 
-    for f in &files {
-        println!("{f}");
+    for (f, score) in &ranked {
+        println!("{f} (score: {score:.3})");
     }
     eprintln!(
         "\n{} file(s) in \"{}\" import from \"{}\".",
-        files.len(),
+        ranked.len(),
         from,
         to
     );

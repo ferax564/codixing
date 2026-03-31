@@ -202,7 +202,9 @@ def codixing_cross_imports(repo_path: Path, from_dir: str, to_dir: str, top_k: i
         if not stripped or "file(s) in" in stripped or "import from" in stripped:
             continue
         if "/" in stripped or stripped.endswith(".ts") or stripped.endswith(".tsx"):
-            files.append(stripped)
+            # Strip optional score suffix: "file.ts (score: 0.85)" → "file.ts"
+            path = stripped.split(" (score:")[0].strip()
+            files.append(path)
             if len(files) >= top_k:
                 break
     return files, elapsed_ms
