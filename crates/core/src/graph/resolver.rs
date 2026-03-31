@@ -1110,4 +1110,17 @@ mod tests {
         let resolved = resolver.resolve(&raw, "src/index.ts");
         assert_eq!(resolved, Some("src/legacy.js".to_string()));
     }
+
+    #[test]
+    fn typescript_js_extension_prefers_ts_over_js() {
+        // Both .ts and .js exist — .ts should win (TypeScript compiler behavior).
+        let resolver = make_resolver(&["src/utils.ts", "src/utils.js", "src/index.ts"]);
+        let raw = RawImport {
+            path: "./utils.js".to_string(),
+            language: Language::TypeScript,
+            is_relative: true,
+        };
+        let resolved = resolver.resolve(&raw, "src/index.ts");
+        assert_eq!(resolved, Some("src/utils.ts".to_string()));
+    }
 }
