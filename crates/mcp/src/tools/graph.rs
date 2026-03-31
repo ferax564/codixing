@@ -8,6 +8,43 @@ use codixing_core::{Engine, RepoMapOptions};
 
 use super::common::ProgressReporter;
 
+pub(crate) fn call_cross_imports(engine: &Engine, args: &Value) -> (String, bool) {
+    let from = match args.get("from").and_then(|v| v.as_str()) {
+        Some(f) => f.to_string(),
+        None => return ("Missing required argument: from".to_string(), true),
+    };
+    let to = match args.get("to").and_then(|v| v.as_str()) {
+        Some(t) => t.to_string(),
+        None => return ("Missing required argument: to".to_string(), true),
+    };
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
+
+    let ranked = engine.cross_imports_ranked(&from, &to, limit);
+
+    if ranked.is_empty() {
+        return (
+            format!("No files in \"{from}\" import from \"{to}\"."),
+            false,
+        );
+    }
+
+    let mut out = String::new();
+    for (file, score) in &ranked {
+        out.push_str(&format!("{file} (score: {score:.3})\n"));
+    }
+    out.push_str(&format!(
+        "\n{} file(s) in \"{}\" import from \"{}\".",
+        ranked.len(),
+        from,
+        to
+    ));
+
+    (out, false)
+}
+
 pub(crate) fn call_get_references(engine: &Engine, args: &Value) -> (String, bool) {
     let file = match args.get("file").and_then(|v| v.as_str()) {
         Some(f) => f.to_string(),

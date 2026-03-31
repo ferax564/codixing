@@ -1,4 +1,26 @@
 [[tools]]
+name = "cross_imports"
+description = "Find files in one directory that import from another directory, ranked by PageRank and git recency. Useful for cross-package dependency analysis (e.g. 'which gateway files import from the auth module?'). Returns results sorted by relevance score."
+handler = "graph::call_cross_imports"
+calling_convention = "engine_args"
+read_only = true
+medium = true
+
+[tools.params.from]
+type = "string"
+description = "Path prefix of the importing directory (e.g. 'src/gateway', 'packages/api')"
+required = true
+
+[tools.params.to]
+type = "string"
+description = "Path prefix of the imported directory (e.g. 'src/auth', 'packages/types')"
+required = true
+
+[tools.params.limit]
+type = "integer"
+description = "Maximum number of results to return (default: no limit)"
+
+[[tools]]
 name = "get_references"
 description = "Get the dependency relationships for a file: which files import it (callers/dependents) and which files it imports (callees/dependencies). Requires graph intelligence to be enabled."
 handler = "graph::call_get_references"
