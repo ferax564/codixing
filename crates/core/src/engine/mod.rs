@@ -445,11 +445,11 @@ impl Engine {
         Ok(pending)
     }
 
-    /// Run an embedding pass over `pending` and return timing statistics.
+    /// Run embedding on the given pending chunks and return timing stats.
     ///
-    /// Unlike [`Engine::embed_remaining`], this method does **not** persist the
-    /// resulting vectors to disk — it is intended for benchmarking only.
-    /// The caller decides what to do with the returned [`EmbedTimingStats`].
+    /// Writes vectors into the in-memory index but does not persist to disk.
+    /// Note: with --force on a fully-embedded index, this will duplicate key IDs
+    /// in the HNSW graph for the lifetime of the process.
     pub fn bench_embed(
         &mut self,
         pending: &DashMap<u64, String>,

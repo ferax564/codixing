@@ -4,7 +4,7 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub struct EmbedTimingStats {
     /// Total number of chunks that were embedded.
-    pub total_chunks: usize,
+    pub embedded_chunks: usize,
     /// Total number of source files processed.
     pub total_files: usize,
     /// Wall-clock time from start to finish of the embedding pass.
@@ -21,7 +21,7 @@ impl EmbedTimingStats {
     /// Embedding throughput in chunks per second.
     pub fn chunks_per_sec(&self) -> f64 {
         if self.wall_clock.as_secs_f64() > 0.0 {
-            self.total_chunks as f64 / self.wall_clock.as_secs_f64()
+            self.embedded_chunks as f64 / self.wall_clock.as_secs_f64()
         } else {
             0.0
         }
@@ -39,7 +39,7 @@ impl EmbedTimingStats {
     /// Serialize to a JSON value for `--json` output.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
-            "total_chunks": self.total_chunks,
+            "embedded_chunks": self.embedded_chunks,
             "total_files": self.total_files,
             "wall_clock_secs": self.wall_clock.as_secs_f64(),
             "chunks_per_sec": self.chunks_per_sec(),

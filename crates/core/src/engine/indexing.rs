@@ -472,10 +472,10 @@ where
     let entries: Vec<u64> = pending.iter().map(|e| *e.key()).collect();
     if entries.is_empty() {
         return Ok(EmbedTimingStats {
-            total_chunks: 0,
+            embedded_chunks: 0,
             total_files: 0,
             wall_clock: std::time::Duration::ZERO,
-            workers: 1,
+            workers: 1, // Sync path — always 1 worker.
             late_chunking_files: 0,
             fallback_files: 0,
         });
@@ -518,10 +518,10 @@ where
     }
 
     Ok(EmbedTimingStats {
-        total_chunks: embedded_so_far,
+        embedded_chunks: embedded_so_far,
         total_files,
         wall_clock: start.elapsed(),
-        workers: 1,
+        workers: 1, // Sync path — always 1 worker.
         late_chunking_files,
         fallback_files,
     })

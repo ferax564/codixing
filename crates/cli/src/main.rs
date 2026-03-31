@@ -1111,7 +1111,7 @@ fn cmd_bench_embed(path: PathBuf, force: bool, json: bool) -> Result<()> {
         );
     } else {
         eprintln!("\n── Embedding Benchmark Results ──────────────────");
-        eprintln!("  Chunks:            {}", stats.total_chunks);
+        eprintln!("  Chunks:            {}", stats.embedded_chunks);
         eprintln!("  Files:             {}", stats.total_files);
         eprintln!(
             "  Wall clock:        {:.2}s",
