@@ -548,6 +548,12 @@ impl Engine {
     }
 }
 
+impl Drop for Engine {
+    fn drop(&mut self) {
+        self.shutdown_embeddings();
+    }
+}
+
 // Bring indexing helpers into scope for tests and this module's remaining code.
 use indexing::*;
 

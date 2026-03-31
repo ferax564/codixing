@@ -54,6 +54,9 @@ impl Engine {
     }
 
     pub(super) fn reindex_file_impl(&mut self, path: &Path, do_graph_finalize: bool) -> Result<()> {
+        // Wait for any background embedding to complete before modifying the vector index.
+        self.wait_for_embeddings();
+
         let abs_path = if path.is_absolute() {
             path.to_path_buf()
         } else {
@@ -517,6 +520,9 @@ impl Engine {
         if self.read_only {
             return Err(CodixingError::ReadOnly);
         }
+
+        // Wait for any background embedding to complete before modifying the vector index.
+        self.wait_for_embeddings();
 
         let embedder = self
             .embedder

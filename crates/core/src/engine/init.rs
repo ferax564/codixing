@@ -284,17 +284,15 @@ impl Engine {
                 let chunk_meta_clone = Arc::clone(&chunk_meta_arc);
                 let contextual = config.embedding.contextual_embeddings;
                 let root_clone = root.to_path_buf();
-                let store_path = store.vector_index_path().parent().unwrap().to_path_buf();
                 let file_chunks_path = store.file_chunks_path().to_path_buf();
                 let vector_index_path = store.vector_index_path().to_path_buf();
 
                 let handle = std::thread::Builder::new()
                     .name("codixing-embed-bg".into())
                     .spawn(move || {
-                        let _ = store_path; // keep the path alive
-                        match VectorIndex::new(dims, quantize) {
-                            Ok(bg_vector) => {
-                                let result = background_embed(
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            match VectorIndex::new(dims, quantize) {
+                                Ok(bg_vector) => background_embed(
                                     &emb_clone,
                                     &pending_embeds,
                                     &chunk_meta_clone,
@@ -302,42 +300,44 @@ impl Engine {
                                     contextual,
                                     &root_clone,
                                     &state_clone,
-                                );
-                                match result {
-                                    Ok(completed_vector) => {
-                                        // Persist to disk before exposing to readers.
-                                        if let Err(e) = completed_vector
-                                            .save(&vector_index_path, &file_chunks_path)
-                                        {
-                                            tracing::error!(
-                                                error = %e,
-                                                "background embedding: failed to persist vector index"
-                                            );
-                                        }
-                                        *vector_slot
-                                            .write()
-                                            .unwrap_or_else(|e| e.into_inner()) =
-                                            Some(completed_vector);
-                                        state_clone.mark_ready();
-                                        tracing::info!(
-                                            chunks = state_clone.progress().0,
-                                            "background embedding complete"
-                                        );
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            error = %e,
-                                            "background embedding failed"
-                                        );
-                                        state_clone.mark_ready();
-                                    }
+                                ),
+                                Err(e) => {
+                                    tracing::error!(
+                                        error = %e,
+                                        "background embedding: failed to create VectorIndex"
+                                    );
+                                    Err(e)
                                 }
                             }
-                            Err(e) => {
+                        }));
+                        match result {
+                            Ok(Ok(completed_vector)) => {
+                                // Persist to disk before exposing to readers.
+                                if let Err(e) =
+                                    completed_vector.save(&vector_index_path, &file_chunks_path)
+                                {
+                                    tracing::error!(
+                                        error = %e,
+                                        "background embedding: failed to persist vector index"
+                                    );
+                                }
+                                *vector_slot.write().unwrap_or_else(|e| e.into_inner()) =
+                                    Some(completed_vector);
+                                state_clone.mark_ready();
+                                tracing::info!(
+                                    chunks = state_clone.progress().0,
+                                    "background embedding complete"
+                                );
+                            }
+                            Ok(Err(e)) => {
                                 tracing::error!(
                                     error = %e,
-                                    "background embedding: failed to create VectorIndex"
+                                    "background embedding failed"
                                 );
+                                state_clone.mark_ready();
+                            }
+                            Err(_panic) => {
+                                tracing::error!("background embedding panicked");
                                 state_clone.mark_ready();
                             }
                         }
