@@ -842,10 +842,14 @@ fn background_embed(
     // Group chunks by file path.
     let mut by_file: std::collections::HashMap<String, Vec<u64>> = std::collections::HashMap::new();
     for entry in pending.iter() {
-        by_file
-            .entry(entry.value().clone())
-            .or_default()
-            .push(*entry.key());
+        let chunk_id = *entry.key();
+        let file_path = chunk_meta
+            .get(&chunk_id)
+            .map(|m| m.file_path.clone())
+            .unwrap_or_default();
+        if !file_path.is_empty() {
+            by_file.entry(file_path).or_default().push(chunk_id);
+        }
     }
 
     for (file_path, chunk_ids) in &by_file {
