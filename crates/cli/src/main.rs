@@ -58,6 +58,10 @@ enum Command {
         /// search available immediately.
         #[arg(long)]
         defer_embeddings: bool,
+
+        /// Block until embeddings complete (old behavior). Default: return after BM25 is ready.
+        #[arg(long)]
+        wait: bool,
     },
 
     /// Search the code index.
@@ -386,6 +390,7 @@ async fn main() -> Result<()> {
             model,
             reranker,
             defer_embeddings,
+            wait,
         } => cmd_init(
             path,
             also,
@@ -394,6 +399,7 @@ async fn main() -> Result<()> {
             model,
             reranker,
             defer_embeddings,
+            wait,
         ),
         Command::Search {
             query,
@@ -437,6 +443,7 @@ async fn main() -> Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_init(
     path: PathBuf,
     also: Vec<PathBuf>,
@@ -445,6 +452,7 @@ fn cmd_init(
     model: Option<String>,
     reranker: bool,
     defer_embeddings: bool,
+    wait: bool,
 ) -> Result<()> {
     let root = path
         .canonicalize()
@@ -527,6 +535,18 @@ fn cmd_init(
         stats.vector_count,
         elapsed.as_secs_f64(),
     );
+
+    if !engine.embeddings_ready() {
+        let (done, total) = engine.embedding_progress();
+        eprintln!("Embedding {total} chunks in background ({done}/{total} complete)...");
+        eprintln!("Search is available now (BM25-only until embeddings complete).");
+
+        if wait {
+            eprintln!("Waiting for embeddings to complete (--wait)...");
+            engine.wait_for_embeddings();
+            eprintln!("Embeddings complete.");
+        }
+    }
 
     Ok(())
 }

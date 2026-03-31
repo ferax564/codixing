@@ -409,6 +409,21 @@ pub(crate) fn call_session_status(engine: &Engine, args: &Value) -> (String, boo
         }
     }
 
+    if !engine.embeddings_ready() {
+        let (done, total) = engine.embedding_progress();
+        out.push_str("\n## Embedding Progress\n\n");
+        out.push_str(&format!(
+            "  {done}/{total} chunks ({:.0}%)\n",
+            if total > 0 {
+                done as f64 / total as f64 * 100.0
+            } else {
+                100.0
+            }
+        ));
+    } else if engine.embedding_progress().1 > 0 {
+        out.push_str("\n## Embedding Progress\n\n  Complete\n");
+    }
+
     (out, false)
 }
 
