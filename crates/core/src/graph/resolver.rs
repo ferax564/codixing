@@ -186,6 +186,25 @@ impl ImportResolver {
         let joined = join_paths(&source_dir, import);
         let norm = normalize_path(&joined);
 
+        // TypeScript .js→.ts extension swap (moduleResolution: "node16"/"bundler").
+        let js_to_ts_swaps: &[(&str, &[&str])] = &[
+            (".js", &[".ts", ".tsx"]),
+            (".jsx", &[".tsx"]),
+            (".mjs", &[".mts"]),
+            (".cjs", &[".cts"]),
+        ];
+        for &(js_ext, ts_exts) in js_to_ts_swaps {
+            if let Some(stem) = norm.strip_suffix(js_ext) {
+                for ts_ext in ts_exts {
+                    let candidate = format!("{stem}{ts_ext}");
+                    if self.indexed_files.contains(&candidate) {
+                        return Some(candidate);
+                    }
+                }
+                break;
+            }
+        }
+
         // Try as-is.
         if self.indexed_files.contains(&norm) {
             return Some(norm);
@@ -1026,5 +1045,69 @@ mod tests {
         };
         // addpath-style directory import should return None.
         assert_eq!(resolver.resolve(&raw, "main.m"), None);
+    }
+
+    // -----------------------------------------------------------------
+    // TypeScript .js → .ts extension swap tests (node16 / bundler)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn typescript_js_extension_resolves_to_ts() {
+        let resolver = make_resolver(&["src/utils.ts", "src/index.ts"]);
+        let raw = RawImport {
+            path: "./utils.js".to_string(),
+            language: Language::TypeScript,
+            is_relative: true,
+        };
+        let resolved = resolver.resolve(&raw, "src/index.ts");
+        assert_eq!(resolved, Some("src/utils.ts".to_string()));
+    }
+
+    #[test]
+    fn typescript_jsx_extension_resolves_to_tsx() {
+        let resolver = make_resolver(&["src/Button.tsx", "src/App.tsx"]);
+        let raw = RawImport {
+            path: "./Button.jsx".to_string(),
+            language: Language::TypeScript,
+            is_relative: true,
+        };
+        let resolved = resolver.resolve(&raw, "src/App.tsx");
+        assert_eq!(resolved, Some("src/Button.tsx".to_string()));
+    }
+
+    #[test]
+    fn typescript_mjs_extension_resolves_to_mts() {
+        let resolver = make_resolver(&["lib/config.mts", "lib/main.mts"]);
+        let raw = RawImport {
+            path: "./config.mjs".to_string(),
+            language: Language::TypeScript,
+            is_relative: true,
+        };
+        let resolved = resolver.resolve(&raw, "lib/main.mts");
+        assert_eq!(resolved, Some("lib/config.mts".to_string()));
+    }
+
+    #[test]
+    fn typescript_cjs_extension_resolves_to_cts() {
+        let resolver = make_resolver(&["lib/helper.cts", "lib/main.cts"]);
+        let raw = RawImport {
+            path: "./helper.cjs".to_string(),
+            language: Language::TypeScript,
+            is_relative: true,
+        };
+        let resolved = resolver.resolve(&raw, "lib/main.cts");
+        assert_eq!(resolved, Some("lib/helper.cts".to_string()));
+    }
+
+    #[test]
+    fn typescript_js_extension_falls_through_if_no_ts() {
+        let resolver = make_resolver(&["src/legacy.js", "src/index.ts"]);
+        let raw = RawImport {
+            path: "./legacy.js".to_string(),
+            language: Language::TypeScript,
+            is_relative: true,
+        };
+        let resolved = resolver.resolve(&raw, "src/index.ts");
+        assert_eq!(resolved, Some("src/legacy.js".to_string()));
     }
 }
