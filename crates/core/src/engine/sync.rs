@@ -69,29 +69,32 @@ impl Engine {
         // unchanged can reuse their existing embedding vector.
         let old_chunk_hashes: std::collections::HashMap<u64, (u64, Vec<f32>)> = {
             let mut map = std::collections::HashMap::new();
-            if self.vector.is_some() {
+            let vec_guard = self.vector.read().unwrap_or_else(|e| e.into_inner());
+            if vec_guard.is_some() {
                 for entry in self.chunk_meta.iter() {
                     let meta = entry.value();
                     if meta.file_path == rel_str && meta.content_hash != 0 {
                         // Try to retrieve the existing vector for this chunk.
-                        let existing_vec = self
-                            .vector
-                            .as_ref()
-                            .and_then(|v| v.get_vector(meta.chunk_id));
+                        let existing_vec =
+                            vec_guard.as_ref().and_then(|v| v.get_vector(meta.chunk_id));
                         if let Some(vec) = existing_vec {
                             map.insert(meta.content_hash, (meta.chunk_id, vec));
                         }
                     }
                 }
             }
+            drop(vec_guard);
             map
         };
 
         // Remove old data.
         self.tantivy.remove_file(&rel_str)?;
         self.symbols.remove_file(&rel_str);
-        if let Some(ref mut vec_idx) = self.vector {
-            vec_idx.remove_file(&rel_str)?;
+        {
+            let mut vec_guard = self.vector.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(ref mut vec_idx) = *vec_guard {
+                vec_idx.remove_file(&rel_str)?;
+            }
         }
         // Remove old chunk_meta entries for this file and update trigram index.
         // Collect content before removal so trigram.remove() can clean up posting lists.
@@ -156,7 +159,8 @@ impl Engine {
         // Compare new chunk content hashes against old ones.  Chunks whose
         // content is identical reuse the previous embedding vector, avoiding
         // an expensive re-embedding round-trip through the ONNX model.
-        if let (Some(emb), Some(vec_idx)) = (self.embedder.as_ref(), self.vector.as_mut()) {
+        let mut vec_guard = self.vector.write().unwrap_or_else(|e| e.into_inner());
+        if let (Some(emb), Some(vec_idx)) = (self.embedder.as_ref(), vec_guard.as_mut()) {
             let contextual = self.config.embedding.contextual_embeddings;
             let mut reused = 0usize;
             let mut needs_embed: Vec<usize> = Vec::new();
@@ -338,8 +342,11 @@ impl Engine {
         self.parser.invalidate(abs_path);
         self.file_chunk_counts.remove(rel_str);
 
-        if let Some(ref mut vec_idx) = self.vector {
-            vec_idx.remove_file(rel_str)?;
+        {
+            let mut vec_guard = self.vector.write().unwrap_or_else(|e| e.into_inner());
+            if let Some(ref mut vec_idx) = *vec_guard {
+                vec_idx.remove_file(rel_str)?;
+            }
         }
         // Remove chunk_meta entries and update trigram index.
         let mut removed: Vec<(u64, String)> = Vec::new();
@@ -520,8 +527,8 @@ impl Engine {
             })?
             .clone();
 
-        let vec_idx = self
-            .vector
+        let mut vec_guard = self.vector.write().unwrap_or_else(|e| e.into_inner());
+        let vec_idx = vec_guard
             .as_mut()
             .ok_or_else(|| CodixingError::Config("vector index not available".into()))?;
 
@@ -572,6 +579,7 @@ impl Engine {
                 self.store.root(),
             )?;
         }
+        drop(vec_guard);
 
         self.save()?;
         Ok(unembedded.len())
@@ -1004,11 +1012,14 @@ impl Engine {
         self.store.save_chunk_meta_bytes(&meta_bytes)?;
 
         // Persist vector index.
-        if let Some(ref vec_idx) = self.vector {
-            vec_idx.save(
-                &self.store.vector_index_path(),
-                &self.store.file_chunks_path(),
-            )?;
+        {
+            let vec_guard = self.vector.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(ref vec_idx) = *vec_guard {
+                vec_idx.save(
+                    &self.store.vector_index_path(),
+                    &self.store.file_chunks_path(),
+                )?;
+            }
         }
 
         // Persist graph.
@@ -1063,11 +1074,14 @@ impl Engine {
         let meta_bytes = serialize_chunk_meta_compact(&self.chunk_meta)?;
         self.store.save_chunk_meta_bytes(&meta_bytes)?;
 
-        if let Some(ref vec_idx) = self.vector {
-            vec_idx.save(
-                &self.store.vector_index_path(),
-                &self.store.file_chunks_path(),
-            )?;
+        {
+            let vec_guard = self.vector.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(ref vec_idx) = *vec_guard {
+                vec_idx.save(
+                    &self.store.vector_index_path(),
+                    &self.store.file_chunks_path(),
+                )?;
+            }
         }
 
         if let Some(ref g) = self.graph {

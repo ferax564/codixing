@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 
 use dashmap::DashMap;
 use rayon::prelude::*;
@@ -333,8 +333,8 @@ impl Engine {
             embedder,
             #[cfg(feature = "rustqueue")]
             embed_queue,
-            vector,
-            chunk_meta: chunk_meta_map,
+            vector: Arc::new(RwLock::new(vector)),
+            chunk_meta: Arc::new(chunk_meta_map),
             graph,
             reranker,
             trigram,
@@ -561,8 +561,8 @@ impl Engine {
             embedder,
             #[cfg(feature = "rustqueue")]
             embed_queue,
-            vector,
-            chunk_meta,
+            vector: Arc::new(RwLock::new(vector)),
+            chunk_meta: Arc::new(chunk_meta),
             graph,
             reranker,
             trigram,
@@ -739,8 +739,8 @@ impl Engine {
             embedder,
             #[cfg(feature = "rustqueue")]
             embed_queue: None,
-            vector,
-            chunk_meta,
+            vector: Arc::new(RwLock::new(vector)),
+            chunk_meta: Arc::new(chunk_meta),
             graph,
             reranker,
             trigram: std::sync::OnceLock::new(),

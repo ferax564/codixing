@@ -1079,7 +1079,7 @@ fn cmd_bench_embed(path: PathBuf, force: bool, json: bool) -> Result<()> {
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
 
-    let mut engine =
+    let engine =
         Engine::open(&root).with_context(|| "no index found — run `codixing init` first")?;
 
     let pending = if force {

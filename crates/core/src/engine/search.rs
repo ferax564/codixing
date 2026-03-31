@@ -74,7 +74,8 @@ impl Engine {
                     }
                 }
 
-                if let (Some(emb), Some(vec_idx)) = (&self.embedder, &self.vector) {
+                let vec_guard = self.vector.read().unwrap_or_else(|e| e.into_inner());
+                if let (Some(emb), Some(vec_idx)) = (&self.embedder, vec_guard.as_ref()) {
                     let retriever = HybridRetriever::new(
                         &self.tantivy,
                         Arc::clone(emb),
@@ -102,7 +103,8 @@ impl Engine {
                     }
                 }
 
-                if let (Some(emb), Some(vec_idx)) = (&self.embedder, &self.vector) {
+                let vec_guard = self.vector.read().unwrap_or_else(|e| e.into_inner());
+                if let (Some(emb), Some(vec_idx)) = (&self.embedder, vec_guard.as_ref()) {
                     let hybrid = HybridRetriever::new(
                         &self.tantivy,
                         Arc::clone(emb),
@@ -631,18 +633,20 @@ impl Engine {
     /// and — critically — to avoid recursion through the public `search()`
     /// method which would trigger query expansion and strategy dispatch again.
     fn search_first_pass(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
-        let mut candidates = if let (Some(emb), Some(vec_idx)) = (&self.embedder, &self.vector) {
-            let retriever = HybridRetriever::new(
-                &self.tantivy,
-                Arc::clone(emb),
-                vec_idx,
-                &self.chunk_meta,
-                self.config.embedding.rrf_k,
-            );
-            retriever.search(query)?
-        } else {
-            BM25Retriever::new(&self.tantivy).search(query)?
-        };
+        let vec_guard = self.vector.read().unwrap_or_else(|e| e.into_inner());
+        let mut candidates =
+            if let (Some(emb), Some(vec_idx)) = (&self.embedder, vec_guard.as_ref()) {
+                let retriever = HybridRetriever::new(
+                    &self.tantivy,
+                    Arc::clone(emb),
+                    vec_idx,
+                    &self.chunk_meta,
+                    self.config.embedding.rrf_k,
+                );
+                retriever.search(query)?
+            } else {
+                BM25Retriever::new(&self.tantivy).search(query)?
+            };
         self.apply_graph_boost(&mut candidates, self.config.graph.boost_weight);
         self.apply_definition_boost(&mut candidates, &query.query);
         self.apply_popularity_boost(&mut candidates);
