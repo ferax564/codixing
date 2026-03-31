@@ -1,5 +1,6 @@
 #[cfg(feature = "rustqueue")]
 pub mod embed_queue;
+pub(super) mod embed_stats;
 mod files;
 mod focus_map;
 mod graph;
@@ -16,6 +17,7 @@ mod temporal;
 mod test_mapping;
 mod validation;
 
+pub use embed_stats::EmbedTimingStats;
 pub use focus_map::{FocusMapEntry, FocusMapOptions};
 pub use symbol_graph::SymbolReference;
 
@@ -29,7 +31,6 @@ use serde::Serialize;
 
 use crate::config::IndexConfig;
 use crate::embedder::Embedder;
-#[cfg(test)]
 use crate::error::CodixingError;
 use crate::graph::CodeGraph;
 use crate::index::TantivyIndex;
@@ -413,6 +414,65 @@ impl Engine {
         neighbors.sort();
         neighbors.dedup();
         neighbors
+    }
+
+    /// Return a reference to the chunk metadata table.
+    ///
+    /// Used by `bench-embed` to inspect which chunks exist without taking ownership.
+    pub fn chunk_meta_ref(&self) -> &DashMap<u64, ChunkMeta> {
+        &self.chunk_meta
+    }
+
+    /// Collect chunk IDs that have no vector representation yet.
+    ///
+    /// Returns a `DashMap<chunk_id, file_path>` of chunks missing from the
+    /// vector index.  When the engine has no vector index, every chunk is
+    /// considered unembedded.
+    pub fn find_unembedded_chunks(&self) -> crate::error::Result<DashMap<u64, String>> {
+        let pending = DashMap::new();
+        // Build the set of chunk IDs that already have vectors.
+        let embedded: std::collections::HashSet<u64> = self
+            .vector
+            .as_ref()
+            .map(|v| v.file_chunks().values().flatten().copied().collect())
+            .unwrap_or_default();
+
+        for entry in self.chunk_meta.iter() {
+            if !embedded.contains(entry.key()) {
+                pending.insert(*entry.key(), entry.value().file_path.clone());
+            }
+        }
+        Ok(pending)
+    }
+
+    /// Run an embedding pass over `pending` and return timing statistics.
+    ///
+    /// Unlike [`Engine::embed_remaining`], this method does **not** persist the
+    /// resulting vectors to disk — it is intended for benchmarking only.
+    /// The caller decides what to do with the returned [`EmbedTimingStats`].
+    pub fn bench_embed(
+        &mut self,
+        pending: &DashMap<u64, String>,
+    ) -> crate::error::Result<EmbedTimingStats> {
+        let embedder = self
+            .embedder
+            .as_ref()
+            .ok_or_else(|| CodixingError::Config("no embedder configured".into()))?
+            .clone();
+        let vec_idx = self
+            .vector
+            .as_mut()
+            .ok_or_else(|| CodixingError::Config("no vector index".into()))?;
+        let contextual = self.config.embedding.contextual_embeddings;
+        let root = self.store.root().to_path_buf();
+        indexing::embed_and_index_chunks(
+            pending,
+            &self.chunk_meta,
+            &embedder,
+            vec_idx,
+            contextual,
+            &root,
+        )
     }
 }
 

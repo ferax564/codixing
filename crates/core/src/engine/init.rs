@@ -160,7 +160,7 @@ impl Engine {
                 }
                 #[cfg(not(feature = "rustqueue"))]
                 {
-                    super::indexing::embed_and_index_chunks(
+                    let _stats = super::indexing::embed_and_index_chunks(
                         &pending_embeds,
                         &chunk_meta_map,
                         emb,
