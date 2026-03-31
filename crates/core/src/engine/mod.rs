@@ -1,5 +1,6 @@
 #[cfg(feature = "rustqueue")]
 pub mod embed_queue;
+pub(super) mod embed_state;
 pub(super) mod embed_stats;
 mod files;
 mod focus_map;
@@ -281,6 +282,8 @@ pub struct Engine {
     reload_interval: std::time::Duration,
     /// Last time we checked for staleness.
     last_staleness_check: Option<std::time::Instant>,
+    /// Background embedding state — `None` when embeddings were synchronous or index was opened.
+    pub(super) embed_state: Option<Arc<embed_state::EmbedState>>,
 }
 
 impl Engine {
@@ -494,6 +497,54 @@ impl Engine {
             contextual,
             &root,
         )
+    }
+
+    /// Returns (completed, total) embedding progress. (0, 0) if no background embedding.
+    pub fn embedding_progress(&self) -> (usize, usize) {
+        self.embed_state
+            .as_ref()
+            .map(|s| s.progress())
+            .unwrap_or((0, 0))
+    }
+
+    /// True when embeddings are complete (or were never started in background).
+    pub fn embeddings_ready(&self) -> bool {
+        self.embed_state
+            .as_ref()
+            .map(|s| s.is_ready())
+            .unwrap_or(true) // No background embed = always ready
+    }
+
+    /// Block until background embeddings complete. No-op if already done.
+    pub fn wait_for_embeddings(&self) {
+        if let Some(state) = &self.embed_state {
+            while !state.is_ready() {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            if let Some(handle) = state
+                .handle
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    /// Request background embedding to stop and join the thread.
+    pub fn shutdown_embeddings(&self) {
+        if let Some(state) = &self.embed_state {
+            state.request_cancel();
+            if let Some(handle) = state
+                .handle
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
+                let _ = handle.join();
+            }
+        }
     }
 }
 

@@ -7,6 +7,8 @@ use dashmap::DashMap;
 use rayon::prelude::*;
 use tracing::{debug, info, warn};
 
+use super::embed_state::EmbedState;
+
 use crate::config::IndexConfig;
 use crate::embedder::Embedder;
 use crate::error::{CodixingError, Result};
@@ -93,11 +95,7 @@ impl Engine {
         };
 
         let dims = embedder.as_ref().map(|e| e.dims).unwrap_or(0);
-        let mut vector: Option<VectorIndex> = if embedder.is_some() {
-            Some(VectorIndex::new(dims, config.embedding.quantize)?)
-        } else {
-            None
-        };
+        let quantize = config.embedding.quantize;
 
         let files = walk_source_files(&root, &config)?;
         info!(file_count = files.len(), "discovered source files");
@@ -142,39 +140,8 @@ impl Engine {
 
         tantivy.commit()?;
 
-        // Batch-embed all chunks if the embedder is available.
-        if let Some(emb) = &embedder {
-            if let Some(vec_idx) = &mut vector {
-                #[cfg(feature = "rustqueue")]
-                {
-                    super::embed_queue::embed_pending(
-                        embed_queue.as_ref(),
-                        &pending_embeds,
-                        &chunk_meta_map,
-                        emb,
-                        vec_idx,
-                        config.embedding.contextual_embeddings,
-                        &root,
-                        &config.embedding.model,
-                    )?;
-                }
-                #[cfg(not(feature = "rustqueue"))]
-                {
-                    let _stats = super::indexing::embed_and_index_chunks(
-                        &pending_embeds,
-                        &chunk_meta_map,
-                        emb,
-                        vec_idx,
-                        config.embedding.contextual_embeddings,
-                        &root,
-                    )?;
-                }
-            }
-        }
-
         let total_chunks = chunk_count.load(Ordering::Relaxed);
         let total_symbols = symbols.len();
-        let vector_count = vector.as_ref().map(|v| v.len()).unwrap_or(0);
 
         // Convert DashMaps to owned types.
         let file_chunk_counts: HashMap<String, usize> = file_chunk_map.into_iter().collect();
@@ -275,10 +242,8 @@ impl Engine {
         })?;
         store.save_chunk_meta_bytes(&meta_bytes)?;
 
-        // Persist vector index.
-        if let Some(ref vec_idx) = vector {
-            vec_idx.save(&store.vector_index_path(), &store.file_chunks_path())?;
-        }
+        // Note: the vector index is built and persisted by the background embedding
+        // thread spawned below. We do not persist it here.
 
         // Record the current git HEAD so git_sync() can diff from this point.
         let git_commit = git_head_commit(&root);
@@ -296,11 +261,104 @@ impl Engine {
             files = files.len(),
             chunks = total_chunks,
             symbols = total_symbols,
-            vectors = vector_count,
             graph_nodes,
             graph_edges,
-            "index initialized"
+            "index initialized (embeddings starting in background)"
         );
+
+        // Shared vector slot — starts as None. The background thread will
+        // populate it and swap it in when embedding completes.
+        let vector_arc: Arc<RwLock<Option<VectorIndex>>> = Arc::new(RwLock::new(None));
+
+        // Wrap chunk_meta in Arc so the background thread can share it.
+        let chunk_meta_arc: Arc<DashMap<u64, ChunkMeta>> = Arc::new(chunk_meta_map);
+
+        // Spawn background embedding thread (if an embedder and pending work exist).
+        let embed_state = if let Some(emb) = &embedder {
+            if !pending_embeds.is_empty() {
+                let total = pending_embeds.len();
+                let state = Arc::new(EmbedState::new(total));
+                let state_clone = Arc::clone(&state);
+                let vector_slot = Arc::clone(&vector_arc);
+                let emb_clone = Arc::clone(emb);
+                let chunk_meta_clone = Arc::clone(&chunk_meta_arc);
+                let contextual = config.embedding.contextual_embeddings;
+                let root_clone = root.to_path_buf();
+                let store_path = store.vector_index_path().parent().unwrap().to_path_buf();
+                let file_chunks_path = store.file_chunks_path().to_path_buf();
+                let vector_index_path = store.vector_index_path().to_path_buf();
+
+                let handle = std::thread::Builder::new()
+                    .name("codixing-embed-bg".into())
+                    .spawn(move || {
+                        let _ = store_path; // keep the path alive
+                        match VectorIndex::new(dims, quantize) {
+                            Ok(bg_vector) => {
+                                let result = background_embed(
+                                    &emb_clone,
+                                    &pending_embeds,
+                                    &chunk_meta_clone,
+                                    bg_vector,
+                                    contextual,
+                                    &root_clone,
+                                    &state_clone,
+                                );
+                                match result {
+                                    Ok(completed_vector) => {
+                                        // Persist to disk before exposing to readers.
+                                        if let Err(e) = completed_vector
+                                            .save(&vector_index_path, &file_chunks_path)
+                                        {
+                                            tracing::error!(
+                                                error = %e,
+                                                "background embedding: failed to persist vector index"
+                                            );
+                                        }
+                                        *vector_slot
+                                            .write()
+                                            .unwrap_or_else(|e| e.into_inner()) =
+                                            Some(completed_vector);
+                                        state_clone.mark_ready();
+                                        tracing::info!(
+                                            chunks = state_clone.progress().0,
+                                            "background embedding complete"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            error = %e,
+                                            "background embedding failed"
+                                        );
+                                        state_clone.mark_ready();
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    error = %e,
+                                    "background embedding: failed to create VectorIndex"
+                                );
+                                state_clone.mark_ready();
+                            }
+                        }
+                    })
+                    .map_err(|e| {
+                        CodixingError::Config(format!("failed to spawn embed thread: {e}"))
+                    })?;
+
+                state
+                    .handle
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .replace(handle);
+
+                Some(state)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         // Load reranker if requested (opt-in: model is ~270 MB).
         let reranker = if config.embedding.reranker_enabled {
@@ -333,8 +391,8 @@ impl Engine {
             embedder,
             #[cfg(feature = "rustqueue")]
             embed_queue,
-            vector: Arc::new(RwLock::new(vector)),
-            chunk_meta: Arc::new(chunk_meta_map),
+            vector: vector_arc,
+            chunk_meta: chunk_meta_arc,
             graph,
             reranker,
             trigram,
@@ -346,6 +404,7 @@ impl Engine {
             last_load_time: None,
             reload_interval: std::time::Duration::from_secs(30),
             last_staleness_check: None,
+            embed_state,
         })
     }
 
@@ -574,6 +633,7 @@ impl Engine {
             last_load_time: meta_mtime,
             reload_interval: std::time::Duration::from_secs(30),
             last_staleness_check: None,
+            embed_state: None,
         })
     }
 
@@ -752,6 +812,7 @@ impl Engine {
             last_load_time: meta_mtime,
             reload_interval: std::time::Duration::from_secs(30),
             last_staleness_check: None,
+            embed_state: None,
         })
     }
 
@@ -763,4 +824,46 @@ impl Engine {
     pub fn is_read_only(&self) -> bool {
         self.read_only
     }
+}
+
+/// Embed all pending chunks in a background thread, processing file by file.
+///
+/// Returns the populated `VectorIndex` on success. The caller swaps it into
+/// the shared `Arc<RwLock<Option<VectorIndex>>>` slot.
+fn background_embed(
+    embedder: &crate::embedder::Embedder,
+    pending: &DashMap<u64, String>,
+    chunk_meta: &DashMap<u64, ChunkMeta>,
+    mut vector: VectorIndex,
+    contextual: bool,
+    root: &std::path::Path,
+    state: &EmbedState,
+) -> Result<VectorIndex> {
+    // Group chunks by file path.
+    let mut by_file: std::collections::HashMap<String, Vec<u64>> = std::collections::HashMap::new();
+    for entry in pending.iter() {
+        by_file
+            .entry(entry.value().clone())
+            .or_default()
+            .push(*entry.key());
+    }
+
+    for (file_path, chunk_ids) in &by_file {
+        if state.is_cancelled() {
+            tracing::info!("background embedding cancelled");
+            break;
+        }
+        let (embedded, _used_late_chunking) = super::indexing::embed_single_file(
+            embedder,
+            chunk_meta,
+            &mut vector,
+            contextual,
+            root,
+            file_path,
+            chunk_ids,
+        )?;
+        state.increment_completed(embedded);
+    }
+
+    Ok(vector)
 }
