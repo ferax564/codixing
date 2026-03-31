@@ -224,6 +224,7 @@ impl Engine {
                 );
             }
         }
+        drop(vec_guard); // Release write lock before graph/PageRank work
 
         self.file_chunk_counts.insert(rel_str.clone(), chunks.len());
 

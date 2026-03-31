@@ -117,6 +117,11 @@ impl Engine {
                         ..query.clone()
                     };
                     let candidates = hybrid.search(&fetch_query)?;
+                    let emb_clone = Arc::clone(emb);
+                    let mmr_lambda = self.config.embedding.mmr_lambda;
+                    let limit = query.limit;
+                    let query_str_owned = query.query.clone();
+                    drop(vec_guard); // Release read lock before ONNX inference
 
                     if candidates.is_empty() {
                         return Ok(Vec::new());
@@ -126,20 +131,21 @@ impl Engine {
                         candidates
                             .into_iter()
                             .filter_map(|r| {
-                                let emb_vec = emb.embed_one(&r.content).ok()?;
+                                let emb_vec = emb_clone.embed_one(&r.content).ok()?;
                                 Some((r, emb_vec))
                             })
                             .unzip();
 
-                    let query_vec = emb.embed_query(&query.query)?;
+                    let query_vec = emb_clone.embed_query(&query_str_owned)?;
                     mmr_select(
                         results_with_meta,
                         &query_vec,
                         &embeddings,
-                        self.config.embedding.mmr_lambda,
-                        query.limit,
+                        mmr_lambda,
+                        limit,
                     )
                 } else {
+                    drop(vec_guard);
                     debug!("no embedder available; falling back to BM25 for Thorough strategy");
                     BM25Retriever::new(&self.tantivy).search(&query)?
                 }
@@ -647,6 +653,7 @@ impl Engine {
             } else {
                 BM25Retriever::new(&self.tantivy).search(query)?
             };
+        drop(vec_guard); // Release before boost computations
         self.apply_graph_boost(&mut candidates, self.config.graph.boost_weight);
         self.apply_definition_boost(&mut candidates, &query.query);
         self.apply_popularity_boost(&mut candidates);
