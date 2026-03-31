@@ -135,7 +135,7 @@ impl Engine {
                     self.config.embedding.quantize,
                 ) {
                     Ok(vec_idx) => {
-                        self.vector = Some(vec_idx);
+                        *self.vector.write().unwrap_or_else(|e| e.into_inner()) = Some(vec_idx);
                     }
                     Err(e) => {
                         warn!(error = %e, "failed to reload vector index");

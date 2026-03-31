@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use dashmap::DashMap;
 use rayon::prelude::*;
@@ -263,6 +263,8 @@ pub(super) const STREAM_BATCH_SIZE: usize = 256;
 /// The `sink` closure receives `(chunk_id, embedding, file_path)` for each
 /// embedded chunk. Both [`embed_single_file`] and [`embed_file_collect`]
 /// delegate to this function, differing only in what the sink does.
+///
+/// Returns `(chunks_embedded, used_late_chunking)`.
 fn embed_single_file_inner(
     embedder: &Embedder,
     chunk_meta: &DashMap<u64, ChunkMeta>,
@@ -271,7 +273,7 @@ fn embed_single_file_inner(
     file_path: &str,
     chunk_ids: &[u64],
     sink: &mut dyn FnMut(u64, Vec<f32>, &str),
-) -> Result<usize> {
+) -> Result<(usize, bool)> {
     let mut embedded = 0;
 
     // ── Late chunking attempt ─────────────────────────────────────────
@@ -315,7 +317,7 @@ fn embed_single_file_inner(
                             sink(*id, embedding, file_path);
                             embedded += 1;
                         }
-                        return Ok(embedded);
+                        return Ok((embedded, true));
                     }
                     Ok(None) => {
                         tracing::debug!(path = %file_path, "late chunking not applicable");
@@ -352,7 +354,7 @@ fn embed_single_file_inner(
         }
     }
 
-    Ok(embedded)
+    Ok((embedded, false))
 }
 
 /// Embed all chunks from a single file, using late chunking when possible.
@@ -361,7 +363,7 @@ fn embed_single_file_inner(
 /// backend doesn't support it, falls back to independent per-chunk embedding
 /// in `STREAM_BATCH_SIZE` windows.
 ///
-/// Returns the number of chunks embedded.
+/// Returns `(chunks_embedded, used_late_chunking)`.
 pub(super) fn embed_single_file(
     embedder: &Embedder,
     chunk_meta: &DashMap<u64, ChunkMeta>,
@@ -370,7 +372,7 @@ pub(super) fn embed_single_file(
     root: &Path,
     file_path: &str,
     chunk_ids: &[u64],
-) -> Result<usize> {
+) -> Result<(usize, bool)> {
     embed_single_file_inner(
         embedder,
         chunk_meta,
@@ -410,6 +412,8 @@ pub(super) fn embed_file_collect(
             collected.push((id, embedding, fp.to_string()));
         },
     )?;
+    // Discard the used_late_chunking bool — callers of embed_file_collect
+    // don't need per-file stats.
     Ok(collected)
 }
 
@@ -437,7 +441,7 @@ pub(super) fn embed_and_index_chunks(
     vec_idx: &mut VectorIndex,
     contextual: bool,
     root: &Path,
-) -> Result<()> {
+) -> Result<super::embed_stats::EmbedTimingStats> {
     embed_and_index_chunks_with_progress(
         pending,
         chunk_meta,
@@ -459,13 +463,22 @@ pub(super) fn embed_and_index_chunks_with_progress<F>(
     contextual: bool,
     root: &Path,
     progress_callback: Option<F>,
-) -> Result<()>
+) -> Result<super::embed_stats::EmbedTimingStats>
 where
     F: Fn(usize, usize),
 {
+    use super::embed_stats::EmbedTimingStats;
+
     let entries: Vec<u64> = pending.iter().map(|e| *e.key()).collect();
     if entries.is_empty() {
-        return Ok(());
+        return Ok(EmbedTimingStats {
+            embedded_chunks: 0,
+            total_files: 0,
+            wall_clock: std::time::Duration::ZERO,
+            workers: 1, // Sync path — always 1 worker.
+            late_chunking_files: 0,
+            fallback_files: 0,
+        });
     }
 
     let total_chunks = entries.len();
@@ -484,17 +497,34 @@ where
         }
     }
 
+    let total_files = file_chunks.len();
+    let mut late_chunking_files = 0usize;
+    let mut fallback_files = 0usize;
+    let start = Instant::now();
+
     for (file_path, chunk_ids) in &file_chunks {
-        let done = embed_single_file(
+        let (done, used_late_chunking) = embed_single_file(
             embedder, chunk_meta, vec_idx, contextual, root, file_path, chunk_ids,
         )?;
         embedded_so_far += done;
+        if used_late_chunking {
+            late_chunking_files += 1;
+        } else {
+            fallback_files += 1;
+        }
         if let Some(ref cb) = progress_callback {
             cb(embedded_so_far, total_chunks);
         }
     }
 
-    Ok(())
+    Ok(EmbedTimingStats {
+        embedded_chunks: embedded_so_far,
+        total_files,
+        wall_clock: start.elapsed(),
+        workers: 1, // Sync path — always 1 worker.
+        late_chunking_files,
+        fallback_files,
+    })
 }
 
 /// Walk the directory tree and collect all source files with supported extensions.

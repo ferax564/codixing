@@ -6,8 +6,9 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use codixing_core::{
-    EmbeddingModel, Engine, FederatedEngine, FederationConfig, GitSyncStats, IndexConfig,
-    RepoMapOptions, SearchQuery, Strategy, SyncStats, discover_projects, to_federation_config,
+    EmbedTimingStats, EmbeddingModel, Engine, FederatedEngine, FederationConfig, GitSyncStats,
+    IndexConfig, RepoMapOptions, SearchQuery, Strategy, SyncStats, discover_projects,
+    to_federation_config,
 };
 
 #[derive(Parser)]
@@ -57,6 +58,10 @@ enum Command {
         /// search available immediately.
         #[arg(long)]
         defer_embeddings: bool,
+
+        /// Block until embeddings complete (old behavior). Default: return after BM25 is ready.
+        #[arg(long)]
+        wait: bool,
     },
 
     /// Search the code index.
@@ -220,6 +225,26 @@ enum Command {
         path: PathBuf,
     },
 
+    /// Benchmark embedding speed on the current index.
+    ///
+    /// Measures wall-clock time, throughput (chunks/sec), worker count, and
+    /// late-chunking hit rate.  Results are printed to stderr by default or
+    /// as JSON to stdout when --json is given (suitable for CI integration).
+    BenchEmbed {
+        /// Project root to benchmark (defaults to current directory).
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Re-embed all chunks even if they already have vectors.
+        /// Without this flag only un-embedded chunks are processed.
+        #[arg(long)]
+        force: bool,
+
+        /// Output results as JSON to stdout instead of human-readable stderr.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Start the REST API server.
     Serve {
         /// Host to bind to.
@@ -365,6 +390,7 @@ async fn main() -> Result<()> {
             model,
             reranker,
             defer_embeddings,
+            wait,
         } => cmd_init(
             path,
             also,
@@ -373,6 +399,7 @@ async fn main() -> Result<()> {
             model,
             reranker,
             defer_embeddings,
+            wait,
         ),
         Command::Search {
             query,
@@ -410,11 +437,13 @@ async fn main() -> Result<()> {
         Command::Sync { path } => cmd_sync(path),
         Command::GitSync { path } => cmd_git_sync(path),
         Command::Embed { path } => cmd_embed(path),
+        Command::BenchEmbed { path, force, json } => cmd_bench_embed(path, force, json),
         Command::Serve { host, port, path } => cmd_serve(host, port, path).await,
         Command::Federation { action } => cmd_federation(action),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_init(
     path: PathBuf,
     also: Vec<PathBuf>,
@@ -423,6 +452,7 @@ fn cmd_init(
     model: Option<String>,
     reranker: bool,
     defer_embeddings: bool,
+    wait: bool,
 ) -> Result<()> {
     let root = path
         .canonicalize()
@@ -505,6 +535,18 @@ fn cmd_init(
         stats.vector_count,
         elapsed.as_secs_f64(),
     );
+
+    if !engine.embeddings_ready() {
+        let (done, total) = engine.embedding_progress();
+        eprintln!("Embedding {total} chunks in background ({done}/{total} complete)...");
+        eprintln!("Search is available now (BM25-only until embeddings complete).");
+
+        if wait {
+            eprintln!("Waiting for embeddings to complete (--wait)...");
+            engine.wait_for_embeddings();
+            eprintln!("Embeddings complete.");
+        }
+    }
 
     Ok(())
 }
@@ -1049,6 +1091,65 @@ fn cmd_embed(path: PathBuf) -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+fn cmd_bench_embed(path: PathBuf, force: bool, json: bool) -> Result<()> {
+    let root = path
+        .canonicalize()
+        .with_context(|| format!("path not found: {}", path.display()))?;
+
+    let engine =
+        Engine::open(&root).with_context(|| "no index found — run `codixing init` first")?;
+
+    let pending = if force {
+        // Re-embed all chunks, whether or not they already have vectors.
+        let pending = dashmap::DashMap::new();
+        for entry in engine.chunk_meta_ref().iter() {
+            pending.insert(*entry.key(), entry.value().file_path.clone());
+        }
+        if pending.is_empty() {
+            anyhow::bail!("no chunks in index — run `codixing init` first");
+        }
+        pending
+    } else {
+        engine.find_unembedded_chunks()?
+    };
+
+    if pending.is_empty() {
+        eprintln!("All chunks already have embeddings. Use --force to re-embed.");
+        return Ok(());
+    }
+
+    eprintln!("Benchmarking embedding of {} chunks...", pending.len());
+    let stats: EmbedTimingStats = engine.bench_embed(&pending)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&stats.to_json()).unwrap_or_default()
+        );
+    } else {
+        eprintln!("\n── Embedding Benchmark Results ──────────────────");
+        eprintln!("  Chunks:            {}", stats.embedded_chunks);
+        eprintln!("  Files:             {}", stats.total_files);
+        eprintln!(
+            "  Wall clock:        {:.2}s",
+            stats.wall_clock.as_secs_f64()
+        );
+        eprintln!(
+            "  Throughput:        {:.1} chunks/sec",
+            stats.chunks_per_sec()
+        );
+        eprintln!("  Workers:           {}", stats.workers);
+        eprintln!(
+            "  Late chunking:     {:.0}% ({}/{})",
+            stats.late_chunking_rate() * 100.0,
+            stats.late_chunking_files,
+            stats.total_files
+        );
+        eprintln!("─────────────────────────────────────────────────");
+    }
     Ok(())
 }
 

@@ -74,7 +74,8 @@ impl Engine {
                     }
                 }
 
-                if let (Some(emb), Some(vec_idx)) = (&self.embedder, &self.vector) {
+                let vec_guard = self.vector.read().unwrap_or_else(|e| e.into_inner());
+                if let (Some(emb), Some(vec_idx)) = (&self.embedder, vec_guard.as_ref()) {
                     let retriever = HybridRetriever::new(
                         &self.tantivy,
                         Arc::clone(emb),
@@ -102,7 +103,8 @@ impl Engine {
                     }
                 }
 
-                if let (Some(emb), Some(vec_idx)) = (&self.embedder, &self.vector) {
+                let vec_guard = self.vector.read().unwrap_or_else(|e| e.into_inner());
+                if let (Some(emb), Some(vec_idx)) = (&self.embedder, vec_guard.as_ref()) {
                     let hybrid = HybridRetriever::new(
                         &self.tantivy,
                         Arc::clone(emb),
@@ -115,6 +117,11 @@ impl Engine {
                         ..query.clone()
                     };
                     let candidates = hybrid.search(&fetch_query)?;
+                    let emb_clone = Arc::clone(emb);
+                    let mmr_lambda = self.config.embedding.mmr_lambda;
+                    let limit = query.limit;
+                    let query_str_owned = query.query.clone();
+                    drop(vec_guard); // Release read lock before ONNX inference
 
                     if candidates.is_empty() {
                         return Ok(Vec::new());
@@ -124,20 +131,21 @@ impl Engine {
                         candidates
                             .into_iter()
                             .filter_map(|r| {
-                                let emb_vec = emb.embed_one(&r.content).ok()?;
+                                let emb_vec = emb_clone.embed_one(&r.content).ok()?;
                                 Some((r, emb_vec))
                             })
                             .unzip();
 
-                    let query_vec = emb.embed_query(&query.query)?;
+                    let query_vec = emb_clone.embed_query(&query_str_owned)?;
                     mmr_select(
                         results_with_meta,
                         &query_vec,
                         &embeddings,
-                        self.config.embedding.mmr_lambda,
-                        query.limit,
+                        mmr_lambda,
+                        limit,
                     )
                 } else {
+                    drop(vec_guard);
                     debug!("no embedder available; falling back to BM25 for Thorough strategy");
                     BM25Retriever::new(&self.tantivy).search(&query)?
                 }
@@ -631,18 +639,21 @@ impl Engine {
     /// and — critically — to avoid recursion through the public `search()`
     /// method which would trigger query expansion and strategy dispatch again.
     fn search_first_pass(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
-        let mut candidates = if let (Some(emb), Some(vec_idx)) = (&self.embedder, &self.vector) {
-            let retriever = HybridRetriever::new(
-                &self.tantivy,
-                Arc::clone(emb),
-                vec_idx,
-                &self.chunk_meta,
-                self.config.embedding.rrf_k,
-            );
-            retriever.search(query)?
-        } else {
-            BM25Retriever::new(&self.tantivy).search(query)?
-        };
+        let vec_guard = self.vector.read().unwrap_or_else(|e| e.into_inner());
+        let mut candidates =
+            if let (Some(emb), Some(vec_idx)) = (&self.embedder, vec_guard.as_ref()) {
+                let retriever = HybridRetriever::new(
+                    &self.tantivy,
+                    Arc::clone(emb),
+                    vec_idx,
+                    &self.chunk_meta,
+                    self.config.embedding.rrf_k,
+                );
+                retriever.search(query)?
+            } else {
+                BM25Retriever::new(&self.tantivy).search(query)?
+            };
+        drop(vec_guard); // Release before boost computations
         self.apply_graph_boost(&mut candidates, self.config.graph.boost_weight);
         self.apply_definition_boost(&mut candidates, &query.query);
         self.apply_popularity_boost(&mut candidates);

@@ -1,5 +1,7 @@
 #[cfg(feature = "rustqueue")]
 pub mod embed_queue;
+pub(super) mod embed_state;
+pub(super) mod embed_stats;
 mod files;
 mod focus_map;
 mod graph;
@@ -16,12 +18,13 @@ mod temporal;
 mod test_mapping;
 mod validation;
 
+pub use embed_stats::EmbedTimingStats;
 pub use focus_map::{FocusMapEntry, FocusMapOptions};
 pub use symbol_graph::SymbolReference;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
 
 use dashmap::DashMap;
@@ -29,7 +32,6 @@ use serde::Serialize;
 
 use crate::config::IndexConfig;
 use crate::embedder::Embedder;
-#[cfg(test)]
 use crate::error::CodixingError;
 use crate::graph::CodeGraph;
 use crate::index::TantivyIndex;
@@ -245,9 +247,15 @@ pub struct Engine {
     #[cfg(feature = "rustqueue")]
     pub(super) embed_queue: Option<Arc<rustqueue::RustQueue>>,
     /// Optional usearch HNSW vector index.
-    pub(super) vector: Option<VectorIndex>,
+    ///
+    /// Wrapped in `Arc<RwLock<...>>` so that a background embedding thread
+    /// (Task 5) can write new vectors while search queries hold read locks.
+    pub(super) vector: Arc<RwLock<Option<VectorIndex>>>,
     /// Chunk metadata hydration table for vector results.
-    pub(super) chunk_meta: DashMap<u64, ChunkMeta>,
+    ///
+    /// Wrapped in `Arc` so the background embedding thread can share it
+    /// without taking a write lock on the whole engine.
+    pub(super) chunk_meta: Arc<DashMap<u64, ChunkMeta>>,
     /// Optional code dependency graph with PageRank scores.
     pub(super) graph: Option<CodeGraph>,
     /// Optional cross-encoder reranker (BGE-Reranker-Base) for the `deep` strategy.
@@ -274,6 +282,8 @@ pub struct Engine {
     reload_interval: std::time::Duration,
     /// Last time we checked for staleness.
     last_staleness_check: Option<std::time::Instant>,
+    /// Background embedding state — `None` when embeddings were synchronous or index was opened.
+    pub(super) embed_state: Option<Arc<embed_state::EmbedState>>,
 }
 
 impl Engine {
@@ -334,7 +344,13 @@ impl Engine {
             file_count: self.file_chunk_counts.len(),
             chunk_count: self.file_chunk_counts.values().sum(),
             symbol_count: self.symbols.len(),
-            vector_count: self.vector.as_ref().map(|v| v.len()).unwrap_or(0),
+            vector_count: self
+                .vector
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map(|v| v.len())
+                .unwrap_or(0),
             graph_node_count,
             graph_edge_count,
             symbol_node_count,
@@ -413,6 +429,138 @@ impl Engine {
         neighbors.sort();
         neighbors.dedup();
         neighbors
+    }
+
+    /// Return a reference to the chunk metadata table.
+    ///
+    /// Used by `bench-embed` to inspect which chunks exist without taking ownership.
+    pub fn chunk_meta_ref(&self) -> &DashMap<u64, ChunkMeta> {
+        &self.chunk_meta
+    }
+
+    /// Return a clone of the `Arc` wrapping the chunk metadata table.
+    ///
+    /// Used by the background embedding thread to share ownership without
+    /// locking the full engine.
+    pub fn chunk_meta_arc(&self) -> Arc<DashMap<u64, ChunkMeta>> {
+        Arc::clone(&self.chunk_meta)
+    }
+
+    /// Collect chunk IDs that have no vector representation yet.
+    ///
+    /// Returns a `DashMap<chunk_id, file_path>` of chunks missing from the
+    /// vector index.  When the engine has no vector index, every chunk is
+    /// considered unembedded.
+    pub fn find_unembedded_chunks(&self) -> crate::error::Result<DashMap<u64, String>> {
+        let pending = DashMap::new();
+        // Build the set of chunk IDs that already have vectors.
+        let vec_guard = self.vector.read().unwrap_or_else(|e| e.into_inner());
+        let embedded: std::collections::HashSet<u64> = vec_guard
+            .as_ref()
+            .map(|v| v.file_chunks().values().flatten().copied().collect())
+            .unwrap_or_default();
+        drop(vec_guard);
+
+        for entry in self.chunk_meta.iter() {
+            if !embedded.contains(entry.key()) {
+                pending.insert(*entry.key(), entry.value().file_path.clone());
+            }
+        }
+        Ok(pending)
+    }
+
+    /// Run embedding on the given pending chunks and return timing stats.
+    ///
+    /// Writes vectors into the in-memory index but does not persist to disk.
+    /// Note: with --force on a fully-embedded index, this will duplicate key IDs
+    /// in the HNSW graph for the lifetime of the process.
+    pub fn bench_embed(
+        &self,
+        pending: &DashMap<u64, String>,
+    ) -> crate::error::Result<EmbedTimingStats> {
+        let embedder = self
+            .embedder
+            .as_ref()
+            .ok_or_else(|| CodixingError::Config("no embedder configured".into()))?
+            .clone();
+        let mut vec_guard = self.vector.write().unwrap_or_else(|e| e.into_inner());
+        let vec_idx = vec_guard
+            .as_mut()
+            .ok_or_else(|| CodixingError::Config("no vector index".into()))?;
+        let contextual = self.config.embedding.contextual_embeddings;
+        let root = self.store.root().to_path_buf();
+        indexing::embed_and_index_chunks(
+            pending,
+            &self.chunk_meta,
+            &embedder,
+            vec_idx,
+            contextual,
+            &root,
+        )
+    }
+
+    /// Returns (completed, total) embedding progress. (0, 0) if no background embedding.
+    pub fn embedding_progress(&self) -> (usize, usize) {
+        self.embed_state
+            .as_ref()
+            .map(|s| s.progress())
+            .unwrap_or((0, 0))
+    }
+
+    /// True when embeddings are complete (or were never started in background).
+    pub fn embeddings_ready(&self) -> bool {
+        self.embed_state
+            .as_ref()
+            .map(|s| s.is_ready())
+            .unwrap_or(true) // No background embed = always ready
+    }
+
+    /// Block until background embeddings complete. No-op if already done.
+    pub fn wait_for_embeddings(&self) {
+        if let Some(state) = &self.embed_state {
+            while !state.is_ready() {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            if let Some(handle) = state
+                .handle
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    /// Request background embedding to stop and join the thread.
+    pub fn shutdown_embeddings(&self) {
+        if let Some(state) = &self.embed_state {
+            state.request_cancel();
+            if let Some(handle) = state
+                .handle
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+            {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
+impl Drop for Engine {
+    fn drop(&mut self) {
+        // Do NOT cancel background embeddings on drop — let the thread finish
+        // and persist the vector index. Only explicit shutdown_embeddings()
+        // should cancel. The thread holds Arc clones of shared state, so it
+        // will complete safely even after Engine is dropped.
+        if let Some(state) = &self.embed_state {
+            if !state.is_ready() {
+                tracing::debug!(
+                    "Engine dropped while background embedding in progress — thread will continue"
+                );
+            }
+        }
     }
 }
 

@@ -52,7 +52,7 @@ For broad codebase exploration, always try a Codixing tool first. Fall back to B
 
 ```bash
 cargo build --release --workspace          # build all binaries
-cargo test --workspace                      # run all tests (858+)
+cargo test --workspace                      # run all tests (854+)
 cargo clippy --workspace -- -D warnings     # lint (must pass)
 cargo fmt --check                           # format check (must pass)
 
@@ -63,6 +63,9 @@ cargo test --workspace --no-default-features
 # With RustQueue queue-based embedding:
 cargo build -p codixing-core --features rustqueue
 cargo test -p codixing-core --features rustqueue
+
+# Embedding speed benchmarking:
+cargo run --release -p codixing-cli -- bench-embed /path/to/repo --model bge-small-en
 ```
 
 ## Version Locations

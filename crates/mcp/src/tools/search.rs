@@ -292,6 +292,16 @@ pub(crate) fn call_code_search(
             } else {
                 out.push_str(&engine.format_results(&results, Some(8000)));
             }
+
+            if !engine.embeddings_ready() {
+                let (done, total) = engine.embedding_progress();
+                let note = format!(
+                    "**Note:** Embeddings in progress ({done}/{total}). Results are BM25-only; \
+                     quality will improve when embedding completes.\n\n"
+                );
+                out = format!("{note}{out}");
+            }
+
             (out, false)
         }
         Err(e) => (format!("Search error: {e}"), true),

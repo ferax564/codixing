@@ -119,7 +119,7 @@ pub async fn drain_embed_queue(
             match super::indexing::embed_single_file(
                 embedder, chunk_meta, vec_idx, contextual, root, &file_path, &chunk_ids,
             ) {
-                Ok(n) => {
+                Ok((n, _used_late_chunking)) => {
                     total_embedded += n;
                     rq.ack(job.id, None).await.map_err(queue_err)?;
                 }
@@ -313,4 +313,5 @@ pub fn embed_pending(
     super::indexing::embed_and_index_chunks(
         pending, chunk_meta, embedder, vec_idx, contextual, root,
     )
+    .map(|_stats| ())
 }
