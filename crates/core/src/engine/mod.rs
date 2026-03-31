@@ -550,7 +550,15 @@ impl Engine {
 
 impl Drop for Engine {
     fn drop(&mut self) {
-        self.shutdown_embeddings();
+        // Do NOT cancel background embeddings on drop — let the thread finish
+        // and persist the vector index. Only explicit shutdown_embeddings()
+        // should cancel. The thread holds Arc clones of shared state, so it
+        // will complete safely even after Engine is dropped.
+        if let Some(state) = &self.embed_state {
+            if !state.is_ready() {
+                tracing::debug!("Engine dropped while background embedding in progress — thread will continue");
+            }
+        }
     }
 }
 
