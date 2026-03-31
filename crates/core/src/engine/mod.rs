@@ -556,7 +556,9 @@ impl Drop for Engine {
         // will complete safely even after Engine is dropped.
         if let Some(state) = &self.embed_state {
             if !state.is_ready() {
-                tracing::debug!("Engine dropped while background embedding in progress — thread will continue");
+                tracing::debug!(
+                    "Engine dropped while background embedding in progress — thread will continue"
+                );
             }
         }
     }
