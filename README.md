@@ -214,6 +214,9 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Symbol-level call graph** — Function-to-function call edges extracted from AST, including Rust trait dispatch, Python class inheritance, and TypeScript interface implementations
 - **Dependency graph** — Import + call extraction, PageRank scoring, Personalized PageRank for focus-aware maps
 - **54 MCP tools** — Search, graph traversal, file operations, code review, git analysis, session memory, federation discovery
+- **TypeScript import resolution** — Resolve `.js` → `.ts` imports with node16/bundler moduleResolution support, enabling 0.8+ R@10 on cross-package code discovery
+- **Background embedding drain** — Instant BM25 search after `codixing init`, hybrid vector search transparently upgrades as embeddings complete in the background
+- **Embedding speed measurement** — New `bench-embed` CLI subcommand for profiling embedding performance across custom models
 - **Daemon mode** — Engine stays in memory, auto-starts on first connection, Unix socket (macOS/Linux) or named pipe (Windows) IPC, file watcher for live index updates, 30-min idle timeout
 - **Field-weighted BM25** — Configurable per-field boosting (entity_names 3×, signature 2×, scope_chain 1.5×, content 1×)
 - **Search pipeline** — Composable search stages (definition boost, test demotion, path match, graph boost, recency boost, deduplication, truncation) with 6 strategies including trigram exact-match
@@ -279,7 +282,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 858+ tests
+cargo test --workspace        # 854+ tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```

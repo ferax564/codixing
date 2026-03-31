@@ -1,7 +1,7 @@
 {
   "name": "codixing",
   "description": "Code retrieval engine that gives Claude structural understanding of your codebase. Before modifying code, Codixing tells Claude what will break — predicting impact across the dependency graph, finding affected tests, and tracing callers through the call hierarchy. Unlike text search, Codixing builds an AST-aware index with BM25 + semantic hybrid retrieval, dependency graphs with PageRank ranking, and trigram-accelerated grep — all running locally with zero cloud dependencies.\n\n54 MCP tools cover the full development loop: search by symbol or natural language, trace dependencies, predict change impact, discover test coverage, review complexity, and navigate unfamiliar codebases. Three built-in slash commands (/codixing-setup, /codixing-explore, /codixing-review) provide guided workflows for project onboarding, architecture exploration, and dependency-aware code review. Tested at scale on the Linux kernel (73K files, 1.57s cold start). Runs on macOS, Linux, and Windows.",
-  "version": "0.22.1",
+  "version": "0.23.0",
   "author": {
     "name": "ferax564",
     "url": "https://codixing.com"
