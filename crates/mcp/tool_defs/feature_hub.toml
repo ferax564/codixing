@@ -1,0 +1,16 @@
+[[tools]]
+name = "feature_hub"
+description = "One-call feature exploration: finds core files, dependencies, dependents, and tests for a feature query. Combines search + callers + callees + tests into a single structured response. Reduces agent tool calls from 4-5 to 1 for feature exploration."
+handler = "feature_hub::call_feature_hub"
+calling_convention = "engine_args"
+read_only = true
+medium = true
+
+[tools.params.query]
+type = "string"
+description = "Natural language description of the feature to explore (e.g. 'authentication flow', 'BM25 scoring')"
+required = true
+
+[tools.params.limit]
+type = "integer"
+description = "Max core files to explore (default: 5)"

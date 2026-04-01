@@ -213,7 +213,10 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Hybrid search** — BM25 + optional vector embeddings, fused with Reciprocal Rank Fusion
 - **Symbol-level call graph** — Function-to-function call edges extracted from AST, including Rust trait dispatch, Python class inheritance, and TypeScript interface implementations
 - **Dependency graph** — Import + call extraction, PageRank scoring, Personalized PageRank for focus-aware maps
-- **54 MCP tools** — Search, graph traversal, file operations, code review, git analysis, session memory, federation discovery
+- **Ranked cross-imports** — PageRank + git recency scoring for relevance-ranked graph queries across directory boundaries
+- **Memory relations** — `memory_relate` tool creates typed edges between agent memory entries, enabling associative recall across sessions
+- **Feature hub** — One-call feature exploration combining search + callers + callees + tests for unified understanding
+- **56 MCP tools** — Search, graph traversal, file operations, code review, git analysis, session memory, federation discovery
 - **TypeScript import resolution** — Resolve `.js` → `.ts` imports with node16/bundler moduleResolution support, enabling 0.8+ R@10 on cross-package code discovery
 - **Background embedding drain** — Instant BM25 search after `codixing init`, hybrid vector search transparently upgrades as embeddings complete in the background
 - **Embedding speed measurement** — New `bench-embed` CLI subcommand for profiling embedding performance across custom models

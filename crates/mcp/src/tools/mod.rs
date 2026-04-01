@@ -12,6 +12,7 @@
 mod analysis;
 mod common;
 mod context;
+mod feature_hub;
 pub mod federation;
 mod files;
 mod focus;

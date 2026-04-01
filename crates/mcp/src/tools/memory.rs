@@ -1,4 +1,4 @@
-//! Memory tool handlers: remember, recall, forget, enrich_docs.
+//! Memory tool handlers: remember, recall, forget, enrich_docs, memory_relate.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -7,22 +7,59 @@ use serde_json::{Value, json};
 
 use codixing_core::Engine;
 
+/// A typed relation between two memory entries.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct Relation {
+    from: String,
+    to: String,
+    relation: String,
+}
+
+/// The on-disk memory store format (v2).
+///
+/// Backward compatible: if the file contains a bare JSON array it is treated as
+/// the `entries` field with an empty `relations` list.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct MemoryStore {
+    entries: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    relations: Vec<Relation>,
+}
+
 /// Path to the memory store relative to the project index directory.
 fn memory_path(engine: &Engine) -> PathBuf {
     engine.config().root.join(".codixing/memory.json")
 }
 
-/// Load the memory store from disk.
-fn load_memory(engine: &Engine) -> HashMap<String, serde_json::Value> {
+/// Load the memory store from disk with backward-compat fallback.
+///
+/// Old format: a bare JSON object (`{key: {value, tags}, ...}`)
+/// New format: `{"entries": {...}, "relations": [...]}`
+fn load_store(engine: &Engine) -> MemoryStore {
     let path = memory_path(engine);
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let text = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return MemoryStore::default(),
+    };
+
+    // Try new format first.
+    if let Ok(store) = serde_json::from_str::<MemoryStore>(&text) {
+        return store;
+    }
+
+    // Fall back: old format was a bare HashMap<String, Value>.
+    if let Ok(entries) = serde_json::from_str::<HashMap<String, serde_json::Value>>(&text) {
+        return MemoryStore {
+            entries,
+            relations: Vec::new(),
+        };
+    }
+
+    MemoryStore::default()
 }
 
 /// Persist the memory store to disk.
-fn save_memory(engine: &Engine, memory: &HashMap<String, serde_json::Value>) -> Result<(), String> {
+fn save_store(engine: &Engine, store: &MemoryStore) -> Result<(), String> {
     let path = memory_path(engine);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -30,7 +67,7 @@ fn save_memory(engine: &Engine, memory: &HashMap<String, serde_json::Value>) -> 
     }
     std::fs::write(
         &path,
-        serde_json::to_string_pretty(memory).unwrap_or_default(),
+        serde_json::to_string_pretty(store).unwrap_or_default(),
     )
     .map_err(|e| format!("Failed to write memory.json: {e}"))
 }
@@ -54,12 +91,17 @@ pub(crate) fn call_remember(engine: &mut Engine, args: &Value) -> (String, bool)
         })
         .unwrap_or_default();
 
-    let mut memory = load_memory(engine);
-    memory.insert(key.clone(), json!({ "value": value, "tags": tags }));
+    let mut store = load_store(engine);
+    store
+        .entries
+        .insert(key.clone(), json!({ "value": value, "tags": tags }));
 
-    match save_memory(engine, &memory) {
+    match save_store(engine, &store) {
         Ok(()) => (
-            format!("Stored memory '{key}'. Total entries: {}.", memory.len()),
+            format!(
+                "Stored memory '{key}'. Total entries: {}.",
+                store.entries.len()
+            ),
             false,
         ),
         Err(e) => (e, true),
@@ -82,9 +124,9 @@ pub(crate) fn call_recall(engine: &Engine, args: &Value) -> (String, bool) {
         })
         .unwrap_or_default();
 
-    let memory = load_memory(engine);
+    let store = load_store(engine);
 
-    if memory.is_empty() {
+    if store.entries.is_empty() {
         return (
             "No memories stored yet. Use `remember` to store project knowledge.".to_string(),
             false,
@@ -93,7 +135,7 @@ pub(crate) fn call_recall(engine: &Engine, args: &Value) -> (String, bool) {
 
     let mut results: Vec<(String, String, Vec<String>)> = Vec::new();
 
-    for (key, entry) in &memory {
+    for (key, entry) in &store.entries {
         let value = entry
             .get("value")
             .and_then(|v| v.as_str())
@@ -139,7 +181,35 @@ pub(crate) fn call_recall(engine: &Engine, args: &Value) -> (String, bool) {
             out.push_str(&format!("  [{}]", entry_tags.join(", ")));
         }
         out.push('\n');
-        out.push_str(&format!("  {value}\n\n"));
+        out.push_str(&format!("  {value}\n"));
+
+        // Show outgoing relations (this key → other).
+        let outgoing: Vec<(&str, &str)> = store
+            .relations
+            .iter()
+            .filter(|r| r.from == *key)
+            .map(|r| (r.relation.as_str(), r.to.as_str()))
+            .collect();
+
+        // Show incoming relations (other → this key).
+        let incoming: Vec<(&str, &str)> = store
+            .relations
+            .iter()
+            .filter(|r| r.to == *key)
+            .map(|r| (r.relation.as_str(), r.from.as_str()))
+            .collect();
+
+        if !outgoing.is_empty() || !incoming.is_empty() {
+            out.push_str("  Related:\n");
+            for (rel, target) in &outgoing {
+                out.push_str(&format!("    → {rel}: {target}\n"));
+            }
+            for (rel, source) in &incoming {
+                out.push_str(&format!("    ← {rel}: {source}\n"));
+            }
+        }
+
+        out.push('\n');
     }
     (out, false)
 }
@@ -150,16 +220,80 @@ pub(crate) fn call_forget(engine: &mut Engine, args: &Value) -> (String, bool) {
         None => return ("Missing required argument: key".to_string(), true),
     };
 
-    let mut memory = load_memory(engine);
-    if memory.remove(&key).is_none() {
+    let mut store = load_store(engine);
+    if store.entries.remove(&key).is_none() {
         return (format!("No memory entry found with key '{key}'."), false);
     }
+    // Also remove any relations involving this key.
+    store.relations.retain(|r| r.from != key && r.to != key);
 
-    match save_memory(engine, &memory) {
+    match save_store(engine, &store) {
         Ok(()) => (
             format!(
                 "Removed memory entry '{key}'. Remaining entries: {}.",
-                memory.len()
+                store.entries.len()
+            ),
+            false,
+        ),
+        Err(e) => (e, true),
+    }
+}
+
+/// Create a typed relation edge between two memory entries.
+pub(crate) fn call_memory_relate(engine: &mut Engine, args: &Value) -> (String, bool) {
+    let from_id = match args.get("from_id").and_then(|v| v.as_str()) {
+        Some(k) => k.to_string(),
+        None => return ("Missing required argument: from_id".to_string(), true),
+    };
+    let to_id = match args.get("to_id").and_then(|v| v.as_str()) {
+        Some(k) => k.to_string(),
+        None => return ("Missing required argument: to_id".to_string(), true),
+    };
+    let relation = args
+        .get("relation")
+        .and_then(|v| v.as_str())
+        .unwrap_or("related-to")
+        .to_string();
+
+    let mut store = load_store(engine);
+
+    // Warn if either key doesn't exist, but still create the relation.
+    let from_exists = store.entries.contains_key(&from_id);
+    let to_exists = store.entries.contains_key(&to_id);
+
+    // Avoid duplicate relations.
+    let already_exists = store
+        .relations
+        .iter()
+        .any(|r| r.from == from_id && r.to == to_id && r.relation == relation);
+
+    if already_exists {
+        return (
+            format!("Relation '{from_id}' --{relation}--> '{to_id}' already exists."),
+            false,
+        );
+    }
+
+    store.relations.push(Relation {
+        from: from_id.clone(),
+        to: to_id.clone(),
+        relation: relation.clone(),
+    });
+
+    let mut warnings = String::new();
+    if !from_exists {
+        warnings.push_str(&format!(" (warning: '{from_id}' not found in memory)"));
+    }
+    if !to_exists {
+        warnings.push_str(&format!(" (warning: '{to_id}' not found in memory)"));
+    }
+
+    match save_store(engine, &store) {
+        Ok(()) => (
+            format!(
+                "Created relation: '{from_id}' --{relation}--> '{to_id}'.{warnings} \
+                 Total relations: {}.",
+                store.relations.len()
             ),
             false,
         ),

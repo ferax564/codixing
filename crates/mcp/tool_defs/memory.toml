@@ -63,3 +63,24 @@ read_only = false
 type = "string"
 description = "Key of the memory entry to delete"
 required = true
+
+[[tools]]
+name = "memory_relate"
+description = "Create a typed relation edge between two memory entries in .codixing/memory.json. Relations are shown when recalling either entry. Use this to express dependencies, ownership, or any semantic link between stored notes."
+handler = "memory::call_memory_relate"
+calling_convention = "engine_mut_args"
+read_only = false
+
+[tools.params.from_id]
+type = "string"
+description = "Key of the source memory entry"
+required = true
+
+[tools.params.to_id]
+type = "string"
+description = "Key of the target memory entry"
+required = true
+
+[tools.params.relation]
+type = "string"
+description = "Relation label (e.g. 'depends-on', 'implements', 'related-to'). Defaults to 'related-to'."

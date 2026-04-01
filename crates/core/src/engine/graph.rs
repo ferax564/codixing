@@ -66,6 +66,24 @@ impl Engine {
             .unwrap_or_default()
     }
 
+    /// Find files under `from_prefix` that import any file under `to_prefix`, ranked by relevance.
+    ///
+    /// Results are sorted by score descending: score = sum(target_pagerank) × (1 + recency_boost).
+    pub fn cross_imports_ranked(
+        &self,
+        from_prefix: &str,
+        to_prefix: &str,
+        limit: Option<usize>,
+    ) -> Vec<(String, f32)> {
+        self.graph
+            .as_ref()
+            .map(|g| {
+                let recency = self.get_recency_map();
+                g.cross_imports_ranked(from_prefix, to_prefix, Some(recency), limit)
+            })
+            .unwrap_or_default()
+    }
+
     /// Return graph statistics, or `None` if the graph has not been built.
     pub fn graph_stats(&self) -> Option<GraphStats> {
         self.graph.as_ref().map(|g| g.stats())

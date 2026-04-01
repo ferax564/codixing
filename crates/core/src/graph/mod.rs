@@ -336,6 +336,65 @@ impl CodeGraph {
         sorted
     }
 
+    /// Find files under `from_prefix` that import any file under `to_prefix`, ranked by relevance.
+    ///
+    /// Score = sum of target PageRank values for each cross-import edge, multiplied by
+    /// a recency boost: `1 + exp(-0.05 * days_old)` for the source file.
+    ///
+    /// Returns `(file_path, score)` pairs sorted by score descending.
+    pub fn cross_imports_ranked(
+        &self,
+        from_prefix: &str,
+        to_prefix: &str,
+        recency_map: Option<&std::collections::HashMap<String, i64>>,
+        limit: Option<usize>,
+    ) -> Vec<(String, f32)> {
+        let mut scores: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
+
+        for edge in self.graph.edge_references() {
+            let source = &self.graph[edge.source()];
+            let target = &self.graph[edge.target()];
+
+            if source.file_path.starts_with(from_prefix)
+                && target.file_path.starts_with(to_prefix)
+                && !source.file_path.starts_with("__ext__:")
+            {
+                let target_pr = target.pagerank.max(0.001);
+                let entry = scores.entry(source.file_path.clone()).or_insert(0.0);
+                *entry += target_pr;
+            }
+        }
+
+        // Apply recency boost per source file.
+        if let Some(rmap) = recency_map {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+
+            for (file, score) in scores.iter_mut() {
+                if let Some(&commit_ts) = rmap.get(file) {
+                    let days_old = ((now - commit_ts) as f64 / 86400.0).max(0.0);
+                    let boost = (-0.05 * days_old).exp();
+                    *score *= 1.0 + boost as f32;
+                }
+            }
+        }
+
+        let mut ranked: Vec<(String, f32)> = scores.into_iter().collect();
+        ranked.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+
+        if let Some(lim) = limit {
+            ranked.truncate(lim);
+        }
+
+        ranked
+    }
+
     /// Transitive callers (files that transitively depend on `file_path`) up to `depth` hops.
     pub fn transitive_callers(&self, file_path: &str, depth: usize) -> Vec<String> {
         self.transitive_traverse(file_path, depth, |f| self.callers(f))
@@ -795,5 +854,54 @@ mod tests {
         let s = g.stats();
         assert_eq!(s.symbol_nodes, 2);
         assert_eq!(s.symbol_edges, 1);
+    }
+
+    #[test]
+    fn cross_imports_ranked_by_pagerank() {
+        let mut g = CodeGraph::new();
+        // Two gateway files import from two target files with different PageRank.
+        g.add_edge(
+            "src/gateway/a.rs",
+            "src/auth/high_rank.rs",
+            "crate::auth::high_rank",
+            Language::Rust,
+            Language::Rust,
+        );
+        g.add_edge(
+            "src/gateway/b.rs",
+            "src/auth/low_rank.rs",
+            "crate::auth::low_rank",
+            Language::Rust,
+            Language::Rust,
+        );
+        // Assign pagerank: high_rank.rs gets 0.5, low_rank.rs gets 0.001 (min).
+        let mut scores = std::collections::HashMap::new();
+        scores.insert("src/auth/high_rank.rs".to_string(), 0.5f32);
+        scores.insert("src/auth/low_rank.rs".to_string(), 0.001f32);
+        g.apply_pagerank(&scores);
+
+        let ranked = g.cross_imports_ranked("src/gateway", "src/auth", None, None);
+        assert_eq!(ranked.len(), 2);
+        // gateway/a.rs imports the high-rank target, so it should score higher.
+        assert_eq!(ranked[0].0, "src/gateway/a.rs");
+        assert_eq!(ranked[1].0, "src/gateway/b.rs");
+        assert!(ranked[0].1 > ranked[1].1);
+    }
+
+    #[test]
+    fn cross_imports_ranked_respects_limit() {
+        let mut g = CodeGraph::new();
+        for i in 0..5 {
+            g.add_edge(
+                &format!("src/gateway/file_{i}.rs"),
+                "src/auth/mod.rs",
+                "crate::auth",
+                Language::Rust,
+                Language::Rust,
+            );
+        }
+
+        let ranked = g.cross_imports_ranked("src/gateway", "src/auth", None, Some(3));
+        assert_eq!(ranked.len(), 3);
     }
 }
