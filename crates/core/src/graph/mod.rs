@@ -382,7 +382,11 @@ impl CodeGraph {
         }
 
         let mut ranked: Vec<(String, f32)> = scores.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        ranked.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
 
         if let Some(lim) = limit {
             ranked.truncate(lim);

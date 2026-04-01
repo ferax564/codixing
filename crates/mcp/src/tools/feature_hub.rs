@@ -24,11 +24,13 @@ pub(crate) fn call_feature_hub(engine: &Engine, args: &Value) -> (String, bool) 
         return (format!("No files found for: {query}"), false);
     }
 
-    // Deduplicate core file paths (search may return multiple chunks per file).
-    let mut seen = std::collections::BTreeSet::new();
+    // Deduplicate core file paths (search may return multiple chunks per file),
+    // then truncate to limit to ensure full coverage across files.
+    let mut seen = std::collections::HashSet::new();
     let core_files: Vec<_> = core_files
         .into_iter()
         .filter(|r| seen.insert(r.file_path.clone()))
+        .take(limit)
         .collect();
     let core_paths: Vec<String> = core_files.iter().map(|r| r.file_path.clone()).collect();
 
