@@ -49,7 +49,18 @@ For the most important changed symbols (functions, methods), call `symbol_caller
 
 For changed files, call `get_complexity` to identify any functions with high cyclomatic complexity. Flag functions above threshold 10 as candidates for refactoring.
 
-### 7. Present review
+### 7. Preflight: Claim Verification
+
+Before writing the review verdict, check for any accuracy or performance claims in the diff (commit messages, comments, docs):
+
+- If the diff contains phrases like "R@10 improves", "N% faster", "fixes benchmark gap" — verify the claim:
+  1. Identify the measurement command (e.g., `python3 benchmarks/queue_v2_benchmark.py`)
+  2. Check if the benchmark was actually run (look for updated results files in the diff)
+  3. If no evidence: flag as "**Unverified claim** — [phrase] in [file] has no benchmark evidence"
+
+This catches misleading commit messages and PR descriptions before they reach main.
+
+### 8. Present review
 
 Structure the review as:
 
