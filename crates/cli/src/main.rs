@@ -6,9 +6,9 @@ use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 use codixing_core::{
-    EmbedTimingStats, EmbeddingModel, Engine, FederatedEngine, FederationConfig, GitSyncStats,
-    IndexConfig, RepoMapOptions, SearchQuery, Strategy, SyncStats, discover_projects,
-    to_federation_config,
+    EmbedTimingStats, EmbeddingModel, Engine, FederatedEngine, FederationConfig, FreshnessOptions,
+    FreshnessTier, GitSyncStats, IndexConfig, RepoMapOptions, SearchQuery, Strategy, SyncStats,
+    discover_projects, to_federation_config,
 };
 
 #[derive(Parser)]
@@ -265,6 +265,31 @@ enum Command {
         #[command(subcommand)]
         action: FederationAction,
     },
+
+    /// Audit files for freshness: finds stale and orphaned files that may need attention.
+    ///
+    /// Combines git recency, orphan detection, and import graph analysis to classify
+    /// files into three tiers:
+    ///   Critical — no importers AND not modified in threshold_days (dead code candidates)
+    ///   Warning  — stale but still imported by other files
+    ///   Info     — recently orphaned (no importers but freshly modified)
+    Audit {
+        /// Flag files not modified in this many days.
+        #[arg(long, default_value = "21")]
+        threshold_days: u64,
+
+        /// File pattern to include (substring match, e.g. "crates/", "*.rs").
+        #[arg(long)]
+        include: Option<String>,
+
+        /// File pattern to exclude (substring match, e.g. "test", "vendor").
+        #[arg(long)]
+        exclude: Option<String>,
+
+        /// Project root directory (defaults to current directory).
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
 }
 
 /// Subcommands for managing federation configurations.
@@ -440,6 +465,12 @@ async fn main() -> Result<()> {
         Command::BenchEmbed { path, force, json } => cmd_bench_embed(path, force, json),
         Command::Serve { host, port, path } => cmd_serve(host, port, path).await,
         Command::Federation { action } => cmd_federation(action),
+        Command::Audit {
+            threshold_days,
+            include,
+            exclude,
+            path,
+        } => cmd_audit(path, threshold_days, include, exclude),
     }
 }
 
@@ -1371,4 +1402,103 @@ async fn cmd_serve(host: String, port: u16, path: PathBuf) -> Result<()> {
         }
         Ok(_) => Ok(()),
     }
+}
+
+fn cmd_audit(
+    path: PathBuf,
+    threshold_days: u64,
+    include: Option<String>,
+    exclude: Option<String>,
+) -> Result<()> {
+    let root = path
+        .canonicalize()
+        .with_context(|| format!("path not found: {}", path.display()))?;
+
+    let engine = Engine::open(&root).with_context(|| {
+        format!(
+            "no index found at {} — run `codixing init` first",
+            root.display()
+        )
+    })?;
+
+    let options = FreshnessOptions {
+        threshold_days,
+        include_pattern: include,
+        exclude_pattern: exclude,
+    };
+
+    let report = engine.audit_freshness(options);
+
+    if report.entries.is_empty() {
+        eprintln!(
+            "All {} indexed file(s) are fresh — no stale or orphaned files detected.",
+            report.files_audited
+        );
+        return Ok(());
+    }
+
+    let critical: Vec<_> = report
+        .entries
+        .iter()
+        .filter(|e| e.tier == FreshnessTier::Critical)
+        .collect();
+    let warning: Vec<_> = report
+        .entries
+        .iter()
+        .filter(|e| e.tier == FreshnessTier::Warning)
+        .collect();
+    let info: Vec<_> = report
+        .entries
+        .iter()
+        .filter(|e| e.tier == FreshnessTier::Info)
+        .collect();
+
+    if !critical.is_empty() {
+        println!("\nCritical (orphan + stale, {}+ days):", threshold_days);
+        println!("{}", "-".repeat(80));
+        for e in &critical {
+            let days_str = if e.days_old == u64::MAX {
+                "very old".to_string()
+            } else {
+                format!("{} days", e.days_old)
+            };
+            println!("  [CRITICAL] {} ({}) — {}", e.file_path, days_str, e.reason);
+        }
+    }
+
+    if !warning.is_empty() {
+        println!("\nWarning (stale but connected, {}+ days):", threshold_days);
+        println!("{}", "-".repeat(80));
+        for e in &warning {
+            let days_str = if e.days_old == u64::MAX {
+                "very old".to_string()
+            } else {
+                format!("{} days", e.days_old)
+            };
+            println!("  [WARNING] {} ({}) — {}", e.file_path, days_str, e.reason);
+        }
+    }
+
+    if !info.is_empty() {
+        println!("\nInfo (recently orphaned):");
+        println!("{}", "-".repeat(80));
+        for e in &info {
+            let days_str = if e.days_old == u64::MAX {
+                "very old".to_string()
+            } else {
+                format!("{} days", e.days_old)
+            };
+            println!("  [INFO] {} ({}) — {}", e.file_path, days_str, e.reason);
+        }
+    }
+
+    eprintln!(
+        "\nSummary: {} file(s) audited — {} critical, {} warning, {} info",
+        report.files_audited,
+        critical.len(),
+        warning.len(),
+        info.len(),
+    );
+
+    Ok(())
 }

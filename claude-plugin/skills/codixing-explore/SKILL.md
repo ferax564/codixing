@@ -22,13 +22,27 @@ Call `check_staleness` to see if the index needs a sync. If stale, run:
 codixing sync .
 ```
 
-### 2. Architecture overview
+### 2. Preflight: Existence Scan (if user is proposing a new feature)
+
+If the user asked to explore in the context of building something new ("I want to add X", "can we build Y"), run the existence scan BEFORE the architecture overview:
+
+1. Extract 3-5 keywords from what the user wants to build
+2. Run `code_search(keyword)` for each keyword
+3. Run `find_symbol(keyword)` for likely struct/function names
+4. Run `list_files(*keyword*)` for matching filenames
+5. READ any matches — don't dismiss based on names alone
+
+Report findings: "Searched for X, Y, Z — found [existing_file] which already implements [feature]" or "No existing implementation found."
+
+**This prevents the most expensive mistake:** proposing and designing something that already exists.
+
+### 3. Architecture overview
 
 Call `get_repo_map` with a token budget of 4000. This returns the file structure sorted by PageRank (most important files first).
 
 Present the top 10 files by importance, explaining what each one does based on its symbols.
 
-### 3. Dependency graph
+### 4. Dependency graph
 
 For the top 3 most important files, call `get_references` to show:
 - Who imports them (callers)
@@ -36,22 +50,22 @@ For the top 3 most important files, call `get_references` to show:
 
 This reveals the architecture's dependency flow.
 
-### 4. Focus area (if argument provided)
+### 5. Focus area (if argument provided)
 
 If the user specified a focus area (e.g., "search", "graph", "auth"), use `code_search` with that query to find the relevant modules, then use `explain` on the key symbols found.
 
-### 5. Key symbols
+### 6. Key symbols
 
 Call `find_symbol` for the main entry points identified in step 2. For each, briefly describe:
 - What it is (struct, function, trait)
 - Where it's defined
 - Its signature
 
-### 6. Test coverage
+### 7. Test coverage
 
 Call `find_tests` for the 3 most important source files to show what test coverage exists.
 
-### 7. Summary
+### 8. Summary
 
 Present a structured summary:
 - **Architecture**: How the codebase is organized

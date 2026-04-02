@@ -17,7 +17,7 @@ claude plugin marketplace add ferax564/codixing
 claude plugin install codixing@codixing
 ```
 
-Restart Claude Code after installing. You get 54 MCP tools plus `/codixing-setup`, `/codixing-explore`, and `/codixing-review`.
+Restart Claude Code after installing. You get 57 MCP tools plus `/codixing-setup`, `/codixing-explore`, and `/codixing-review`.
 
 Alternatively, register just the MCP server without the plugin:
 
@@ -34,7 +34,7 @@ curl -fsSL https://codixing.com/install.sh | sh
 codex mcp add codixing -- codixing-mcp --root .
 ```
 
-> **Note:** Codex requires the binary installed locally — `npx` is not supported. Do not use `--compact` with Codex as it needs all 54 tools visible in the tool list.
+> **Note:** Codex requires the binary installed locally — `npx` is not supported. Do not use `--compact` with Codex as it needs all 57 tools visible in the tool list.
 
 ### Cursor / Windsurf
 
@@ -119,14 +119,14 @@ codixing sync
 
 ## MCP Tools
 
-54 tools across 7 categories:
+57 tools across 7 categories:
 
 | Category | Tools |
 |----------|-------|
 | **Search** | code_search, find_symbol, grep_code, search_usages, read_symbol, find_similar, stitch_context |
 | **Graph** | get_repo_map, focus_map, get_references, get_transitive_deps, symbol_callers, symbol_callees, predict_impact, find_orphans, explain |
 | **Files** | read_file, write_file, edit_file, delete_file, apply_patch, list_files, outline_file |
-| **Analysis** | find_tests, find_source_for_test, get_complexity, review_context, rename_symbol, run_tests, get_context_for_task, check_staleness, generate_onboarding |
+| **Analysis** | find_tests, find_source_for_test, get_complexity, review_context, rename_symbol, run_tests, get_context_for_task, check_staleness, generate_onboarding, audit_freshness |
 | **Git** | git_diff, get_hotspots, search_changes, get_blame |
 | **Session** | remember, recall, forget, get_session_summary, session_status, session_reset_focus |
 | **Meta** | index_status, search_tools, get_tool_schema, enrich_docs |
@@ -216,7 +216,9 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Ranked cross-imports** — PageRank + git recency scoring for relevance-ranked graph queries across directory boundaries
 - **Memory relations** — `memory_relate` tool creates typed edges between agent memory entries, enabling associative recall across sessions
 - **Feature hub** — One-call feature exploration combining search + callers + callees + tests for unified understanding
-- **56 MCP tools** — Search, graph traversal, file operations, code review, git analysis, session memory, federation discovery
+- **57 MCP tools** — Search, graph traversal, file operations, code review, git analysis, session memory, federation discovery
+- **File freshness audit** — `audit_freshness` tool identifies stale and orphaned files across releases
+- **Preflight gates** — Plugin enforces existence scanning before proposing new features
 - **TypeScript import resolution** — Resolve `.js` → `.ts` imports with node16/bundler moduleResolution support, enabling 0.8+ R@10 on cross-package code discovery
 - **Background embedding drain** — Instant BM25 search after `codixing init`, hybrid vector search transparently upgrades as embeddings complete in the background
 - **Embedding speed measurement** — New `bench-embed` CLI subcommand for profiling embedding performance across custom models
@@ -285,7 +287,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 854+ tests
+cargo test --workspace        # 856+ tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```
