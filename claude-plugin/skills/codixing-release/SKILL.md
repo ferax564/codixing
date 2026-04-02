@@ -20,12 +20,17 @@ Follow ALL steps. No skipping. No deferring. Every release that skipped steps ne
 ```bash
 git status                    # must be clean
 git log --oneline -10         # review what's shipping
-cargo test --workspace 2>&1 | grep "^test result:" | awk '{sum += $4} END {print "Tests:", sum}'
-cargo clippy --workspace -- -D warnings 2>&1 | tail -2
+```
+
+Run each check SEPARATELY and verify exit code before proceeding:
+
+```bash
+cargo test --workspace        # count total tests from output
+cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```
 
-If ANY fails, fix first.
+If ANY fails, fix first. Do NOT pipe through awk/tail — that masks failures.
 
 ## Step 2: Version Bump (ALL 5 locations)
 
@@ -54,9 +59,11 @@ grep -rn "OLD_TEST_COUNT\|OLD_TOOL_COUNT" README.md CLAUDE.md docs/index.html
 
 ## Step 4: Benchmark (if OpenClaw available)
 
+Run from the repo root:
+
 ```bash
-cd benchmarks/repos/openclaw && ../../target/release/codixing init . --no-embeddings --wait
-cd ../../.. && python3 benchmarks/queue_v2_benchmark.py --repo openclaw
+./target/release/codixing init benchmarks/repos/openclaw --no-embeddings --wait
+python3 benchmarks/queue_v2_benchmark.py --repo openclaw
 ```
 
 Report actual R@10 numbers. Do NOT predict. If OpenClaw not available, say "benchmark TBD."
