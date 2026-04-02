@@ -45,7 +45,7 @@ For broad codebase exploration, always try a Codixing tool first. Fall back to B
 - `crates/server/` — HTTP API server (`codixing-server`), REST endpoints with SSE streaming for sync
 - `crates/core/src/federation/` — cross-repo federated search (`--federation config.json`)
 - `crates/lsp/` — LSP server (`codixing-lsp`), hover/go-to-def/refs/symbols/call hierarchy/complexity diagnostics/rename/semantic tokens
-- `claude-plugin/` — Claude Code plugin with 3 skills + MCP server config
+- `claude-plugin/` — Claude Code plugin with 5 skills + MCP server config
 - `.codixing/` — index data (do not edit manually)
 
 ## Build & Test
@@ -67,6 +67,30 @@ cargo test -p codixing-core --features rustqueue
 # Embedding speed benchmarking:
 cargo run --release -p codixing-cli -- bench-embed /path/to/repo --model bge-small-en
 ```
+
+## Plugin Skills
+
+The Codixing Claude Code plugin provides 5 slash commands:
+
+| Skill | Purpose |
+|-------|---------|
+| `/codixing-setup` | Index a new project and register the MCP server |
+| `/codixing-explore` | Deep codebase exploration with architecture overview. Includes **preflight existence scan** (Step 2) to catch duplicate feature proposals |
+| `/codixing-review` | Code review with dependency graph context. Includes **claim verification** (Step 7) to flag unverified accuracy claims in diffs |
+| `/codixing-preflight` | Mandatory before proposing new features — searches for existing implementations (Gate 1) and verifies benchmark claims (Gate 2) |
+| `/codixing-release` | Complete release pipeline — version bump, tests, docs, CI review, benchmark, blog, X post, tag, publish. All steps mandatory |
+
+### Release workflow
+
+Use `/codixing-release [version]` to ship. It handles everything:
+1. Pre-flight checks (clean state, tests, clippy, fmt)
+2. Version bump in all 5 locations
+3. Documentation update (README, CLAUDE.md, docs/index.html)
+4. PR creation + CI monitoring + review comment fixes
+5. Merge + tag (with auto-tag re-push workaround)
+6. GitHub Release notes
+7. Blog post (asks for angle first)
+8. X post via automarketing repo
 
 ## Version Locations
 
