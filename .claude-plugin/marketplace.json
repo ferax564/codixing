@@ -4,7 +4,7 @@
     "name": "ferax564"
   },
   "metadata": {
-    "description": "Code retrieval engine that gives Claude structural understanding of your codebase — impact prediction, test mapping, dependency graphs, and hybrid AST-aware search across 57 MCP tools",
+    "description": "Code retrieval engine that saves your agent 73% of its tokens — ranked search, impact prediction, dependency graphs, and hybrid AST-aware retrieval across 57 MCP tools and 5 slash commands",
     "version": "0.25.0"
   },
   "plugins": [
@@ -16,7 +16,7 @@
         "path": "claude-plugin",
         "ref": "main"
       },
-      "description": "Code retrieval engine with 57 MCP tools and 3 slash commands — impact prediction, test mapping, dependency graphs, and hybrid AST-aware search. Runs locally, zero cloud dependencies.",
+      "description": "Code retrieval engine that saves your agent 73% of its tokens. 57 MCP tools and 5 slash commands — ranked search, impact prediction, dependency graphs, and hybrid AST-aware retrieval. Runs locally, zero cloud dependencies.",
       "version": "0.25.0",
       "author": {
         "name": "ferax564"
