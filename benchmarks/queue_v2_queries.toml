@@ -95,14 +95,16 @@ text = "files that import ChannelPlugin type"
 grep_pattern = "import.*ChannelPlugin"
 symbol = "ChannelPlugin"
 category = "usage"
+# GT updated 2026-04-02: verified against OpenClaw with both codixing usages + grep
 ground_truth = [
-  "src/security/audit.ts",
-  "src/security/audit-channel.ts",
-  "src/plugins/registry.ts",
-  "src/plugins/loader.ts",
-  "src/plugin-sdk/core.ts",
-  "src/infra/outbound/target-resolver.ts",
-  "src/infra/outbound/message.ts",
+  "src/channels/plugins/registry.ts",
+  "src/channels/plugins/setup-registry.ts",
+  "extensions/matrix/src/channel.ts",
+  "extensions/signal/src/channel.ts",
+  "extensions/mattermost/src/channel.ts",
+  "extensions/imessage/src/channel.ts",
+  "extensions/discord/index.ts",
+  "extensions/tlon/src/channel.ts",
 ]
 
 [[query]]
@@ -128,17 +130,18 @@ text = "files that call loadConfig from config/io"
 grep_pattern = "import.*loadConfig"
 symbol = "loadConfig"
 category = "usage"
+# GT updated 2026-04-02: verified against OpenClaw with both codixing usages + grep
 ground_truth = [
-  "src/tui/tui.ts",
-  "src/tui/gateway-chat.ts",
-  "src/plugins/runtime/runtime-config.ts",
-  "src/plugins/cli.ts",
-  "src/node-host/runner.ts",
-  "src/mcp/channel-server.ts",
-  "src/logging/diagnostic.ts",
-  "src/library.ts",
-  "src/infra/restart.ts",
-  "src/gateway/server-http.ts",
+  "src/config/io.ts",
+  "src/gateway/server-lanes.ts",
+  "src/gateway/server-plugin-bootstrap.ts",
+  "src/gateway/server-plugins.ts",
+  "src/agents/subagent-registry-helpers.ts",
+  "extensions/discord/src/monitor/native-command.ts",
+  "extensions/discord/src/monitor/message-handler.preflight.ts",
+  "extensions/tlon/src/monitor/index.ts",
+  "extensions/whatsapp/src/auto-reply/monitor/group-activation.ts",
+  "src/cli/qr-cli.ts",
 ]
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -258,9 +261,13 @@ grep_pattern = "import.*from.*config/types"
 category = "cross-package"
 from_dir = "src/agents"
 to_dir = "src/config"
+# GT updated 2026-04-02: top-ranked files by PageRank+recency from cross_imports_ranked
 ground_truth = [
-  "src/agents/tools/web-search-provider-credentials.ts",
-  "src/agents/tools/model-config.helpers.ts",
+  "src/agents/tools/session-status-tool.ts",
+  "src/agents/acp-spawn.ts",
+  "src/agents/context.ts",
+  "src/agents/model-auth.ts",
+  "src/agents/sandbox/config.ts",
 ]
 
 [[query]]
