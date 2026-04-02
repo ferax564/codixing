@@ -5,19 +5,19 @@
 
 **Website: [codixing.com](https://codixing.com)** · **[Docs](https://codixing.com/docs)**
 
-Ultra-fast code retrieval engine for AI agents — beats `grep` at its own game.
+Code retrieval engine that saves your AI agent 73% of its token budget. Replaces grep with ranked, AST-aware search — so models spend tokens reasoning, not reading.
 
 ## Install
 
 ### Claude Code
 
 ```bash
-# Plugin — includes MCP server + 3 slash commands (recommended)
+# Plugin — includes MCP server + 5 slash commands (recommended)
 claude plugin marketplace add ferax564/codixing
 claude plugin install codixing@codixing
 ```
 
-Restart Claude Code after installing. You get 57 MCP tools plus `/codixing-setup`, `/codixing-explore`, and `/codixing-review`.
+Restart Claude Code after installing. You get 57 MCP tools plus `/codixing-setup`, `/codixing-explore`, `/codixing-review`, `/codixing-preflight`, and `/codixing-release`.
 
 Alternatively, register just the MCP server without the plugin:
 
@@ -84,6 +84,20 @@ Installs `codixing`, `codixing-mcp`, and `codixing-lsp` to `/usr/local/bin`. mac
 AI coding agents use `grep`, `find`, and `cat` for code navigation. These tools return **everything, always** — a single `rg b2Vec2` on a real codebase returns 2,240 hits (225 KB), burning context before any reasoning happens.
 
 Codixing returns the top 20 results in 1.3 KB — same signal, **99% less waste**.
+
+### The cost of noise
+
+Tested on 6 real-world repos (tokio, ripgrep, axum, django, fastapi, react — 9,493 files):
+
+| Metric | grep/cat/find | Codixing | Savings |
+|--------|---------------|----------|---------|
+| Tool calls per session | 58 | 26 | **55% fewer** |
+| Output tokens | ~84,600 | ~22,900 | **73% fewer** |
+| Est. cost (Opus @ $15/M) | $1.27 | $0.34 | **$0.93/session** |
+
+At 50 agent sessions/day, that's **$1,400/month** back in your pocket — and the agent finds the right code more often.
+
+### What you get
 
 | Capability | grep/rg | Codixing |
 |-----------|---------|----------|
@@ -197,11 +211,13 @@ code --install-extension codixing.vsix
 | Search latency | 30-42ms | 36-40ms |
 | Top-1 accuracy | 7/10 | **10/10** |
 
+**Retrieval accuracy** (OpenClaw, 9.4K files): Codixing R@10 = **0.714** vs grep R@10 = 0.345 — **2× better retrieval**.
+
 **Large codebase** (368K LoC, 7,607 files): Init 7.9s, search 94ms, 99% token reduction vs grep.
 
-**SWE-bench Lite** (300 tasks, 12 repos): Recall@5 = 74.3% (vs grep 41.3%).
+**Linux kernel** (73K files, 30M lines): 1.57s cold-start search, 0.79s warm. Zero-deserialization mmap for instant startup.
 
-**Retrieval accuracy** (Codixing benchmark suite): Codixing R@10 = 0.607 vs grep R@10 = 0.315.
+**SWE-bench Lite** (300 tasks, 12 repos): Recall@5 = 74.3% (vs grep 41.3%).
 
 See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts.
 
@@ -276,7 +292,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 │  + Exact (trigram) · Graph boost · Definition 3.5× · Session     │
 │  SearchPipeline: composable stages, 6 strategies                  │
 │                                                                   │
-│  API: CLI · MCP (49+ tools, JSON-RPC 2.0) · LSP · HTTP Server   │
+│  API: CLI · MCP (57 tools, JSON-RPC 2.0) · LSP · HTTP Server    │
 │       Daemon (Unix socket / Windows named pipe) · File Watcher   │
 └──────────────────────────────────────────────────────────────────┘
 ```
