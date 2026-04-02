@@ -277,6 +277,21 @@ fn register_code_tokenizer(index: &Index) {
     index.tokenizers().register("code", analyzer);
 }
 
+/// Register the `"code_stemmed"` tokenizer on a [`tantivy::Index`].
+///
+/// This is identical to `"code"` but adds an English Porter stemmer filter,
+/// making morphological variants (e.g. "limiting" / "limit") share tokens.
+/// Intended for NL-oriented fields such as `doc_comment`, `identifier_words`,
+/// and `path_segments` where recall matters more than exact token matching.
+fn register_code_stemmed_tokenizer(index: &Index) {
+    let analyzer = tantivy::tokenizer::TextAnalyzer::builder(CodeTokenizer)
+        .filter(tantivy::tokenizer::Stemmer::new(
+            tantivy::tokenizer::Language::English,
+        ))
+        .build();
+    index.tokenizers().register("code_stemmed", analyzer);
+}
+
 impl TantivyIndex {
     /// Create a new **in-memory** index (useful for tests).
     pub fn create_in_ram() -> Result<Self> {
@@ -288,6 +303,7 @@ impl TantivyIndex {
         let (schema, fields) = build_schema();
         let index = Index::create_in_ram(schema);
         register_code_tokenizer(&index);
+        register_code_stemmed_tokenizer(&index);
         let writer = index.writer(50_000_000)?;
         let reader = index
             .reader_builder()
@@ -317,6 +333,7 @@ impl TantivyIndex {
             .map_err(|e| CodixingError::Index(e.to_string()))?;
         let index = Index::open_or_create(dir, schema)?;
         register_code_tokenizer(&index);
+        register_code_stemmed_tokenizer(&index);
         let writer = index.writer(50_000_000)?;
         let reader = index
             .reader_builder()
@@ -345,6 +362,7 @@ impl TantivyIndex {
         }
         let index = Index::open_in_dir(path)?;
         register_code_tokenizer(&index);
+        register_code_stemmed_tokenizer(&index);
 
         // Reconstruct field handles from the existing schema.
         let schema = index.schema();
@@ -402,6 +420,7 @@ impl TantivyIndex {
         }
         let index = Index::open_in_dir(path)?;
         register_code_tokenizer(&index);
+        register_code_stemmed_tokenizer(&index);
 
         // Reconstruct field handles from the existing schema.
         let schema = index.schema();
@@ -788,6 +807,46 @@ mod tests {
         assert!(tokens.contains(&"foo".to_string()));
         assert!(tokens.contains(&"bar".to_string()));
         assert!(tokens.contains(&"baz".to_string()));
+    }
+
+    /// Helper: collect all token texts from the code_stemmed tokenizer.
+    fn tokenize_stemmed(text: &str) -> Vec<String> {
+        let index = Index::create_in_ram(tantivy::schema::Schema::builder().build());
+        register_code_stemmed_tokenizer(&index);
+        let mut analyzer = index.tokenizers().get("code_stemmed").unwrap();
+        let mut stream = analyzer.token_stream(text);
+        let mut out = Vec::new();
+        while stream.advance() {
+            out.push(stream.token().text.clone());
+        }
+        out
+    }
+
+    #[test]
+    fn tokenizer_stemmed_reduces_morphological_variants() {
+        // "limiting" and "limit" should share a common stemmed token via the stemmer.
+        let limiting_tokens = tokenize_stemmed("limiting");
+        let limit_tokens = tokenize_stemmed("limit");
+
+        // Both should produce a token that is the stem of "limit" (e.g. "limit").
+        // The English Porter stemmer reduces "limiting" -> "limit".
+        assert!(
+            limiting_tokens.iter().any(|t| limit_tokens.contains(t)),
+            "expected 'limiting' and 'limit' to share a stemmed token; limiting={limiting_tokens:?}, limit={limit_tokens:?}"
+        );
+
+        // camelCase splitting must still work in the stemmed tokenizer.
+        let camel_tokens = tokenize_stemmed("camelCase");
+        assert!(
+            camel_tokens.contains(&"camel".to_string()),
+            "expected 'camel' split token; got {camel_tokens:?}"
+        );
+        assert!(
+            camel_tokens
+                .iter()
+                .any(|t| t.starts_with("case") || t == "case"),
+            "expected 'case' split token (possibly stemmed); got {camel_tokens:?}"
+        );
     }
 
     // --- Index tests ---
