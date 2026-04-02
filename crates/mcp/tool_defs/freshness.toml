@@ -1,0 +1,19 @@
+[[tools]]
+name = "audit_freshness"
+description = "Audit files for freshness by combining git recency, orphan detection, and import graph connectivity. Returns a tiered markdown report: Critical (no importers AND stale), Warning (stale but still imported), Info (recently orphaned). Useful for finding dead code, outdated modules, and files that haven't been touched across several releases."
+handler = "freshness::call_audit_freshness"
+calling_convention = "engine_args"
+read_only = true
+medium = true
+
+[tools.params.threshold_days]
+type = "integer"
+description = "Flag files not modified in this many days (default: 21)"
+
+[tools.params.include]
+type = "string"
+description = "File pattern to include (substring match, e.g. 'crates/', '*.rs'). Omit to check all files."
+
+[tools.params.exclude]
+type = "string"
+description = "File pattern to exclude (substring match, e.g. 'test', 'vendor'). Appended to the default exclusions."

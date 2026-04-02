@@ -16,6 +16,7 @@ mod feature_hub;
 pub mod federation;
 mod files;
 mod focus;
+mod freshness;
 mod graph;
 mod memory;
 mod orphans;

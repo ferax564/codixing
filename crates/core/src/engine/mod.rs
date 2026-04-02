@@ -4,6 +4,7 @@ pub(super) mod embed_state;
 pub(super) mod embed_stats;
 mod files;
 mod focus_map;
+pub mod freshness;
 mod graph;
 pub(crate) mod indexing;
 mod init;

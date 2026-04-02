@@ -26,6 +26,7 @@ pub mod watcher;
 
 // Re-export primary public API types.
 pub use config::{EmbeddingConfig, EmbeddingModel, GraphConfig, IndexConfig};
+pub use engine::freshness::{FreshnessEntry, FreshnessOptions, FreshnessReport, FreshnessTier};
 pub use engine::{
     ConflictKind, EmbedTimingStats, Engine, FocusMapEntry, FocusMapOptions, GitSyncStats,
     GrepMatch, IndexStats, RenameConflict, RenameValidation, StaleReport, SymbolReference,
