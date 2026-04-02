@@ -69,7 +69,7 @@ pub struct FreshnessEntry {
     /// Classification tier.
     pub tier: FreshnessTier,
     /// Days since the last git commit touching this file.
-    /// `u64::MAX` if the file has no commit history in the recency window.
+    /// `0` if the file has no commit history in the recency window (treated as fresh).
     pub days_old: u64,
     /// Unix timestamp of the last git commit (0 if unknown).
     pub last_modified_ts: i64,
@@ -113,26 +113,29 @@ impl Engine {
         let recency: HashMap<String, i64> =
             crate::engine::recency::build_recency_map(self.store.root(), recency_window);
 
-        // 2. Run orphan detection with same include/exclude options but a high
-        //    limit so we don't prematurely cut the list.
-        let mut orphan_opts = OrphanOptions {
-            limit: usize::MAX,
-            check_dynamic_refs: false, // skip text search for performance
-            ..OrphanOptions::default()
+        // 2. Run orphan detection only when the import graph is available.
+        //    Without a graph every file looks like an orphan, producing false
+        //    Critical alerts.
+        let has_graph = self.graph.is_some();
+        let orphan_map: HashMap<String, OrphanConfidence> = if has_graph {
+            let mut orphan_opts = OrphanOptions {
+                limit: usize::MAX,
+                check_dynamic_refs: false, // skip text search for performance
+                ..OrphanOptions::default()
+            };
+            if let Some(ref inc) = options.include_pattern {
+                orphan_opts.include_patterns = vec![inc.clone()];
+            }
+            if let Some(ref exc) = options.exclude_pattern {
+                orphan_opts.exclude_patterns.push(exc.clone());
+            }
+            self.find_orphans(orphan_opts)
+                .into_iter()
+                .map(|o| (o.file_path, o.confidence))
+                .collect()
+        } else {
+            HashMap::new()
         };
-        if let Some(ref inc) = options.include_pattern {
-            orphan_opts.include_patterns = vec![inc.clone()];
-        }
-        if let Some(ref exc) = options.exclude_pattern {
-            orphan_opts.exclude_patterns.push(exc.clone());
-        }
-        let orphans = self.find_orphans(orphan_opts);
-
-        // Build a lookup: file_path -> (is_orphan, confidence)
-        let orphan_map: HashMap<String, OrphanConfidence> = orphans
-            .into_iter()
-            .map(|o| (o.file_path, o.confidence))
-            .collect();
 
         // 3. Iterate over all indexed files.
         let all_files: Vec<String> = self.file_chunk_counts.keys().cloned().collect();
@@ -153,21 +156,24 @@ impl Engine {
             }
 
             // Compute days since last commit.
+            // Files with no git history (new / untracked) are treated as fresh
+            // (age 0) rather than infinitely old, so they are never flagged stale.
             let last_ts = recency.get(file).copied().unwrap_or(0);
             let days_old = if last_ts > 0 {
                 ((now_ts - last_ts).max(0) as u64) / 86_400
             } else {
-                // No commit in the recency window — treat as very old.
-                u64::MAX
+                0 // No commit history — treat as fresh
             };
 
-            let is_stale = days_old > options.threshold_days;
+            // Use >= so the threshold is inclusive ("N+ days" semantics).
+            let is_stale = days_old >= options.threshold_days;
             let orphan_confidence = orphan_map.get(file).cloned();
-            let is_orphan = orphan_confidence.is_some();
-            let is_strong_orphan = matches!(
-                orphan_confidence,
-                Some(OrphanConfidence::Certain) | Some(OrphanConfidence::High)
-            );
+            let is_orphan = has_graph && orphan_confidence.is_some();
+            let is_strong_orphan = has_graph
+                && matches!(
+                    orphan_confidence,
+                    Some(OrphanConfidence::Certain) | Some(OrphanConfidence::High)
+                );
 
             // Only report files that are stale OR orphaned.
             if !is_stale && !is_orphan {
@@ -190,11 +196,7 @@ impl Engine {
                             .as_ref()
                             .map(|c| c.as_str())
                             .unwrap_or("unknown"),
-                        if days_old == u64::MAX {
-                            format!(">{}", recency_window)
-                        } else {
-                            days_old.to_string()
-                        }
+                        days_old
                     ),
                 )
             } else if is_orphan && !is_stale {
@@ -214,12 +216,7 @@ impl Engine {
                     FreshnessTier::Warning,
                     format!(
                         "Not modified in {} day(s), still imported by {} file(s)",
-                        if days_old == u64::MAX {
-                            format!(">{}", recency_window)
-                        } else {
-                            days_old.to_string()
-                        },
-                        importer_count
+                        days_old, importer_count
                     ),
                 )
             } else {
