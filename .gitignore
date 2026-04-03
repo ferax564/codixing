@@ -40,6 +40,7 @@ linux-staging/
 *.jpeg
 *.gif
 !docs/assets/**
+!docs/og-image.png
 
 # IDE
 .idea/
