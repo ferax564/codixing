@@ -374,6 +374,7 @@ fn make_chunk(
         scope_chain: scope.to_vec(),
         signatures,
         entity_names,
+        doc_comments: String::new(),
     }
 }
 
