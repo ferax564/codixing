@@ -72,6 +72,18 @@ pub struct Bm25Config {
     /// Boost for matches in `content` (raw source code).
     #[serde(default = "default_bm25_content_boost")]
     pub content_boost: f32,
+
+    /// Boost for matches in `doc_comment` (extracted doc comments, stemmed).
+    #[serde(default = "default_bm25_doc_comment_boost")]
+    pub doc_comment_boost: f32,
+
+    /// Boost for matches in `identifier_words` (split entity names, stemmed).
+    #[serde(default = "default_bm25_identifier_words_boost")]
+    pub identifier_words_boost: f32,
+
+    /// Boost for matches in `path_segments` (directory/filename tokens, stemmed).
+    #[serde(default = "default_bm25_path_segments_boost")]
+    pub path_segments_boost: f32,
 }
 
 impl Default for Bm25Config {
@@ -81,6 +93,9 @@ impl Default for Bm25Config {
             signature_boost: default_bm25_signature_boost(),
             scope_chain_boost: default_bm25_scope_chain_boost(),
             content_boost: default_bm25_content_boost(),
+            doc_comment_boost: default_bm25_doc_comment_boost(),
+            identifier_words_boost: default_bm25_identifier_words_boost(),
+            path_segments_boost: default_bm25_path_segments_boost(),
         }
     }
 }
@@ -99,6 +114,18 @@ fn default_bm25_scope_chain_boost() -> f32 {
 
 fn default_bm25_content_boost() -> f32 {
     1.0
+}
+
+fn default_bm25_doc_comment_boost() -> f32 {
+    2.0
+}
+
+fn default_bm25_identifier_words_boost() -> f32 {
+    2.0
+}
+
+fn default_bm25_path_segments_boost() -> f32 {
+    1.5
 }
 
 /// Configuration for the Codixing index.

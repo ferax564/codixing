@@ -277,6 +277,52 @@ fn register_code_tokenizer(index: &Index) {
     index.tokenizers().register("code", analyzer);
 }
 
+/// Register the stemmed `"code_stemmed"` tokenizer on a [`tantivy::Index`].
+///
+/// Like `"code"` but with an English stemmer filter appended.
+/// Used for NL-oriented fields (doc_comment, identifier_words, path_segments).
+fn register_code_stemmed_tokenizer(index: &Index) {
+    let analyzer = tantivy::tokenizer::TextAnalyzer::builder(CodeTokenizer)
+        .filter(tantivy::tokenizer::Stemmer::new(
+            tantivy::tokenizer::Language::English,
+        ))
+        .build();
+    index.tokenizers().register("code_stemmed", analyzer);
+}
+
+/// Split a code identifier into constituent words for the `identifier_words` field.
+///
+/// E.g., `"createRateLimiter"` → `["create", "rate", "limiter", "createratelimiter"]`
+fn split_identifier_words(name: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    for part in name.split(['_', '.']).filter(|p| !p.is_empty()) {
+        for sub in split_camel(part) {
+            let lower = sub.to_lowercase();
+            if !lower.is_empty() {
+                words.push(lower);
+            }
+        }
+    }
+    words.push(name.to_lowercase());
+    words
+}
+
+/// Generate path segment tokens from a file path.
+///
+/// E.g., `"src/cron/fixed-window-rate-limit.ts"` → `"src cron fixed window rate limit"`
+fn generate_path_segments(file_path: &str) -> String {
+    file_path
+        .split('/')
+        .flat_map(|segment| {
+            let name = segment.rsplit_once('.').map_or(segment, |(name, _)| name);
+            name.split(['-', '_'])
+                .filter(|p| !p.is_empty())
+                .map(|p| p.to_lowercase())
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl TantivyIndex {
     /// Create a new **in-memory** index (useful for tests).
     pub fn create_in_ram() -> Result<Self> {
@@ -288,6 +334,7 @@ impl TantivyIndex {
         let (schema, fields) = build_schema();
         let index = Index::create_in_ram(schema);
         register_code_tokenizer(&index);
+        register_code_stemmed_tokenizer(&index);
         let writer = index.writer(50_000_000)?;
         let reader = index
             .reader_builder()
@@ -317,6 +364,7 @@ impl TantivyIndex {
             .map_err(|e| CodixingError::Index(e.to_string()))?;
         let index = Index::open_or_create(dir, schema)?;
         register_code_tokenizer(&index);
+        register_code_stemmed_tokenizer(&index);
         let writer = index.writer(50_000_000)?;
         let reader = index
             .reader_builder()
@@ -345,6 +393,7 @@ impl TantivyIndex {
         }
         let index = Index::open_in_dir(path)?;
         register_code_tokenizer(&index);
+        register_code_stemmed_tokenizer(&index);
 
         // Reconstruct field handles from the existing schema.
         let schema = index.schema();
@@ -366,6 +415,9 @@ impl TantivyIndex {
             line_end: field("line_end")?,
             byte_start: field("byte_start")?,
             byte_end: field("byte_end")?,
+            doc_comment: field("doc_comment")?,
+            identifier_words: field("identifier_words")?,
+            path_segments: field("path_segments")?,
         };
 
         let writer = index.writer(50_000_000)?;
@@ -402,6 +454,7 @@ impl TantivyIndex {
         }
         let index = Index::open_in_dir(path)?;
         register_code_tokenizer(&index);
+        register_code_stemmed_tokenizer(&index);
 
         // Reconstruct field handles from the existing schema.
         let schema = index.schema();
@@ -423,6 +476,9 @@ impl TantivyIndex {
             line_end: field("line_end")?,
             byte_start: field("byte_start")?,
             byte_end: field("byte_end")?,
+            doc_comment: field("doc_comment")?,
+            identifier_words: field("identifier_words")?,
+            path_segments: field("path_segments")?,
         };
 
         // No writer — read-only mode.
@@ -455,6 +511,15 @@ impl TantivyIndex {
         let entity_names_text = chunk.entity_names.join(" ");
         let chunk_id_str = chunk.id.to_string();
 
+        // BM25F synthetic fields for concept retrieval.
+        let identifier_words_text = chunk
+            .entity_names
+            .iter()
+            .flat_map(|name| split_identifier_words(name))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let path_segments_text = generate_path_segments(&chunk.file_path);
+
         let writer = writer_mutex
             .lock()
             .map_err(|e| CodixingError::Index(format!("writer lock poisoned: {e}")))?;
@@ -468,6 +533,9 @@ impl TantivyIndex {
             self.fields.scope_chain => scope_chain_text,
             self.fields.signature => signatures_text,
             self.fields.entity_names => entity_names_text,
+            self.fields.doc_comment => chunk.doc_comments.as_str(),
+            self.fields.identifier_words => identifier_words_text.as_str(),
+            self.fields.path_segments => path_segments_text.as_str(),
             self.fields.line_start => chunk.line_start as u64,
             self.fields.line_end => chunk.line_end as u64,
             self.fields.byte_start => chunk.byte_start as u64,
@@ -526,6 +594,9 @@ impl TantivyIndex {
                 self.fields.entity_names,
                 self.fields.signature,
                 self.fields.scope_chain,
+                self.fields.doc_comment,
+                self.fields.identifier_words,
+                self.fields.path_segments,
             ],
         );
         // Field-weighted BM25: configurable boosts so symbol lookups rank above
@@ -537,6 +608,15 @@ impl TantivyIndex {
         query_parser.set_field_boost(self.fields.signature, self.bm25_config.signature_boost);
         query_parser.set_field_boost(self.fields.scope_chain, self.bm25_config.scope_chain_boost);
         query_parser.set_field_boost(self.fields.content, self.bm25_config.content_boost);
+        query_parser.set_field_boost(self.fields.doc_comment, self.bm25_config.doc_comment_boost);
+        query_parser.set_field_boost(
+            self.fields.identifier_words,
+            self.bm25_config.identifier_words_boost,
+        );
+        query_parser.set_field_boost(
+            self.fields.path_segments,
+            self.bm25_config.path_segments_boost,
+        );
 
         let query = query_parser.parse_query(query_str)?;
         let top_docs = searcher.search(&query, &TopDocs::with_limit(limit))?;
@@ -573,6 +653,9 @@ impl TantivyIndex {
                 self.fields.entity_names,
                 self.fields.signature,
                 self.fields.scope_chain,
+                self.fields.doc_comment,
+                self.fields.identifier_words,
+                self.fields.path_segments,
             ],
         );
         query_parser.set_field_boost(
@@ -582,6 +665,15 @@ impl TantivyIndex {
         query_parser.set_field_boost(self.fields.signature, self.bm25_config.signature_boost);
         query_parser.set_field_boost(self.fields.scope_chain, self.bm25_config.scope_chain_boost);
         query_parser.set_field_boost(self.fields.content, self.bm25_config.content_boost);
+        query_parser.set_field_boost(self.fields.doc_comment, self.bm25_config.doc_comment_boost);
+        query_parser.set_field_boost(
+            self.fields.identifier_words,
+            self.bm25_config.identifier_words_boost,
+        );
+        query_parser.set_field_boost(
+            self.fields.path_segments,
+            self.bm25_config.path_segments_boost,
+        );
 
         let query = query_parser.parse_query(query_str)?;
         let top_docs = searcher.search(&query, &TopDocs::with_limit(limit))?;
@@ -736,6 +828,7 @@ mod tests {
             scope_chain: vec!["module".to_string()],
             signatures: vec!["fn example() -> bool".to_string()],
             entity_names: vec!["example".to_string()],
+            doc_comments: String::new(),
         }
     }
 
@@ -874,6 +967,7 @@ mod tests {
             scope_chain: vec!["module".to_string()],
             signatures: vec![],
             entity_names: vec!["FooParser".to_string()],
+            doc_comments: String::new(),
         };
 
         // Chunk 2: "FooParser" appears only in content, NOT in entity_names.
@@ -889,6 +983,7 @@ mod tests {
             scope_chain: vec!["module".to_string()],
             signatures: vec![],
             entity_names: vec!["validate".to_string()],
+            doc_comments: String::new(),
         };
 
         idx.add_chunk(&entity_chunk).unwrap();
@@ -926,6 +1021,7 @@ mod tests {
             scope_chain: vec!["graph".to_string()],
             signatures: vec!["fn compute_pagerank(g: &Graph) -> Vec<f64>".to_string()],
             entity_names: vec!["compute_pagerank".to_string()],
+            doc_comments: String::new(),
         };
 
         // Chunk 2: "compute_pagerank" appears only in content (a comment reference).
@@ -941,6 +1037,7 @@ mod tests {
             scope_chain: vec!["engine".to_string()],
             signatures: vec![],
             entity_names: vec!["index_files".to_string()],
+            doc_comments: String::new(),
         };
 
         idx.add_chunk(&sig_chunk).unwrap();
@@ -970,6 +1067,7 @@ mod tests {
             signature_boost: 1.0,
             scope_chain_boost: 1.0,
             content_boost: 1.0,
+            ..Default::default()
         };
         let idx = TantivyIndex::create_in_ram_with_config(high_entity).unwrap();
 
@@ -985,6 +1083,7 @@ mod tests {
             scope_chain: vec![],
             signatures: vec![],
             entity_names: vec!["Widget".to_string()],
+            doc_comments: String::new(),
         };
         let content_chunk = Chunk {
             id: 101,
@@ -999,6 +1098,7 @@ mod tests {
             scope_chain: vec![],
             signatures: vec![],
             entity_names: vec!["render".to_string()],
+            doc_comments: String::new(),
         };
 
         idx.add_chunk(&entity_chunk).unwrap();
@@ -1012,5 +1112,34 @@ mod tests {
             results[0].0, "100",
             "high entity_names_boost should make entity match rank first"
         );
+    }
+
+    #[test]
+    fn split_identifier_words_camel_case() {
+        let words = split_identifier_words("createRateLimiter");
+        assert!(words.contains(&"create".to_string()));
+        assert!(words.contains(&"rate".to_string()));
+        assert!(words.contains(&"limiter".to_string()));
+        assert!(words.contains(&"createratelimiter".to_string()));
+    }
+
+    #[test]
+    fn split_identifier_words_snake_case() {
+        let words = split_identifier_words("fixed_window_rate_limit");
+        assert!(words.contains(&"fixed".to_string()));
+        assert!(words.contains(&"window".to_string()));
+        assert!(words.contains(&"rate".to_string()));
+        assert!(words.contains(&"limit".to_string()));
+    }
+
+    #[test]
+    fn generate_path_segments_strips_extension() {
+        let segments = generate_path_segments("src/cron/fixed-window-rate-limit.ts");
+        assert!(segments.contains("cron"));
+        assert!(segments.contains("fixed"));
+        assert!(segments.contains("window"));
+        assert!(segments.contains("rate"));
+        assert!(segments.contains("limit"));
+        assert!(!segments.contains("ts"));
     }
 }

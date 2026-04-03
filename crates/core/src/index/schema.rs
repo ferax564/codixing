@@ -29,6 +29,12 @@ pub struct SchemaFields {
     pub byte_start: Field,
     /// Byte offset of the chunk end.
     pub byte_end: Field,
+    /// Doc comments extracted from entities in the chunk (stemmed, stored).
+    pub doc_comment: Field,
+    /// Camel/snake-split words from entity names (stemmed, unstored).
+    pub identifier_words: Field,
+    /// Directory/filename segments from the file path (stemmed, unstored).
+    pub path_segments: Field,
 }
 
 /// Build the Tantivy schema and return it together with field handles.
@@ -55,6 +61,21 @@ pub fn build_schema() -> (Schema, SchemaFields) {
             .set_index_option(IndexRecordOption::WithFreqsAndPositions),
     );
 
+    // Stemmed text (stored) for doc_comment — retrievable for display/reranking.
+    let code_stemmed_stored = TextOptions::default()
+        .set_indexing_options(
+            TextFieldIndexing::default()
+                .set_tokenizer("code_stemmed")
+                .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+        )
+        .set_stored();
+    // Stemmed text (unstored) for search-only fields.
+    let code_stemmed_unstored = TextOptions::default().set_indexing_options(
+        TextFieldIndexing::default()
+            .set_tokenizer("code_stemmed")
+            .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+    );
+
     let chunk_id = builder.add_text_field("chunk_id", STRING | STORED);
     let file_path = builder.add_text_field("file_path", code_text.clone());
     let file_path_exact = builder.add_text_field("file_path_exact", STRING);
@@ -68,6 +89,10 @@ pub fn build_schema() -> (Schema, SchemaFields) {
     let line_end = builder.add_u64_field("line_end", STORED | FAST);
     let byte_start = builder.add_u64_field("byte_start", STORED | FAST);
     let byte_end = builder.add_u64_field("byte_end", STORED | FAST);
+    let doc_comment = builder.add_text_field("doc_comment", code_stemmed_stored);
+    let identifier_words =
+        builder.add_text_field("identifier_words", code_stemmed_unstored.clone());
+    let path_segments = builder.add_text_field("path_segments", code_stemmed_unstored);
 
     let schema = builder.build();
 
@@ -84,6 +109,9 @@ pub fn build_schema() -> (Schema, SchemaFields) {
         line_end,
         byte_start,
         byte_end,
+        doc_comment,
+        identifier_words,
+        path_segments,
     };
 
     (schema, fields)
@@ -102,5 +130,14 @@ mod tests {
         assert_eq!(schema.get_field("language").unwrap(), fields.language);
         assert_eq!(schema.get_field("content").unwrap(), fields.content);
         assert_eq!(schema.get_field("line_start").unwrap(), fields.line_start);
+        assert_eq!(schema.get_field("doc_comment").unwrap(), fields.doc_comment);
+        assert_eq!(
+            schema.get_field("identifier_words").unwrap(),
+            fields.identifier_words
+        );
+        assert_eq!(
+            schema.get_field("path_segments").unwrap(),
+            fields.path_segments
+        );
     }
 }

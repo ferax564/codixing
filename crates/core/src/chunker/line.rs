@@ -50,6 +50,7 @@ impl Chunker for LineChunker {
                 scope_chain: Vec::new(),
                 signatures: Vec::new(),
                 entity_names: Vec::new(),
+                doc_comments: String::new(),
             });
         }
 

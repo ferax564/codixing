@@ -120,6 +120,7 @@ mod tests {
             scope_chain: vec!["module".to_string()],
             signatures: vec!["fn example() -> bool".to_string()],
             entity_names: vec!["example".to_string()],
+            doc_comments: String::new(),
         }
     }
 

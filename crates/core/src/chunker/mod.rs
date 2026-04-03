@@ -29,6 +29,8 @@ pub struct Chunk {
     pub signatures: Vec<String>,
     /// Names of entities contained in this chunk.
     pub entity_names: Vec<String>,
+    /// Concatenated doc comments from entities in this chunk.
+    pub doc_comments: String,
 }
 
 /// Count non-whitespace characters in a byte slice.
