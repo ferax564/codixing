@@ -1,6 +1,7 @@
 use std::sync::Mutex;
 
 use fastembed::{EmbeddingModel as FastEmbedModel, InitOptions, OutputKey, TextEmbedding};
+use safetensors::SafeTensors;
 use tracing::{debug, info, warn};
 
 use crate::config::EmbeddingModel;
@@ -69,7 +70,7 @@ struct OrtQwen3Session {
 impl OrtQwen3Session {
     fn from_hf(repo_id: &str, onnx_file: &str, max_length: usize) -> Result<Self> {
         use hf_hub::api::sync::ApiBuilder;
-        use ort_qwen3::session::{builder::GraphOptimizationLevel, Session};
+        use ort_qwen3::session::{Session, builder::GraphOptimizationLevel};
         use tokenizers_qwen3::{
             PaddingDirection, PaddingParams, PaddingStrategy, TruncationParams,
         };
@@ -224,6 +225,48 @@ impl OrtQwen3Session {
     }
 }
 
+struct Model2VecData {
+    matrix: Vec<Vec<f32>>,
+    tokenizer: tokenizers::Tokenizer,
+}
+
+fn mean_pool_and_normalize(matrix: &[Vec<f32>], token_ids: &[u32]) -> Vec<f32> {
+    if matrix.is_empty() {
+        return Vec::new();
+    }
+    let dims = matrix[0].len();
+    let mut sum = vec![0.0f32; dims];
+    let mut count = 0u32;
+
+    for &tid in token_ids {
+        let idx = tid as usize;
+        if idx < matrix.len() {
+            for (s, &v) in sum.iter_mut().zip(&matrix[idx]) {
+                *s += v;
+            }
+            count += 1;
+        }
+    }
+
+    if count == 0 {
+        return vec![0.0; dims];
+    }
+
+    let inv_count = 1.0 / count as f32;
+    for s in &mut sum {
+        *s *= inv_count;
+    }
+
+    let norm = sum.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if norm > 1e-12 {
+        for s in &mut sum {
+            *s /= norm;
+        }
+    }
+
+    sum
+}
+
 /// Backing inference engine.
 enum EmbedBackend {
     /// ONNX Runtime backend (fastembed — BGE/Jina/Nomic/Snowflake models).
@@ -231,6 +274,8 @@ enum EmbedBackend {
     /// ONNX Runtime backend for Qwen3 (direct ORT, last-token pooling).
     #[cfg(feature = "qwen3")]
     Qwen3(Mutex<OrtQwen3Session>),
+    /// Model2Vec static embeddings (lookup table, no ONNX).
+    Model2Vec(Mutex<Model2VecData>),
 }
 
 /// Wrapper around a fastembed embedding model.
@@ -278,7 +323,7 @@ impl Embedder {
             EmbeddingModel::Qwen3SmallEmbedding => Self::new_qwen3(),
 
             // ── Model2Vec static embeddings ──────────────────────────────────
-            EmbeddingModel::Model2Vec => todo!("Model2Vec backend — Task 3"),
+            EmbeddingModel::Model2Vec => Self::new_model2vec(),
         }
     }
 
@@ -400,6 +445,95 @@ impl Embedder {
         })
     }
 
+    const MODEL2VEC_DIMS: usize = 256;
+    const MODEL2VEC_REPO: &'static str = "minishlab/potion-base-8M";
+
+    fn new_model2vec() -> Result<Self> {
+        use hf_hub::api::sync::ApiBuilder;
+
+        info!(
+            repo = Self::MODEL2VEC_REPO,
+            dims = Self::MODEL2VEC_DIMS,
+            "loading Model2Vec static embeddings"
+        );
+
+        let api = ApiBuilder::new()
+            .build()
+            .map_err(|e| CodixingError::Embedding(format!("hf-hub init: {e}")))?;
+        let repo = api.model(Self::MODEL2VEC_REPO.to_string());
+
+        let safetensors_path = repo
+            .get("model.safetensors")
+            .map_err(|e| CodixingError::Embedding(format!("download model.safetensors: {e}")))?;
+        let safetensors_bytes = std::fs::read(&safetensors_path)
+            .map_err(|e| CodixingError::Embedding(format!("read model.safetensors: {e}")))?;
+
+        let tensors = SafeTensors::deserialize(&safetensors_bytes)
+            .map_err(|e| CodixingError::Embedding(format!("parse safetensors: {e}")))?;
+
+        let embedding_tensor = tensors
+            .tensor("embedding")
+            .or_else(|_| tensors.tensor("embeddings"))
+            .map_err(|_| {
+                let names: Vec<_> = tensors.names().into_iter().collect();
+                CodixingError::Embedding(format!(
+                    "no 'embedding' tensor found in safetensors. Available: {:?}",
+                    names
+                ))
+            })?;
+
+        let shape = embedding_tensor.shape();
+        if shape.len() != 2 {
+            return Err(CodixingError::Embedding(format!(
+                "expected 2D embedding tensor, got shape {:?}",
+                shape
+            )));
+        }
+        let vocab_size = shape[0];
+        let dims = shape[1];
+
+        info!(vocab_size, dims, "Model2Vec embedding matrix loaded");
+
+        let raw_data = embedding_tensor.data();
+        if raw_data.len() != vocab_size * dims * 4 {
+            return Err(CodixingError::Embedding(format!(
+                "tensor byte count mismatch: expected {}, got {}",
+                vocab_size * dims * 4,
+                raw_data.len()
+            )));
+        }
+
+        let mut matrix = Vec::with_capacity(vocab_size);
+        for row_idx in 0..vocab_size {
+            let mut row = Vec::with_capacity(dims);
+            for col_idx in 0..dims {
+                let offset = (row_idx * dims + col_idx) * 4;
+                let val = f32::from_le_bytes([
+                    raw_data[offset],
+                    raw_data[offset + 1],
+                    raw_data[offset + 2],
+                    raw_data[offset + 3],
+                ]);
+                row.push(val);
+            }
+            matrix.push(row);
+        }
+
+        let tokenizer_path = repo
+            .get("tokenizer.json")
+            .map_err(|e| CodixingError::Embedding(format!("download tokenizer.json: {e}")))?;
+        let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path)
+            .map_err(|e| CodixingError::Embedding(format!("load tokenizer: {e}")))?;
+
+        let data = Model2VecData { matrix, tokenizer };
+
+        Ok(Self {
+            backend: EmbedBackend::Model2Vec(Mutex::new(data)),
+            dims,
+            query_prefix: None,
+        })
+    }
+
     /// Embed a batch of text strings.
     ///
     /// Returns one embedding vector per input string, in the same order.
@@ -426,6 +560,22 @@ impl Embedder {
                 let mut results = Vec::with_capacity(texts.len());
                 for chunk in texts.chunks(QWEN3_BATCH) {
                     results.extend(session.embed(chunk)?);
+                }
+                Ok(results)
+            }
+
+            EmbedBackend::Model2Vec(m) => {
+                let data = m
+                    .lock()
+                    .map_err(|e| CodixingError::Embedding(format!("model lock poisoned: {e}")))?;
+                let mut results = Vec::with_capacity(texts.len());
+                for text in &texts {
+                    let encoding = data
+                        .tokenizer
+                        .encode(text.as_str(), false)
+                        .map_err(|e| CodixingError::Embedding(format!("tokenize: {e}")))?;
+                    let ids = encoding.get_ids();
+                    results.push(mean_pool_and_normalize(&data.matrix, ids));
                 }
                 Ok(results)
             }
@@ -471,6 +621,17 @@ impl Embedder {
                     .pop()
                     .ok_or_else(|| CodixingError::Embedding("empty embedding result".to_string()))
             }
+
+            EmbedBackend::Model2Vec(m) => {
+                let data = m
+                    .lock()
+                    .map_err(|e| CodixingError::Embedding(format!("model lock poisoned: {e}")))?;
+                let encoding = data
+                    .tokenizer
+                    .encode(text, false)
+                    .map_err(|e| CodixingError::Embedding(format!("tokenize: {e}")))?;
+                Ok(mean_pool_and_normalize(&data.matrix, encoding.get_ids()))
+            }
         }
     }
 
@@ -479,7 +640,8 @@ impl Embedder {
         match &self.backend {
             EmbedBackend::Onnx(m) => Some(m),
             #[cfg(feature = "qwen3")]
-            _ => None,
+            EmbedBackend::Qwen3(_) => None,
+            EmbedBackend::Model2Vec(_) => None,
         }
     }
 
@@ -815,5 +977,32 @@ mod tests {
             .unwrap();
         let embeddings = result.expect("should succeed with empty chunks");
         assert!(embeddings.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod model2vec_tests {
+    use super::*;
+
+    #[test]
+    fn model2vec_mean_pool_and_normalize() {
+        let matrix = vec![
+            vec![1.0, 0.0, 0.0, 0.0],
+            vec![0.0, 1.0, 0.0, 0.0],
+            vec![0.0, 0.0, 1.0, 0.0],
+        ];
+        let result = mean_pool_and_normalize(&matrix, &[0, 1, 2]);
+        assert_eq!(result.len(), 4);
+        assert!((result[0] - 0.57735).abs() < 0.001);
+        assert!((result[1] - 0.57735).abs() < 0.001);
+        assert!((result[2] - 0.57735).abs() < 0.001);
+        assert!((result[3] - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn model2vec_mean_pool_empty_tokens() {
+        let matrix = vec![vec![1.0, 0.0]];
+        let result = mean_pool_and_normalize(&matrix, &[]);
+        assert!(result.iter().all(|&v| v == 0.0));
     }
 }
