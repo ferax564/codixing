@@ -77,6 +77,7 @@ dashmap.workspace = true
 rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+safetensors.workspace = true
 bitcode.workspace = true
 xxhash-rust.workspace = true
 thiserror.workspace = true

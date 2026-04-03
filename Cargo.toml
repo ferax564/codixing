@@ -43,6 +43,7 @@ tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 hf-hub = { version = "0.4", features = ["native-tls"] }
 ndarray = "0.17"
 usearch = "2"
+safetensors = "0.5"
 
 # Async runtime & HTTP server
 axum = { version = "0.8", features = ["json", "macros"] }
