@@ -23,6 +23,8 @@ pub struct SearchContext<'a> {
     pub graph_boost_weight: f32,
     /// Git recency map (file path → last commit timestamp) for recency boosts.
     pub recency_map: Option<&'a std::collections::HashMap<String, i64>>,
+    /// Chunk metadata table for hydrating injected results (graph propagation).
+    pub chunk_meta: Option<&'a dashmap::DashMap<u64, crate::retriever::ChunkMeta>>,
 }
 
 /// A single composable stage in the search pipeline.
@@ -202,6 +204,89 @@ impl SearchStage for RecencyBoostStage {
     }
 }
 
+/// Inject 1-hop graph neighbors of top results into the result set.
+///
+/// For each of the top N results, looks up callers and callees from the
+/// dependency graph. Neighbors not already in the result set are injected
+/// with a damped score.
+pub struct GraphPropagationStage;
+
+impl GraphPropagationStage {
+    const TOP_N: usize = 5;
+    const MAX_INJECTED: usize = 3;
+    const CALLEE_DAMPING: f32 = 0.25;
+    const CALLER_DAMPING: f32 = 0.15;
+}
+
+impl SearchStage for GraphPropagationStage {
+    fn apply(&self, results: &mut Vec<SearchResult>, ctx: &SearchContext<'_>) -> Result<()> {
+        let graph = match ctx.graph {
+            Some(g) => g,
+            None => return Ok(()),
+        };
+        let chunk_meta = match ctx.chunk_meta {
+            Some(m) => m,
+            None => return Ok(()),
+        };
+
+        let existing_files: std::collections::HashSet<&str> =
+            results.iter().map(|r| r.file_path.as_str()).collect();
+
+        let mut candidates: Vec<(String, f32)> = Vec::new();
+        let source_count = results.len().min(Self::TOP_N);
+
+        for r in &results[..source_count] {
+            for callee in graph.callees(&r.file_path) {
+                if !existing_files.contains(callee.as_str()) {
+                    candidates.push((callee, r.score * Self::CALLEE_DAMPING));
+                }
+            }
+            for caller in graph.callers(&r.file_path) {
+                if !existing_files.contains(caller.as_str()) {
+                    candidates.push((caller, r.score * Self::CALLER_DAMPING));
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            return Ok(());
+        }
+
+        // Deduplicate candidates by file path, keeping highest score.
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut seen_candidates = std::collections::HashSet::new();
+        candidates.retain(|(path, _)| seen_candidates.insert(path.clone()));
+        candidates.truncate(Self::MAX_INJECTED);
+
+        // Build SearchResult for each candidate from chunk_meta.
+        for (file_path, score) in candidates {
+            // Find the first chunk for this file in chunk_meta (lowest line_start).
+            let best_chunk = chunk_meta
+                .iter()
+                .filter(|entry| entry.value().file_path == file_path)
+                .min_by_key(|entry| entry.value().line_start);
+
+            if let Some(entry) = best_chunk {
+                let meta = entry.value();
+                results.push(SearchResult {
+                    chunk_id: meta.chunk_id.to_string(),
+                    file_path: meta.file_path.clone(),
+                    language: meta.language.clone(),
+                    score,
+                    line_start: meta.line_start,
+                    line_end: meta.line_end,
+                    signature: meta.signature.clone(),
+                    scope_chain: meta.scope_chain.clone(),
+                    content: meta.content.clone(),
+                });
+            }
+        }
+
+        sort_descending(results);
+        Ok(())
+    }
+}
+
 /// Boost results whose file path contains a dotted-path or keyword reference
 /// from the query.
 pub struct PathMatchBoostStage;
@@ -295,6 +380,7 @@ pub fn fast_pipeline() -> SearchPipeline {
         .add(RecencyBoostStage)
         .add(PathMatchBoostStage)
         .add(TestDemotionStage)
+        .add(GraphPropagationStage)
         .add(TruncationStage {
             min_results: 3,
             cliff_threshold: 0.35,
@@ -311,6 +397,7 @@ pub fn thorough_pipeline() -> SearchPipeline {
         .add(RecencyBoostStage)
         .add(PathMatchBoostStage)
         .add(TestDemotionStage)
+        .add(GraphPropagationStage)
         .add(TruncationStage {
             min_results: 3,
             cliff_threshold: 0.35,
@@ -356,6 +443,7 @@ mod tests {
             graph: None,
             graph_boost_weight: 0.0,
             recency_map: None,
+            chunk_meta: None,
         };
         let mut results = vec![make_result("a", 10.0, "src/a.rs")];
         pipeline.run(&mut results, &ctx).unwrap();
@@ -373,6 +461,7 @@ mod tests {
             graph: None,
             graph_boost_weight: 0.0,
             recency_map: None,
+            chunk_meta: None,
         };
         let mut results = vec![
             make_result("a", 10.0, "src/main.rs"),
@@ -393,6 +482,7 @@ mod tests {
             graph: None,
             graph_boost_weight: 0.0,
             recency_map: None,
+            chunk_meta: None,
         };
         let mut results = vec![
             SearchResult {
@@ -436,6 +526,7 @@ mod tests {
             graph: None,
             graph_boost_weight: 0.0,
             recency_map: None,
+            chunk_meta: None,
         };
         let mut results = vec![
             make_result("a", 10.0, "src/a.rs"),
@@ -460,6 +551,7 @@ mod tests {
             graph: None,
             graph_boost_weight: 0.0,
             recency_map: None,
+            chunk_meta: None,
         };
         let mut results = vec![
             make_result("a", 10.0, "src/engine.rs"),
@@ -482,6 +574,7 @@ mod tests {
             graph: None,
             graph_boost_weight: 0.0,
             recency_map: None,
+            chunk_meta: None,
         };
         let mut results = vec![make_result("a", 10.0, "src/engine.rs")];
         pipeline.run(&mut results, &ctx).unwrap();
@@ -498,6 +591,7 @@ mod tests {
             graph: None,
             graph_boost_weight: 0.0,
             recency_map: None,
+            chunk_meta: None,
         };
         let mut results = vec![make_result("a", 10.0, "src/engine.rs")];
         pipeline.run(&mut results, &ctx).unwrap();
@@ -527,6 +621,7 @@ mod tests {
             graph: None,
             graph_boost_weight: 0.0,
             recency_map: Some(&recency),
+            chunk_meta: None,
         };
 
         let mut results = vec![
@@ -559,6 +654,115 @@ mod tests {
             (unknown.score - 10.0).abs() < f32::EPSILON,
             "expected unknown file to remain at 10.0, got {}",
             unknown.score
+        );
+    }
+
+    #[test]
+    fn graph_propagation_injects_neighbor() {
+        use crate::graph::CodeGraph;
+        use crate::language::Language;
+
+        let mut graph = CodeGraph::new();
+        graph.add_edge("src/a.rs", "src/b.rs", "b", Language::Rust, Language::Rust);
+        let pr_scores = crate::graph::compute_pagerank(&graph, 0.85, 20);
+        graph.apply_pagerank(&pr_scores);
+
+        let chunk_meta = dashmap::DashMap::new();
+        chunk_meta.insert(
+            100,
+            crate::retriever::ChunkMeta {
+                chunk_id: 100,
+                file_path: "src/b.rs".into(),
+                language: "Rust".into(),
+                line_start: 0,
+                line_end: 20,
+                signature: "fn helper()".into(),
+                scope_chain: vec![],
+                entity_names: vec![],
+                content: "fn helper() {}".into(),
+                content_hash: 0,
+            },
+        );
+
+        let stage = GraphPropagationStage;
+        let symbols = crate::symbols::SymbolTable::new();
+        let ctx = SearchContext {
+            query: "test",
+            symbols: &symbols,
+            graph: Some(&graph),
+            graph_boost_weight: 0.5,
+            recency_map: None,
+            chunk_meta: Some(&chunk_meta),
+        };
+
+        let mut results = vec![make_result("a", 10.0, "src/a.rs")];
+        stage.apply(&mut results, &ctx).unwrap();
+
+        assert!(
+            results.len() >= 2,
+            "expected neighbor injection, got {} results",
+            results.len()
+        );
+        let b_result = results.iter().find(|r| r.file_path == "src/b.rs");
+        assert!(b_result.is_some(), "src/b.rs should be injected");
+        let b = b_result.unwrap();
+        assert!(
+            (b.score - 2.5).abs() < 0.01,
+            "expected callee score ~2.5, got {}",
+            b.score
+        );
+    }
+
+    #[test]
+    fn graph_propagation_skips_existing_results() {
+        use crate::graph::CodeGraph;
+        use crate::language::Language;
+
+        let mut graph = CodeGraph::new();
+        graph.add_edge("src/a.rs", "src/b.rs", "b", Language::Rust, Language::Rust);
+        let pr_scores = crate::graph::compute_pagerank(&graph, 0.85, 20);
+        graph.apply_pagerank(&pr_scores);
+
+        let chunk_meta = dashmap::DashMap::new();
+        chunk_meta.insert(
+            100,
+            crate::retriever::ChunkMeta {
+                chunk_id: 100,
+                file_path: "src/b.rs".into(),
+                language: "Rust".into(),
+                line_start: 0,
+                line_end: 20,
+                signature: String::new(),
+                scope_chain: vec![],
+                entity_names: vec![],
+                content: String::new(),
+                content_hash: 0,
+            },
+        );
+
+        let stage = GraphPropagationStage;
+        let symbols = crate::symbols::SymbolTable::new();
+        let ctx = SearchContext {
+            query: "test",
+            symbols: &symbols,
+            graph: Some(&graph),
+            graph_boost_weight: 0.5,
+            recency_map: None,
+            chunk_meta: Some(&chunk_meta),
+        };
+
+        let mut results = vec![
+            make_result("a", 10.0, "src/a.rs"),
+            make_result("b", 8.0, "src/b.rs"),
+        ];
+        stage.apply(&mut results, &ctx).unwrap();
+
+        let b_count = results.iter().filter(|r| r.file_path == "src/b.rs").count();
+        assert_eq!(b_count, 1);
+        let b = results.iter().find(|r| r.file_path == "src/b.rs").unwrap();
+        assert!(
+            (b.score - 8.0).abs() < 0.01,
+            "existing result score should be unchanged"
         );
     }
 }
