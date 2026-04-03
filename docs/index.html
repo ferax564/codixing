@@ -10,7 +10,7 @@
   <!-- Open Graph -->
   <meta property="og:type" content="website" />
   <meta property="og:title" content="Codixing — Code Retrieval Engine for AI Agents" />
-  <meta property="og:description" content="R@10=0.714 retrieval accuracy. 73% fewer tokens. 57 MCP tools. Hybrid BM25 + embeddings + call graph PageRank — in a single Rust binary." />
+  <meta property="og:description" content="R@10=0.714 retrieval accuracy. 73% fewer tokens. 19 CLI commands. Hybrid BM25 + embeddings + call graph PageRank — in a single Rust binary." />
   <meta property="og:url" content="https://codixing.com/" />
   <meta property="og:image" content="https://codixing.com/og-image.png" />
   <meta property="og:image:width" content="1200" />
@@ -20,7 +20,7 @@
   <!-- Twitter/X Card -->
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="Codixing — Code Retrieval Engine for AI Agents" />
-  <meta name="twitter:description" content="R@10=0.714 retrieval accuracy. 73% fewer tokens. 57 MCP tools. Hybrid BM25 + embeddings + call graph PageRank — in a single Rust binary." />
+  <meta name="twitter:description" content="R@10=0.714 retrieval accuracy. 73% fewer tokens. 19 CLI commands. Hybrid BM25 + embeddings + call graph PageRank — in a single Rust binary." />
   <meta name="twitter:image" content="https://codixing.com/og-image.png" />
 
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -1073,7 +1073,7 @@
         <a href="#benchmark">Benchmark</a>
         <a href="#features">Features</a>
         <a href="#quickstart">Quick Start</a>
-        <a href="#mcp">MCP Tools</a>
+        <a href="#cli">CLI</a>
         <a href="/blog.html">Blog</a>
         <a href="/docs.html">Docs</a>
       </div>
@@ -1089,7 +1089,7 @@
     <div class="hero">
       <div class="hero-badge">
         <span class="badge-dot"></span>
-        Rust-native &bull; 864 tests &bull; 57 MCP tools &bull; 73% token savings
+        Rust-native &bull; 864 tests &bull; 19 CLI commands &bull; 73% token savings
       </div>
       <h1>Your AI agent is<br><span class="grad">burning money on grep</span></h1>
       <p class="hero-sub">
@@ -1132,8 +1132,8 @@
           <span class="metric-label">R@10 retrieval accuracy (vs grep 0.345)</span>
         </div>
         <div class="metric-item">
-          <span class="metric-val" data-count="57" data-suffix="">0</span>
-          <span class="metric-label">MCP tools</span>
+          <span class="metric-val" data-count="19" data-suffix="">0</span>
+          <span class="metric-label">CLI commands</span>
         </div>
       </div>
     </div>
@@ -1593,9 +1593,9 @@
           <div class="feature-icon green">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#3fb950" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 17h6M17 14v6"/><path d="M7 10v4M10 7h4M17 10v4"/></svg>
           </div>
-          <h3>MCP-ready</h3>
-          <p>57 JSON-RPC 2.0 tools exposed for Claude Code and any MCP-capable client. <code style="color:var(--cyan);font-size:0.85em">--compact</code> mode sends only 2 meta-tools on init (96.7% token savings), with all 57 tools discoverable on demand.</p>
-          <span class="feature-tag">57 tools &bull; --compact &bull; stdin/stdout &bull; Unix socket</span>
+          <h3>CLI + MCP</h3>
+          <p>19 CLI commands for direct use, plus 57 JSON-RPC 2.0 tools for Claude Code and any MCP-capable client. <code style="color:var(--cyan);font-size:0.85em">--compact</code> mode sends only 2 meta-tools on init (96.7% token savings), with all 57 tools discoverable on demand.</p>
+          <span class="feature-tag">19 CLI cmds &bull; 57 MCP tools &bull; stdin/stdout &bull; Unix socket</span>
         </div>
         <div class="feature-card" style="--delay:0.35s">
           <div class="feature-icon pink">
@@ -1609,14 +1609,14 @@
     </div>
   </section>
 
-  <!-- MCP Tools -->
-  <section id="mcp" class="mcp-section">
+  <!-- CLI + MCP Tools -->
+  <section id="cli" class="mcp-section">
     <div class="wrapper">
       <div class="mcp-layout">
         <div>
-          <div class="section-label reveal">MCP Integration</div>
-          <h2 class="section-title reveal">57 tools for<br>your AI agent</h2>
-          <p class="section-sub reveal">Codixing exposes retrieval, symbols, graph traversal, file reading, temporal analysis, and diagnostics over the Model Context Protocol. In <code style="color:var(--cyan);font-size:0.85em">--compact</code> mode, only 2 meta-tools are sent on init (~218 tokens), with the full 57 tools discoverable on demand.</p>
+          <div class="section-label reveal">CLI &amp; MCP Integration</div>
+          <h2 class="section-title reveal">19 CLI commands +<br>57 MCP tools</h2>
+          <p class="section-sub reveal">Use Codixing directly from the terminal with 19 commands, or connect any MCP-capable editor. The MCP server exposes retrieval, symbols, graph traversal, file reading, temporal analysis, and diagnostics. In <code style="color:var(--cyan);font-size:0.85em">--compact</code> mode, only 2 meta-tools are sent on init (~218 tokens), with the full 57 tools discoverable on demand.</p>
           <div class="tools-grid reveal">
             <div class="tool-card">
               <div class="tool-name">code_search</div>
