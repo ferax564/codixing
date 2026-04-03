@@ -15,6 +15,7 @@ mod reload;
 mod search;
 mod symbol_graph;
 mod sync;
+pub(crate) mod synonyms;
 mod temporal;
 mod test_mapping;
 mod validation;
@@ -285,9 +286,40 @@ pub struct Engine {
     last_staleness_check: Option<std::time::Instant>,
     /// Background embedding state — `None` when embeddings were synchronous or index was opened.
     pub(super) embed_state: Option<Arc<embed_state::EmbedState>>,
+    /// Lazily-initialised concept reranker for future A/B experiments.
+    ///
+    /// NOT used in the active search path — general-purpose rerankers hurt code search
+    /// quality by favouring prose matches over code structure.  Initialised on first call
+    /// to `get_concept_reranker`.  `None` inside the lock means the model failed to load.
+    pub(super) concept_reranker: std::sync::OnceLock<Option<Arc<Reranker>>>,
 }
 
 impl Engine {
+    /// Get the concept reranker, lazily loading it on first access.
+    ///
+    /// Returns `None` if the model failed to load (e.g. ONNX runtime not available).
+    ///
+    /// **NOT used in the active search path** — general-purpose rerankers (Jina, BGE)
+    /// consistently hurt code search quality by preferring prose matches over code
+    /// structure.  This is infrastructure for future A/B testing once a code-specific
+    /// cross-encoder becomes available.
+    #[allow(dead_code)]
+    pub(super) fn get_concept_reranker(&self) -> Option<&Arc<Reranker>> {
+        use crate::reranker::Reranker;
+        use fastembed::RerankerModel;
+        self.concept_reranker
+            .get_or_init(
+                || match Reranker::with_model(RerankerModel::JINARerankerV1TurboEn) {
+                    Ok(r) => Some(Arc::new(r)),
+                    Err(e) => {
+                        tracing::warn!("concept reranker unavailable: {e}");
+                        None
+                    }
+                },
+            )
+            .as_ref()
+    }
+
     /// Return the git recency map, lazily building it on first access.
     ///
     /// The map covers the last 180 days and maps relative file paths to
