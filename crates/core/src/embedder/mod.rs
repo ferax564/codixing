@@ -69,7 +69,7 @@ struct OrtQwen3Session {
 impl OrtQwen3Session {
     fn from_hf(repo_id: &str, onnx_file: &str, max_length: usize) -> Result<Self> {
         use hf_hub::api::sync::ApiBuilder;
-        use ort_qwen3::session::{Session, builder::GraphOptimizationLevel};
+        use ort_qwen3::session::{builder::GraphOptimizationLevel, Session};
         use tokenizers_qwen3::{
             PaddingDirection, PaddingParams, PaddingStrategy, TruncationParams,
         };
@@ -276,6 +276,9 @@ impl Embedder {
             // ── Qwen3 ONNX backend ────────────────────────────────────────────
             #[cfg(feature = "qwen3")]
             EmbeddingModel::Qwen3SmallEmbedding => Self::new_qwen3(),
+
+            // ── Model2Vec static embeddings ──────────────────────────────────
+            EmbeddingModel::Model2Vec => todo!("Model2Vec backend — Task 3"),
         }
     }
 
@@ -297,6 +300,7 @@ impl Embedder {
             EmbeddingModel::NomicEmbedCode => unreachable!(),
             #[cfg(feature = "qwen3")]
             EmbeddingModel::Qwen3SmallEmbedding => unreachable!(),
+            EmbeddingModel::Model2Vec => unreachable!(),
         };
 
         // BGE models are trained with an instruction prefix for queries.
