@@ -4,12 +4,12 @@ use tracing::debug;
 
 use crate::error::Result;
 use crate::retriever::bm25::BM25Retriever;
-use crate::retriever::hybrid::{rrf_fuse, HybridRetriever};
+use crate::retriever::hybrid::{HybridRetriever, rrf_fuse};
 use crate::retriever::mmr::mmr_select;
 use crate::retriever::{Retriever, SearchQuery, SearchResult, Strategy};
 
-use super::pipeline::{SearchContext, SearchPipeline};
 use super::Engine;
+use super::pipeline::{SearchContext, SearchPipeline};
 
 impl Engine {
     /// Search the index using the strategy specified in `query`.
@@ -179,7 +179,7 @@ impl Engine {
                     min_results: 3,
                     cliff_threshold: 0.35,
                 })
-                .add(DeduplicationStage),
+                .add(FileDedupStage),
         }
     }
 
@@ -1931,7 +1931,7 @@ mod tests {
             "expected at least 3 reformulations, got {r:?}"
         );
         assert_eq!(r[0], "fix authentication token expiry"); // original
-                                                             // Keywords-only should drop "fix"
+        // Keywords-only should drop "fix"
         assert!(
             r.iter().any(|q| q == "authentication token expiry"),
             "expected keywords-only reformulation, got: {r:?}"
@@ -2173,12 +2173,16 @@ mod tests {
     fn reformulate_to_code_multiple_concepts() {
         let patterns = reformulate_to_code("async file parsing with error handling");
         assert!(patterns.iter().any(|p| p.contains("async")));
-        assert!(patterns
-            .iter()
-            .any(|p| p.contains("parse") || p.contains("Parser")));
-        assert!(patterns
-            .iter()
-            .any(|p| p.contains("Result") || p.contains("Err")));
+        assert!(
+            patterns
+                .iter()
+                .any(|p| p.contains("parse") || p.contains("Parser"))
+        );
+        assert!(
+            patterns
+                .iter()
+                .any(|p| p.contains("Result") || p.contains("Err"))
+        );
     }
 
     // -----------------------------------------------------------------------

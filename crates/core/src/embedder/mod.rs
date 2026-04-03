@@ -70,7 +70,7 @@ struct OrtQwen3Session {
 impl OrtQwen3Session {
     fn from_hf(repo_id: &str, onnx_file: &str, max_length: usize) -> Result<Self> {
         use hf_hub::api::sync::ApiBuilder;
-        use ort_qwen3::session::{builder::GraphOptimizationLevel, Session};
+        use ort_qwen3::session::{Session, builder::GraphOptimizationLevel};
         use tokenizers_qwen3::{
             PaddingDirection, PaddingParams, PaddingStrategy, TruncationParams,
         };

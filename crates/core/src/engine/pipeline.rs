@@ -333,11 +333,78 @@ impl SearchStage for TestDemotionStage {
 
 /// Remove results whose line ranges overlap with a higher-scored result
 /// from the same file.
+#[allow(dead_code)]
 pub struct DeduplicationStage;
 
 impl SearchStage for DeduplicationStage {
     fn apply(&self, results: &mut Vec<SearchResult>, _ctx: &SearchContext<'_>) -> Result<()> {
         super::search::dedup_overlapping(results);
+        Ok(())
+    }
+}
+
+/// File-level deduplication with allowance for qualified second chunks.
+///
+/// 1. Runs `dedup_overlapping` to remove line-range overlaps (same as old stage).
+/// 2. Groups results by file path.
+/// 3. Keeps the best chunk per file.
+/// 4. Allows a second chunk from the same file only if:
+///    - Its score ≥ 70% of the file's best chunk score.
+///    - It's ≥ 50 lines away from all already-kept chunks from that file.
+/// 5. Drops all other same-file duplicates.
+pub struct FileDedupStage;
+
+impl FileDedupStage {
+    const SECOND_CHUNK_SCORE_THRESHOLD: f32 = 0.70;
+    const MIN_LINE_GAP: u64 = 50;
+}
+
+impl SearchStage for FileDedupStage {
+    fn apply(&self, results: &mut Vec<SearchResult>, _ctx: &SearchContext<'_>) -> Result<()> {
+        // Phase 1: remove overlapping line-range duplicates.
+        super::search::dedup_overlapping(results);
+
+        if results.len() <= 1 {
+            return Ok(());
+        }
+
+        // Phase 2: file-level dedup with allowance.
+        let mut kept: Vec<SearchResult> = Vec::with_capacity(results.len());
+        // file_path → (best_score, Vec<(line_start, line_end)>)
+        let mut file_kept: std::collections::HashMap<String, (f32, Vec<(u64, u64)>)> =
+            std::collections::HashMap::new();
+
+        // Results are sorted by score descending (guaranteed by prior stages).
+        for r in results.drain(..) {
+            match file_kept.get_mut(&r.file_path) {
+                None => {
+                    file_kept.insert(
+                        r.file_path.clone(),
+                        (r.score, vec![(r.line_start, r.line_end)]),
+                    );
+                    kept.push(r);
+                }
+                Some((best_score, kept_ranges)) => {
+                    let score_ok = r.score >= *best_score * Self::SECOND_CHUNK_SCORE_THRESHOLD;
+                    let gap_ok = kept_ranges.iter().all(|&(ks, ke)| {
+                        let gap = if r.line_start >= ke {
+                            r.line_start - ke
+                        } else {
+                            ks.saturating_sub(r.line_end)
+                        };
+                        gap >= Self::MIN_LINE_GAP
+                    });
+
+                    if score_ok && gap_ok {
+                        kept_ranges.push((r.line_start, r.line_end));
+                        kept.push(r);
+                    }
+                }
+            }
+        }
+
+        *results = kept;
+        sort_descending(results);
         Ok(())
     }
 }
@@ -368,7 +435,7 @@ pub fn instant_pipeline() -> SearchPipeline {
         .add(DefinitionBoostStage)
         .add(PathMatchBoostStage)
         .add(TestDemotionStage)
-        .add(DeduplicationStage)
+        .add(FileDedupStage)
 }
 
 /// Build the post-retrieval pipeline for `Strategy::Fast`.
@@ -385,7 +452,7 @@ pub fn fast_pipeline() -> SearchPipeline {
             min_results: 3,
             cliff_threshold: 0.35,
         })
-        .add(DeduplicationStage)
+        .add(FileDedupStage)
 }
 
 /// Build the post-retrieval pipeline for `Strategy::Thorough`.
@@ -402,7 +469,7 @@ pub fn thorough_pipeline() -> SearchPipeline {
             min_results: 3,
             cliff_threshold: 0.35,
         })
-        .add(DeduplicationStage)
+        .add(FileDedupStage)
 }
 
 /// Build the post-retrieval pipeline for `Strategy::Exact`.
@@ -411,7 +478,7 @@ pub fn exact_pipeline() -> SearchPipeline {
         .add(DefinitionBoostStage)
         .add(PathMatchBoostStage)
         .add(TestDemotionStage)
-        .add(DeduplicationStage)
+        .add(FileDedupStage)
 }
 
 #[cfg(test)]
@@ -711,6 +778,140 @@ mod tests {
             "expected callee score ~2.5, got {}",
             b.score
         );
+    }
+
+    #[test]
+    fn file_dedup_keeps_best_per_file() {
+        let stage = FileDedupStage;
+        let symbols = crate::symbols::SymbolTable::new();
+        let ctx = SearchContext {
+            query: "test",
+            symbols: &symbols,
+            graph: None,
+            graph_boost_weight: 0.0,
+            recency_map: None,
+            chunk_meta: None,
+        };
+        let mut results = vec![
+            SearchResult {
+                chunk_id: "1".into(),
+                file_path: "src/main.rs".into(),
+                language: "Rust".into(),
+                score: 10.0,
+                line_start: 0,
+                line_end: 20,
+                signature: String::new(),
+                scope_chain: vec![],
+                content: String::new(),
+            },
+            SearchResult {
+                chunk_id: "2".into(),
+                file_path: "src/main.rs".into(),
+                language: "Rust".into(),
+                score: 3.0, // below 70% of 10.0 = 7.0
+                line_start: 100,
+                line_end: 120,
+                signature: String::new(),
+                scope_chain: vec![],
+                content: String::new(),
+            },
+            SearchResult {
+                chunk_id: "3".into(),
+                file_path: "src/other.rs".into(),
+                language: "Rust".into(),
+                score: 5.0,
+                line_start: 0,
+                line_end: 20,
+                signature: String::new(),
+                scope_chain: vec![],
+                content: String::new(),
+            },
+        ];
+        stage.apply(&mut results, &ctx).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].chunk_id, "1");
+        assert_eq!(results[1].chunk_id, "3");
+    }
+
+    #[test]
+    fn file_dedup_allows_qualified_second_chunk() {
+        let stage = FileDedupStage;
+        let symbols = crate::symbols::SymbolTable::new();
+        let ctx = SearchContext {
+            query: "test",
+            symbols: &symbols,
+            graph: None,
+            graph_boost_weight: 0.0,
+            recency_map: None,
+            chunk_meta: None,
+        };
+        let mut results = vec![
+            SearchResult {
+                chunk_id: "1".into(),
+                file_path: "src/main.rs".into(),
+                language: "Rust".into(),
+                score: 10.0,
+                line_start: 0,
+                line_end: 20,
+                signature: String::new(),
+                scope_chain: vec![],
+                content: String::new(),
+            },
+            SearchResult {
+                chunk_id: "2".into(),
+                file_path: "src/main.rs".into(),
+                language: "Rust".into(),
+                score: 8.0,      // 80% ≥ 70%
+                line_start: 200, // gap 180 ≥ 50
+                line_end: 220,
+                signature: String::new(),
+                scope_chain: vec![],
+                content: String::new(),
+            },
+        ];
+        stage.apply(&mut results, &ctx).unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn file_dedup_rejects_close_second_chunk() {
+        let stage = FileDedupStage;
+        let symbols = crate::symbols::SymbolTable::new();
+        let ctx = SearchContext {
+            query: "test",
+            symbols: &symbols,
+            graph: None,
+            graph_boost_weight: 0.0,
+            recency_map: None,
+            chunk_meta: None,
+        };
+        let mut results = vec![
+            SearchResult {
+                chunk_id: "1".into(),
+                file_path: "src/main.rs".into(),
+                language: "Rust".into(),
+                score: 10.0,
+                line_start: 0,
+                line_end: 20,
+                signature: String::new(),
+                scope_chain: vec![],
+                content: String::new(),
+            },
+            SearchResult {
+                chunk_id: "2".into(),
+                file_path: "src/main.rs".into(),
+                language: "Rust".into(),
+                score: 9.0,     // qualifies on score
+                line_start: 30, // gap 10 < 50
+                line_end: 50,
+                signature: String::new(),
+                scope_chain: vec![],
+                content: String::new(),
+            },
+        ];
+        stage.apply(&mut results, &ctx).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].chunk_id, "1");
     }
 
     #[test]
