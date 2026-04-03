@@ -70,7 +70,7 @@ struct OrtQwen3Session {
 impl OrtQwen3Session {
     fn from_hf(repo_id: &str, onnx_file: &str, max_length: usize) -> Result<Self> {
         use hf_hub::api::sync::ApiBuilder;
-        use ort_qwen3::session::{Session, builder::GraphOptimizationLevel};
+        use ort_qwen3::session::{builder::GraphOptimizationLevel, Session};
         use tokenizers_qwen3::{
             PaddingDirection, PaddingParams, PaddingStrategy, TruncationParams,
         };
@@ -225,11 +225,22 @@ impl OrtQwen3Session {
     }
 }
 
+/// Static token embedding matrix for Model2Vec.
+///
+/// Each row corresponds to a token ID from the tokenizer. Document
+/// embeddings are computed as the mean of the token vectors, then
+/// L2-normalized. No ONNX runtime required.
 struct Model2VecData {
     matrix: Vec<Vec<f32>>,
     tokenizer: tokenizers::Tokenizer,
 }
 
+/// Mean-pool token vectors and L2-normalize the result.
+///
+/// Given the embedding matrix and a list of token IDs, computes the
+/// element-wise mean of the corresponding rows, then normalizes to unit
+/// length. Token IDs outside the matrix bounds are silently skipped.
+/// Returns a zero vector if no valid tokens are provided.
 fn mean_pool_and_normalize(matrix: &[Vec<f32>], token_ids: &[u32]) -> Vec<f32> {
     if matrix.is_empty() {
         return Vec::new();
@@ -491,6 +502,15 @@ impl Embedder {
         }
         let vocab_size = shape[0];
         let dims = shape[1];
+
+        // Validate dtype — safetensors can store f16/bf16 which would silently
+        // produce garbage if interpreted as f32.
+        if embedding_tensor.dtype() != safetensors::Dtype::F32 {
+            return Err(CodixingError::Embedding(format!(
+                "expected F32 embedding tensor, got {:?}",
+                embedding_tensor.dtype()
+            )));
+        }
 
         info!(vocab_size, dims, "Model2Vec embedding matrix loaded");
 
