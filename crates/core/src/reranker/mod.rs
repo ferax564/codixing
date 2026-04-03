@@ -38,6 +38,22 @@ impl Reranker {
         })
     }
 
+    /// Load a specific reranker model by [`RerankerModel`] variant.
+    ///
+    /// Intended for concept-retrieval experiments (e.g. [`RerankerModel::JINARerankerV1TurboEn`]).
+    /// NOT used in the active search path — general-purpose rerankers hurt code search
+    /// quality by favouring prose matches over code structure.  This constructor is
+    /// infrastructure for future A/B testing once a code-specific reranker is available.
+    pub fn with_model(model: RerankerModel) -> Result<Self> {
+        info!("loading reranker model ({model})");
+        let model =
+            TextRerank::try_new(RerankInitOptions::new(model).with_show_download_progress(true))
+                .map_err(|e| CodixingError::Reranker(format!("failed to load model: {e}")))?;
+        Ok(Self {
+            model: Mutex::new(model),
+        })
+    }
+
     /// Score each `(query, doc)` pair and return `(original_index, score)`
     /// sorted by descending relevance score.
     ///

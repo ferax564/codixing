@@ -405,6 +405,7 @@ impl Engine {
             reload_interval: std::time::Duration::from_secs(30),
             last_staleness_check: None,
             embed_state,
+            concept_reranker: std::sync::OnceLock::new(),
         })
     }
 
@@ -634,6 +635,7 @@ impl Engine {
             reload_interval: std::time::Duration::from_secs(30),
             last_staleness_check: None,
             embed_state: None,
+            concept_reranker: std::sync::OnceLock::new(),
         })
     }
 
@@ -813,6 +815,7 @@ impl Engine {
             reload_interval: std::time::Duration::from_secs(30),
             last_staleness_check: None,
             embed_state: None,
+            concept_reranker: std::sync::OnceLock::new(),
         })
     }
 
