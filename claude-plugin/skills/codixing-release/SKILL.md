@@ -4,7 +4,7 @@ description: "Complete Codixing release pipeline — version bump in 5 locations
 user-invocable: true
 disable-model-invocation: false
 argument-hint: "[version]"
-allowed-tools: Bash, Read, Edit, Write, Glob, Grep, Agent, MCP(codixing::*)
+allowed-tools: Bash, Read, Edit, Write, Glob, Grep, Agent
 ---
 
 # Codixing Release Pipeline

@@ -1,10 +1,10 @@
 ---
 name: codixing-preflight
-description: "MANDATORY before proposing new features, modules, or tools — and before claiming accuracy or performance numbers. Enforces existence scanning via Codixing MCP tools and evidence-based verification. Triggers on ANY proposal for new code, new files, new tools, design specs, or architecture discussions. Also triggers when accuracy/performance numbers are about to be stated."
+description: "MANDATORY before proposing new features, modules, or tools — and before claiming accuracy or performance numbers. Enforces existence scanning via the Codixing CLI and evidence-based verification. Triggers on ANY proposal for new code, new files, new tools, design specs, or architecture discussions. Also triggers when accuracy/performance numbers are about to be stated."
 user-invocable: true
 disable-model-invocation: false
 argument-hint: "[feature-description]"
-allowed-tools: Bash, Read, Glob, Grep, MCP(codixing::*)
+allowed-tools: Bash, Read, Glob
 ---
 
 # Codixing Preflight
@@ -42,9 +42,9 @@ This includes: design specs, brainstorming proposals, implementation plans, PR d
    (e.g., "memory", "persist", "remember", "agent context")
 
 2. SEARCH: Run ALL THREE of these against the codebase:
-   a. code_search(keyword) — for each keyword
-   b. find_symbol(keyword) — for struct/function names
-   c. list_files(pattern) — for file names matching the concept
+   a. codixing search "keyword"  — for each keyword
+   b. codixing symbols keyword   — for struct/function names
+   c. codixing search "keyword" --limit 20  — for file names matching the concept
 
 3. READ: For every match found, read the actual code.
    Don't dismiss matches based on names — read them.
@@ -64,9 +64,9 @@ When proposing something NEW:
 ## Preflight: Existence Scan
 
 Searched for: "memory", "persist", "remember", "agent context"
-- code_search("memory"): 0 relevant matches
-- find_symbol("MemoryStore"): not found
-- list_files("*memory*"): no files
+- codixing search "memory": 0 relevant matches
+- codixing symbols MemoryStore: not found
+- codixing search "memory" --limit 20: no matches
 
 ✅ No existing implementation found. Proposing new module.
 ```
@@ -76,7 +76,7 @@ When EXTENDING existing code:
 ## Preflight: Existence Scan
 
 Searched for: "memory", "persist", "remember"
-- code_search("memory"): found crates/mcp/src/tools/memory.rs
+- codixing search "memory": found crates/mcp/src/tools/memory.rs
 - Read memory.rs: has remember/recall/forget tools, JSON persistence
 
 🔄 Existing implementation found. Proposing extension, not replacement.
@@ -127,7 +127,7 @@ This includes: commit messages, PR descriptions, spec documents, verbal claims.
 | "I know this codebase well" | You knew it at a point in time. Search now. |
 | "The existing code is different" | Read it first. Then decide. |
 | "This is just a small addition" | Small additions duplicate most often |
-| "It would take too long to search" | 3 MCP calls take 5 seconds. Proposing a duplicate wastes hours. |
+| "It would take too long to search" | 3 CLI calls take 5 seconds. Proposing a duplicate wastes hours. |
 | "I checked earlier in this session" | Context decays. Search again if >10 messages ago. |
 | "The numbers should be roughly..." | "Should" is not evidence. Run the command. |
 | "Based on the code change, R@10 will..." | Predictions are wrong more often than right. Measure. |
@@ -157,4 +157,4 @@ In the v0.23-v0.24 development cycle of this project:
 1. A new memory module was proposed from scratch when `memory.rs` already existed with remember/recall/forget tools — wasting an entire spec + plan cycle
 2. Commit messages claimed "R@10 >0.8" without running the benchmark — the actual result was unchanged (0.640)
 
-Both failures happened at the COORDINATOR level, not the implementation level. Implementation agents with Codixing MCP tools score 5/5 on finding existing code. The coordinator writing specs without searching scored 0/2. This skill fixes the coordinator.
+Both failures happened at the COORDINATOR level, not the implementation level. Implementation agents with Codixing tools score 5/5 on finding existing code. The coordinator writing specs without searching scored 0/2. This skill fixes the coordinator.
