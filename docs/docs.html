@@ -556,7 +556,7 @@ pub fn handle_auth_request(req: Request) -&gt; Result&lt;Token&gt;</span>
         <div class="pre-label">Plugin (recommended)</div>
         <pre><code><span class="tok-cmd">claude plugin marketplace add</span> ferax564/codixing
 <span class="tok-cmd">claude plugin install</span> codixing@codixing</code></pre>
-        <p>Installs the MCP server (54 tools) plus three slash commands: <code>/codixing-setup</code> (index + register), <code>/codixing-explore</code> (architecture deep-dive), <code>/codixing-review</code> (code review with impact analysis). Restart Claude Code after installing.</p>
+        <p>Installs the MCP server (57 tools) plus five slash commands: <code>/codixing-setup</code> (index + register), <code>/codixing-explore</code> (architecture deep-dive), <code>/codixing-review</code> (code review with impact analysis), <code>/codixing-preflight</code> (duplicate detection), <code>/codixing-release</code> (automated release pipeline). Restart Claude Code after installing.</p>
 
         <p>Alternatively, register just the MCP server without the plugin:</p>
         <div class="pre-label">MCP only</div>
@@ -804,7 +804,7 @@ Sync complete in 0.12s</span></code></pre>
           <tbody>
             <tr><td><code>--serve</code></td><td>false</td><td>Launch the REST + graph viewer server after analysis</td></tr>
             <tr><td><code>--port</code></td><td>8080</td><td>Port for the server when <code>--serve</code> is used</td></tr>
-            <tr><td><code>--model bge-small-en</code></td><td>false</td><td>Skip vector embedding (faster, BM25+graph only)</td></tr>
+            <tr><td><code>--no-embeddings</code></td><td>false</td><td>Skip vector embedding (faster, BM25+graph only)</td></tr>
             <tr><td><code>--output</code></td><td>text</td><td><code>text</code> or <code>json</code> report format</td></tr>
           </tbody>
         </table>

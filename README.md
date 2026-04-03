@@ -109,25 +109,58 @@ At 50 agent sessions/day, that's **$1,400/month** back in your pocket — and th
 
 ---
 
-## Quick Start
+## Getting Started
+
+### 60-second setup
 
 ```bash
-# Index a codebase (BM25 only — fast, no dependencies)
+# 1. Install (pick one)
+claude plugin marketplace add ferax564/codixing   # Claude Code plugin (recommended)
+npx -y codixing-mcp                               # any MCP client
+curl -fsSL https://codixing.com/install.sh | sh   # standalone binary
+
+# 2. Index your project
 codixing init .
+# ✓ Indexed 2,847 files, 14,203 chunks, 8,891 symbols in 1.2s
 
-# Search
+# 3. Search
 codixing search "authentication handler"
+# ► src/auth/handler.rs:42  [score: 0.94]
+#   pub fn handle_auth_request(req: Request) -> Result<Token>
+```
 
-# Symbol lookup
+That's it. Your agent now uses ranked search instead of grep. The MCP server auto-indexes on first connection if no index exists.
+
+### CLI commands
+
+```bash
+# Search (natural language or symbol names)
+codixing search "error handling middleware"
+
+# Symbol lookup (definitions only, not mentions)
 codixing symbols Engine
 
 # Dependency graph
-codixing callers src/engine.rs
-codixing callees src/engine.rs
+codixing callers src/engine.rs    # who imports this file?
+codixing callees src/engine.rs    # what does this file import?
 
-# Incremental sync (re-indexes only changed files)
+# Keep index fresh (re-indexes only changed files)
 codixing sync
+
+# Architecture map
+codixing graph --token-budget 4000
 ```
+
+### Hybrid search (optional)
+
+BM25-only works great for most queries. For natural-language queries ("how does the auth flow work?"), add semantic embeddings:
+
+```bash
+codixing init . --model bge-small-en    # one-time, ~2 min
+codixing search "how does auth work" --strategy fast
+```
+
+Requires ONNX Runtime (`pip install onnxruntime` or download from GitHub).
 
 ---
 
