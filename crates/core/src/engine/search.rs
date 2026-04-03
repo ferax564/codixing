@@ -35,11 +35,10 @@ impl Engine {
             query
         };
 
-        // Note: synonym expansion is applied only in the Deep strategy
-        // (via generate_reformulations) to avoid polluting BM25 results.
-        // Expanding synonyms into the main query causes the synonym definition
-        // code itself to rank highly (e.g., "orphan" matches search.rs 47 times
-        // because it contains the synonym map).
+        // Note: synonym expansion is applied as an *extra reformulation* (not injected
+        // into the main BM25 query) so that the synonym definition code itself does not
+        // rank highly for domain queries.  Fast/Thorough use generate_reformulations_with_synonyms
+        // which appends synonym and code-HyDE variants; Deep uses its own similar path.
 
         let strategy = query.strategy;
         let pipeline = self.pipeline_for_strategy(strategy);
@@ -63,9 +62,13 @@ impl Engine {
             }
             Strategy::Fast => {
                 // Multi-query RRF fusion for 3+ word natural language queries.
+                // Uses synonym expansion + code HyDE patterns to bridge vocabulary gaps.
+                // Note: a concept reranker (e.g. JINARerankerV1TurboEn) is NOT applied
+                // here — general-purpose rerankers consistently hurt code search quality
+                // by favouring prose matches over code structure. See `get_concept_reranker`.
                 let word_count = query.query.split_whitespace().count();
                 if word_count >= 3 {
-                    let reformulations = generate_reformulations(&query.query);
+                    let reformulations = generate_reformulations_with_synonyms(&query.query);
                     if reformulations.len() >= 2 {
                         let mut fused = self.search_multi(&reformulations, &query)?;
                         let ctx = self.search_context(&query_str);
@@ -92,9 +95,10 @@ impl Engine {
             Strategy::Explore => self.search_explore(query)?,
             Strategy::Thorough => {
                 // Multi-query RRF fusion for 3+ word natural language queries.
+                // Uses synonym expansion + code HyDE patterns to bridge vocabulary gaps.
                 let word_count = query.query.split_whitespace().count();
                 if word_count >= 3 {
-                    let reformulations = generate_reformulations(&query.query);
+                    let reformulations = generate_reformulations_with_synonyms(&query.query);
                     if reformulations.len() >= 2 {
                         let mut fused = self.search_multi(&reformulations, &query)?;
                         let ctx = self.search_context(&query_str);
@@ -943,7 +947,9 @@ pub(super) fn is_test_file(path: &str) -> bool {
 /// Skipped when the query explicitly targets search concepts (detected by
 /// presence of search-related terms like "rrf", "fusion", "retriev", "hybrid").
 pub(super) fn is_search_infra(path: &str, query: &str) -> bool {
-    let is_infra = path.ends_with("engine/search.rs") || path.ends_with("retriever/hybrid.rs");
+    let is_infra = path.ends_with("engine/search.rs")
+        || path.ends_with("engine/synonyms.rs")
+        || path.ends_with("retriever/hybrid.rs");
     if !is_infra {
         return false;
     }
@@ -1225,216 +1231,39 @@ fn path_component_starts_with(path: &str, prefix: &str) -> bool {
     })
 }
 
-/// Generate hypothetical code patterns from a natural language query.
-///
-/// This is a lightweight HyDE (Hypothetical Document Embedding) approach:
-/// maps common programming concepts to code patterns that would appear
-/// in implementations. Used to improve retrieval for conceptual queries.
-///
-/// Example: "how to sort a list" -> ["fn sort", ".sort(", "sort_by", "Ord", "cmp"]
-fn reformulate_to_code(query: &str) -> Vec<String> {
-    let query_lower = query.to_lowercase();
-    let mut patterns = Vec::new();
+use super::synonyms::{expand_synonyms, reformulate_to_code};
 
-    // Map common programming concepts to code patterns.
-    let concept_map: &[(&[&str], &[&str])] = &[
-        // Sorting
-        (
-            &["sort", "order", "arrange"],
-            &["fn sort", ".sort(", "sort_by", "Ord", "cmp"],
-        ),
-        // Searching
-        (
-            &["search", "find", "lookup", "locate"],
-            &["fn search", "fn find", ".find(", "filter", "contains"],
-        ),
-        // Iteration
-        (
-            &["iterate", "loop", "traverse", "walk"],
-            &["for ", ".iter()", ".map(", "while ", "Iterator"],
-        ),
-        // Error handling
-        (
-            &["error", "exception", "handle error", "failure"],
-            &["Result<", "Err(", "unwrap", "anyhow", "?;"],
-        ),
-        // Parsing
-        (
-            &["parse", "parsing", "tokenize", "lex"],
-            &["fn parse", "Parser", "Token", "from_str"],
-        ),
-        // Serialization
-        (
-            &["serialize", "deserialize", "json", "encode", "decode"],
-            &["Serialize", "Deserialize", "serde", "to_string", "from_str"],
-        ),
-        // Concurrency
-        (
-            &["concurrent", "parallel", "thread", "async", "mutex"],
-            &["Arc<", "Mutex<", "async fn", "tokio", "rayon", "RwLock"],
-        ),
-        // Testing
-        (
-            &["test", "assert", "verify", "check"],
-            &["#[test]", "assert!", "assert_eq!", "fn test_"],
-        ),
-        // Caching
-        (
-            &["cache", "memoize", "store"],
-            &["HashMap", "cache", "LruCache", "memo"],
-        ),
-        // Configuration
-        (
-            &["config", "setting", "option", "preference"],
-            &["Config", "Settings", "Options", "Default"],
-        ),
-        // Networking/HTTP
-        (
-            &["http", "request", "endpoint", "api", "rest"],
-            &["fn get", "fn post", "Handler", "Router", "axum"],
-        ),
-        // File I/O
-        (
-            &["file", "read file", "write file", "io"],
-            &["File::open", "read_to_string", "BufReader", "std::fs"],
-        ),
-        // Graph/tree
-        (
-            &["graph", "tree", "node", "edge"],
-            &["Graph", "Node", "Edge", "petgraph", "DiGraph"],
-        ),
-        // Database
-        (
-            &["database", "query", "sql", "store"],
-            &["Connection", "execute", "query", "INSERT", "SELECT"],
-        ),
-        // Authentication
-        (
-            &["auth", "login", "password", "token", "jwt"],
-            &["authenticate", "verify_token", "Bearer", "Session"],
-        ),
-        // Hashing
-        (
-            &["hash", "digest", "checksum"],
-            &["Hash", "Hasher", "sha256", "xxh3", "digest"],
-        ),
-        // Embedding/vector
-        (
-            &["embed", "vector", "similarity", "cosine"],
-            &["embed", "Vec<f32>", "cosine_similarity", "dot_product"],
-        ),
-        // Indexing
-        (
-            &["index", "inverted", "full text", "bm25"],
-            &["Index", "Tantivy", "BM25", "tokenizer"],
-        ),
-    ];
+/// Generate query reformulations enriched with synonym expansion and code patterns.
+///
+/// Extends [`generate_reformulations`] with:
+/// - A synonym-expanded variant (e.g. "rate limiting" → "rate limiting throttle burst").
+/// - The top-3 code-pattern tokens from [`reformulate_to_code`] joined as a single
+///   search string (e.g. "rate limiting" → "RateLimiter throttle_count burst_capacity").
+///
+/// Used by the `Fast` and `Thorough` strategies to improve concept recall without
+/// polluting the main BM25 query.
+fn generate_reformulations_with_synonyms(query: &str) -> Vec<String> {
+    let mut reformulations = generate_reformulations(query);
 
-    for (keywords, code_patterns) in concept_map {
-        if keywords.iter().any(|kw| query_lower.contains(kw)) {
-            patterns.extend(code_patterns.iter().map(|p| p.to_string()));
+    // Append synonym-expanded variant if it adds new terms.
+    if let Some(expanded) = expand_synonyms(query) {
+        if expanded != query {
+            reformulations.push(expanded);
         }
     }
 
-    patterns
-}
-
-/// Expand query with domain-specific code synonyms.
-///
-/// Bridges vocabulary gaps where users describe concepts differently
-/// than the code names them (e.g. "dead code" -> "orphan", "unused" -> "zero in-degree").
-fn expand_synonyms(query: &str) -> Option<String> {
-    let query_lower = query.to_lowercase();
-    let mut extra_terms = Vec::new();
-
-    let synonym_map: &[(&[&str], &[&str])] = &[
-        // Dead code / unused detection
-        (
-            &["dead code", "unused", "unreachable"],
-            &["orphan", "zero in-degree", "find_orphans"],
-        ),
-        // Error handling
-        (
-            &["error handling", "exception"],
-            &["Result", "Error", "anyhow"],
-        ),
-        // Dependency / import
-        (
-            &["dependency", "dependencies"],
-            &["import", "require", "use"],
-        ),
-        // Callback / handler
-        (
-            &["callback", "handler", "listener"],
-            &["on_", "handle_", "hook"],
-        ),
-        // Cache / memoize
-        (
-            &["cache", "caching", "memoize"],
-            &["LruCache", "HashMap", "memo"],
-        ),
-        // Refactor / rename
-        (
-            &["refactor", "restructure"],
-            &["rename", "extract", "inline"],
-        ),
-        // Performance / optimization
-        (
-            &["performance", "optimize", "speed"],
-            &["benchmark", "perf", "fast"],
-        ),
-        // Authentication / authorization
-        (
-            &["authentication", "authorization", "auth"],
-            &["login", "token", "session", "jwt"],
-        ),
-        // Serialization
-        (
-            &["serialize", "marshal"],
-            &["serde", "Serialize", "Deserialize", "json"],
-        ),
-        // Similarity / matching
-        (
-            &["similar", "duplicate", "clone detection"],
-            &["cosine", "similarity", "find_similar"],
-        ),
-        // Ranking / scoring
-        (
-            &["ranking", "scoring", "relevance"],
-            &["pagerank", "boost", "score", "BM25"],
-        ),
-        // Documentation
-        (
-            &["documentation", "docs", "docstring"],
-            &["doc comment", "///", "enrich_docs"],
-        ),
-        // Coverage / testing
-        (
-            &["coverage", "test coverage"],
-            &["find_tests", "test_mapping", "#[test]"],
-        ),
-        // Complexity
-        (
-            &["complexity", "complex", "complicated"],
-            &["cyclomatic", "get_complexity", "McCabe"],
-        ),
-    ];
-
-    for (triggers, expansions) in synonym_map {
-        if triggers.iter().any(|t| query_lower.contains(t)) {
-            for exp in expansions.iter() {
-                if !query_lower.contains(&exp.to_lowercase()) {
-                    extra_terms.push(exp.to_string());
-                }
-            }
-        }
+    // Append top-3 code pattern tokens as a single query string.
+    let code_patterns = reformulate_to_code(query);
+    if !code_patterns.is_empty() {
+        let joined = code_patterns
+            .into_iter()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(" ");
+        reformulations.push(joined);
     }
 
-    if extra_terms.is_empty() {
-        None
-    } else {
-        Some(format!("{} {}", query, extra_terms.join(" ")))
-    }
+    reformulations
 }
 
 /// Generate query reformulations for multi-query search (RRF fusion).
@@ -1537,6 +1366,69 @@ fn generate_reformulations(query: &str) -> Vec<String> {
     }
 
     reformulations
+}
+
+/// Classify whether a query reads like natural language (vs. a code identifier).
+///
+/// Used as a lightweight gate: natural-language queries benefit from synonym
+/// expansion and code-HyDE reformulations; pure symbol lookups do not.
+///
+/// Returns `true` when:
+/// - The query has 3+ words, AND
+/// - It contains a natural-language marker word (articles, conjunctions,
+///   question words, or common conceptual nouns), OR
+/// - It has no code separators (`_`, `::`, `.`) and all words are short lowercase.
+#[allow(dead_code)]
+fn is_natural_language_query(query: &str) -> bool {
+    const NL_MARKERS: &[&str] = &[
+        "a",
+        "an",
+        "the",
+        "and",
+        "or",
+        "not",
+        "in",
+        "of",
+        "for",
+        "to",
+        "is",
+        "how",
+        "does",
+        "what",
+        "where",
+        "why",
+        "when",
+        "with",
+        "from",
+        "by",
+        "this",
+        "that",
+        "which",
+        "using",
+        "about",
+        "into",
+        "between",
+        "implementation",
+        "handling",
+        "building",
+        "checking",
+        "scheduling",
+    ];
+    let words: Vec<&str> = query.split_whitespace().collect();
+    if words.len() < 3 {
+        return false;
+    }
+    let has_nl_marker = words
+        .iter()
+        .any(|w| NL_MARKERS.contains(&w.to_lowercase().as_str()));
+    let has_code_separator = words
+        .iter()
+        .any(|w| w.contains('_') || w.contains("::") || w.contains('.'));
+    has_nl_marker
+        || (!has_code_separator
+            && words
+                .iter()
+                .all(|w| w.len() <= 15 && *w == w.to_lowercase()))
 }
 
 /// Fuse multiple ranked result lists via iterative Reciprocal Rank Fusion.
@@ -2462,5 +2354,14 @@ mod tests {
             backtick.is_empty(),
             "bare filename without / should not be extracted as backtick file path, got: {backtick:?}"
         );
+    }
+
+    #[test]
+    fn is_natural_language_query_classification() {
+        assert!(is_natural_language_query("rate limiting and throttling"));
+        assert!(is_natural_language_query("how does authentication work"));
+        assert!(!is_natural_language_query("FiberNode abort callers"));
+        assert!(!is_natural_language_query("createRateLimiter"));
+        assert!(!is_natural_language_query("ab"));
     }
 }
