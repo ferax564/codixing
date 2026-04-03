@@ -3,7 +3,7 @@ members = ["crates/core", "crates/cli", "crates/mcp", "crates/lsp", "crates/serv
 resolver = "3"
 
 [workspace.package]
-version = "0.26.0"
+version = "0.27.0"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.85"
@@ -43,6 +43,7 @@ tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 hf-hub = { version = "0.4", features = ["native-tls"] }
 ndarray = "0.17"
 usearch = "2"
+safetensors = "0.5"
 
 # Async runtime & HTTP server
 axum = { version = "0.8", features = ["json", "macros"] }

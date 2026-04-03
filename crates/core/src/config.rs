@@ -202,6 +202,13 @@ pub enum EmbeddingModel {
     /// Runs via the same ONNX Runtime shared library as the BGE models.
     #[cfg(feature = "qwen3")]
     Qwen3SmallEmbedding,
+    /// Model2Vec static embeddings — 256 dimensions, ~40ms init, no ONNX.
+    ///
+    /// Uses `minishlab/potion-base-8M` from HuggingFace. Computes document
+    /// embeddings as the mean of static token vectors (a lookup table, not
+    /// a neural network). Enables hybrid search on any machine without GPU
+    /// or ONNX Runtime.
+    Model2Vec,
 }
 
 /// Which vector storage backend to use for the brute-force / trait-based index.

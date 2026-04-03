@@ -46,6 +46,7 @@ tokenizers-qwen3 = { package = "tokenizers", version = "0.22",         optional 
 ndarray-qwen3  = { package = "ndarray",    version = "0.17",          optional = true }
 
 hf-hub = { workspace = true }
+tokenizers = { workspace = true }
 
 tree-sitter.workspace = true
 tree-sitter-rust.workspace = true
@@ -77,6 +78,7 @@ dashmap.workspace = true
 rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+safetensors.workspace = true
 bitcode.workspace = true
 xxhash-rust.workspace = true
 thiserror.workspace = true

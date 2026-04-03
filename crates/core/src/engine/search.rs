@@ -179,7 +179,7 @@ impl Engine {
                     min_results: 3,
                     cliff_threshold: 0.35,
                 })
-                .add(DeduplicationStage),
+                .add(FileDedupStage),
         }
     }
 
@@ -191,6 +191,7 @@ impl Engine {
             graph: self.graph.as_ref(),
             graph_boost_weight: self.config.graph.boost_weight,
             recency_map: Some(self.get_recency_map()),
+            chunk_meta: Some(&self.chunk_meta),
         }
     }
 

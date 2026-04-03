@@ -613,7 +613,7 @@ dependencies = [
 
 [[package]]
 name = "codixing"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -628,7 +628,7 @@ dependencies = [
 
 [[package]]
 name = "codixing-core"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "bitcode",
  "criterion",
@@ -649,6 +649,7 @@ dependencies = [
  "regex",
  "regex-syntax",
  "rustqueue",
+ "safetensors 0.5.3",
  "serde",
  "serde_json",
  "serial_test",
@@ -684,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "codixing-lsp"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "codixing-core",
  "serde_json",
@@ -697,7 +698,7 @@ dependencies = [
 
 [[package]]
 name = "codixing-mcp"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -714,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "codixing-server"
-version = "0.25.0"
+version = "0.26.0"
 dependencies = [
  "anyhow",
  "axum 0.8.8",
@@ -1288,7 +1289,7 @@ dependencies = [
  "hf-hub",
  "ndarray",
  "ort",
- "safetensors",
+ "safetensors 0.7.0",
  "serde",
  "serde_json",
  "tokenizers",
@@ -3483,6 +3484,16 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "safetensors"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc0cdb7198d738a111f6df8fef42cb175412c311d0c4ac9126ff4e550ad1a0e8"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "safetensors"
