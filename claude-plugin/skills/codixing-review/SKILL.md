@@ -4,20 +4,23 @@ description: Code review with full context using Codixing. Analyzes the current 
 user-invocable: true
 disable-model-invocation: false
 argument-hint: "[commit-range or file]"
-allowed-tools: Bash, Read, MCP(codixing::*)
+allowed-tools: Bash, Read
 ---
 
 # Codixing Review
 
-Perform a thorough code review of the current changes using Codixing's code intelligence.
+Perform a thorough code review of the current changes using the Codixing CLI.
 
 ## Steps
 
 ### 1. Get the diff
 
-If the user provided a commit range, use `git_diff` with that range. Otherwise, get the working tree diff:
+If the user provided a commit range, use it directly. Otherwise, get the working tree diff:
 
-Call `git_diff` with no arguments to see unstaged + staged changes.
+```bash
+git diff
+git diff --cached
+```
 
 If the diff is empty, check for staged changes or recent commits:
 ```bash
@@ -26,30 +29,49 @@ git log --oneline -5
 
 ### 2. Analyze impact
 
-Call `predict_impact` with the diff content. This uses the dependency graph + call graph to rank files most likely to need changes or be affected by the diff.
+For each changed file, find what calls into it:
+
+```bash
+codixing callers path/to/changed_file
+```
+
+This uses the dependency graph + call graph to rank files most likely to need changes or be affected by the diff.
 
 Present the impact analysis as a ranked list with explanations.
 
 ### 3. Review context
 
-Call `review_context` with the diff. This assembles:
-- Changed symbols and their signatures
+For changed symbols, find all usage sites:
+
+```bash
+codixing usages changed_symbol
+```
+
+This assembles:
 - Callers of changed functions (who might break)
-- Related tests that should be run
+- Related code that should be checked
 
 ### 4. Check test coverage
 
-For each changed file, call `find_tests` to identify existing tests. Flag any changed code that lacks test coverage.
+For each changed file, search for existing tests:
+
+```bash
+codixing search "test_function"
+```
+
+Flag any changed code that lacks test coverage.
 
 ### 5. Examine callers
 
-For the most important changed symbols (functions, methods), call `symbol_callers` to find all call sites. Check if any callers might be affected by the change.
+For the most important changed symbols (functions, methods), find all call sites:
 
-### 6. Complexity check
+```bash
+codixing usages symbol_name
+```
 
-For changed files, call `get_complexity` to identify any functions with high cyclomatic complexity. Flag functions above threshold 10 as candidates for refactoring.
+Check if any callers might be affected by the change.
 
-### 7. Preflight: Claim Verification
+### 6. Preflight: Claim Verification
 
 Before writing the review verdict, check for any accuracy or performance claims in the diff (commit messages, comments, docs):
 
@@ -60,7 +82,7 @@ Before writing the review verdict, check for any accuracy or performance claims 
 
 This catches misleading commit messages and PR descriptions before they reach main.
 
-### 8. Present review
+### 7. Present review
 
 Structure the review as:
 

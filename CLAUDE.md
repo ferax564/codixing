@@ -23,31 +23,23 @@ codixing callees src/engine/mod.rs  # what this file imports
 codixing graph --map                # repo architecture map
 ```
 
-MCP tools (`mcp__codixing__*`) are also available when the MCP server is connected, but the CLI is preferred — it's simpler, works for subagents, and dogfoods the search quality directly.
+The MCP server is also available when connected to an editor, but the CLI is preferred — it's simpler, works for subagents, and dogfoods the search quality directly.
 
 For broad codebase exploration, always try Codixing first. Fall back to Grep/Bash only if the CLI doesn't cover the case.
 
-### When to use which tool
+### When to use which command
 
-- **Understanding a symbol** → `explain` (assembles definition + callers + callees in one call)
-- **Finding where something is defined** → `find_symbol`
-- **Searching by concept / natural language** → `code_search` (auto-detects strategy; use `kind` param to filter by type)
-- **Searching by symbol type** → `code_search` with `kind` param (`function`, `struct`, `enum`, `trait`, `impl`, `const`)
-- **Discovering available tools** → `search_tools` (keyword search over tool names/descriptions)
-- **Getting tool schemas** → `get_tool_schema` (lazy schema loading, used with `--compact`)
-- **Listing files by glob** → `list_files`
-- **Impact analysis before a change** → `predict_impact`
-- **Seeing all callers of a function** → `symbol_callers`
-- **Seeing what a function calls** → `symbol_callees`
-- **Rename across codebase** → `rename_symbol`
-- **Test coverage discovery** → `find_tests`
-- **Finding code that a test covers** → `find_source_for_test`
-- **Cyclomatic complexity** → `get_complexity`
-- **Code review context** → `review_context`
-- **Context-aware repo map** → `focus_map` (PPR seeded by recent edits)
-- **Index freshness check** → `check_staleness`
-- **Multi-agent session status** → `session_status`
-- **Assembled context for a task** → `get_context_for_task`
+- **Understanding a symbol** → `codixing usages <name>` (call sites and imports)
+- **Finding where something is defined** → `codixing symbols <name>`
+- **Searching by concept / natural language** → `codixing search "<query>"`
+- **Searching by symbol type** → `codixing search "<query>" --kind function` (function, struct, enum, trait, impl, const)
+- **Listing files by glob** → `Glob` tool (Codixing doesn't replace file finding)
+- **Impact analysis before a change** → `codixing callers <file>` + `codixing callees <file>`
+- **Seeing all callers of a function** → `codixing usages <name>`
+- **Architecture overview** → `codixing graph --map`
+- **Test coverage discovery** → `codixing search "test <name>"`
+- **Index freshness / stale files** → `codixing audit`
+- **Incremental re-index after changes** → `codixing sync`
 
 ## Project Structure
 
@@ -142,7 +134,7 @@ Never batch documentation updates after implementation — document as you go.
 
 When dispatching subagents (implementation, review, or any task):
 
-1. **Always use Codixing MCP tools for code exploration.** Subagents MUST use `mcp__codixing__code_search`, `mcp__codixing__find_symbol`, `mcp__codixing__read_file`, etc. instead of `grep`, `cat`, `find`. Include this instruction in every subagent prompt.
+1. **Always use the Codixing CLI for code exploration.** Subagents MUST use `codixing search`, `codixing symbols`, `codixing usages`, `codixing callers`, `codixing callees` instead of `grep`, `cat`, `find`. Include this instruction in every subagent prompt.
 2. **Always spec-review every task.** No task is "too simple" to skip review.
 3. **Always run the full verification triad** (test + clippy + fmt) before committing.
 4. **Never run background tests against the main repo** while working in a worktree. Always run tests from the worktree directory.

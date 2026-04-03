@@ -9,36 +9,24 @@ Code retrieval engine that saves your AI agent 73% of its token budget. Replaces
 
 ## Install
 
-### Claude Code
+```sh
+curl -fsSL https://codixing.com/install.sh | sh
+```
+
+Installs `codixing` to `/usr/local/bin`. macOS (Apple Silicon) and Linux (x86_64). Binaries also on the [releases page](https://github.com/ferax564/codixing/releases).
+
+### Claude Code plugin (optional)
 
 ```bash
-# Plugin — includes MCP server + 5 slash commands (recommended)
 claude plugin marketplace add ferax564/codixing
 claude plugin install codixing@codixing
 ```
 
-Restart Claude Code after installing. You get 57 MCP tools plus `/codixing-setup`, `/codixing-explore`, `/codixing-review`, `/codixing-preflight`, and `/codixing-release`.
+Adds 5 slash commands: `/codixing-setup`, `/codixing-explore`, `/codixing-review`, `/codixing-preflight`, `/codixing-release`.
 
-Alternatively, register just the MCP server without the plugin:
+### MCP server (optional — for Cursor, Windsurf, Continue.dev, Codex)
 
-```bash
-claude mcp add codixing -- npx -y codixing-mcp --root . --medium --no-daemon-fork
-```
-
-### OpenAI Codex CLI
-
-Install the binary first, then register the MCP server:
-
-```bash
-curl -fsSL https://codixing.com/install.sh | sh
-codex mcp add codixing -- codixing-mcp --root .
-```
-
-> **Note:** Codex requires the binary installed locally — `npx` is not supported. Do not use `--compact` with Codex as it needs all 57 tools visible in the tool list.
-
-### Cursor / Windsurf
-
-Add to your project's `.mcp.json` (or global MCP settings):
+Add to your project's `.mcp.json`:
 
 ```json
 {
@@ -51,31 +39,7 @@ Add to your project's `.mcp.json` (or global MCP settings):
 }
 ```
 
-### Continue.dev
-
-Add to `~/.continue/config.json` under `mcpServers`:
-
-```json
-{
-  "mcpServers": [
-    {
-      "name": "codixing",
-      "command": "npx",
-      "args": ["-y", "codixing-mcp", "--root", "."]
-    }
-  ]
-}
-```
-
-### Binary install
-
-For CLI usage or when `npx` isn't available:
-
-```sh
-curl -fsSL https://codixing.com/install.sh | sh
-```
-
-Installs `codixing`, `codixing-mcp`, and `codixing-lsp` to `/usr/local/bin`. macOS (Apple Silicon) and Linux (x86_64). Binaries also on the [releases page](https://github.com/ferax564/codixing/releases).
+Or for OpenAI Codex CLI: `codex mcp add codixing -- codixing-mcp --root .`
 
 ---
 
@@ -114,10 +78,8 @@ At 50 agent sessions/day, that's **$1,400/month** back in your pocket — and th
 ### 60-second setup
 
 ```bash
-# 1. Install (pick one)
-claude plugin marketplace add ferax564/codixing   # Claude Code plugin (recommended)
-npx -y codixing-mcp                               # any MCP client
-curl -fsSL https://codixing.com/install.sh | sh   # standalone binary
+# 1. Install
+curl -fsSL https://codixing.com/install.sh | sh
 
 # 2. Index your project
 codixing init .
@@ -129,7 +91,7 @@ codixing search "authentication handler"
 #   pub fn handle_auth_request(req: Request) -> Result<Token>
 ```
 
-That's it. Your agent now uses ranked search instead of grep. The MCP server auto-indexes on first connection if no index exists.
+That's it. Your agent now uses ranked search instead of grep.
 
 ### CLI commands
 
@@ -164,9 +126,27 @@ Requires ONNX Runtime (`pip install onnxruntime` or download from GitHub).
 
 ---
 
-## MCP Tools
+## CLI Commands
 
-57 tools across 7 categories:
+19 commands for code intelligence:
+
+```bash
+codixing search "query"          # Semantic code search
+codixing symbols Widget          # Find symbol definitions
+codixing usages add_chunk        # Find call sites and imports
+codixing callers src/engine.rs   # Who imports this file
+codixing callees src/engine.rs   # What this file imports
+codixing graph --map             # Architecture overview
+codixing init .                  # Index a project
+codixing sync                    # Incremental re-index
+codixing audit                   # Find stale files
+```
+
+Full reference: [codixing.com/docs](https://codixing.com/docs)
+
+### MCP server (optional)
+
+For editors with MCP support, the `codixing-mcp` binary exposes 57 JSON-RPC 2.0 tools:
 
 | Category | Tools |
 |----------|-------|
@@ -177,8 +157,6 @@ Requires ONNX Runtime (`pip install onnxruntime` or download from GitHub).
 | **Git** | git_diff, get_hotspots, search_changes, get_blame |
 | **Session** | remember, recall, forget, get_session_summary, session_status, session_reset_focus |
 | **Meta** | index_status, search_tools, get_tool_schema, enrich_docs |
-
-Full reference: [codixing.com/docs](https://codixing.com/docs)
 
 ### Daemon mode
 
@@ -265,7 +243,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Ranked cross-imports** — PageRank + git recency scoring for relevance-ranked graph queries across directory boundaries
 - **Memory relations** — `memory_relate` tool creates typed edges between agent memory entries, enabling associative recall across sessions
 - **Feature hub** — One-call feature exploration combining search + callers + callees + tests for unified understanding
-- **57 MCP tools** — Search, graph traversal, file operations, code review, git analysis, session memory, federation discovery
+- **CLI + MCP** — 19 CLI commands for direct use; 57 MCP tools for editor integration (search, graph traversal, file operations, code review, git analysis, session memory, federation discovery)
 - **File freshness audit** — `audit_freshness` tool identifies stale and orphaned files across releases
 - **Preflight gates** — Plugin enforces existence scanning before proposing new features
 - **TypeScript import resolution** — Resolve `.js` → `.ts` imports with node16/bundler moduleResolution support, enabling 0.8+ R@10 on cross-package code discovery
@@ -325,7 +303,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 │  + Exact (trigram) · Graph boost · Definition 3.5× · Session     │
 │  SearchPipeline: composable stages, 6 strategies                  │
 │                                                                   │
-│  API: CLI · MCP (57 tools, JSON-RPC 2.0) · LSP · HTTP Server    │
+│  API: CLI (19 cmds) · MCP (57 tools, JSON-RPC 2.0) · LSP · HTTP  │
 │       Daemon (Unix socket / Windows named pipe) · File Watcher   │
 └──────────────────────────────────────────────────────────────────┘
 ```
