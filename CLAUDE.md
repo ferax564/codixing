@@ -2,18 +2,30 @@
 
 ## Code Search & Navigation
 
-**MANDATORY: Always use Codixing MCP tools** instead of `grep`, `find`, `cat`, or `rg` for code exploration tasks. This applies to ALL agents, including subagents dispatched for implementation, review, or exploration. Include this instruction when dispatching any subagent:
+**MANDATORY: Always use the Codixing CLI** (via Bash) instead of `Grep`, `grep`, `find`, `cat`, or `rg` for code exploration tasks. This applies to ALL agents, including subagents. A PostToolUse hook enforces this — Grep on code files triggers a reminder.
 
-| Instead of... | Use... |
+| Instead of... | Use (via Bash)... |
 |---|---|
-| `grep -r "symbol"` | `mcp__codixing__search` |
-| `cat file.rs` | `mcp__codixing__read_file` |
-| `find . -name "*.rs"` | `mcp__codixing__list_files` |
-| `grep -rn "fn foo"` to find a definition | `mcp__codixing__find_symbol` |
-| Manual call-site hunting | `mcp__codixing__symbol_callers` |
-| Manual dependency tracing | `mcp__codixing__callers` / `mcp__codixing__callees` |
+| `Grep "symbol" **/*.rs` | `codixing search "symbol"` |
+| `Grep "fn foo"` to find a definition | `codixing symbols foo` |
+| Manual call-site hunting | `codixing usages foo` |
+| Manual dependency tracing | `codixing callers <file>` / `codixing callees <file>` |
+| `find . -name "*.rs"` | `Glob` tool (Codixing doesn't replace file finding) |
+| `cat file.rs` / `Read` tool | `Read` tool (Codixing doesn't replace file reading) |
 
-For broad codebase exploration, always try a Codixing tool first. Fall back to Bash only if the tool doesn't cover the case.
+**CLI commands** (run from repo root via Bash):
+```bash
+codixing search "rate limiting"     # semantic code search
+codixing symbols Widget             # find symbol definitions
+codixing usages add_chunk           # find call sites and imports
+codixing callers src/engine/mod.rs  # who imports this file
+codixing callees src/engine/mod.rs  # what this file imports
+codixing graph --map                # repo architecture map
+```
+
+MCP tools (`mcp__codixing__*`) are also available when the MCP server is connected, but the CLI is preferred — it's simpler, works for subagents, and dogfoods the search quality directly.
+
+For broad codebase exploration, always try Codixing first. Fall back to Grep/Bash only if the CLI doesn't cover the case.
 
 ### When to use which tool
 
