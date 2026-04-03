@@ -222,7 +222,7 @@ code --install-extension codixing.vsix
 | Search latency | 30-42ms | 36-40ms |
 | Top-1 accuracy | 7/10 | **10/10** |
 
-**Retrieval accuracy** (OpenClaw, 9.4K files): Codixing R@10 = **0.714** vs grep R@10 = 0.345 — **2× better retrieval**.
+**Retrieval accuracy** (OpenClaw, 9.4K files): Codixing R@10 = **0.763** vs grep R@10 = 0.345 — **2× better retrieval** (MRR = 0.706).
 
 **Large codebase** (368K LoC, 7,607 files): Init 7.9s, search 94ms, 99% token reduction vs grep.
 
@@ -247,11 +247,11 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **File freshness audit** — `audit_freshness` tool identifies stale and orphaned files across releases
 - **Preflight gates** — Plugin enforces existence scanning before proposing new features
 - **TypeScript import resolution** — Resolve `.js` → `.ts` imports with node16/bundler moduleResolution support, enabling 0.8+ R@10 on cross-package code discovery
-- **Background embedding drain** — Instant BM25 search after `codixing init`, hybrid vector search transparently upgrades as embeddings complete in the background
+- **Background embedding drain** — Instant BM25 search after `codixing init`, hybrid vector search transparently upgrades as embeddings complete in the background; experimental static embeddings via Model2Vec (no ONNX needed, instant init)
 - **Embedding speed measurement** — New `bench-embed` CLI subcommand for profiling embedding performance across custom models
 - **Daemon mode** — Engine stays in memory, auto-starts on first connection, Unix socket (macOS/Linux) or named pipe (Windows) IPC, file watcher for live index updates, 30-min idle timeout
 - **Field-weighted BM25** — Configurable per-field boosting (entity_names 3×, signature 2×, scope_chain 1.5×, content 1×)
-- **Search pipeline** — Composable search stages (definition boost, test demotion, path match, graph boost, recency boost, deduplication, truncation) with 6 strategies including trigram exact-match
+- **Search pipeline** — Composable search stages (definition boost, test demotion, path match, graph boost, recency boost, graph semantic propagation via GraphPropagationStage, file-level dedup via FileDedupStage, truncation) with 6 strategies including trigram exact-match
 - **Multi-query RRF fusion** — Auto-generates query reformulations for natural-language queries (3+ words) and fuses results via Reciprocal Rank Fusion; also available via explicit `queries` parameter on `code_search`
 - **Git recency signal** — Mildly boosts recently modified files (+10% linear decay over 180 days) via lazy-loaded git log timestamps
 - **Overlapping chunks** — Bridge chunks at AST-aware chunk boundaries capture cross-function context; configurable `overlap_ratio` (default 0.0)
@@ -314,7 +314,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 856+ tests
+cargo test --workspace        # 871+ tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```
