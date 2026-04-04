@@ -585,10 +585,14 @@ fn cmd_init(
 fn parse_embedding_model(s: &str) -> Result<EmbeddingModel> {
     match s.to_lowercase().as_str() {
         "bge-small-en" | "bge-small" | "small" => Ok(EmbeddingModel::BgeSmallEn),
+        "bge-small-en-q" | "bge-small-q" | "small-q" => Ok(EmbeddingModel::BgeSmallEnQ),
         "bge-base-en" | "bge-base" | "base" => Ok(EmbeddingModel::BgeBaseEn),
         "bge-large-en" | "bge-large" | "large" => Ok(EmbeddingModel::BgeLargeEn),
         "jina" | "jina-embed-code" => Ok(EmbeddingModel::JinaEmbedCode),
         "nomic-embed-code" | "nomic" => Ok(EmbeddingModel::NomicEmbedCode),
+        "snowflake-arctic-xs-q" | "arctic-xs-q" | "arctic-xs" => {
+            Ok(EmbeddingModel::SnowflakeArcticEmbedXSQ)
+        }
         "snowflake-arctic-l" | "arctic-l" | "arctic" => Ok(EmbeddingModel::SnowflakeArcticEmbedL),
         "qwen3" | "qwen" => {
             #[cfg(feature = "qwen3")]
@@ -601,8 +605,9 @@ fn parse_embedding_model(s: &str) -> Result<EmbeddingModel> {
             Ok(EmbeddingModel::Model2VecRetrieval)
         }
         "jina-code-int8" | "jina-int8" => Ok(EmbeddingModel::JinaCodeInt8),
+        "model2vec-jina-code" | "m2v-jina" | "jina-m2v" => Ok(EmbeddingModel::Model2VecJinaCode),
         other => anyhow::bail!(
-            "unknown model '{}'. Valid: bge-small-en, bge-base-en, bge-large-en, jina-embed-code, jina-code-int8, nomic-embed-code, snowflake-arctic-l, qwen3, model2vec, model2vec-retrieval",
+            "unknown model '{}'. Valid: bge-small-en, bge-base-en, bge-large-en, jina-embed-code, jina-code-int8, nomic-embed-code, snowflake-arctic-l, qwen3, model2vec, model2vec-retrieval, model2vec-jina-code",
             other
         ),
     }

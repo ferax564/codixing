@@ -1,19 +1,19 @@
 # Queue Embedding v2 — Benchmark Results
 
-**Date:** 2026-04-03 23:20
+**Date:** 2026-04-04 15:25
 
 ## Search Accuracy (OpenClaw)
 
 | Method | Precision@10 | Recall@10 | MRR |
 |--------|-------------|----------|-----|
 | grep | 0.150 | 0.345 | 0.176 |
-| codixing | 0.251 | 0.710 | 0.631 |
+| codixing | 0.256 | 0.720 | 0.556 |
 
 ### By Category
 
 | Category | Strategy | grep P@10 | grep R@10 | codixing P@10 | codixing R@10 | Best |
 |----------|----------|----------|----------|--------------|--------------|------|
-| concept | fast | 0.060 | 0.183 | 0.100 | 0.300 | codixing |
+| concept | fast | 0.060 | 0.183 | 0.120 | 0.340 | codixing |
 | cross-package | cross_imports | 0.040 | 0.080 | 0.233 | 0.800 | codixing |
 | symbol | symbol_lookup | 0.140 | 0.600 | 0.180 | 1.000 | codixing |
 | usage | usages | 0.360 | 0.515 | 0.489 | 0.740 | codixing |
@@ -60,10 +60,10 @@
 | usage-context-engine-imports | usage | usages | 0.500 | 0.625 | 1.000 |
 | usage-load-config | usage | usages | 0.700 | 0.700 | 1.000 |
 | concept-security-audit | concept | fast | 0.200 | 0.500 | 0.500 |
-| concept-rate-limiting | concept | fast | 0.100 | 0.333 | 1.000 |
-| concept-secret-redaction | concept | fast | 0.100 | 0.333 | 1.000 |
-| concept-cron-scheduling | concept | fast | 0.000 | 0.000 | 0.000 |
-| concept-system-prompt-composition | concept | fast | 0.100 | 0.333 | 1.000 |
+| concept-rate-limiting | concept | fast | 0.100 | 0.333 | 0.500 |
+| concept-secret-redaction | concept | fast | 0.100 | 0.333 | 0.500 |
+| concept-cron-scheduling | concept | fast | 0.100 | 0.200 | 0.167 |
+| concept-system-prompt-composition | concept | fast | 0.100 | 0.333 | 0.333 |
 | cross-pkg-plugin-sdk-entry | cross-package | cross_imports | 0.000 | 0.000 | 0.000 |
 | cross-pkg-bundled-channel-entries | cross-package | cross_imports | 0.250 | 1.000 | 0.500 |
 | cross-pkg-security-from-gateway | cross-package | cross_imports | 0.167 | 1.000 | 0.200 |
@@ -74,45 +74,45 @@
 
 | Method | Avg query time (ms) | Min | Max |
 |--------|-------------------|-----|-----|
-| grep | 938.5 | 511.7 | 1368.3 |
-| codixing cross_imports | 149.5 | 148.9 | 149.9 |
-| codixing fast | 66903.8 | 55556.4 | 93273.5 |
-| codixing symbol_lookup | 140.6 | 138.8 | 142.2 |
-| codixing usages | 133.8 | 132.0 | 138.5 |
+| grep | 1142.2 | 546.5 | 2093.1 |
+| codixing cross_imports | 131.5 | 118.5 | 143.0 |
+| codixing fast | 72445.5 | 59811.7 | 99987.9 |
+| codixing symbol_lookup | 90.4 | 82.7 | 107.4 |
+| codixing usages | 83.4 | 79.8 | 90.5 |
 
 ### Per-Query Timing
 
 | Query | Category | grep (ms) | codixing (ms) | Strategy |
 |-------|----------|----------|--------------|----------|
-| symbol-channel-plugin | symbol | 1205.6 | 140.9 | symbol_lookup |
-| symbol-gateway-server | symbol | 511.7 | 140.5 | symbol_lookup |
-| symbol-context-engine-interface | symbol | 542.3 | 138.8 | symbol_lookup |
-| symbol-openclaw-config | symbol | 520.2 | 140.5 | symbol_lookup |
-| symbol-tool-policy-like | symbol | 533.8 | 142.2 | symbol_lookup |
-| usage-redact-sensitive-text | usage | 993.2 | 132.9 | usages |
-| usage-create-auth-rate-limiter | usage | 1007.4 | 132.6 | usages |
-| usage-channel-plugin-imports | usage | 979.6 | 132.0 | usages |
-| usage-context-engine-imports | usage | 974.7 | 138.5 | usages |
-| usage-load-config | usage | 985.4 | 133.1 | usages |
-| concept-security-audit | concept | 653.7 | 55995.8 | fast |
-| concept-rate-limiting | concept | 1368.3 | 55556.4 | fast |
-| concept-secret-redaction | concept | 761.1 | 93273.5 | fast |
-| concept-cron-scheduling | concept | 684.0 | 55575.2 | fast |
-| concept-system-prompt-composition | concept | 1271.9 | 74117.9 | fast |
-| cross-pkg-plugin-sdk-entry | cross-package | 1081.3 | 149.8 | cross_imports |
-| cross-pkg-bundled-channel-entries | cross-package | 1106.1 | 149.6 | cross_imports |
-| cross-pkg-security-from-gateway | cross-package | 1180.9 | 148.9 | cross_imports |
-| cross-pkg-config-types-from-agents | cross-package | 1199.8 | 149.2 | cross_imports |
-| cross-pkg-plugin-contracts-registry | cross-package | 1209.9 | 149.9 | cross_imports |
+| symbol-channel-plugin | symbol | 1247.0 | 107.4 | symbol_lookup |
+| symbol-gateway-server | symbol | 558.5 | 86.5 | symbol_lookup |
+| symbol-context-engine-interface | symbol | 597.6 | 82.7 | symbol_lookup |
+| symbol-openclaw-config | symbol | 546.5 | 90.5 | symbol_lookup |
+| symbol-tool-policy-like | symbol | 554.2 | 85.0 | symbol_lookup |
+| usage-redact-sensitive-text | usage | 1009.9 | 90.5 | usages |
+| usage-create-auth-rate-limiter | usage | 985.4 | 85.4 | usages |
+| usage-channel-plugin-imports | usage | 990.3 | 81.0 | usages |
+| usage-context-engine-imports | usage | 956.2 | 79.8 | usages |
+| usage-load-config | usage | 997.1 | 80.2 | usages |
+| concept-security-audit | concept | 698.7 | 59849.3 | fast |
+| concept-rate-limiting | concept | 1512.7 | 62386.9 | fast |
+| concept-secret-redaction | concept | 1562.1 | 99987.9 | fast |
+| concept-cron-scheduling | concept | 1414.0 | 59811.7 | fast |
+| concept-system-prompt-composition | concept | 2093.1 | 80191.7 | fast |
+| cross-pkg-plugin-sdk-entry | cross-package | 1933.3 | 143.0 | cross_imports |
+| cross-pkg-bundled-channel-entries | cross-package | 1204.1 | 118.5 | cross_imports |
+| cross-pkg-security-from-gateway | cross-package | 1304.3 | 142.6 | cross_imports |
+| cross-pkg-config-types-from-agents | cross-package | 1359.6 | 120.8 | cross_imports |
+| cross-pkg-plugin-contracts-registry | cross-package | 1319.0 | 132.7 | cross_imports |
 
 ## Indexing Speed
 
 | Repo | BM25 Init (s) |
 |------|--------------|
-| openclaw | 22.83 |
+| openclaw | 27.14 |
 
 ## Time to First Search
 
 | Repo | Standard (s) | Deferred (s) | Speedup |
 |------|-------------|--------------|---------|
-| openclaw | 23.17 | 23.32 | 1.0x |
+| openclaw | 25.74 | 27.59 | 0.9x |

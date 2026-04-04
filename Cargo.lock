@@ -635,6 +635,7 @@ dependencies = [
  "dashmap 6.1.0",
  "fastembed",
  "glob",
+ "half",
  "hf-hub",
  "ignore",
  "memmap2",

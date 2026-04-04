@@ -170,6 +170,8 @@ pub struct IndexConfig {
 pub enum EmbeddingModel {
     /// BGE Small English v1.5 — 384 dimensions, kept for backwards compat / fast machines.
     BgeSmallEn,
+    /// BGE Small English v1.5 Quantized — 384 dims, int8 dynamic quantization.
+    BgeSmallEnQ,
     /// BGE Base English v1.5 — 768 dimensions, higher quality (new default).
     #[default]
     BgeBaseEn,
@@ -188,6 +190,8 @@ pub enum EmbeddingModel {
     /// Currently the official repo only ships safetensors; falls back to BM25-only if
     /// the ONNX file is not found.
     NomicEmbedCode,
+    /// Snowflake Arctic Embed XS Quantized — 384 dims, 22M params, int8.
+    SnowflakeArcticEmbedXSQ,
     /// Snowflake Arctic Embed L — 1024 dimensions, SOTA retrieval at ~335M params.
     ///
     /// Top MTEB score at this size class. Recommended when retrieval quality
@@ -221,6 +225,12 @@ pub enum EmbeddingModel {
     /// Code-specific transformer with 150 emb/s throughput, nDCG@10 0.949.
     /// Set `JINA_CODE_INT8_ONNX` to the path of `model_qint8_arm64.onnx`.
     JinaCodeInt8,
+    /// Model2Vec distilled from Jina Code — 256 dims, static lookup, no ONNX.
+    ///
+    /// Distilled from `jinaai/jina-embeddings-v2-base-code` via Model2Vec.
+    /// Uses BPE tokenizer that handles CamelCase natively (no preprocessing
+    /// needed). Set `MODEL2VEC_JINA_CODE_DIR` to the model directory.
+    Model2VecJinaCode,
 }
 
 /// Which vector storage backend to use for the brute-force / trait-based index.
