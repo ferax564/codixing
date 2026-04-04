@@ -68,9 +68,9 @@
         {
           "query": "usage-load-config",
           "category": "usage",
-          "precision_at_10": 0.0,
-          "recall_at_10": 0.0,
-          "mrr": 0.0
+          "precision_at_10": 0.2,
+          "recall_at_10": 0.2,
+          "mrr": 0.125
         },
         {
           "query": "concept-security-audit",
@@ -131,9 +131,9 @@
         {
           "query": "cross-pkg-config-types-from-agents",
           "category": "cross-package",
-          "precision_at_10": 0.0,
-          "recall_at_10": 0.0,
-          "mrr": 0.0
+          "precision_at_10": 0.2,
+          "recall_at_10": 0.4,
+          "mrr": 0.167
         },
         {
           "query": "cross-pkg-plugin-contracts-registry",
@@ -204,9 +204,9 @@
           "query": "usage-channel-plugin-imports",
           "category": "usage",
           "strategy": "usages",
-          "precision_at_10": 0.0,
-          "recall_at_10": 0.0,
-          "mrr": 0.0
+          "precision_at_10": 0.6,
+          "recall_at_10": 0.75,
+          "mrr": 1.0
         },
         {
           "query": "usage-context-engine-imports",
@@ -220,9 +220,9 @@
           "query": "usage-load-config",
           "category": "usage",
           "strategy": "usages",
-          "precision_at_10": 0.0,
-          "recall_at_10": 0.0,
-          "mrr": 0.0
+          "precision_at_10": 0.7,
+          "recall_at_10": 0.7,
+          "mrr": 1.0
         },
         {
           "query": "concept-security-audit",
@@ -230,7 +230,7 @@
           "strategy": "fast",
           "precision_at_10": 0.2,
           "recall_at_10": 0.5,
-          "mrr": 1.0
+          "mrr": 0.5
         },
         {
           "query": "concept-rate-limiting",
@@ -238,7 +238,7 @@
           "strategy": "fast",
           "precision_at_10": 0.1,
           "recall_at_10": 0.333,
-          "mrr": 1.0
+          "mrr": 0.5
         },
         {
           "query": "concept-secret-redaction",
@@ -246,7 +246,7 @@
           "strategy": "fast",
           "precision_at_10": 0.1,
           "recall_at_10": 0.333,
-          "mrr": 1.0
+          "mrr": 0.5
         },
         {
           "query": "concept-cron-scheduling",
@@ -254,7 +254,7 @@
           "strategy": "fast",
           "precision_at_10": 0.1,
           "recall_at_10": 0.2,
-          "mrr": 0.25
+          "mrr": 0.167
         },
         {
           "query": "concept-system-prompt-composition",
@@ -262,34 +262,10 @@
           "strategy": "fast",
           "precision_at_10": 0.1,
           "recall_at_10": 0.333,
-          "mrr": 1.0
-        },
-        {
-          "query": "cross-pkg-plugin-sdk-entry",
-          "category": "cross-package",
-          "strategy": "cross_imports",
-          "precision_at_10": 0.1,
-          "recall_at_10": 0.2,
-          "mrr": 0.25
-        },
-        {
-          "query": "cross-pkg-bundled-channel-entries",
-          "category": "cross-package",
-          "strategy": "cross_imports",
-          "precision_at_10": 0.25,
-          "recall_at_10": 1.0,
           "mrr": 0.333
         },
         {
-          "query": "cross-pkg-security-from-gateway",
-          "category": "cross-package",
-          "strategy": "cross_imports",
-          "precision_at_10": 1.0,
-          "recall_at_10": 1.0,
-          "mrr": 1.0
-        },
-        {
-          "query": "cross-pkg-config-types-from-agents",
+          "query": "cross-pkg-plugin-sdk-entry",
           "category": "cross-package",
           "strategy": "cross_imports",
           "precision_at_10": 0.0,
@@ -297,25 +273,49 @@
           "mrr": 0.0
         },
         {
+          "query": "cross-pkg-bundled-channel-entries",
+          "category": "cross-package",
+          "strategy": "cross_imports",
+          "precision_at_10": 0.25,
+          "recall_at_10": 1.0,
+          "mrr": 0.5
+        },
+        {
+          "query": "cross-pkg-security-from-gateway",
+          "category": "cross-package",
+          "strategy": "cross_imports",
+          "precision_at_10": 0.167,
+          "recall_at_10": 1.0,
+          "mrr": 0.2
+        },
+        {
+          "query": "cross-pkg-config-types-from-agents",
+          "category": "cross-package",
+          "strategy": "cross_imports",
+          "precision_at_10": 0.5,
+          "recall_at_10": 1.0,
+          "mrr": 1.0
+        },
+        {
           "query": "cross-pkg-plugin-contracts-registry",
           "category": "cross-package",
           "strategy": "cross_imports",
           "precision_at_10": 0.25,
           "recall_at_10": 1.0,
-          "mrr": 0.333
+          "mrr": 0.5
         }
       ]
     },
     "summary": {
       "grep": {
-        "avg_precision": 0.13,
-        "avg_recall": 0.315,
-        "avg_mrr": 0.161
+        "avg_precision": 0.15,
+        "avg_recall": 0.345,
+        "avg_mrr": 0.176
       },
       "codixing": {
-        "avg_precision": 0.212,
-        "avg_recall": 0.607,
-        "avg_mrr": 0.554
+        "avg_precision": 0.256,
+        "avg_recall": 0.72,
+        "avg_mrr": 0.556
       }
     },
     "category_summary": {
@@ -328,10 +328,10 @@
         "best": "codixing"
       },
       "cross-package": {
-        "grep_precision": 0.0,
-        "grep_recall": 0.0,
-        "codixing_precision": 0.32,
-        "codixing_recall": 0.64,
+        "grep_precision": 0.04,
+        "grep_recall": 0.08,
+        "codixing_precision": 0.233,
+        "codixing_recall": 0.8,
         "codixing_strategy": "cross_imports",
         "best": "codixing"
       },
@@ -344,12 +344,12 @@
         "best": "codixing"
       },
       "usage": {
-        "grep_precision": 0.32,
-        "grep_recall": 0.475,
-        "codixing_precision": 0.229,
-        "codixing_recall": 0.45,
+        "grep_precision": 0.36,
+        "grep_recall": 0.515,
+        "codixing_precision": 0.489,
+        "codixing_recall": 0.74,
         "codixing_strategy": "usages",
-        "best": "grep"
+        "best": "codixing"
       }
     },
     "timing": {
@@ -357,169 +357,169 @@
         {
           "query": "symbol-channel-plugin",
           "category": "symbol",
-          "grep_ms": 1311.8,
-          "codixing_ms": 56.0,
+          "grep_ms": 1247.0,
+          "codixing_ms": 107.4,
           "codixing_strategy": "symbol_lookup"
         },
         {
           "query": "symbol-gateway-server",
           "category": "symbol",
-          "grep_ms": 528.0,
-          "codixing_ms": 55.5,
+          "grep_ms": 558.5,
+          "codixing_ms": 86.5,
           "codixing_strategy": "symbol_lookup"
         },
         {
           "query": "symbol-context-engine-interface",
           "category": "symbol",
-          "grep_ms": 559.3,
-          "codixing_ms": 53.5,
+          "grep_ms": 597.6,
+          "codixing_ms": 82.7,
           "codixing_strategy": "symbol_lookup"
         },
         {
           "query": "symbol-openclaw-config",
           "category": "symbol",
-          "grep_ms": 552.2,
-          "codixing_ms": 59.0,
+          "grep_ms": 546.5,
+          "codixing_ms": 90.5,
           "codixing_strategy": "symbol_lookup"
         },
         {
           "query": "symbol-tool-policy-like",
           "category": "symbol",
-          "grep_ms": 558.9,
-          "codixing_ms": 53.7,
+          "grep_ms": 554.2,
+          "codixing_ms": 85.0,
           "codixing_strategy": "symbol_lookup"
         },
         {
           "query": "usage-redact-sensitive-text",
           "category": "usage",
-          "grep_ms": 1060.1,
-          "codixing_ms": 54.9,
+          "grep_ms": 1009.9,
+          "codixing_ms": 90.5,
           "codixing_strategy": "usages"
         },
         {
           "query": "usage-create-auth-rate-limiter",
           "category": "usage",
-          "grep_ms": 1053.9,
-          "codixing_ms": 58.8,
+          "grep_ms": 985.4,
+          "codixing_ms": 85.4,
           "codixing_strategy": "usages"
         },
         {
           "query": "usage-channel-plugin-imports",
           "category": "usage",
-          "grep_ms": 1011.3,
-          "codixing_ms": 51.3,
+          "grep_ms": 990.3,
+          "codixing_ms": 81.0,
           "codixing_strategy": "usages"
         },
         {
           "query": "usage-context-engine-imports",
           "category": "usage",
-          "grep_ms": 1035.5,
-          "codixing_ms": 51.8,
+          "grep_ms": 956.2,
+          "codixing_ms": 79.8,
           "codixing_strategy": "usages"
         },
         {
           "query": "usage-load-config",
           "category": "usage",
-          "grep_ms": 1029.0,
-          "codixing_ms": 54.7,
+          "grep_ms": 997.1,
+          "codixing_ms": 80.2,
           "codixing_strategy": "usages"
         },
         {
           "query": "concept-security-audit",
           "category": "concept",
-          "grep_ms": 678.8,
-          "codixing_ms": 242.1,
+          "grep_ms": 698.7,
+          "codixing_ms": 59849.3,
           "codixing_strategy": "fast"
         },
         {
           "query": "concept-rate-limiting",
           "category": "concept",
-          "grep_ms": 1347.0,
-          "codixing_ms": 247.0,
+          "grep_ms": 1512.7,
+          "codixing_ms": 62386.9,
           "codixing_strategy": "fast"
         },
         {
           "query": "concept-secret-redaction",
           "category": "concept",
-          "grep_ms": 742.5,
-          "codixing_ms": 252.7,
+          "grep_ms": 1562.1,
+          "codixing_ms": 99987.9,
           "codixing_strategy": "fast"
         },
         {
           "query": "concept-cron-scheduling",
           "category": "concept",
-          "grep_ms": 658.5,
-          "codixing_ms": 240.7,
+          "grep_ms": 1414.0,
+          "codixing_ms": 59811.7,
           "codixing_strategy": "fast"
         },
         {
           "query": "concept-system-prompt-composition",
           "category": "concept",
-          "grep_ms": 1262.9,
-          "codixing_ms": 255.4,
+          "grep_ms": 2093.1,
+          "codixing_ms": 80191.7,
           "codixing_strategy": "fast"
         },
         {
           "query": "cross-pkg-plugin-sdk-entry",
           "category": "cross-package",
-          "grep_ms": 1043.8,
-          "codixing_ms": 41.2,
+          "grep_ms": 1933.3,
+          "codixing_ms": 143.0,
           "codixing_strategy": "cross_imports"
         },
         {
           "query": "cross-pkg-bundled-channel-entries",
           "category": "cross-package",
-          "grep_ms": 1126.7,
-          "codixing_ms": 42.2,
+          "grep_ms": 1204.1,
+          "codixing_ms": 118.5,
           "codixing_strategy": "cross_imports"
         },
         {
           "query": "cross-pkg-security-from-gateway",
           "category": "cross-package",
-          "grep_ms": 1199.1,
-          "codixing_ms": 40.3,
+          "grep_ms": 1304.3,
+          "codixing_ms": 142.6,
           "codixing_strategy": "cross_imports"
         },
         {
           "query": "cross-pkg-config-types-from-agents",
           "category": "cross-package",
-          "grep_ms": 1209.2,
-          "codixing_ms": 44.1,
+          "grep_ms": 1359.6,
+          "codixing_ms": 120.8,
           "codixing_strategy": "cross_imports"
         },
         {
           "query": "cross-pkg-plugin-contracts-registry",
           "category": "cross-package",
-          "grep_ms": 1280.2,
-          "codixing_ms": 41.1,
+          "grep_ms": 1319.0,
+          "codixing_ms": 132.7,
           "codixing_strategy": "cross_imports"
         }
       ],
       "summary": {
         "grep": {
-          "avg_ms": 962.4,
-          "min_ms": 528.0,
-          "max_ms": 1347.0
+          "avg_ms": 1142.2,
+          "min_ms": 546.5,
+          "max_ms": 2093.1
         },
         "codixing cross_imports": {
-          "avg_ms": 41.8,
-          "min_ms": 40.3,
-          "max_ms": 44.1
+          "avg_ms": 131.5,
+          "min_ms": 118.5,
+          "max_ms": 143.0
         },
         "codixing fast": {
-          "avg_ms": 247.6,
-          "min_ms": 240.7,
-          "max_ms": 255.4
+          "avg_ms": 72445.5,
+          "min_ms": 59811.7,
+          "max_ms": 99987.9
         },
         "codixing symbol_lookup": {
-          "avg_ms": 55.5,
-          "min_ms": 53.5,
-          "max_ms": 59.0
+          "avg_ms": 90.4,
+          "min_ms": 82.7,
+          "max_ms": 107.4
         },
         "codixing usages": {
-          "avg_ms": 54.3,
-          "min_ms": 51.3,
-          "max_ms": 58.8
+          "avg_ms": 83.4,
+          "min_ms": 79.8,
+          "max_ms": 90.5
         }
       }
     }
@@ -527,15 +527,15 @@
   "indexing": [
     {
       "repo": "openclaw",
-      "bm25_init_seconds": 23.79
+      "bm25_init_seconds": 27.14
     }
   ],
   "ttfs": [
     {
       "repo": "openclaw",
-      "standard_ttfs_seconds": 24.15,
-      "deferred_ttfs_seconds": 23.82,
-      "speedup": 1.0
+      "standard_ttfs_seconds": 25.74,
+      "deferred_ttfs_seconds": 27.59,
+      "speedup": 0.9
     }
   ]
 }
