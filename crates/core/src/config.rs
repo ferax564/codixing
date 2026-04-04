@@ -215,6 +215,12 @@ pub enum EmbeddingModel {
     /// lookup architecture as `Model2Vec` but with 2× dimensions and training
     /// optimized for retrieval tasks (+13% MTEB retrieval vs potion-base-8M).
     Model2VecRetrieval,
+    /// Jina Code Int8 — 768 dimensions, ~8ms on ARM64, ONNX Runtime.
+    ///
+    /// Uses `jinaai/jina-embeddings-v2-base-code` (int8 quantized for ARM64).
+    /// Code-specific transformer with 150 emb/s throughput, nDCG@10 0.949.
+    /// Set `JINA_CODE_INT8_ONNX` to the path of `model_qint8_arm64.onnx`.
+    JinaCodeInt8,
 }
 
 /// Which vector storage backend to use for the brute-force / trait-based index.

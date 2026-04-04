@@ -389,6 +389,9 @@ impl Embedder {
                 Self::MODEL2VEC_RETRIEVAL_REPO,
                 Self::MODEL2VEC_RETRIEVAL_DIMS,
             ),
+
+            // ── Jina Code Int8 (local ONNX) ─────────────────────────────────
+            EmbeddingModel::JinaCodeInt8 => Self::new_jina_code_int8(),
         }
     }
 
@@ -411,6 +414,7 @@ impl Embedder {
             #[cfg(feature = "qwen3")]
             EmbeddingModel::Qwen3SmallEmbedding => unreachable!(),
             EmbeddingModel::Model2Vec | EmbeddingModel::Model2VecRetrieval => unreachable!(),
+            EmbeddingModel::JinaCodeInt8 => unreachable!(),
         };
 
         // BGE models are trained with an instruction prefix for queries.
@@ -482,6 +486,71 @@ impl Embedder {
         Ok(Self {
             backend: EmbedBackend::Onnx(Mutex::new(model)),
             dims: NOMIC_EMBED_CODE_DIMS,
+            query_prefix: None,
+        })
+    }
+
+    const JINA_CODE_INT8_DIMS: usize = 768;
+    const JINA_CODE_INT8_HF_REPO: &'static str = "jinaai/jina-embeddings-v2-base-code";
+
+    /// Construct a Jina Code Int8 embedder from a local ONNX file.
+    ///
+    /// Loads `jina-embeddings-v2-base-code` int8-quantized for ARM64.
+    /// The ONNX file path is read from `JINA_CODE_INT8_ONNX` env var.
+    /// Tokenizer files are downloaded from HuggingFace on first use.
+    fn new_jina_code_int8() -> Result<Self> {
+        use fastembed::{
+            InitOptionsUserDefined, Pooling, TokenizerFiles, UserDefinedEmbeddingModel,
+        };
+        use hf_hub::api::sync::ApiBuilder;
+
+        let onnx_path = std::env::var("JINA_CODE_INT8_ONNX").map_err(|_| {
+            CodixingError::Embedding(
+                "JINA_CODE_INT8_ONNX env var not set. \
+                 Point it at model_qint8_arm64.onnx"
+                    .to_string(),
+            )
+        })?;
+
+        info!(
+            onnx = %onnx_path,
+            dims = Self::JINA_CODE_INT8_DIMS,
+            "loading Jina Code Int8 embedder"
+        );
+
+        let onnx = std::fs::read(&onnx_path)
+            .map_err(|e| CodixingError::Embedding(format!("read ONNX file {onnx_path}: {e}")))?;
+
+        // Tokenizer from HuggingFace (same repo as the FP32 model).
+        let api = ApiBuilder::new()
+            .build()
+            .map_err(|e| CodixingError::Embedding(format!("hf-hub init: {e}")))?;
+        let repo = api.model(Self::JINA_CODE_INT8_HF_REPO.to_string());
+
+        let get = |file: &str| -> Result<Vec<u8>> {
+            let path = repo
+                .get(file)
+                .map_err(|e| CodixingError::Embedding(format!("download {file}: {e}")))?;
+            std::fs::read(&path).map_err(|e| CodixingError::Embedding(format!("read {file}: {e}")))
+        };
+
+        let tokenizer_files = TokenizerFiles {
+            tokenizer_file: get("tokenizer.json")?,
+            config_file: get("config.json")?,
+            special_tokens_map_file: get("special_tokens_map.json")?,
+            tokenizer_config_file: get("tokenizer_config.json")?,
+        };
+
+        let ud_model =
+            UserDefinedEmbeddingModel::new(onnx, tokenizer_files).with_pooling(Pooling::Mean);
+
+        let model =
+            TextEmbedding::try_new_from_user_defined(ud_model, InitOptionsUserDefined::default())
+                .map_err(|e| CodixingError::Embedding(format!("Jina Code Int8 init: {e}")))?;
+
+        Ok(Self {
+            backend: EmbedBackend::Onnx(Mutex::new(model)),
+            dims: Self::JINA_CODE_INT8_DIMS,
             query_prefix: None,
         })
     }

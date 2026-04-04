@@ -600,8 +600,9 @@ fn parse_embedding_model(s: &str) -> Result<EmbeddingModel> {
         "model2vec-retrieval" | "m2v-retrieval" | "potion-retrieval" | "potion-32m" => {
             Ok(EmbeddingModel::Model2VecRetrieval)
         }
+        "jina-code-int8" | "jina-int8" => Ok(EmbeddingModel::JinaCodeInt8),
         other => anyhow::bail!(
-            "unknown model '{}'. Valid: bge-small-en, bge-base-en, bge-large-en, jina-embed-code, nomic-embed-code, snowflake-arctic-l, qwen3, model2vec, model2vec-retrieval",
+            "unknown model '{}'. Valid: bge-small-en, bge-base-en, bge-large-en, jina-embed-code, jina-code-int8, nomic-embed-code, snowflake-arctic-l, qwen3, model2vec, model2vec-retrieval",
             other
         ),
     }
