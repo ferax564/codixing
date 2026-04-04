@@ -247,7 +247,9 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **File freshness audit** — `audit_freshness` tool identifies stale and orphaned files across releases
 - **Preflight gates** — Plugin enforces existence scanning before proposing new features
 - **TypeScript import resolution** — Resolve `.js` → `.ts` imports with node16/bundler moduleResolution support, enabling 0.8+ R@10 on cross-package code discovery
-- **Background embedding drain** — Instant BM25 search after `codixing init`, hybrid vector search transparently upgrades as embeddings complete in the background; experimental static embeddings via Model2Vec (no ONNX needed, instant init)
+- **Background embedding drain** — Instant BM25 search after `codixing init`, hybrid vector search transparently upgrades as embeddings complete in the background
+- **Model2Vec with code-aware preprocessing** — Static embeddings via `potion-base-8M` (no ONNX needed, instant init). CamelCase/snake_case splitting before tokenization reduces subword fragments by 50-70%, achieving MRR 1.000 on concept queries
+- **Jina Code Int8** — `jina-embeddings-v2-base-code` int8-quantized for ARM64 (768 dims, 8ms/query, nDCG@10 0.949). Set `JINA_CODE_INT8_ONNX` env var to the model path
 - **Embedding speed measurement** — New `bench-embed` CLI subcommand for profiling embedding performance across custom models
 - **Daemon mode** — Engine stays in memory, auto-starts on first connection, Unix socket (macOS/Linux) or named pipe (Windows) IPC, file watcher for live index updates, 30-min idle timeout
 - **Field-weighted BM25** — Configurable per-field boosting (entity_names 3×, signature 2×, scope_chain 1.5×, content 1×)
@@ -314,7 +316,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 871+ tests
+cargo test --workspace        # 878+ tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```
