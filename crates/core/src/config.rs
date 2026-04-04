@@ -209,6 +209,12 @@ pub enum EmbeddingModel {
     /// a neural network). Enables hybrid search on any machine without GPU
     /// or ONNX Runtime.
     Model2Vec,
+    /// Model2Vec retrieval-optimized — 512 dimensions, ~60ms init, no ONNX.
+    ///
+    /// Uses `minishlab/potion-retrieval-32M` from HuggingFace. Same static
+    /// lookup architecture as `Model2Vec` but with 2× dimensions and training
+    /// optimized for retrieval tasks (+13% MTEB retrieval vs potion-base-8M).
+    Model2VecRetrieval,
 }
 
 /// Which vector storage backend to use for the brute-force / trait-based index.

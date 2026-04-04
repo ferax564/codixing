@@ -596,9 +596,12 @@ fn parse_embedding_model(s: &str) -> Result<EmbeddingModel> {
             #[cfg(not(feature = "qwen3"))]
             anyhow::bail!("qwen3 model requires building with --features codixing-core/qwen3")
         }
-        "model2vec" | "m2v" | "potion" => Ok(EmbeddingModel::Model2Vec),
+        "model2vec" | "m2v" | "potion" | "potion-8m" => Ok(EmbeddingModel::Model2Vec),
+        "model2vec-retrieval" | "m2v-retrieval" | "potion-retrieval" | "potion-32m" => {
+            Ok(EmbeddingModel::Model2VecRetrieval)
+        }
         other => anyhow::bail!(
-            "unknown model '{}'. Valid: bge-small-en, bge-base-en, bge-large-en, jina-embed-code, nomic-embed-code, snowflake-arctic-l, qwen3, model2vec",
+            "unknown model '{}'. Valid: bge-small-en, bge-base-en, bge-large-en, jina-embed-code, nomic-embed-code, snowflake-arctic-l, qwen3, model2vec, model2vec-retrieval",
             other
         ),
     }
