@@ -2,6 +2,7 @@ pub mod bash;
 pub mod c;
 pub mod cpp;
 pub mod csharp;
+pub mod doc;
 pub mod dockerfile;
 pub mod go;
 pub mod java;
