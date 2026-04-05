@@ -1,4 +1,5 @@
 pub mod cast;
+pub mod doc;
 pub mod line;
 
 use serde::{Deserialize, Serialize};
