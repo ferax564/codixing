@@ -418,6 +418,7 @@ impl TantivyIndex {
             doc_comment: field("doc_comment")?,
             identifier_words: field("identifier_words")?,
             path_segments: field("path_segments")?,
+            doc_type: field("doc_type")?,
         };
 
         let writer = index.writer(50_000_000)?;
@@ -479,6 +480,7 @@ impl TantivyIndex {
             doc_comment: field("doc_comment")?,
             identifier_words: field("identifier_words")?,
             path_segments: field("path_segments")?,
+            doc_type: field("doc_type")?,
         };
 
         // No writer — read-only mode.
@@ -520,6 +522,14 @@ impl TantivyIndex {
             .join(" ");
         let path_segments_text = generate_path_segments(&chunk.file_path);
 
+        let doc_type_str = if chunk.language.is_doc() {
+            "doc"
+        } else if chunk.language.is_tree_sitter() {
+            "code"
+        } else {
+            "config"
+        };
+
         let writer = writer_mutex
             .lock()
             .map_err(|e| CodixingError::Index(format!("writer lock poisoned: {e}")))?;
@@ -540,6 +550,7 @@ impl TantivyIndex {
             self.fields.line_end => chunk.line_end as u64,
             self.fields.byte_start => chunk.byte_start as u64,
             self.fields.byte_end => chunk.byte_end as u64,
+            self.fields.doc_type => doc_type_str,
         ))?;
 
         Ok(())

@@ -35,6 +35,8 @@ pub struct SchemaFields {
     pub identifier_words: Field,
     /// Directory/filename segments from the file path (stemmed, unstored).
     pub path_segments: Field,
+    /// Document type: "code", "config", or "doc".
+    pub doc_type: Field,
 }
 
 /// Build the Tantivy schema and return it together with field handles.
@@ -93,6 +95,7 @@ pub fn build_schema() -> (Schema, SchemaFields) {
     let identifier_words =
         builder.add_text_field("identifier_words", code_stemmed_unstored.clone());
     let path_segments = builder.add_text_field("path_segments", code_stemmed_unstored);
+    let doc_type = builder.add_text_field("doc_type", STRING | STORED);
 
     let schema = builder.build();
 
@@ -112,6 +115,7 @@ pub fn build_schema() -> (Schema, SchemaFields) {
         doc_comment,
         identifier_words,
         path_segments,
+        doc_type,
     };
 
     (schema, fields)
@@ -139,5 +143,11 @@ mod tests {
             schema.get_field("path_segments").unwrap(),
             fields.path_segments
         );
+    }
+
+    #[test]
+    fn schema_has_doc_type_field() {
+        let (schema, fields) = build_schema();
+        assert_eq!(schema.get_field("doc_type").unwrap(), fields.doc_type);
     }
 }
