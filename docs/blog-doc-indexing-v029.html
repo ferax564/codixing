@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Your docs are invisible to code search. We fixed that.</title>
+  <meta name="description" content="Codixing v0.29.0 indexes markdown and HTML docs alongside code. Section-aware chunking, doc-to-code graph edges, and query routing — all in Rust, no GPU." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <style>
+    :root {
+      --bg: #000000;
+      --bg-1: #0a0a0f;
+      --bg-2: #0d1117;
+      --bg-3: #161b22;
+      --border: rgba(48, 54, 61, 0.8);
+      --cyan: #00d4aa;
+      --purple: #8b5cf6;
+      --orange: #f97316;
+      --text: #f0f6fc;
+      --text-muted: #8b949e;
+      --text-dim: #484f58;
+      --green: #3fb950;
+      --red: #f85149;
+      --radius: 12px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body { font-family: "Inter", system-ui, sans-serif; background: var(--bg); color: var(--text); line-height: 1.8; }
+    ::selection { background: rgba(0, 212, 170, 0.2); }
+    nav { position: fixed; top: 0; left: 0; right: 0; z-index: 100; background: rgba(0,0,0,0.85); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); }
+    .nav-inner { max-width: 800px; margin: 0 auto; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; }
+    .nav-inner a { color: var(--text-muted); text-decoration: none; font-size: 0.9rem; }
+    .nav-inner a:hover { color: var(--cyan); }
+    article { max-width: 800px; margin: 0 auto; padding: 120px 24px 80px; }
+    .blog-meta { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 16px; }
+    article h1 { font-size: clamp(2rem, 4vw, 2.8rem); font-weight: 700; letter-spacing: -0.03em; line-height: 1.2; margin-bottom: 24px; }
+    .subtitle { font-size: 1.15rem; color: var(--text-muted); line-height: 1.7; margin-bottom: 48px; max-width: 65ch; }
+    article h2 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; margin-top: 56px; margin-bottom: 16px; color: var(--cyan); }
+    article h3 { font-size: 1.15rem; font-weight: 600; margin-top: 40px; margin-bottom: 12px; }
+    article p { margin-bottom: 20px; color: var(--text); font-size: 1.02rem; }
+    article strong { color: var(--cyan); font-weight: 600; }
+    article code { font-family: "JetBrains Mono", monospace; font-size: 0.88em; background: var(--bg-2); padding: 2px 6px; border-radius: 4px; color: var(--cyan); }
+    article a { color: var(--cyan); text-decoration: underline; text-underline-offset: 2px; }
+    article a:hover { color: var(--text); }
+    article ul, article ol { margin: 0 0 20px 24px; color: var(--text); }
+    article li { margin-bottom: 8px; font-size: 1.02rem; }
+    pre { background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 24px; overflow-x: auto; font-family: "JetBrains Mono", monospace; font-size: 0.83rem; line-height: 1.7; margin: 20px 0 28px; color: var(--text-muted); }
+    .callout { background: var(--bg-1); border-left: 3px solid var(--cyan); padding: 20px 24px; border-radius: 0 var(--radius) var(--radius) 0; margin: 28px 0; }
+    .callout p { margin-bottom: 0; color: var(--text-muted); }
+    .callout strong { color: var(--text); }
+    .terminal { background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 24px; margin: 20px 0 28px; font-family: "JetBrains Mono", monospace; font-size: 0.83rem; line-height: 1.8; }
+    .terminal .prompt { color: var(--cyan); }
+    .terminal .output { color: var(--text-muted); }
+    .terminal .highlight { color: var(--green); font-weight: 600; }
+    .terminal .dim { color: var(--text-dim); }
+    footer { max-width: 800px; margin: 0 auto; padding: 40px 24px 60px; border-top: 1px solid var(--border); color: var(--text-muted); font-size: 0.85rem; }
+    footer a { color: var(--cyan); text-decoration: none; }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <a href="/" style="font-weight: 600; color: var(--text);">Codixing</a>
+      <div>
+        <a href="https://github.com/ferax564/codixing">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <article>
+    <div class="blog-meta">April 5, 2026 &mdash; v0.29.0</div>
+    <h1>Your docs are invisible to code search. We fixed that.</h1>
+    <p class="subtitle">
+      Codixing now indexes markdown and HTML documentation alongside source code.
+      One search box, unified results, doc-to-code linking &mdash; all running locally in Rust.
+    </p>
+
+    <h2>The problem</h2>
+
+    <p>You search for "rate limiting" in your codebase. You get the <code>RateLimiter</code> struct, the middleware implementation, maybe a test. But that architecture doc your teammate wrote explaining <em>why</em> the algorithm was chosen? Invisible. The README section explaining how to configure rate limits? Gone.</p>
+
+    <p>Every code search tool I've used treats documentation as a second-class citizen. Source code lives in the index. Docs live in... hope you remember which file it was in.</p>
+
+    <p>Starting with v0.29.0, Codixing treats <strong>.md and .html files as first-class searchable content</strong>. No separate command, no separate index, no configuration. Just <code>codixing init</code> and your docs are in.</p>
+
+    <h2>How it works: a walkthrough</h2>
+
+    <p>Let's say your repo has this README:</p>
+
+<pre><span style="color: var(--cyan);"># My Project</span>
+
+<span style="color: var(--cyan);">## Getting Started</span>
+
+Call `Engine::init()` to initialize the search engine.
+Configure via `IndexConfig`.
+
+<span style="color: var(--cyan);">## Installation</span>
+
+<span style="color: var(--cyan);">### Linux</span>
+
+Run the install script:
+```bash
+curl -fsSL https://codixing.dev/install.sh | bash
+```</pre>
+
+    <p>After <code>codixing init</code>, search "how to install":</p>
+
+    <div class="terminal">
+      <div><span class="prompt">$</span> codixing search "how to install"</div>
+      <br/>
+      <div><span class="highlight">1.</span> <span class="output">README.md</span> <span class="dim">&sect; My Project &gt; Installation &gt; Linux</span> <span class="dim">[doc]</span> <span class="dim">score=4.231</span></div>
+      <div><span class="output">&nbsp;&nbsp; | Run the install script:</span></div>
+      <div><span class="output">&nbsp;&nbsp; | ```bash</span></div>
+      <div><span class="output">&nbsp;&nbsp; | curl -fsSL https://codixing.dev/install.sh | bash</span></div>
+      <br/>
+      <div><span class="highlight">2.</span> <span class="output">docs/install.sh</span> <span class="dim">[L1-L45] (Bash)</span> <span class="dim">score=2.107</span></div>
+      <div><span class="output">&nbsp;&nbsp; | #!/bin/bash</span></div>
+      <div><span class="output">&nbsp;&nbsp; | set -euo pipefail</span></div>
+    </div>
+
+    <p>Notice two things:</p>
+
+    <ul>
+      <li><strong>The breadcrumb</strong> &mdash; <code>&sect; My Project &gt; Installation &gt; Linux</code> tells you exactly where in the doc this result lives, without line numbers.</li>
+      <li><strong>Both docs and code appear together</strong> &mdash; the README section ranks first (it's the most relevant), the install script ranks second. One search, both worlds.</li>
+    </ul>
+
+    <h2>Section-aware chunking</h2>
+
+    <p>Codixing doesn't dump your entire README into one blob. It parses the heading hierarchy &mdash; <code>#</code>, <code>##</code>, <code>###</code> &mdash; and creates chunks at section boundaries, each carrying a <strong>section breadcrumb path</strong>.</p>
+
+    <p>The algorithm mirrors our code chunker (cAST) with three phases:</p>
+
+    <ol>
+      <li><strong>Section split</strong> &mdash; each heading starts a new chunk. If a section is too large, it splits at paragraph boundaries (<code>\n\n</code>).</li>
+      <li><strong>Atomic preservation</strong> &mdash; code blocks and tables are never split mid-element.</li>
+      <li><strong>Merge pass</strong> &mdash; adjacent tiny sections are merged to avoid index bloat.</li>
+    </ol>
+
+    <p>The breadcrumb path (e.g., <code>["Getting Started", "Installation", "Linux"]</code>) is stored in the same <code>scope_chain</code> field that code uses for AST scope paths like <code>["my_module", "MyClass", "my_method"]</code>. No schema change needed &mdash; the semantics are identical: "where am I in the hierarchy."</p>
+
+    <h2>Doc-to-code linking</h2>
+
+    <p>When your docs mention code symbols in backticks, Codixing notices. If your README says <code>`Engine::init()`</code> and that function exists in your codebase, a <strong>DocumentedBy</strong> graph edge is created.</p>
+
+    <p>This means <code>codixing callers src/engine.rs</code> now shows both:</p>
+
+    <ul>
+      <li>Code files that import/call functions in <code>engine.rs</code></li>
+      <li>Doc files that reference symbols defined in <code>engine.rs</code></li>
+    </ul>
+
+    <p>The linking is conservative &mdash; only unambiguous symbol matches (exactly one defining file) create edges. Common names like <code>new</code> or <code>parse</code> are skipped.</p>
+
+    <h2>Query routing</h2>
+
+    <p>When you search for <code>ChunkConfig</code> (CamelCase, clearly a symbol), you probably want code results. When you search for "how does rate limiting work" (natural language), you probably want docs. Codixing detects this automatically.</p>
+
+    <p>A lightweight heuristic classifier runs on every query:</p>
+
+    <ul>
+      <li><strong>Code signals</strong>: CamelCase, snake_case, <code>::</code>, <code>()</code>, <code>fn</code>, <code>def</code></li>
+      <li><strong>Doc signals</strong>: "how", "what", "why", "guide", "tutorial"</li>
+      <li><strong>Mixed or ambiguous</strong>: equal weights (the default)</li>
+    </ul>
+
+    <p>When the intent is detected, off-target results get a 0.3x score dampening. Docs still appear for code queries if they're highly relevant &mdash; it's a soft boost, not a hard gate.</p>
+
+    <p>For explicit control, use the new flags:</p>
+
+<pre><span style="color: var(--cyan);">$</span> codixing search "rate limiting" --docs-only
+<span style="color: var(--cyan);">$</span> codixing search "RateLimiter" --code-only</pre>
+
+    <h2>What we didn't build (and why)</h2>
+
+    <p>The RAG research for this feature surfaced a lot of techniques. Here's what we deliberately left out:</p>
+
+    <ul>
+      <li><strong>Contextual retrieval (LLM at index time)</strong> &mdash; prepending LLM-generated context to chunks improves retrieval by ~35% per Anthropic's research, but requires an LLM call per chunk at indexing time. Codixing is local-first, no API keys.</li>
+      <li><strong>HyDE (hypothetical document embeddings)</strong> &mdash; generates a synthetic "ideal answer" per query. Adds seconds of LLM latency to every search. Not compatible with sub-millisecond BM25.</li>
+      <li><strong>Semantic chunking</strong> &mdash; splits at embedding similarity boundaries. Benchmarks show it underperforms recursive splitting (54% vs 69% end-to-end accuracy). The "better retrieval recall" doesn't translate to "better answers."</li>
+      <li><strong>Parent-child dual storage</strong> &mdash; stores both parent sections and child chunks. Doubles index size for a quality gain we can add later. The section breadcrumb captures 80% of the benefit.</li>
+    </ul>
+
+    <h2>Under the hood</h2>
+
+    <p>Two new Rust crates do the heavy lifting:</p>
+
+    <ul>
+      <li><strong>comrak</strong> (Markdown) &mdash; the same parser that powers crates.io and docs.rs. Produces an Arena-allocated AST we walk for heading hierarchy, code blocks, and element detection.</li>
+      <li><strong>scraper</strong> (HTML) &mdash; built on html5ever, handles h1-h6 sections with CSS selectors. Extracts <code>&lt;code&gt;</code> tag contents for symbol linking.</li>
+    </ul>
+
+    <p>The architecture is intentionally simple: doc files go through the same indexing pipeline as code. They end up in the same Tantivy index, the same vector index, the same graph. One new field (<code>doc_type</code>) distinguishes them. One new trait (<code>DocLanguageSupport</code>) handles parsing. Everything else is reused.</p>
+
+    <div class="callout">
+      <p><strong>Backward compatible:</strong> If you upgrade Codixing and open an existing index, it works fine. The <code>doc_type</code> field is <code>Option&lt;Field&gt;</code> &mdash; old indexes just don't have it. Run <code>codixing init</code> when you're ready to index docs.</p>
+    </div>
+
+    <h2>What's next</h2>
+
+    <p><strong>External doc crawling</strong> is the obvious Phase 2. Imagine <code>codixing add-docs https://docs.rs/tantivy</code> indexing your dependency's documentation alongside your code. The architecture already supports it &mdash; the HTML parser and <code>doc_type</code> field are ready. We just need a crawl/fetch layer.</p>
+
+    <p>For now, in-repo docs cover the most impactful case: the READMEs, architecture docs, and API guides that developers actually write and forget to search.</p>
+
+    <h2>Try it</h2>
+
+<pre><span style="color: var(--cyan);">$</span> curl -fsSL https://codixing.dev/install.sh | bash
+<span style="color: var(--cyan);">$</span> codixing init .
+<span style="color: var(--cyan);">$</span> codixing search "how to get started"</pre>
+
+    <p>Your docs are no longer invisible.</p>
+  </article>
+
+  <footer>
+    <p>Codixing is open-source. <a href="https://github.com/ferax564/codixing">Star us on GitHub</a> if this is useful.</p>
+  </footer>
+</body>
+</html>
