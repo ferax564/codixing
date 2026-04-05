@@ -35,6 +35,15 @@ pub enum Strategy {
     Exact,
 }
 
+/// Hard filter for document type in search results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocFilter {
+    /// Only code and config chunks.
+    CodeOnly,
+    /// Only documentation chunks.
+    DocsOnly,
+}
+
 /// A search query against the code index.
 #[derive(Debug, Clone)]
 pub struct SearchQuery {
@@ -52,6 +61,8 @@ pub struct SearchQuery {
     /// When provided, each query is searched independently and results are
     /// fused via Reciprocal Rank Fusion. Overrides auto-reformulation.
     pub queries: Option<Vec<String>>,
+    /// Filter results by document type.
+    pub doc_filter: Option<DocFilter>,
 }
 
 impl SearchQuery {
@@ -64,6 +75,7 @@ impl SearchQuery {
             strategy: Strategy::default(),
             token_budget: None,
             queries: None,
+            doc_filter: None,
         }
     }
 
@@ -88,6 +100,12 @@ impl SearchQuery {
     /// Set the token budget for formatted context output.
     pub fn with_token_budget(mut self, budget: usize) -> Self {
         self.token_budget = Some(budget);
+        self
+    }
+
+    /// Filter results by document type.
+    pub fn with_doc_filter(mut self, filter: DocFilter) -> Self {
+        self.doc_filter = Some(filter);
         self
     }
 }

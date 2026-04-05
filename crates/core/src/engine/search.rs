@@ -6,7 +6,7 @@ use crate::error::Result;
 use crate::retriever::bm25::BM25Retriever;
 use crate::retriever::hybrid::{HybridRetriever, rrf_fuse};
 use crate::retriever::mmr::mmr_select;
-use crate::retriever::{Retriever, SearchQuery, SearchResult, Strategy};
+use crate::retriever::{DocFilter, Retriever, SearchQuery, SearchResult, Strategy};
 
 use super::Engine;
 use super::pipeline::{SearchContext, SearchPipeline};
@@ -42,8 +42,19 @@ impl Engine {
 
         let strategy = query.strategy;
         let pipeline = self.pipeline_for_strategy(strategy);
-        // Save query string before the match block moves `query` into Explore/Deep.
+        // Save query string and doc_filter before the match block moves `query`.
         let query_str = query.query.clone();
+        let doc_filter = query.doc_filter;
+
+        /// Apply the doc-type hard filter in place.
+        fn apply_doc_filter(results: &mut Vec<SearchResult>, filter: Option<DocFilter>) {
+            if let Some(f) = filter {
+                results.retain(|r| match f {
+                    DocFilter::CodeOnly => r.language != "Markdown" && r.language != "HTML",
+                    DocFilter::DocsOnly => r.language == "Markdown" || r.language == "HTML",
+                });
+            }
+        }
 
         // Handle explicit multi-query RRF fusion (queries param from MCP/API).
         if let Some(ref queries) = query.queries {
@@ -51,6 +62,7 @@ impl Engine {
                 let mut fused = self.search_multi(queries, &query)?;
                 let ctx = self.search_context(&query_str);
                 pipeline.run(&mut fused, &ctx)?;
+                apply_doc_filter(&mut fused, doc_filter);
                 return Ok(fused);
             }
         }
@@ -73,6 +85,7 @@ impl Engine {
                         let mut fused = self.search_multi(&reformulations, &query)?;
                         let ctx = self.search_context(&query_str);
                         pipeline.run(&mut fused, &ctx)?;
+                        apply_doc_filter(&mut fused, doc_filter);
                         return Ok(fused);
                     }
                 }
@@ -103,6 +116,7 @@ impl Engine {
                         let mut fused = self.search_multi(&reformulations, &query)?;
                         let ctx = self.search_context(&query_str);
                         pipeline.run(&mut fused, &ctx)?;
+                        apply_doc_filter(&mut fused, doc_filter);
                         return Ok(fused);
                     }
                 }
@@ -161,6 +175,10 @@ impl Engine {
         // Apply the post-retrieval pipeline (boosts, demotions, dedup, truncation).
         let ctx = self.search_context(&query_str);
         pipeline.run(&mut results, &ctx)?;
+
+        // Apply hard doc-type filter after pipeline.
+        apply_doc_filter(&mut results, doc_filter);
+
         Ok(results)
     }
 
@@ -226,6 +244,7 @@ impl Engine {
                 strategy: Strategy::Fast,
                 token_budget: None,
                 queries: None,
+                doc_filter: None,
             };
             if let Ok(results) = self.search_first_pass(&sub_query) {
                 if !results.is_empty() {
@@ -434,6 +453,7 @@ impl Engine {
                     strategy: Strategy::Instant,
                     token_budget: None,
                     queries: None,
+                    doc_filter: None,
                 };
                 if let Ok(mut exp) = bm25.search(&nq) {
                     for r in exp.iter_mut() {
@@ -732,6 +752,7 @@ impl Engine {
                     strategy: Strategy::Fast,
                     token_budget: None,
                     queries: None,
+                    doc_filter: None,
                 };
                 if let Ok(results) = self.search_first_pass(&sub_query) {
                     if !results.is_empty() {

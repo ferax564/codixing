@@ -40,7 +40,7 @@ pub use federation::{
 pub use graph::{CodeEdge, CodeGraph, CodeNode, EdgeKind, GraphStats, RepoMapOptions};
 pub use language::EntityKind;
 pub use orphans::{OrphanConfidence, OrphanFile, OrphanOptions};
-pub use retriever::{ChunkMeta, SearchQuery, SearchResult, Strategy};
+pub use retriever::{ChunkMeta, DocFilter, SearchQuery, SearchResult, Strategy};
 pub use session::{SessionEvent, SessionEventKind, SessionState};
 pub use shared_session::{SharedEventType, SharedSession, SharedSessionEvent};
 pub use symbols::Symbol;
