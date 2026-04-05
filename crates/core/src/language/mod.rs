@@ -5,6 +5,7 @@ pub mod csharp;
 pub mod doc;
 pub mod dockerfile;
 pub mod go;
+pub mod html;
 pub mod java;
 pub mod kotlin;
 pub mod makefile;
@@ -279,10 +280,11 @@ pub trait ConfigLanguageSupport: Send + Sync {
 pub struct LanguageRegistry {
     impls: Vec<Arc<dyn LanguageSupport>>,
     config_impls: Vec<Arc<dyn ConfigLanguageSupport>>,
+    doc_impls: Vec<Arc<dyn doc::DocLanguageSupport>>,
 }
 
 impl LanguageRegistry {
-    /// Build a registry with all supported languages (Tier 1 + Tier 2 + config).
+    /// Build a registry with all supported languages (Tier 1 + Tier 2 + config + doc).
     pub fn new() -> Self {
         let impls: Vec<Arc<dyn LanguageSupport>> = vec![
             Arc::new(rust::RustLanguage),
@@ -312,9 +314,14 @@ impl LanguageRegistry {
             Arc::new(mermaid::MermaidLanguage),
             Arc::new(xml::XmlLanguage),
         ];
+        let doc_impls: Vec<Arc<dyn doc::DocLanguageSupport>> = vec![
+            Arc::new(markdown::MarkdownLanguage),
+            Arc::new(html::HtmlLanguage),
+        ];
         Self {
             impls,
             config_impls,
+            doc_impls,
         }
     }
 
@@ -331,10 +338,19 @@ impl LanguageRegistry {
             .cloned()
     }
 
-    /// All registered languages (both tree-sitter and config).
+    /// Look up the `DocLanguageSupport` for a given doc `Language`.
+    pub fn get_doc(&self, lang: Language) -> Option<Arc<dyn doc::DocLanguageSupport>> {
+        self.doc_impls
+            .iter()
+            .find(|i| i.language() == lang)
+            .cloned()
+    }
+
+    /// All registered languages (tree-sitter, config, and doc).
     pub fn languages(&self) -> Vec<Language> {
         let mut langs: Vec<Language> = self.impls.iter().map(|i| i.language()).collect();
         langs.extend(self.config_impls.iter().map(|i| i.language()));
+        langs.extend(self.doc_impls.iter().map(|i| i.language()));
         langs
     }
 }
@@ -535,14 +551,11 @@ mod tests {
     fn registry_has_all_languages() {
         let registry = LanguageRegistry::new();
         let langs = registry.languages();
-        // TODO: restore assert_eq!(langs.len(), ALL_LANGUAGES.len()) after doc impls added
-        assert_eq!(langs.len(), ALL_LANGUAGES.len() - 2);
+        assert_eq!(langs.len(), ALL_LANGUAGES.len());
         for lang in ALL_LANGUAGES {
             if lang.is_doc() {
-                // Doc languages have no registry impl yet
-                continue;
-            }
-            if lang.is_tree_sitter() {
+                assert!(registry.get_doc(*lang).is_some(), "Missing doc {:?}", lang);
+            } else if lang.is_tree_sitter() {
                 assert!(
                     registry.get(*lang).is_some(),
                     "Missing tree-sitter {:?}",
