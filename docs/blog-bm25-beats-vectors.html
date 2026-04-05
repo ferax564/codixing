@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>How we got BM25 to outperform vector search for code retrieval</title>
+  <meta name="description" content="We tested 6 embedding approaches for code search — static lookups, int8 transformers, code-specific distillation. None beat our BM25 pipeline. Here's the data." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <style>
+    :root {
+      --bg: #000000;
+      --bg-1: #0a0a0f;
+      --bg-2: #0d1117;
+      --bg-3: #161b22;
+      --border: rgba(48, 54, 61, 0.8);
+      --cyan: #00d4aa;
+      --purple: #8b5cf6;
+      --orange: #f97316;
+      --text: #f0f6fc;
+      --text-muted: #8b949e;
+      --text-dim: #484f58;
+      --green: #3fb950;
+      --red: #f85149;
+      --radius: 12px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body { font-family: "Inter", system-ui, sans-serif; background: var(--bg); color: var(--text); line-height: 1.8; }
+    ::selection { background: rgba(0, 212, 170, 0.2); }
+    nav { position: fixed; top: 0; left: 0; right: 0; z-index: 100; background: rgba(0,0,0,0.85); backdrop-filter: blur(12px); border-bottom: 1px solid var(--border); }
+    .nav-inner { max-width: 800px; margin: 0 auto; padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; }
+    .nav-inner a { color: var(--text-muted); text-decoration: none; font-size: 0.9rem; }
+    .nav-inner a:hover { color: var(--cyan); }
+    article { max-width: 800px; margin: 0 auto; padding: 120px 24px 80px; }
+    .blog-meta { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 16px; }
+    article h1 { font-size: clamp(2rem, 4vw, 2.8rem); font-weight: 700; letter-spacing: -0.03em; line-height: 1.2; margin-bottom: 24px; }
+    .subtitle { font-size: 1.15rem; color: var(--text-muted); line-height: 1.7; margin-bottom: 48px; max-width: 65ch; }
+    article h2 { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; margin-top: 56px; margin-bottom: 16px; color: var(--cyan); }
+    article h3 { font-size: 1.15rem; font-weight: 600; margin-top: 40px; margin-bottom: 12px; }
+    article p { margin-bottom: 20px; color: var(--text); font-size: 1.02rem; }
+    article strong { color: var(--cyan); font-weight: 600; }
+    article code { font-family: "JetBrains Mono", monospace; font-size: 0.88em; background: var(--bg-2); padding: 2px 6px; border-radius: 4px; color: var(--cyan); }
+    article a { color: var(--cyan); text-decoration: underline; text-underline-offset: 2px; }
+    article a:hover { color: var(--text); }
+    article ul, article ol { margin: 0 0 20px 24px; color: var(--text); }
+    article li { margin-bottom: 8px; font-size: 1.02rem; }
+    .bench-table { width: 100%; border-collapse: collapse; margin: 24px 0 32px; font-size: 0.92rem; }
+    .bench-table th { text-align: left; padding: 10px 14px; background: var(--bg-2); border: 1px solid var(--border); font-weight: 600; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); }
+    .bench-table td { padding: 10px 14px; border: 1px solid var(--border); font-family: "JetBrains Mono", monospace; font-size: 0.85rem; }
+    .bench-table tr:hover td { background: var(--bg-1); }
+    .bench-table .num { color: var(--cyan); font-weight: 600; }
+    .bench-table .win { color: var(--green); font-weight: 700; }
+    .bench-table .lose { color: var(--text-dim); }
+    pre { background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 24px; overflow-x: auto; font-family: "JetBrains Mono", monospace; font-size: 0.83rem; line-height: 1.7; margin: 20px 0 28px; color: var(--text-muted); }
+    .callout { background: var(--bg-1); border-left: 3px solid var(--cyan); padding: 20px 24px; border-radius: 0 var(--radius) var(--radius) 0; margin: 28px 0; }
+    .callout p { margin-bottom: 0; color: var(--text-muted); }
+    .callout strong { color: var(--text); }
+    .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 32px 0; }
+    .stat-card { background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; text-align: center; }
+    .stat-card .big-num { font-size: 2rem; font-weight: 700; color: var(--cyan); display: block; }
+    .stat-card .stat-label { font-size: 0.82rem; color: var(--text-muted); margin-top: 4px; }
+    footer { max-width: 800px; margin: 0 auto; padding: 40px 24px 60px; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 0.85rem; }
+    @media (max-width: 600px) { .stat-grid { grid-template-columns: 1fr 1fr; } }
+  </style>
+</head>
+<body>
+  <nav><div class="nav-inner"><a href="/">codixing</a><a href="/#features">features</a></div></nav>
+
+  <article>
+    <div class="blog-meta">April 4, 2026 &middot; 8 min read</div>
+
+    <h1>How we got BM25 to outperform vector search for code retrieval</h1>
+
+    <p class="subtitle">We spent a week testing 6 embedding approaches for our code search engine. Static lookups, int8 transformers, code-specific distillation. None of them beat our BM25 pipeline. Here's the data and what we learned.</p>
+
+    <div class="stat-grid">
+      <div class="stat-card"><span class="big-num">6</span><span class="stat-label">models tested</span></div>
+      <div class="stat-card"><span class="big-num">0</span><span class="stat-label">beat BM25</span></div>
+      <div class="stat-card"><span class="big-num">175x</span><span class="stat-label">faster indexing</span></div>
+    </div>
+
+    <h2>The setup</h2>
+
+    <p><a href="https://codixing.dev">Codixing</a> is a code retrieval engine for AI agents. It indexes a codebase and answers queries like "rate limiting implementation" or "cron scheduling" by returning the most relevant files.</p>
+
+    <p>Our benchmark uses OpenClaw &mdash; a real 9,400-file TypeScript codebase &mdash; with 5 concept queries, each with manually curated ground-truth files. We measure <strong>R@10</strong> (what fraction of relevant files appear in the top 10 results) and <strong>MRR</strong> (how high the first relevant result ranks).</p>
+
+    <h2>What we tried</h2>
+
+    <p>We tested every embedding approach we could find that runs on CPU without a GPU:</p>
+
+    <table class="bench-table">
+      <thead><tr><th>Model</th><th>Type</th><th>Params</th><th>Dims</th><th>Index time</th></tr></thead>
+      <tbody>
+        <tr><td><strong>BM25 only</strong></td><td>keyword</td><td>&mdash;</td><td>&mdash;</td><td class="win">24s</td></tr>
+        <tr><td>Model2Vec (potion-8M)</td><td>static lookup</td><td>8M</td><td>256</td><td>38s</td></tr>
+        <tr><td>Model2Vec + preprocessing</td><td>static + code-aware</td><td>8M</td><td>256</td><td>38s</td></tr>
+        <tr><td>Model2Vec Jina-distilled</td><td>static, code teacher</td><td>8M</td><td>256</td><td>52s</td></tr>
+        <tr><td>Arctic XS-Q</td><td>transformer, int8</td><td>22M</td><td>384</td><td class="lose">20 min</td></tr>
+        <tr><td>BGE-Small-Q</td><td>transformer, int8</td><td>33M</td><td>384</td><td class="lose">70 min</td></tr>
+        <tr><td>Jina Code Int8</td><td>transformer, int8</td><td>161M</td><td>768</td><td class="lose">80+ min</td></tr>
+      </tbody>
+    </table>
+
+    <h2>The results</h2>
+
+    <table class="bench-table">
+      <thead><tr><th>Model</th><th>R@10</th><th>MRR</th><th>R@10 (short)</th><th>MRR (short)</th></tr></thead>
+      <tbody>
+        <tr><td><strong>BM25 only</strong></td><td class="win">0.513</td><td class="win">1.000</td><td class="win">0.467</td><td class="win">0.840</td></tr>
+        <tr><td>Model2Vec</td><td class="num">0.513</td><td class="num">1.000</td><td class="num">~0.467</td><td class="lose">~0.5</td></tr>
+        <tr><td>M2V + preprocessing</td><td class="num">0.513</td><td class="num">1.000</td><td class="num">~0.467</td><td class="lose">~0.5</td></tr>
+        <tr><td>M2V Jina-distilled</td><td class="lose">0.240</td><td class="lose">0.467</td><td class="lose">0.200</td><td class="lose">0.050</td></tr>
+        <tr><td>Arctic XS-Q</td><td class="lose">0.240</td><td class="lose">0.467</td><td class="lose">0.300</td><td class="lose">0.333</td></tr>
+        <tr><td>BGE-Small-Q</td><td class="num">0.447</td><td class="num">1.000</td><td class="num">0.400</td><td class="num">0.800</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <p><strong>BM25 wins on every metric.</strong> The best embedding model (BGE-Small-Q) gets close but takes 175x longer to index.</p>
+    </div>
+
+    <h2>Why embeddings didn't help</h2>
+
+    <h3>1. BM25 was already doing the semantic work</h3>
+
+    <p>Our BM25 pipeline isn't vanilla BM25. It has:</p>
+    <ul>
+      <li><strong>BM25F weighted fields</strong> &mdash; doc comments get 2x boost, identifier words get 2x, path segments get 1.5x</li>
+      <li><strong>Code-stemmed tokenizer</strong> &mdash; English stemming applied to concept fields so "scheduling" matches "schedule"</li>
+      <li><strong>80 synonym groups</strong> &mdash; "rate limiting" expands to include "throttle", "quota", etc.</li>
+      <li><strong>Multi-query RRF</strong> &mdash; queries with 3+ words generate synonym expansions and code-HyDE reformulations, each searched independently, then fused with Reciprocal Rank Fusion</li>
+    </ul>
+
+    <p>This combination already bridges the vocabulary gap that embeddings are supposed to solve. When someone searches "cron scheduling", synonym expansion adds "schedule" and "periodic", and BM25F fields match against identifier words. There's nothing left for the vector signal to contribute.</p>
+
+    <h3>2. Vector results dilute good BM25 rankings</h3>
+
+    <p>The hybrid search uses asymmetric RRF &mdash; for natural language queries, vector results get higher weight. But when BM25 already found the right files and the vector index returns noisy near-neighbors from 47K chunks, the fusion pulls irrelevant files into the top 10.</p>
+
+    <p>We saw this directly: for short queries like "rate limiting", BM25 alone puts <code>auth-rate-limit.ts</code> at #1 (MRR=1.0). With vectors, it drops to #2 because a semantically similar but irrelevant file gets promoted.</p>
+
+    <h3>3. Static embeddings can't handle code</h3>
+
+    <p>Model2Vec uses a BERT WordPiece tokenizer trained on English prose. Code identifiers get shredded:</p>
+
+    <pre><span style="color:var(--text)">composeSystemPrompt</span> &rarr; compose<span style="color:var(--red)">##sy##ste##mp##rom##pt</span>  (5 of 6 tokens meaningless)
+<span style="color:var(--text)">parseCronSchedule</span>   &rarr; par<span style="color:var(--red)">##se##cr##ons##ched##ule</span>  (all fragments)</pre>
+
+    <p>We built a preprocessing step that splits CamelCase/snake_case before tokenization, reducing subword fragments by 50-70%. We even distilled a code-specific Model2Vec from Jina Code &mdash; the BPE tokenizer handles CamelCase perfectly (<code>createRateLimiter</code> &rarr; <code>create</code>, <code>Rate</code>, <code>Limiter</code>). But both performed the same or worse in the actual pipeline because BM25 was already there.</p>
+
+    <h3>4. Transformers help quality but kill indexing speed</h3>
+
+    <p>BGE-Small-Q (the best embedding model) achieves R@10=0.447 &mdash; close to BM25's 0.513 but not better. And it takes <strong>70 minutes</strong> to index what BM25 does in 24 seconds. Codixing is designed for instant search after <code>codixing init</code>. A 70-minute embedding step would destroy the experience.</p>
+
+    <h2>What actually worked</h2>
+
+    <p>Instead of embeddings, the features that moved the needle were all BM25-side improvements:</p>
+
+    <ol>
+      <li><strong>BM25F concept fields</strong> with doc_comment and identifier_words boosting (+11.8% concept R@10)</li>
+      <li><strong>Synonym expansion</strong> in Fast/Thorough strategies &mdash; moved from Deep-only</li>
+      <li><strong>Code-stemmed tokenizer</strong> &mdash; English stemming on concept-oriented fields</li>
+      <li><strong>Graph semantic propagation</strong> &mdash; inject callers/callees of top results post-retrieval</li>
+      <li><strong>File-level dedup with allowance</strong> &mdash; prevent same-file chunk flooding while preserving struct+impl pairs</li>
+    </ol>
+
+    <p>These are all deterministic, zero-latency improvements. No model to download, no embedding to compute, no ONNX runtime to configure.</p>
+
+    <h2>When embeddings would help</h2>
+
+    <p>Our BM25 pipeline works because it's been heavily tuned for code. Embeddings would likely win in:</p>
+    <ul>
+      <li><strong>Multilingual code</strong> &mdash; BM25 synonyms are English-only; embeddings work cross-language</li>
+      <li><strong>No synonym expansion</strong> &mdash; vanilla BM25 without our 80 synonym groups would benefit from semantic vectors</li>
+      <li><strong>Query-document language gap</strong> &mdash; "find the authentication middleware" searching code that only uses "auth" in identifiers</li>
+    </ul>
+
+    <h2>The takeaway</h2>
+
+    <div class="callout">
+      <p><strong>BM25 is underrated.</strong> If you're building a code search system and reaching for embeddings, consider investing that effort in BM25 tuning instead: code-aware tokenization, synonym tables, field boosting, multi-query RRF. You might find it already does what you thought you needed vectors for. 175x faster.</p>
+    </div>
+
+    <p style="color:var(--text-dim);font-size:0.9rem;margin-top:48px"><em>Benchmarked on OpenClaw (9,387 files, 47,751 chunks) on Apple M4. All numbers from <a href="https://codixing.dev">Codixing</a> v0.28.0. Benchmark scripts at <a href="https://github.com/ferax564/codixing/tree/main/benchmarks">github.com/ferax564/codixing</a>.</em></p>
+  </article>
+
+  <footer>
+    <a href="/" style="color:var(--text-dim)">codixing.dev</a> &middot; Built by <a href="https://x.com/ferax564" style="color:var(--text-dim)">@ferax564</a>
+  </footer>
+</body>
+</html>
