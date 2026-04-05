@@ -236,7 +236,8 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ## Key Features
 
-- **24 languages** — Full AST parsing via tree-sitter (Rust, Python, TypeScript, Go, Java, C, C++, C#, Ruby, Swift, Kotlin, Scala, Zig, PHP, Bash, Matlab + config/diagram formats)
+- **26 languages** — Full AST parsing via tree-sitter (Rust, Python, TypeScript, Go, Java, C, C++, C#, Ruby, Swift, Kotlin, Scala, Zig, PHP, Bash, Matlab + config/diagram formats + Markdown and HTML doc indexing)
+- **Documentation indexing** — indexes Markdown and HTML docs alongside code with section-aware chunking, breadcrumb metadata, and doc-to-code graph linking; use `--docs-only` to restrict results to docs or `--code-only` to exclude them
 - **Hybrid search** — BM25 + optional vector embeddings, fused with Reciprocal Rank Fusion
 - **Symbol-level call graph** — Function-to-function call edges extracted from AST, including Rust trait dispatch, Python class inheritance, and TypeScript interface implementations
 - **Dependency graph** — Import + call extraction, PageRank scoring, Personalized PageRank for focus-aware maps
@@ -287,6 +288,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 | **Tier 3** (full AST + graph) | Zig, PHP, Bash, Matlab |
 | **Config** (symbol extraction) | YAML, TOML, Dockerfile, Makefile |
 | **Diagram / Markup** (symbol extraction) | Mermaid, XML/Draw.io |
+| **Docs** (section-aware chunking) | Markdown, HTML |
 
 ---
 
@@ -316,7 +318,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 878+ tests
+cargo test --workspace        # 911+ tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```

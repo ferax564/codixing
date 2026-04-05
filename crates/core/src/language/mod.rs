@@ -2,11 +2,14 @@ pub mod bash;
 pub mod c;
 pub mod cpp;
 pub mod csharp;
+pub mod doc;
 pub mod dockerfile;
 pub mod go;
+pub mod html;
 pub mod java;
 pub mod kotlin;
 pub mod makefile;
+pub mod markdown;
 pub mod matlab;
 pub mod mermaid;
 pub mod php;
@@ -57,6 +60,9 @@ pub enum Language {
     // Diagram / markup config (line-based, no tree-sitter)
     Mermaid,
     Xml,
+    // Doc languages (structured parsing, no tree-sitter)
+    Markdown,
+    Html,
 }
 
 impl Language {
@@ -87,6 +93,8 @@ impl Language {
             Self::Makefile => "Makefile",
             Self::Mermaid => "Mermaid",
             Self::Xml => "XML",
+            Self::Markdown => "Markdown",
+            Self::Html => "HTML",
         }
     }
 
@@ -117,6 +125,8 @@ impl Language {
             Self::Makefile => &["mk"],
             Self::Mermaid => &["mmd", "mermaid"],
             Self::Xml => &["xml", "drawio"],
+            Self::Markdown => &["md", "mdx"],
+            Self::Html => &["html", "htm"],
         }
     }
 
@@ -127,8 +137,20 @@ impl Language {
     pub fn is_tree_sitter(self) -> bool {
         !matches!(
             self,
-            Self::Yaml | Self::Toml | Self::Dockerfile | Self::Makefile | Self::Mermaid | Self::Xml
+            Self::Yaml
+                | Self::Toml
+                | Self::Dockerfile
+                | Self::Makefile
+                | Self::Mermaid
+                | Self::Xml
+                | Self::Markdown
+                | Self::Html
         )
+    }
+
+    /// Whether this language represents a documentation format (Markdown, HTML).
+    pub fn is_doc(self) -> bool {
+        matches!(self, Self::Markdown | Self::Html)
     }
 }
 
@@ -158,6 +180,8 @@ pub const ALL_LANGUAGES: &[Language] = &[
     Language::Makefile,
     Language::Mermaid,
     Language::Xml,
+    Language::Markdown,
+    Language::Html,
 ];
 
 /// The kind of semantic entity extracted from an AST.
@@ -256,10 +280,11 @@ pub trait ConfigLanguageSupport: Send + Sync {
 pub struct LanguageRegistry {
     impls: Vec<Arc<dyn LanguageSupport>>,
     config_impls: Vec<Arc<dyn ConfigLanguageSupport>>,
+    doc_impls: Vec<Arc<dyn doc::DocLanguageSupport>>,
 }
 
 impl LanguageRegistry {
-    /// Build a registry with all supported languages (Tier 1 + Tier 2 + config).
+    /// Build a registry with all supported languages (Tier 1 + Tier 2 + config + doc).
     pub fn new() -> Self {
         let impls: Vec<Arc<dyn LanguageSupport>> = vec![
             Arc::new(rust::RustLanguage),
@@ -289,9 +314,14 @@ impl LanguageRegistry {
             Arc::new(mermaid::MermaidLanguage),
             Arc::new(xml::XmlLanguage),
         ];
+        let doc_impls: Vec<Arc<dyn doc::DocLanguageSupport>> = vec![
+            Arc::new(markdown::MarkdownLanguage),
+            Arc::new(html::HtmlLanguage),
+        ];
         Self {
             impls,
             config_impls,
+            doc_impls,
         }
     }
 
@@ -308,10 +338,19 @@ impl LanguageRegistry {
             .cloned()
     }
 
-    /// All registered languages (both tree-sitter and config).
+    /// Look up the `DocLanguageSupport` for a given doc `Language`.
+    pub fn get_doc(&self, lang: Language) -> Option<Arc<dyn doc::DocLanguageSupport>> {
+        self.doc_impls
+            .iter()
+            .find(|i| i.language() == lang)
+            .cloned()
+    }
+
+    /// All registered languages (tree-sitter, config, and doc).
     pub fn languages(&self) -> Vec<Language> {
         let mut langs: Vec<Language> = self.impls.iter().map(|i| i.language()).collect();
         langs.extend(self.config_impls.iter().map(|i| i.language()));
+        langs.extend(self.doc_impls.iter().map(|i| i.language()));
         langs
     }
 }
@@ -514,7 +553,9 @@ mod tests {
         let langs = registry.languages();
         assert_eq!(langs.len(), ALL_LANGUAGES.len());
         for lang in ALL_LANGUAGES {
-            if lang.is_tree_sitter() {
+            if lang.is_doc() {
+                assert!(registry.get_doc(*lang).is_some(), "Missing doc {:?}", lang);
+            } else if lang.is_tree_sitter() {
                 assert!(
                     registry.get(*lang).is_some(),
                     "Missing tree-sitter {:?}",
@@ -528,5 +569,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn detect_markdown_language() {
+        assert_eq!(
+            detect_language(Path::new("README.md")),
+            Some(Language::Markdown)
+        );
+        assert_eq!(
+            detect_language(Path::new("docs/guide.mdx")),
+            Some(Language::Markdown)
+        );
+    }
+
+    #[test]
+    fn detect_html_language() {
+        assert_eq!(
+            detect_language(Path::new("docs/index.html")),
+            Some(Language::Html)
+        );
+        assert_eq!(detect_language(Path::new("api.htm")), Some(Language::Html));
+    }
+
+    #[test]
+    fn markdown_is_doc() {
+        assert!(Language::Markdown.is_doc());
+        assert!(Language::Html.is_doc());
+        assert!(!Language::Rust.is_doc());
+        assert!(!Language::Yaml.is_doc());
+    }
+
+    #[test]
+    fn doc_languages_are_not_tree_sitter() {
+        assert!(!Language::Markdown.is_tree_sitter());
+        assert!(!Language::Html.is_tree_sitter());
     }
 }

@@ -93,6 +93,14 @@ enum Command {
         /// Token budget for formatted output (implies --format).
         #[arg(long)]
         token_budget: Option<usize>,
+
+        /// Only return code/config results (no documentation).
+        #[arg(long)]
+        code_only: bool,
+
+        /// Only return documentation results (no code/config).
+        #[arg(long)]
+        docs_only: bool,
     },
 
     /// List symbols (functions, structs, classes, etc.) in the index.
@@ -434,15 +442,27 @@ async fn main() -> Result<()> {
             format,
             json,
             token_budget,
-        } => cmd_search(
-            query,
-            limit,
-            file,
-            strategy,
-            format || token_budget.is_some(),
-            json,
-            token_budget,
-        ),
+            code_only,
+            docs_only,
+        } => {
+            let doc_filter = if code_only {
+                Some(codixing_core::DocFilter::CodeOnly)
+            } else if docs_only {
+                Some(codixing_core::DocFilter::DocsOnly)
+            } else {
+                None
+            };
+            cmd_search(
+                query,
+                limit,
+                file,
+                strategy,
+                format || token_budget.is_some(),
+                json,
+                token_budget,
+                doc_filter,
+            )
+        }
         Command::Symbols { filter, file } => cmd_symbols(filter, file),
         Command::Graph {
             path,
@@ -613,6 +633,7 @@ fn parse_embedding_model(s: &str) -> Result<EmbeddingModel> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_search(
     query: String,
     limit: usize,
@@ -621,6 +642,7 @@ fn cmd_search(
     format: bool,
     json: bool,
     token_budget: Option<usize>,
+    doc_filter: Option<codixing_core::DocFilter>,
 ) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
     let engine = Engine::open(&root).with_context(|| {
@@ -639,6 +661,9 @@ fn cmd_search(
     }
     if let Some(b) = token_budget {
         sq = sq.with_token_budget(b);
+    }
+    if let Some(f) = doc_filter {
+        sq = sq.with_doc_filter(f);
     }
 
     let results = engine.search(sq).context("search failed")?;
@@ -677,19 +702,37 @@ fn cmd_search(
     }
 
     for (i, result) in results.iter().enumerate() {
-        println!(
-            "{}. {} [L{}-L{}] ({}) score={:.3}",
-            i + 1,
-            result.file_path,
-            result.line_start,
-            result.line_end,
-            result.language,
-            result.score,
-        );
-        if !result.signature.is_empty() {
-            println!("   {}", result.signature);
+        let is_doc = result.is_doc();
+
+        if is_doc {
+            let breadcrumb = if result.scope_chain.is_empty() {
+                String::new()
+            } else {
+                format!(" \u{00a7} {}", result.scope_chain.join(" > "))
+            };
+            println!(
+                "{}. {}{} [doc] score={:.3}",
+                i + 1,
+                result.file_path,
+                breadcrumb,
+                result.score,
+            );
+        } else {
+            println!(
+                "{}. {} [L{}-L{}] ({}) score={:.3}",
+                i + 1,
+                result.file_path,
+                result.line_start,
+                result.line_end,
+                result.language,
+                result.score,
+            );
+            if !result.signature.is_empty() {
+                println!("   {}", result.signature);
+            }
         }
-        // Show a snippet of the content (first 3 lines).
+
+        // Snippet (3 lines) — same for both.
         let snippet: String = result
             .content
             .lines()

@@ -55,6 +55,19 @@ impl Parser {
             path: path.to_path_buf(),
         })?;
 
+        // Doc languages (Markdown, HTML) bypass both tree-sitter and config
+        // parsing. Return a minimal ParseResult — actual parsing happens in
+        // the indexing pipeline via DocLanguageSupport.
+        if language.is_doc() {
+            let content_hash = xxh3_64(source);
+            return Ok(ParseResult {
+                language,
+                entities: Vec::new(),
+                tree: None,
+                content_hash,
+            });
+        }
+
         // Config languages bypass tree-sitter entirely.
         if !language.is_tree_sitter() {
             return self.do_config_parse(path, source, language);
@@ -95,6 +108,17 @@ impl Parser {
         let language = detect_language(path).ok_or_else(|| CodixingError::UnsupportedLanguage {
             path: path.to_path_buf(),
         })?;
+
+        // Doc languages — minimal ParseResult, no tree-sitter or config parsing.
+        if language.is_doc() {
+            let content_hash = xxh3_64(source);
+            return Ok(ParseResult {
+                language,
+                entities: Vec::new(),
+                tree: None,
+                content_hash,
+            });
+        }
 
         if !language.is_tree_sitter() {
             return self.do_config_parse(path, source, language);

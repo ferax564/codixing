@@ -90,6 +90,8 @@ toml.workspace = true
 ignore.workspace = true
 memmap2.workspace = true
 half = "2.7.1"
+comrak = { version = "0.37", default-features = false }
+scraper = "0.22"
 
 [dev-dependencies]
 tempfile.workspace = true

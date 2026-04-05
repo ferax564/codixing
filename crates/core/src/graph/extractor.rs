@@ -39,13 +39,15 @@ impl ImportExtractor {
             Language::Php => extract_php(tree, source),
             Language::Bash => extract_bash(tree, source),
             Language::Matlab => extract_matlab(tree, source),
-            // Config languages use line-based parsing; no tree-sitter imports.
+            // Config and doc languages use line-based/structured parsing; no tree-sitter imports.
             Language::Yaml
             | Language::Toml
             | Language::Dockerfile
             | Language::Makefile
             | Language::Mermaid
-            | Language::Xml => Vec::new(),
+            | Language::Xml
+            | Language::Markdown
+            | Language::Html => Vec::new(),
         }
     }
 }

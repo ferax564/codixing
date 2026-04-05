@@ -418,6 +418,8 @@ impl TantivyIndex {
             doc_comment: field("doc_comment")?,
             identifier_words: field("identifier_words")?,
             path_segments: field("path_segments")?,
+            // Graceful fallback for indexes created before this field was added.
+            doc_type: schema.get_field("doc_type").ok(),
         };
 
         let writer = index.writer(50_000_000)?;
@@ -479,6 +481,8 @@ impl TantivyIndex {
             doc_comment: field("doc_comment")?,
             identifier_words: field("identifier_words")?,
             path_segments: field("path_segments")?,
+            // Graceful fallback for indexes created before this field was added.
+            doc_type: schema.get_field("doc_type").ok(),
         };
 
         // No writer — read-only mode.
@@ -520,11 +524,19 @@ impl TantivyIndex {
             .join(" ");
         let path_segments_text = generate_path_segments(&chunk.file_path);
 
+        let doc_type_str = if chunk.language.is_doc() {
+            "doc"
+        } else if chunk.language.is_tree_sitter() {
+            "code"
+        } else {
+            "config"
+        };
+
         let writer = writer_mutex
             .lock()
             .map_err(|e| CodixingError::Index(format!("writer lock poisoned: {e}")))?;
 
-        writer.add_document(doc!(
+        let mut document = doc!(
             self.fields.chunk_id => chunk_id_str,
             self.fields.file_path => chunk.file_path.as_str(),
             self.fields.file_path_exact => chunk.file_path.as_str(),
@@ -540,7 +552,12 @@ impl TantivyIndex {
             self.fields.line_end => chunk.line_end as u64,
             self.fields.byte_start => chunk.byte_start as u64,
             self.fields.byte_end => chunk.byte_end as u64,
-        ))?;
+        );
+        // Only write doc_type when the field exists (old indexes may not have it).
+        if let Some(doc_type_field) = self.fields.doc_type {
+            document.add_field_value(doc_type_field, doc_type_str);
+        }
+        writer.add_document(document)?;
 
         Ok(())
     }

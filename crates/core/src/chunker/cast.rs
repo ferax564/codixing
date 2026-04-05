@@ -401,13 +401,15 @@ fn extract_entity_names_from_content(content: &str, language: Language) -> Vec<S
         Language::Php => &["function ", "class "],
         Language::Bash => &["function "],
         Language::Matlab => &["function ", "classdef "],
-        // Config languages: no keyword-based entity extraction in chunker.
+        // Config and doc languages: no keyword-based entity extraction in chunker.
         Language::Yaml
         | Language::Toml
         | Language::Dockerfile
         | Language::Makefile
         | Language::Mermaid
-        | Language::Xml => &[],
+        | Language::Xml
+        | Language::Markdown
+        | Language::Html => &[],
     };
 
     for line in content.lines() {
@@ -454,13 +456,15 @@ fn extract_signatures_from_content(content: &str, language: Language) -> Vec<Str
         ],
         Language::Bash => &["function "],
         Language::Matlab => &["function "],
-        // Config languages: no signature extraction in chunker.
+        // Config and doc languages: no signature extraction in chunker.
         Language::Yaml
         | Language::Toml
         | Language::Dockerfile
         | Language::Makefile
         | Language::Mermaid
-        | Language::Xml => &[],
+        | Language::Xml
+        | Language::Markdown
+        | Language::Html => &[],
     };
 
     let mut sigs = Vec::new();

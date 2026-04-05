@@ -29,7 +29,7 @@ use crate::symbols::writer::write_mmap_symbols;
 use crate::vector::VectorIndex;
 
 use super::indexing::{
-    IndexContext, add_call_edges, build_file_trigram_from_content, build_graph,
+    IndexContext, add_call_edges, add_doc_edges, build_file_trigram_from_content, build_graph,
     populate_symbol_graph, process_file, unix_timestamp_string, walk_source_files,
 };
 use super::{Engine, git_head_commit};
@@ -115,6 +115,8 @@ impl Engine {
         // the symbol table is fully populated (end of parallel phase).
         let pending_calls: DashMap<String, Vec<String>> = DashMap::new();
         let file_contents: DashMap<String, Vec<u8>> = DashMap::new();
+        let pending_doc_refs: DashMap<String, Vec<crate::language::doc::SymbolRef>> =
+            DashMap::new();
 
         let ctx = IndexContext {
             root: &root,
@@ -129,6 +131,7 @@ impl Engine {
             pending_imports: &pending_imports,
             pending_calls: &pending_calls,
             file_contents: &file_contents,
+            pending_doc_refs: &pending_doc_refs,
         };
 
         // Process files in parallel: parse → chunk → index → extract symbols.
@@ -155,6 +158,8 @@ impl Engine {
                     let mut g = build_graph(&files, &root, &config, &parser, &pending_imports);
                     // Resolve call-site edges using the now-complete symbol table.
                     add_call_edges(&mut g, &symbols, &pending_calls);
+                    // Resolve doc symbol references into DocumentedBy edges.
+                    add_doc_edges(&mut g, &symbols, &pending_doc_refs);
                     // Populate the symbol-level inner graph with function-level call edges.
                     populate_symbol_graph(&mut g, &files, &root, &config, &file_contents);
                     let scores =
