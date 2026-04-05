@@ -8,6 +8,7 @@ pub mod go;
 pub mod java;
 pub mod kotlin;
 pub mod makefile;
+pub mod markdown;
 pub mod matlab;
 pub mod mermaid;
 pub mod php;
