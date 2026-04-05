@@ -34,6 +34,8 @@ pub enum EdgeKind {
     /// These edges are extracted from call expressions via [`CallExtractor`] and
     /// complement import edges with fine-grained call-level coupling information.
     Calls,
+    /// A documentation file references a symbol defined in a code file.
+    DocumentedBy,
 }
 
 /// A node in the dependency graph representing a single source file.
@@ -79,6 +81,8 @@ pub struct GraphStats {
     pub external_edges: usize,
     /// Number of call-site edges added by [`CallExtractor`].
     pub call_edges: usize,
+    /// Number of doc-to-code edges added by `add_doc_edges`.
+    pub doc_edges: usize,
     /// Number of nodes in the symbol-level graph.
     pub symbol_nodes: usize,
     /// Number of edges in the symbol-level graph.
@@ -534,16 +538,48 @@ impl CodeGraph {
         }
     }
 
+    /// Add a documentation-to-code edge between a doc file and a code file.
+    ///
+    /// These edges represent that the doc file references a symbol defined in
+    /// the target code file (e.g., a backtick identifier in Markdown).
+    pub fn add_doc_edge(
+        &mut self,
+        from: &str,
+        to: &str,
+        symbol_name: &str,
+        from_lang: Language,
+        to_lang: Language,
+    ) {
+        let from_idx = self.get_or_insert_node(from, from_lang);
+        let to_idx = self.get_or_insert_node(to, to_lang);
+        self.graph.add_edge(
+            from_idx,
+            to_idx,
+            CodeEdge {
+                raw_import: symbol_name.to_string(),
+                kind: EdgeKind::DocumentedBy,
+            },
+        );
+        if let Some(n) = self.graph.node_weight_mut(from_idx) {
+            n.out_degree += 1;
+        }
+        if let Some(n) = self.graph.node_weight_mut(to_idx) {
+            n.in_degree += 1;
+        }
+    }
+
     /// Compute graph statistics.
     pub fn stats(&self) -> GraphStats {
         let mut resolved = 0usize;
         let mut external = 0usize;
         let mut calls = 0usize;
+        let mut docs = 0usize;
         for e in self.graph.edge_weights() {
             match e.kind {
                 EdgeKind::Resolved => resolved += 1,
                 EdgeKind::External => external += 1,
                 EdgeKind::Calls => calls += 1,
+                EdgeKind::DocumentedBy => docs += 1,
             }
         }
         GraphStats {
@@ -552,6 +588,7 @@ impl CodeGraph {
             resolved_edges: resolved,
             external_edges: external,
             call_edges: calls,
+            doc_edges: docs,
             symbol_nodes: self.inner.node_count(),
             symbol_edges: self.inner.edge_count(),
         }

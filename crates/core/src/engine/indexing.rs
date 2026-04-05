@@ -728,6 +728,53 @@ pub(super) fn add_call_edges(
     }
 }
 
+/// Resolve doc symbol references against the symbol table and add
+/// `EdgeKind::DocumentedBy` edges from doc files to code files.
+///
+/// Only adds an edge when exactly one file defines a symbol with the
+/// given name — same conservative heuristic as `add_call_edges`.
+pub(super) fn add_doc_edges(
+    graph: &mut CodeGraph,
+    symbols: &SymbolTable,
+    pending_doc_refs: &DashMap<String, Vec<crate::language::doc::SymbolRef>>,
+) {
+    let mut total = 0usize;
+    for entry in pending_doc_refs.iter() {
+        let doc_file = entry.key();
+        let refs = entry.value();
+
+        let doc_lang = graph
+            .node(doc_file)
+            .map(|n| n.language)
+            .unwrap_or(Language::Markdown);
+
+        let mut seen_targets = std::collections::HashSet::new();
+        for sym_ref in refs.iter() {
+            let syms = symbols.lookup(&sym_ref.name);
+            // Collect unique defining files, excluding the doc file itself.
+            let target_files: std::collections::HashSet<&str> = syms
+                .iter()
+                .map(|s| s.file_path.as_str())
+                .filter(|&fp| fp != doc_file.as_str())
+                .collect();
+
+            // Only add edge if unambiguous (exactly 1 defining file).
+            if target_files.len() == 1 {
+                let target = *target_files.iter().next().unwrap();
+                if seen_targets.insert(target.to_string()) {
+                    let target_lang =
+                        detect_language(std::path::Path::new(target)).unwrap_or(Language::Rust);
+                    graph.add_doc_edge(doc_file, target, &sym_ref.name, doc_lang, target_lang);
+                    total += 1;
+                }
+            }
+        }
+    }
+    if total > 0 {
+        info!(doc_edges = total, "added DocumentedBy edges from doc files");
+    }
+}
+
 /// Populate the symbol-level inner graph with definitions and call references.
 ///
 /// Reads each source file from `file_contents` (falling back to disk if not

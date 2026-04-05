@@ -535,6 +535,7 @@ fn build_graph_snapshot_payload(
             EdgeKind::Resolved => "import",
             EdgeKind::External => "external",
             EdgeKind::Calls => "call",
+            EdgeKind::DocumentedBy => "documented_by",
         };
         let dedupe_key = (source.clone(), target.clone(), edge_kind.to_string());
         if !seen_edges.insert(dedupe_key) {

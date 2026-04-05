@@ -29,7 +29,7 @@ use crate::symbols::writer::write_mmap_symbols;
 use crate::vector::VectorIndex;
 
 use super::indexing::{
-    IndexContext, add_call_edges, build_file_trigram_from_content, build_graph,
+    IndexContext, add_call_edges, add_doc_edges, build_file_trigram_from_content, build_graph,
     populate_symbol_graph, process_file, unix_timestamp_string, walk_source_files,
 };
 use super::{Engine, git_head_commit};
@@ -158,6 +158,8 @@ impl Engine {
                     let mut g = build_graph(&files, &root, &config, &parser, &pending_imports);
                     // Resolve call-site edges using the now-complete symbol table.
                     add_call_edges(&mut g, &symbols, &pending_calls);
+                    // Resolve doc symbol references into DocumentedBy edges.
+                    add_doc_edges(&mut g, &symbols, &pending_doc_refs);
                     // Populate the symbol-level inner graph with function-level call edges.
                     populate_symbol_graph(&mut g, &files, &root, &config, &file_contents);
                     let scores =
