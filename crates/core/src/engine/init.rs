@@ -115,6 +115,8 @@ impl Engine {
         // the symbol table is fully populated (end of parallel phase).
         let pending_calls: DashMap<String, Vec<String>> = DashMap::new();
         let file_contents: DashMap<String, Vec<u8>> = DashMap::new();
+        let pending_doc_refs: DashMap<String, Vec<crate::language::doc::SymbolRef>> =
+            DashMap::new();
 
         let ctx = IndexContext {
             root: &root,
@@ -129,6 +131,7 @@ impl Engine {
             pending_imports: &pending_imports,
             pending_calls: &pending_calls,
             file_contents: &file_contents,
+            pending_doc_refs: &pending_doc_refs,
         };
 
         // Process files in parallel: parse → chunk → index → extract symbols.

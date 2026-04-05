@@ -46,6 +46,9 @@ pub(super) struct IndexContext<'a> {
     /// Full file content accumulated during parallel indexing for building
     /// a chunk-boundary-free file trigram index.
     pub(super) file_contents: &'a DashMap<String, Vec<u8>>,
+    /// Symbol references extracted from doc files, keyed by relative path.
+    /// Resolved into `EdgeKind::DocumentedBy` edges after the symbol table is built.
+    pub(super) pending_doc_refs: &'a DashMap<String, Vec<crate::language::doc::SymbolRef>>,
 }
 
 /// Build a [`FileTrigramIndex`] from full file content.
@@ -112,6 +115,11 @@ pub(super) fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
     // Accumulate full file content for chunk-boundary-free trigram indexing.
     ctx.file_contents.insert(rel_str.clone(), source.clone());
 
+    // Doc language branch — uses DocLanguageSupport instead of tree-sitter/config.
+    if result.language.is_doc() {
+        return process_doc_file(&rel_str, &source, result.language, ctx);
+    }
+
     let chunker = CastChunker;
     let chunks = chunker.chunk(
         &rel_str,
@@ -177,6 +185,86 @@ pub(super) fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
         chunks = chunks.len(),
         entities = result.entities.len(),
         "indexed file"
+    );
+
+    Ok(())
+}
+
+/// Process a doc file (Markdown, HTML): parse sections → chunk → index.
+///
+/// Uses `DocLanguageSupport` instead of tree-sitter. Symbol refs are stored
+/// in `pending_doc_refs` for later resolution into `DocumentedBy` graph edges.
+fn process_doc_file(
+    rel_str: &str,
+    source: &[u8],
+    language: Language,
+    ctx: &IndexContext<'_>,
+) -> Result<()> {
+    let registry = crate::language::LanguageRegistry::new();
+    let doc_support =
+        registry
+            .get_doc(language)
+            .ok_or_else(|| CodixingError::UnsupportedLanguage {
+                path: std::path::PathBuf::from(rel_str),
+            })?;
+
+    // Parse sections.
+    let sections = doc_support.parse_sections(source);
+
+    // Extract symbol references for later graph edge resolution.
+    let symbol_refs = doc_support.extract_symbol_refs(source);
+    if !symbol_refs.is_empty() {
+        ctx.pending_doc_refs
+            .insert(rel_str.to_string(), symbol_refs);
+    }
+
+    // Chunk the document.
+    let mut chunks =
+        crate::chunker::doc::chunk_doc(rel_str, source, &sections, language, &ctx.config.chunk);
+
+    // Enrich chunks with symbol refs found in their byte range.
+    let all_refs = doc_support.extract_symbol_refs(source);
+    for chunk in &mut chunks {
+        let chunk_refs: Vec<String> = all_refs
+            .iter()
+            .filter(|r| {
+                r.byte_range.start >= chunk.byte_start && r.byte_range.end <= chunk.byte_end
+            })
+            .map(|r| r.name.clone())
+            .collect();
+        chunk.entity_names = chunk_refs;
+    }
+
+    ctx.chunk_count.fetch_add(chunks.len(), Ordering::Relaxed);
+    ctx.file_chunk_map.insert(rel_str.to_string(), chunks.len());
+
+    for chunk in &chunks {
+        ctx.tantivy.add_chunk(chunk)?;
+
+        ctx.chunk_meta_map.insert(
+            chunk.id,
+            ChunkMeta {
+                chunk_id: chunk.id,
+                file_path: rel_str.to_string(),
+                language: chunk.language.name().to_string(),
+                line_start: chunk.line_start as u64,
+                line_end: chunk.line_end as u64,
+                signature: String::new(),
+                scope_chain: chunk.scope_chain.clone(),
+                entity_names: chunk.entity_names.clone(),
+                content_hash: xxhash_rust::xxh3::xxh3_64(chunk.content.as_bytes()),
+                content: chunk.content.clone(),
+            },
+        );
+
+        ctx.pending_embeds.insert(chunk.id, chunk.content.clone());
+    }
+
+    debug!(
+        path = %rel_str,
+        language = language.name(),
+        chunks = chunks.len(),
+        "indexed doc file"
     );
 
     Ok(())
