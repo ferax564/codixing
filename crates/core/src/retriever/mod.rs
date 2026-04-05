@@ -134,6 +134,13 @@ pub struct SearchResult {
     pub content: String,
 }
 
+impl SearchResult {
+    /// Whether this result comes from a documentation file (Markdown or HTML).
+    pub fn is_doc(&self) -> bool {
+        self.language == "Markdown" || self.language == "HTML"
+    }
+}
+
 /// Rich metadata for a chunk, used to hydrate vector search results.
 ///
 /// Stored in the engine's `chunk_meta` table (keyed by `chunk_id: u64`).

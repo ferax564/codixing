@@ -141,14 +141,15 @@ pub fn chunk_doc(
     let mut merged: Vec<RawChunk> = Vec::new();
 
     for chunk in raw {
-        let is_small = non_ws_chars(chunk.content.as_bytes()) < config.min_chars;
+        let chunk_nws = non_ws_chars(chunk.content.as_bytes());
 
         if let Some(last) = merged.last_mut() {
-            let last_small = non_ws_chars(last.content.as_bytes()) < config.min_chars;
-            let combined_nws =
-                non_ws_chars(last.content.as_bytes()) + non_ws_chars(chunk.content.as_bytes());
+            let last_nws = non_ws_chars(last.content.as_bytes());
 
-            if last_small && is_small && combined_nws <= config.max_chars {
+            if last_nws < config.min_chars
+                && chunk_nws < config.min_chars
+                && last_nws + chunk_nws <= config.max_chars
+            {
                 // Merge: append content and extend ranges.
                 last.content.push_str("\n\n");
                 last.content.push_str(&chunk.content);

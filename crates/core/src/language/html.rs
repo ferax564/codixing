@@ -23,9 +23,10 @@ impl DocLanguageSupport for HtmlLanguage {
 
     fn extract_symbol_refs(&self, source: &[u8]) -> Vec<SymbolRef> {
         let text = String::from_utf8_lossy(source);
+        let document = Html::parse_document(&text);
         // Combine backtick refs from raw text and <code> tag refs, deduplicated.
         let mut refs = super::markdown::extract_backtick_refs(&text);
-        let code_refs = extract_code_tag_refs(&text);
+        let code_refs = extract_code_tag_refs_from_doc(&document);
         for r in code_refs {
             if !refs.iter().any(|existing| existing.name == r.name) {
                 refs.push(r);
@@ -272,12 +273,11 @@ fn detect_element_type(tag: &str, el: &ElementRef<'_>) -> Option<DocElement> {
     }
 }
 
-/// Extract symbol references from `<code>` tags in an HTML document.
+/// Extract symbol references from `<code>` tags in a pre-parsed HTML document.
 ///
 /// Uses `is_likely_symbol` and `clean_symbol_name` from the markdown module.
 /// Deduplicates by name.
-pub fn extract_code_tag_refs(html: &str) -> Vec<SymbolRef> {
-    let document = Html::parse_document(html);
+fn extract_code_tag_refs_from_doc(document: &Html) -> Vec<SymbolRef> {
     let code_sel = Selector::parse("code").expect("valid selector");
 
     let mut refs: Vec<SymbolRef> = Vec::new();
@@ -325,7 +325,8 @@ mod tests {
     #[test]
     fn extract_code_tag_symbols() {
         let html = "<p>Use <code>Engine::init()</code> to start. See <code>add_chunk</code>.</p>";
-        let refs = extract_code_tag_refs(html);
+        let document = Html::parse_document(html);
+        let refs = extract_code_tag_refs_from_doc(&document);
         assert_eq!(refs.len(), 2);
         assert_eq!(refs[0].name, "Engine::init");
         assert_eq!(refs[1].name, "add_chunk");

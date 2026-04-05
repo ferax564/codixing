@@ -200,39 +200,32 @@ fn process_doc_file(
     language: Language,
     ctx: &IndexContext<'_>,
 ) -> Result<()> {
-    let registry = crate::language::LanguageRegistry::new();
-    let doc_support =
-        registry
-            .get_doc(language)
-            .ok_or_else(|| CodixingError::UnsupportedLanguage {
-                path: std::path::PathBuf::from(rel_str),
-            })?;
+    let doc_support = ctx.parser.registry().get_doc(language).ok_or_else(|| {
+        CodixingError::UnsupportedLanguage {
+            path: std::path::PathBuf::from(rel_str),
+        }
+    })?;
 
-    // Parse sections.
     let sections = doc_support.parse_sections(source);
-
-    // Extract symbol references for later graph edge resolution.
     let symbol_refs = doc_support.extract_symbol_refs(source);
+
     if !symbol_refs.is_empty() {
         ctx.pending_doc_refs
-            .insert(rel_str.to_string(), symbol_refs);
+            .insert(rel_str.to_string(), symbol_refs.clone());
     }
 
-    // Chunk the document.
     let mut chunks =
         crate::chunker::doc::chunk_doc(rel_str, source, &sections, language, &ctx.config.chunk);
 
     // Enrich chunks with symbol refs found in their byte range.
-    let all_refs = doc_support.extract_symbol_refs(source);
     for chunk in &mut chunks {
-        let chunk_refs: Vec<String> = all_refs
+        chunk.entity_names = symbol_refs
             .iter()
             .filter(|r| {
                 r.byte_range.start >= chunk.byte_start && r.byte_range.end <= chunk.byte_end
             })
             .map(|r| r.name.clone())
             .collect();
-        chunk.entity_names = chunk_refs;
     }
 
     ctx.chunk_count.fetch_add(chunks.len(), Ordering::Relaxed);

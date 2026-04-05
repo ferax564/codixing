@@ -50,8 +50,8 @@ impl Engine {
         fn apply_doc_filter(results: &mut Vec<SearchResult>, filter: Option<DocFilter>) {
             if let Some(f) = filter {
                 results.retain(|r| match f {
-                    DocFilter::CodeOnly => r.language != "Markdown" && r.language != "HTML",
-                    DocFilter::DocsOnly => r.language == "Markdown" || r.language == "HTML",
+                    DocFilter::CodeOnly => !r.is_doc(),
+                    DocFilter::DocsOnly => r.is_doc(),
                 });
             }
         }

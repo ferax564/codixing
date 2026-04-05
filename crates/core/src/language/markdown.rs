@@ -367,8 +367,7 @@ pub(crate) fn is_likely_symbol(s: &str) -> bool {
         "char",
         "byte",
     ];
-    let lower = s.to_lowercase();
-    if non_symbols.contains(&lower.as_str()) {
+    if non_symbols.iter().any(|&kw| s.eq_ignore_ascii_case(kw)) {
         return false;
     }
 
@@ -385,8 +384,7 @@ pub(crate) fn is_likely_symbol(s: &str) -> bool {
         return true;
     }
     // CamelCase: first char uppercase, has at least one lowercase after.
-    let chars: Vec<char> = s.chars().collect();
-    if chars[0].is_uppercase() && chars.iter().any(|c| c.is_lowercase()) {
+    if s.starts_with(|c: char| c.is_uppercase()) && s.chars().any(|c| c.is_lowercase()) {
         return true;
     }
 

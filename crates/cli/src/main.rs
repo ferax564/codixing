@@ -444,17 +444,25 @@ async fn main() -> Result<()> {
             token_budget,
             code_only,
             docs_only,
-        } => cmd_search(
-            query,
-            limit,
-            file,
-            strategy,
-            format || token_budget.is_some(),
-            json,
-            token_budget,
-            code_only,
-            docs_only,
-        ),
+        } => {
+            let doc_filter = if code_only {
+                Some(codixing_core::DocFilter::CodeOnly)
+            } else if docs_only {
+                Some(codixing_core::DocFilter::DocsOnly)
+            } else {
+                None
+            };
+            cmd_search(
+                query,
+                limit,
+                file,
+                strategy,
+                format || token_budget.is_some(),
+                json,
+                token_budget,
+                doc_filter,
+            )
+        }
         Command::Symbols { filter, file } => cmd_symbols(filter, file),
         Command::Graph {
             path,
@@ -634,8 +642,7 @@ fn cmd_search(
     format: bool,
     json: bool,
     token_budget: Option<usize>,
-    code_only: bool,
-    docs_only: bool,
+    doc_filter: Option<codixing_core::DocFilter>,
 ) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
     let engine = Engine::open(&root).with_context(|| {
@@ -655,11 +662,8 @@ fn cmd_search(
     if let Some(b) = token_budget {
         sq = sq.with_token_budget(b);
     }
-    if code_only {
-        sq = sq.with_doc_filter(codixing_core::DocFilter::CodeOnly);
-    }
-    if docs_only {
-        sq = sq.with_doc_filter(codixing_core::DocFilter::DocsOnly);
+    if let Some(f) = doc_filter {
+        sq = sq.with_doc_filter(f);
     }
 
     let results = engine.search(sq).context("search failed")?;
@@ -698,7 +702,7 @@ fn cmd_search(
     }
 
     for (i, result) in results.iter().enumerate() {
-        let is_doc = result.language == "Markdown" || result.language == "HTML";
+        let is_doc = result.is_doc();
 
         if is_doc {
             let breadcrumb = if result.scope_chain.is_empty() {
