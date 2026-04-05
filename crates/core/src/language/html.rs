@@ -87,6 +87,8 @@ pub fn parse_html_sections(html: &str) -> Vec<DocSection> {
 
     let mut heading_stack: Vec<(u8, String)> = Vec::new();
     let mut sections: Vec<DocSection> = Vec::new();
+    let mut byte_offset = 0usize;
+    let mut line_offset = 0usize;
 
     // Build a set of heading element IDs so we can detect them while iterating.
     let heading_names: std::collections::HashSet<&str> = ["h1", "h2", "h3", "h4", "h5", "h6"]
@@ -123,16 +125,19 @@ pub fn parse_html_sections(html: &str) -> Vec<DocSection> {
                     let section_path: Vec<String> =
                         heading_stack.iter().map(|(_, t)| t.clone()).collect();
                     let content = current_content_parts.join(" ").trim().to_string();
-                    let byte_end = content.len();
+                    let section_len = content.len();
+                    let line_count = content.lines().count().max(1);
                     sections.push(DocSection {
                         heading: heading_text,
                         level: lvl,
                         section_path,
                         content,
-                        byte_range: 0..byte_end,
-                        line_range: 0..1,
+                        byte_range: byte_offset..(byte_offset + section_len),
+                        line_range: line_offset..(line_offset + line_count),
                         element_types: std::mem::take(&mut current_elements),
                     });
+                    byte_offset += section_len;
+                    line_offset += line_count;
                     current_content_parts.clear();
                 }
                 let lvl: u8 = tag.trim_start_matches('h').parse().unwrap_or(1);
@@ -165,14 +170,15 @@ pub fn parse_html_sections(html: &str) -> Vec<DocSection> {
         heading_stack.push((lvl, heading_text.clone()));
         let section_path: Vec<String> = heading_stack.iter().map(|(_, t)| t.clone()).collect();
         let content = current_content_parts.join(" ").trim().to_string();
-        let byte_end = content.len();
+        let section_len = content.len();
+        let line_count = content.lines().count().max(1);
         sections.push(DocSection {
             heading: heading_text,
             level: lvl,
             section_path,
             content,
-            byte_range: 0..byte_end,
-            line_range: 0..1,
+            byte_range: byte_offset..(byte_offset + section_len),
+            line_range: line_offset..(line_offset + line_count),
             element_types: std::mem::take(&mut current_elements),
         });
     }
@@ -192,20 +198,25 @@ pub fn parse_html_sections(html: &str) -> Vec<DocSection> {
 fn build_sections_from_headings_list(headings: &[(u8, String, String)]) -> Vec<DocSection> {
     let mut sections = Vec::new();
     let mut heading_stack: Vec<(u8, String)> = Vec::new();
+    let mut byte_offset = 0usize;
+    let mut line_offset = 0usize;
     for (lvl, text, content) in headings {
         heading_stack.retain(|(l, _)| *l < *lvl);
         heading_stack.push((*lvl, text.clone()));
         let section_path: Vec<String> = heading_stack.iter().map(|(_, t)| t.clone()).collect();
-        let byte_end = content.len();
+        let section_len = content.len();
+        let line_count = content.lines().count().max(1);
         sections.push(DocSection {
             heading: text.clone(),
             level: *lvl,
             section_path,
             content: content.clone(),
-            byte_range: 0..byte_end,
-            line_range: 0..1,
+            byte_range: byte_offset..(byte_offset + section_len),
+            line_range: line_offset..(line_offset + line_count),
             element_types: vec![],
         });
+        byte_offset += section_len;
+        line_offset += line_count;
     }
     sections
 }

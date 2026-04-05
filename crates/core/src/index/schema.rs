@@ -36,7 +36,8 @@ pub struct SchemaFields {
     /// Directory/filename segments from the file path (stemmed, unstored).
     pub path_segments: Field,
     /// Document type: "code", "config", or "doc".
-    pub doc_type: Field,
+    /// `None` when opening an index created before this field was added (backward compat).
+    pub doc_type: Option<Field>,
 }
 
 /// Build the Tantivy schema and return it together with field handles.
@@ -115,7 +116,7 @@ pub fn build_schema() -> (Schema, SchemaFields) {
         doc_comment,
         identifier_words,
         path_segments,
-        doc_type,
+        doc_type: Some(doc_type),
     };
 
     (schema, fields)
@@ -148,6 +149,9 @@ mod tests {
     #[test]
     fn schema_has_doc_type_field() {
         let (schema, fields) = build_schema();
-        assert_eq!(schema.get_field("doc_type").unwrap(), fields.doc_type);
+        assert_eq!(
+            schema.get_field("doc_type").unwrap(),
+            fields.doc_type.unwrap()
+        );
     }
 }
