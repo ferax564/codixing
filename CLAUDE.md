@@ -40,10 +40,12 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 - **Test coverage discovery** → `codixing search "test <name>"`
 - **Index freshness / stale files** → `codixing audit`
 - **Incremental re-index after changes** → `codixing sync`
+- **Code/config results only** → `codixing search "<query>" --code-only`
+- **Documentation results only** → `codixing search "<query>" --docs-only`
 
 ## Project Structure
 
-- `crates/core/` — engine: AST parsing, BM25, graph, embeddings, PageRank, test mapping, shared sessions, queue-based embedding (optional `rustqueue` feature)
+- `crates/core/` — engine: AST parsing, BM25, graph, embeddings, PageRank, test mapping, shared sessions, queue-based embedding (optional `rustqueue` feature), doc indexing (Markdown + HTML with section-aware chunking and doc-to-code graph edges)
 - `crates/cli/` — `codixing` CLI binary
 - `crates/mcp/` — MCP server (`codixing-mcp`), 57 tools in `src/tools/` (use `--compact` or `--medium` for token reduction)
 - `crates/server/` — HTTP API server (`codixing-server`), REST endpoints with SSE streaming for sync
@@ -56,7 +58,7 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 
 ```bash
 cargo build --release --workspace          # build all binaries
-cargo test --workspace                      # run all tests (878)
+cargo test --workspace                      # run all tests (911)
 cargo clippy --workspace -- -D warnings     # lint (must pass)
 cargo fmt --check                           # format check (must pass)
 
