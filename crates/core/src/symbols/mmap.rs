@@ -403,6 +403,8 @@ pub fn language_to_u8(lang: Language) -> u8 {
         Language::Makefile => 21,
         Language::Mermaid => 22,
         Language::Xml => 23,
+        Language::Markdown => 24,
+        Language::Html => 25,
     }
 }
 
@@ -433,6 +435,8 @@ pub fn u8_to_language(v: u8) -> Language {
         21 => Language::Makefile,
         22 => Language::Mermaid,
         23 => Language::Xml,
+        24 => Language::Markdown,
+        25 => Language::Html,
         _ => Language::Rust, // fallback
     }
 }

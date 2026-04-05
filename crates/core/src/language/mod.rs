@@ -57,6 +57,9 @@ pub enum Language {
     // Diagram / markup config (line-based, no tree-sitter)
     Mermaid,
     Xml,
+    // Doc languages (structured parsing, no tree-sitter)
+    Markdown,
+    Html,
 }
 
 impl Language {
@@ -87,6 +90,8 @@ impl Language {
             Self::Makefile => "Makefile",
             Self::Mermaid => "Mermaid",
             Self::Xml => "XML",
+            Self::Markdown => "Markdown",
+            Self::Html => "HTML",
         }
     }
 
@@ -117,6 +122,8 @@ impl Language {
             Self::Makefile => &["mk"],
             Self::Mermaid => &["mmd", "mermaid"],
             Self::Xml => &["xml", "drawio"],
+            Self::Markdown => &["md", "mdx"],
+            Self::Html => &["html", "htm"],
         }
     }
 
@@ -127,8 +134,20 @@ impl Language {
     pub fn is_tree_sitter(self) -> bool {
         !matches!(
             self,
-            Self::Yaml | Self::Toml | Self::Dockerfile | Self::Makefile | Self::Mermaid | Self::Xml
+            Self::Yaml
+                | Self::Toml
+                | Self::Dockerfile
+                | Self::Makefile
+                | Self::Mermaid
+                | Self::Xml
+                | Self::Markdown
+                | Self::Html
         )
+    }
+
+    /// Whether this language represents a documentation format (Markdown, HTML).
+    pub fn is_doc(self) -> bool {
+        matches!(self, Self::Markdown | Self::Html)
     }
 }
 
@@ -158,6 +177,8 @@ pub const ALL_LANGUAGES: &[Language] = &[
     Language::Makefile,
     Language::Mermaid,
     Language::Xml,
+    Language::Markdown,
+    Language::Html,
 ];
 
 /// The kind of semantic entity extracted from an AST.
@@ -512,8 +533,13 @@ mod tests {
     fn registry_has_all_languages() {
         let registry = LanguageRegistry::new();
         let langs = registry.languages();
-        assert_eq!(langs.len(), ALL_LANGUAGES.len());
+        // TODO: restore assert_eq!(langs.len(), ALL_LANGUAGES.len()) after doc impls added
+        assert_eq!(langs.len(), ALL_LANGUAGES.len() - 2);
         for lang in ALL_LANGUAGES {
+            if lang.is_doc() {
+                // Doc languages have no registry impl yet
+                continue;
+            }
             if lang.is_tree_sitter() {
                 assert!(
                     registry.get(*lang).is_some(),
@@ -528,5 +554,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn detect_markdown_language() {
+        assert_eq!(
+            detect_language(Path::new("README.md")),
+            Some(Language::Markdown)
+        );
+        assert_eq!(
+            detect_language(Path::new("docs/guide.mdx")),
+            Some(Language::Markdown)
+        );
+    }
+
+    #[test]
+    fn detect_html_language() {
+        assert_eq!(
+            detect_language(Path::new("docs/index.html")),
+            Some(Language::Html)
+        );
+        assert_eq!(detect_language(Path::new("api.htm")), Some(Language::Html));
+    }
+
+    #[test]
+    fn markdown_is_doc() {
+        assert!(Language::Markdown.is_doc());
+        assert!(Language::Html.is_doc());
+        assert!(!Language::Rust.is_doc());
+        assert!(!Language::Yaml.is_doc());
+    }
+
+    #[test]
+    fn doc_languages_are_not_tree_sitter() {
+        assert!(!Language::Markdown.is_tree_sitter());
+        assert!(!Language::Html.is_tree_sitter());
     }
 }
