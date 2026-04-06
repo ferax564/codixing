@@ -967,8 +967,6 @@ mod tests {
 
     #[test]
     fn entity_name_match_ranks_above_content_only() {
-        use crate::config::Bm25Config;
-
         let idx = TantivyIndex::create_in_ram().unwrap();
 
         // Chunk 1: "FooParser" appears only in entity_names (via the chunk).

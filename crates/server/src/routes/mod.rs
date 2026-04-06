@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod graph;
 pub mod index;
+mod paths;
 pub mod search;
 pub mod symbols;
 

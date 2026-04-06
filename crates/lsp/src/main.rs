@@ -1862,6 +1862,7 @@ fn walk_tree(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 
@@ -2197,7 +2198,7 @@ mod tests {
         let same_line: Vec<_> = tokens.iter().filter(|t| t.delta_line == 0).collect();
         // At least the second token on line 0 should have delta_line == 0.
         assert!(
-            same_line.len() >= 1,
+            !same_line.is_empty(),
             "expected at least one same-line delta token"
         );
     }

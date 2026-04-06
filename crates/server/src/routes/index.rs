@@ -1,5 +1,4 @@
 use std::convert::Infallible;
-use std::path::PathBuf;
 use std::time::Instant;
 
 use axum::Json;
@@ -9,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::error::ApiError;
+use crate::routes::paths::resolve_repo_path;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -32,15 +32,14 @@ pub async fn reindex_handler(
     Json(req): Json<ReindexRequest>,
 ) -> Result<Json<ReindexResponse>, ApiError> {
     let start = Instant::now();
-    let path = PathBuf::from(&req.file_path);
-
     let mut engine = state.write().await;
-    engine.reindex_file(&path)?;
+    let path = resolve_repo_path(&engine, &req.file_path)?;
+    engine.reindex_file(&path.absolute)?;
     engine.save()?;
 
     Ok(Json(ReindexResponse {
         status: "ok",
-        file_path: req.file_path,
+        file_path: path.relative,
         elapsed_ms: start.elapsed().as_millis() as u64,
     }))
 }
@@ -64,15 +63,14 @@ pub async fn remove_file_handler(
     State(state): State<AppState>,
     Json(req): Json<RemoveFileRequest>,
 ) -> Result<Json<RemoveFileResponse>, ApiError> {
-    let path = PathBuf::from(&req.file_path);
-
     let mut engine = state.write().await;
-    engine.remove_file(&path)?;
+    let path = resolve_repo_path(&engine, &req.file_path)?;
+    engine.remove_file(&path.absolute)?;
     engine.save()?;
 
     Ok(Json(RemoveFileResponse {
         status: "ok",
-        file_path: req.file_path,
+        file_path: path.relative,
     }))
 }
 

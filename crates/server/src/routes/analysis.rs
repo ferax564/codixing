@@ -8,6 +8,7 @@ use codixing_core::EntityKind;
 use codixing_core::complexity::{count_cyclomatic_complexity, risk_band};
 
 use crate::error::ApiError;
+use crate::routes::paths::resolve_repo_path;
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -230,13 +231,12 @@ pub async fn complexity_handler(
     Query(params): Query<ComplexityQuery>,
 ) -> Result<Json<ComplexityResponse>, ApiError> {
     let engine = state.read().await;
-    let root = engine.config().root.clone();
-    let abs_path = root.join(&file);
+    let file = resolve_repo_path(&engine, &file)?;
 
-    let source = fs::read_to_string(&abs_path)
-        .map_err(|e| ApiError::BadRequest(format!("cannot read '{file}': {e}")))?;
+    let source = fs::read_to_string(&file.absolute)
+        .map_err(|e| ApiError::BadRequest(format!("cannot read '{}': {e}", file.relative)))?;
 
-    let syms = engine.symbols("", Some(&file))?;
+    let syms = engine.symbols("", Some(&file.relative))?;
     let mut fns: Vec<_> = syms
         .iter()
         .filter(|s| matches!(s.kind, EntityKind::Function | EntityKind::Method))
@@ -264,7 +264,7 @@ pub async fn complexity_handler(
 
     let total = functions.len();
     Ok(Json(ComplexityResponse {
-        file,
+        file: file.relative,
         functions,
         total,
     }))
@@ -296,7 +296,8 @@ pub async fn outline_handler(
     Path(file): Path<String>,
 ) -> Result<Json<OutlineResponse>, ApiError> {
     let engine = state.read().await;
-    let mut syms = engine.symbols("", Some(&file))?;
+    let file = resolve_repo_path(&engine, &file)?;
+    let mut syms = engine.symbols("", Some(&file.relative))?;
     syms.sort_by_key(|s| s.line_start);
 
     let total = syms.len();
@@ -313,7 +314,7 @@ pub async fn outline_handler(
         .collect();
 
     Ok(Json(OutlineResponse {
-        file,
+        file: file.relative,
         symbols,
         total,
     }))

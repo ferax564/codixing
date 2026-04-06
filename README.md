@@ -318,7 +318,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 911+ tests
+cargo test --workspace        # 931+ tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```

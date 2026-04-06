@@ -269,9 +269,6 @@ fn parse_name_list(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::CodeGraph;
-    use crate::language::Language;
-    use crate::symbols::SymbolTable;
 
     /// Build a minimal Engine-like test by directly testing classify_relationship.
     #[test]

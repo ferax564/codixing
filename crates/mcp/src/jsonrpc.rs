@@ -619,12 +619,18 @@ mod tests {
         let engine = Arc::new(RwLock::new(engine));
 
         let socket_path = dir.path().join("test_daemon.sock");
+        let listener = match UnixListener::bind(&socket_path) {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping daemon_socket_roundtrip: cannot bind unix socket: {err}");
+                return;
+            }
+            Err(err) => panic!("failed to bind test daemon socket: {err}"),
+        };
 
         // Start the daemon listener in a background task.
         let engine_clone = Arc::clone(&engine);
-        let socket_clone = socket_path.clone();
         let daemon_handle = tokio::spawn(async move {
-            let listener = UnixListener::bind(&socket_clone).unwrap();
             // Accept exactly one connection.
             let (stream, _) = listener.accept().await.unwrap();
             crate::daemon::handle_socket_connection(stream, engine_clone, ListingMode::Full, None)

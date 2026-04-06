@@ -686,8 +686,8 @@ fn compare_embedding_models() {
             case.query
         };
         print!("{:<width$}", display_query, width = header_pad);
-        for col in 0..results.len() {
-            print!("{:>20}", if hit_matrix[row][col] { "HIT" } else { "miss" });
+        for &hit in &hit_matrix[row] {
+            print!("{:>20}", if hit { "HIT" } else { "miss" });
         }
         println!();
     }
@@ -937,7 +937,7 @@ fn real_codebase_bm25_vs_hybrid() {
     let mut hybrid_ms = 0u128;
 
     println!();
-    println!("{:<55} {:>6} {:>8}  {}", "Query", "BM25", "Hybrid", "Type");
+    println!("{:<55} {:>6} {:>8}  Type", "Query", "BM25", "Hybrid");
     println!("{}", "-".repeat(82));
 
     for case in REAL_CODEBASE_CASES {
@@ -1196,10 +1196,10 @@ fn real_codebase_model_comparison() {
             case.query
         };
         print!("{:<width$} {:>6}", q, case.query_type, width = q_w);
-        for col in 0..n_models {
+        for &hit in &hit_matrix[row] {
             print!(
                 "  {:>width$}",
-                if hit_matrix[row][col] { "HIT" } else { "miss" },
+                if hit { "HIT" } else { "miss" },
                 width = col_w - 2
             );
         }
@@ -1210,7 +1210,7 @@ fn real_codebase_model_comparison() {
 
     // NL recall row
     print!("{:<width$} {:>6}", "NL Recall@k", "nl", width = q_w);
-    for col in 0..n_models {
+    for (col, _) in models.iter().enumerate() {
         let hits = nl_cases.iter().filter(|&&r| hit_matrix[r][col]).count();
         print!(
             "  {:>width$}",
@@ -1227,7 +1227,7 @@ fn real_codebase_model_comparison() {
 
     // Identifier recall row
     print!("{:<width$} {:>6}", "ID Recall@k", "id", width = q_w);
-    for col in 0..n_models {
+    for (col, _) in models.iter().enumerate() {
         let hits = id_cases.iter().filter(|&&r| hit_matrix[r][col]).count();
         print!(
             "  {:>width$}",
@@ -1244,7 +1244,7 @@ fn real_codebase_model_comparison() {
 
     // Search latency row
     print!("{:<width$} {:>6}", "Avg search latency", "", width = q_w);
-    for col in 0..n_models {
+    for (col, _) in models.iter().enumerate() {
         let avg = if n_cases > 0 {
             search_ms[col] / n_cases as u128
         } else {

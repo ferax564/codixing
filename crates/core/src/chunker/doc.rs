@@ -6,6 +6,18 @@ use crate::language::doc::DocSection;
 
 use super::{Chunk, chunk_id, non_ws_chars};
 
+fn clamp_to_char_boundary(s: &str, offset: usize) -> usize {
+    if offset >= s.len() {
+        return s.len();
+    }
+
+    let mut pos = offset;
+    while pos > 0 && !s.is_char_boundary(pos) {
+        pos -= 1;
+    }
+    pos
+}
+
 /// Chunk a parsed document using its section tree.
 ///
 /// Algorithm:
@@ -87,8 +99,12 @@ pub fn chunk_doc(
                 if !acc.is_empty() && combined_nws > config.max_chars {
                     // Flush accumulator.
                     let acc_byte_end = byte_start + offset_in_content;
+                    let acc_prefix_start = clamp_to_char_boundary(
+                        content,
+                        offset_in_content.saturating_sub(acc.len()),
+                    );
                     let acc_line_start = section.line_range.start
-                        + content[..offset_in_content.saturating_sub(acc.len())]
+                        + content[..acc_prefix_start]
                             .chars()
                             .filter(|&c| c == '\n')
                             .count();
@@ -115,8 +131,10 @@ pub fn chunk_doc(
             // Flush remaining.
             if !acc.is_empty() {
                 let acc_byte_end = section.byte_range.end;
+                let acc_prefix_start =
+                    clamp_to_char_boundary(content, content.len().saturating_sub(acc.len()));
                 let acc_line_start = section.line_range.start
-                    + content[..content.len().saturating_sub(acc.len())]
+                    + content[..acc_prefix_start]
                         .chars()
                         .filter(|&c| c == '\n')
                         .count();
@@ -304,5 +322,39 @@ mod tests {
             &default_config(),
         );
         assert_eq!(chunks[0].scope_chain, vec!["Guide", "Install"]);
+    }
+
+    #[test]
+    fn large_section_with_multibyte_text_splits_without_panicking() {
+        let content = "# Cafes\n\nCafe et the.\n\nEmoji 😀 section.\n".to_string();
+        let sections = vec![DocSection {
+            heading: "Cafes".to_string(),
+            level: 1,
+            section_path: vec!["Cafes".to_string()],
+            content: content.clone(),
+            byte_range: 0..content.len(),
+            line_range: 0..5,
+            element_types: vec![DocElement::Paragraph],
+        }];
+        let config = ChunkConfig {
+            max_chars: 10,
+            min_chars: 1,
+            overlap_ratio: 0.0,
+        };
+
+        let chunks = chunk_doc(
+            "doc.md",
+            content.as_bytes(),
+            &sections,
+            Language::Markdown,
+            &config,
+        );
+
+        assert!(chunks.len() >= 2);
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk.content.contains("Emoji 😀"))
+        );
     }
 }

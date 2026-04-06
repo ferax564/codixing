@@ -58,7 +58,7 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 
 ```bash
 cargo build --release --workspace          # build all binaries
-cargo test --workspace                      # run all tests (911)
+cargo test --workspace                      # run all tests (931)
 cargo clippy --workspace -- -D warnings     # lint (must pass)
 cargo fmt --check                           # format check (must pass)
 

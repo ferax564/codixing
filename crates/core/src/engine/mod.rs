@@ -1126,8 +1126,9 @@ pub fn unique_reload_function() -> bool {
     fn streaming_batch_constant_is_reasonable() {
         // STREAM_BATCH_SIZE must be > 0 and within a reasonable range
         // for memory-bounded embedding.
-        assert!(STREAM_BATCH_SIZE > 0);
-        assert!(STREAM_BATCH_SIZE <= 1024);
+        let batch_size = std::hint::black_box(STREAM_BATCH_SIZE);
+        assert!(batch_size > 0);
+        assert!(batch_size <= 1024);
     }
 
     #[test]

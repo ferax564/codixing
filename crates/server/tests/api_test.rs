@@ -216,6 +216,46 @@ async fn find_symbol_returns_definitions() {
 }
 
 #[tokio::test]
+async fn reindex_rejects_paths_outside_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("outside.md"), "# outside\n").unwrap();
+
+    let engine = make_test_engine(dir.path());
+    let app = build_router(new_state(engine));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/index/reindex")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_string(&serde_json::json!({
+                        "file_path": outside.path().join("outside.md")
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("must stay within the indexed project roots")
+    );
+}
+
+#[tokio::test]
 async fn grep_returns_matches() {
     let dir = tempfile::tempdir().unwrap();
     let engine = make_test_engine(dir.path());

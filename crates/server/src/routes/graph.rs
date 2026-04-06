@@ -12,6 +12,7 @@ use codixing_core::language::detect_language;
 use codixing_core::{EdgeKind, Engine, RepoMapOptions, Symbol};
 
 use crate::error::ApiError;
+use crate::routes::paths::resolve_repo_path;
 use crate::state::AppState;
 
 const GRAPH_VIEW_HTML: &str = include_str!("../../assets/graph_viewer.html");
@@ -268,10 +269,11 @@ pub async fn callers_handler(
     Query(params): Query<FileDepthQuery>,
 ) -> Result<Json<FilesResponse>, ApiError> {
     let engine = state.read().await;
+    let file = resolve_repo_path(&engine, &params.file)?;
     let files = if params.depth <= 1 {
-        engine.callers(&params.file)
+        engine.callers(&file.relative)
     } else {
-        engine.transitive_callers(&params.file, params.depth)
+        engine.transitive_callers(&file.relative, params.depth)
     };
     let count = files.len();
     Ok(Json(FilesResponse { files, count }))
@@ -286,10 +288,11 @@ pub async fn callees_handler(
     Query(params): Query<FileDepthQuery>,
 ) -> Result<Json<FilesResponse>, ApiError> {
     let engine = state.read().await;
+    let file = resolve_repo_path(&engine, &params.file)?;
     let files = if params.depth <= 1 {
-        engine.callees(&params.file)
+        engine.callees(&file.relative)
     } else {
-        engine.transitive_callees(&params.file, params.depth)
+        engine.transitive_callees(&file.relative, params.depth)
     };
     let count = files.len();
     Ok(Json(FilesResponse { files, count }))

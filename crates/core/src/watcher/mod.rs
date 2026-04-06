@@ -3,12 +3,17 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, EventKind, RecursiveMode, Watcher};
 use tracing::{debug, info, warn};
 
 use crate::config::IndexConfig;
 use crate::error::Result;
 use crate::language::detect_language;
+
+#[cfg(target_os = "macos")]
+type BackendWatcher = notify::PollWatcher;
+#[cfg(not(target_os = "macos"))]
+type BackendWatcher = notify::RecommendedWatcher;
 
 /// Default debounce window — events within this period are coalesced.
 ///
@@ -17,13 +22,16 @@ use crate::language::detect_language;
 /// (e.g. `git checkout`, formatter runs) into a single batch, avoiding
 /// redundant reindex cycles.
 const DEBOUNCE_MS: u64 = 500;
+/// Give backend watchers a brief moment to attach before callers start
+/// mutating the filesystem. This avoids dropping the first write on macOS.
+const STARTUP_SETTLE_MS: u64 = 150;
 
 /// A debounced file-system watcher that emits batches of changed paths.
 ///
-/// Uses `notify::RecommendedWatcher` under the hood. Events are debounced
+/// Uses `notify` under the hood. Events are debounced
 /// so that a burst of rapid saves produces a single batch callback.
 pub struct FileWatcher {
-    _watcher: RecommendedWatcher,
+    _watcher: BackendWatcher,
     receiver: mpsc::Receiver<notify::Result<notify::Event>>,
     exclude_patterns: HashSet<String>,
 }
@@ -53,7 +61,18 @@ impl FileWatcher {
     pub fn new(root: &Path, config: &IndexConfig) -> Result<Self> {
         let (tx, rx) = mpsc::channel();
 
-        let mut watcher = RecommendedWatcher::new(
+        #[cfg(target_os = "macos")]
+        let mut watcher = BackendWatcher::new(
+            move |res| {
+                let _ = tx.send(res);
+            },
+            Config::default()
+                .with_poll_interval(Duration::from_millis(100))
+                .with_compare_contents(true),
+        )?;
+
+        #[cfg(not(target_os = "macos"))]
+        let mut watcher = BackendWatcher::new(
             move |res| {
                 let _ = tx.send(res);
             },
@@ -61,6 +80,7 @@ impl FileWatcher {
         )?;
 
         watcher.watch(root, RecursiveMode::Recursive)?;
+        std::thread::sleep(Duration::from_millis(STARTUP_SETTLE_MS));
 
         let exclude_patterns: HashSet<String> = config.exclude_patterns.iter().cloned().collect();
 
