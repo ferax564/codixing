@@ -33,17 +33,40 @@ fn normalize_lexical(path: &Path) -> PathBuf {
 fn resolve_relative_candidate(config: &IndexConfig, requested: &str) -> PathBuf {
     let requested = requested.replace('\\', "/");
 
+    if let Some(existing) = config.resolve_path(&requested) {
+        return existing;
+    }
+
+    let first_component =
+        Path::new(&requested)
+            .components()
+            .find_map(|component| match component {
+                Component::Normal(part) => Some(part.to_os_string()),
+                _ => None,
+            });
+
     for extra_root in &config.extra_roots {
         let prefix = extra_root
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| extra_root.to_string_lossy().into_owned());
         let prefix_with_slash = format!("{prefix}/");
-        if requested == prefix {
-            return extra_root.clone();
-        }
-        if let Some(stripped) = requested.strip_prefix(&prefix_with_slash) {
-            return extra_root.join(stripped);
+        let extra_candidate = if requested == prefix {
+            Some(extra_root.clone())
+        } else {
+            requested
+                .strip_prefix(&prefix_with_slash)
+                .map(|stripped| extra_root.join(stripped))
+        };
+
+        if let Some(extra_candidate) = extra_candidate {
+            let primary_claims_prefix = first_component
+                .as_ref()
+                .map(|component| config.root.join(component))
+                .is_some_and(|path| path.exists());
+            if !primary_claims_prefix {
+                return extra_candidate;
+            }
         }
     }
 
@@ -200,5 +223,37 @@ mod tests {
             err.to_string()
                 .contains("must stay within the indexed project roots")
         );
+    }
+
+    #[test]
+    fn keeps_primary_root_priority_when_extra_root_prefix_collides() {
+        let workspace = tempdir().unwrap();
+        let root = workspace.path().join("project");
+        let extra = workspace.path().join("deps").join("shared");
+
+        fs::create_dir_all(root.join("shared/src")).unwrap();
+        fs::write(root.join("shared/src/main.rs"), "pub fn primary() {}\n").unwrap();
+
+        let engine = make_engine(&root, Some(&extra));
+        let resolved = resolve_repo_path(&engine, "shared/src/main.rs").unwrap();
+
+        assert_eq!(resolved.relative, "shared/src/main.rs");
+        assert_eq!(
+            resolved.absolute,
+            root.join("shared/src/main.rs").canonicalize().unwrap()
+        );
+    }
+
+    #[test]
+    fn resolves_missing_prefixed_paths_to_extra_root_when_primary_namespace_does_not_exist() {
+        let workspace = tempdir().unwrap();
+        let root = workspace.path().join("project");
+        let extra = workspace.path().join("deps").join("shared");
+        let engine = make_engine(&root, Some(&extra));
+
+        let resolved = resolve_repo_path(&engine, "shared/src/new.rs").unwrap();
+
+        assert_eq!(resolved.relative, "shared/src/new.rs");
+        assert_eq!(resolved.absolute, extra.join("src/new.rs"));
     }
 }
