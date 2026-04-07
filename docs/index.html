@@ -10,7 +10,7 @@
   <!-- Open Graph -->
   <meta property="og:type" content="website" />
   <meta property="og:title" content="Codixing — Code Retrieval Engine for AI Agents" />
-  <meta property="og:description" content="R@10=0.763 retrieval accuracy. 73% fewer tokens. 19 CLI commands. Hybrid BM25 + embeddings + call graph PageRank — in a single Rust binary." />
+  <meta property="og:description" content="R@10=0.763 retrieval accuracy. 73% fewer tokens. 24 CLI commands. Hybrid BM25 + embeddings + call graph PageRank — in a single Rust binary." />
   <meta property="og:url" content="https://codixing.com/" />
   <meta property="og:image" content="https://codixing.com/og-image.png" />
   <meta property="og:image:width" content="1200" />
@@ -20,7 +20,7 @@
   <!-- Twitter/X Card -->
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="Codixing — Code Retrieval Engine for AI Agents" />
-  <meta name="twitter:description" content="R@10=0.763 retrieval accuracy. 73% fewer tokens. 19 CLI commands. Hybrid BM25 + embeddings + call graph PageRank — in a single Rust binary." />
+  <meta name="twitter:description" content="R@10=0.763 retrieval accuracy. 73% fewer tokens. 24 CLI commands. Hybrid BM25 + embeddings + call graph PageRank — in a single Rust binary." />
   <meta name="twitter:image" content="https://codixing.com/og-image.png" />
 
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -1089,7 +1089,7 @@
     <div class="hero">
       <div class="hero-badge">
         <span class="badge-dot"></span>
-        Rust-native &bull; 931 tests &bull; 19 CLI commands &bull; 73% token savings
+        Rust-native &bull; 982 tests &bull; 24 CLI commands &bull; 73% token savings
       </div>
       <h1>Your AI agent is<br><span class="grad">burning money on grep</span></h1>
       <p class="hero-sub">
@@ -1132,7 +1132,7 @@
           <span class="metric-label">R@10 retrieval accuracy (vs grep 0.345)</span>
         </div>
         <div class="metric-item">
-          <span class="metric-val" data-count="19" data-suffix="">0</span>
+          <span class="metric-val" data-count="24" data-suffix="">0</span>
           <span class="metric-label">CLI commands</span>
         </div>
       </div>
@@ -1594,8 +1594,8 @@
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#3fb950" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 17h6M17 14v6"/><path d="M7 10v4M10 7h4M17 10v4"/></svg>
           </div>
           <h3>CLI + MCP</h3>
-          <p>19 CLI commands for direct use, plus 57 JSON-RPC 2.0 tools for Claude Code and any MCP-capable client. <code style="color:var(--cyan);font-size:0.85em">--compact</code> mode sends only 2 meta-tools on init (96.7% token savings), with all 57 tools discoverable on demand.</p>
-          <span class="feature-tag">19 CLI cmds &bull; 57 MCP tools &bull; stdin/stdout &bull; Unix socket</span>
+          <p>24 CLI commands for direct use, plus 56 JSON-RPC 2.0 tools for Claude Code and any MCP-capable client. <code style="color:var(--cyan);font-size:0.85em">--compact</code> mode sends only 2 meta-tools on init (96.7% token savings), with all 56 tools discoverable on demand.</p>
+          <span class="feature-tag">24 CLI cmds &bull; 56 MCP tools &bull; stdin/stdout &bull; Unix socket</span>
         </div>
         <div class="feature-card" style="--delay:0.35s">
           <div class="feature-icon pink">
@@ -1604,6 +1604,22 @@
           <h3>Zero runtime stack</h3>
           <p>Single statically-linked Rust binary under 50MB. No JVM, no Docker, no external database required. Works on macOS, Linux, and Windows.</p>
           <span class="feature-tag">Single binary &bull; Tantivy &bull; usearch</span>
+        </div>
+        <div class="feature-card" style="--delay:0.42s">
+          <div class="feature-icon cyan">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#00d4aa" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M12 6v6l4 2"/></svg>
+          </div>
+          <h3>Code understanding</h3>
+          <p>Five new commands go beyond search: <code style="color:var(--cyan);font-size:0.85em">impact</code> computes blast radius, <code style="color:var(--cyan);font-size:0.85em">api</code> lists public surfaces, <code style="color:var(--cyan);font-size:0.85em">types</code> maps relationships, <code style="color:var(--cyan);font-size:0.85em">examples</code> mines usage, and <code style="color:var(--cyan);font-size:0.85em">context</code> assembles cross-file understanding.</p>
+          <span class="feature-tag">impact &bull; api &bull; types &bull; examples &bull; context</span>
+        </div>
+        <div class="feature-card" style="--delay:0.49s">
+          <div class="feature-icon purple">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+          </div>
+          <h3>Semantic intelligence</h3>
+          <p>Embedding-free <code style="color:var(--cyan);font-size:0.85em">--semantic</code> strategy matches code by behavioral signatures, not names. Query-personalized PageRank and learned reformulation adapt ranking to each query and project.</p>
+          <span class="feature-tag">Concept graph &bull; Behavioral signatures &bull; PPR</span>
         </div>
       </div>
     </div>
@@ -1615,8 +1631,8 @@
       <div class="mcp-layout">
         <div>
           <div class="section-label reveal">CLI &amp; MCP Integration</div>
-          <h2 class="section-title reveal">19 CLI commands +<br>57 MCP tools</h2>
-          <p class="section-sub reveal">Use Codixing directly from the terminal with 19 commands, or connect any MCP-capable editor. The MCP server exposes retrieval, symbols, graph traversal, file reading, temporal analysis, and diagnostics. In <code style="color:var(--cyan);font-size:0.85em">--compact</code> mode, only 2 meta-tools are sent on init (~218 tokens), with the full 57 tools discoverable on demand.</p>
+          <h2 class="section-title reveal">24 CLI commands +<br>56 MCP tools</h2>
+          <p class="section-sub reveal">Use Codixing directly from the terminal with 24 commands, or connect any MCP-capable editor. The MCP server exposes retrieval, symbols, graph traversal, file reading, temporal analysis, and diagnostics. In <code style="color:var(--cyan);font-size:0.85em">--compact</code> mode, only 2 meta-tools are sent on init (~218 tokens), with the full 56 tools discoverable on demand.</p>
           <div class="tools-grid reveal">
             <div class="tool-card">
               <div class="tool-name">code_search</div>

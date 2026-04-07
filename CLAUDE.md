@@ -21,6 +21,11 @@ codixing usages add_chunk           # find call sites and imports
 codixing callers src/engine/mod.rs  # who imports this file
 codixing callees src/engine/mod.rs  # what this file imports
 codixing graph --map                # repo architecture map
+codixing impact src/engine/mod.rs   # blast radius analysis
+codixing api src/engine/mod.rs      # public API surface
+codixing types Engine               # type relationships
+codixing examples add_chunk         # usage examples from tests + callers
+codixing context src/engine/mod.rs  # cross-file context assembly
 ```
 
 The MCP server is also available when connected to an editor, but the CLI is preferred — it's simpler, works for subagents, and dogfoods the search quality directly.
@@ -34,8 +39,12 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 - **Searching by concept / natural language** → `codixing search "<query>"`
 - **Searching by symbol type** → `codixing search "<query>" --kind function` (function, struct, enum, trait, impl, const)
 - **Listing files by glob** → `Glob` tool (Codixing doesn't replace file finding)
-- **Impact analysis before a change** → `codixing callers <file>` + `codixing callees <file>`
+- **Impact analysis before a change** → `codixing impact <file>` (blast radius + affected tests)
 - **Seeing all callers of a function** → `codixing usages <name>`
+- **Public API surface of a file** → `codixing api <file>`
+- **Type relationships for a symbol** → `codixing types <name>`
+- **Usage examples for a symbol** → `codixing examples <name>` (tests + callers + doc blocks)
+- **Cross-file context for understanding** → `codixing context <file> --line N`
 - **Architecture overview** → `codixing graph --map`
 - **Test coverage discovery** → `codixing search "test <name>"`
 - **Index freshness / stale files** → `codixing audit`
@@ -45,9 +54,9 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 
 ## Project Structure
 
-- `crates/core/` — engine: AST parsing, BM25, graph, embeddings, PageRank, test mapping, shared sessions, queue-based embedding (optional `rustqueue` feature), doc indexing (Markdown + HTML with section-aware chunking and doc-to-code graph edges)
+- `crates/core/` — engine: AST parsing, BM25, graph, embeddings, PageRank, test mapping, shared sessions, queue-based embedding (optional `rustqueue` feature), doc indexing (Markdown + HTML with section-aware chunking and doc-to-code graph edges), change impact analysis, semantic concept graph, API surface analysis, type relations, usage example mining, cross-file context assembly, behavioral signatures, query-personalized PageRank, learned query reformulation
 - `crates/cli/` — `codixing` CLI binary
-- `crates/mcp/` — MCP server (`codixing-mcp`), 57 tools in `src/tools/` (use `--compact` or `--medium` for token reduction)
+- `crates/mcp/` — MCP server (`codixing-mcp`), 56 tools in `src/tools/` (use `--compact` or `--medium` for token reduction)
 - `crates/server/` — HTTP API server (`codixing-server`), REST endpoints with SSE streaming for sync
 - `crates/core/src/federation/` — cross-repo federated search (`--federation config.json`)
 - `crates/lsp/` — LSP server (`codixing-lsp`), hover/go-to-def/refs/symbols/call hierarchy/complexity diagnostics/rename/semantic tokens
@@ -58,7 +67,7 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 
 ```bash
 cargo build --release --workspace          # build all binaries
-cargo test --workspace                      # run all tests (931)
+cargo test --workspace                      # run all tests (982)
 cargo clippy --workspace -- -D warnings     # lint (must pass)
 cargo fmt --check                           # format check (must pass)
 

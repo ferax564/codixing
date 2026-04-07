@@ -128,7 +128,7 @@ Requires ONNX Runtime (`pip install onnxruntime` or download from GitHub).
 
 ## CLI Commands
 
-19 commands for code intelligence:
+24 commands for code intelligence:
 
 ```bash
 codixing search "query"          # Semantic code search
@@ -137,6 +137,11 @@ codixing usages add_chunk        # Find call sites and imports
 codixing callers src/engine.rs   # Who imports this file
 codixing callees src/engine.rs   # What this file imports
 codixing graph --map             # Architecture overview
+codixing impact src/engine.rs    # Blast radius analysis
+codixing api src/engine.rs       # Public API surface
+codixing types Engine            # Type relationships
+codixing examples add_chunk      # Usage examples from tests + callers
+codixing context src/engine.rs   # Cross-file context assembly
 codixing init .                  # Index a project
 codixing sync                    # Incremental re-index
 codixing audit                   # Find stale files
@@ -146,7 +151,7 @@ Full reference: [codixing.com/docs](https://codixing.com/docs)
 
 ### MCP server (optional)
 
-For editors with MCP support, the `codixing-mcp` binary exposes 57 JSON-RPC 2.0 tools:
+For editors with MCP support, the `codixing-mcp` binary exposes 56 JSON-RPC 2.0 tools:
 
 | Category | Tools |
 |----------|-------|
@@ -244,7 +249,15 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Ranked cross-imports** — PageRank + git recency scoring for relevance-ranked graph queries across directory boundaries
 - **Memory relations** — `memory_relate` tool creates typed edges between agent memory entries, enabling associative recall across sessions
 - **Feature hub** — One-call feature exploration combining search + callers + callees + tests for unified understanding
-- **CLI + MCP** — 19 CLI commands for direct use; 57 MCP tools for editor integration (search, graph traversal, file operations, code review, git analysis, session memory, federation discovery)
+- **Change impact analysis** — `codixing impact` computes blast radius: direct dependents, transitive dependents, and affected tests for any file
+- **Semantic concept graph** — Vocabulary gap bridging via behavioral signatures; embedding-free `--semantic` strategy matches code by what it does, not just what it's named
+- **API surface analysis** — `codixing api` lists public symbols with visibility tracking (pub, pub(crate), export, etc.)
+- **Type-aware search** — `codixing types` shows type relationships: implements, extends, returns, contains
+- **Usage example mining** — `codixing examples` finds real usage from tests, callers, and doc blocks
+- **Cross-file context assembly** — `codixing context` follows import chains and callees to assemble understanding context
+- **Query-personalized PageRank** — Query-time graph boost seeds PageRank from query-relevant nodes for context-aware ranking
+- **Learned query reformulation** — Project-specific vocabulary expansion learns from codebase patterns
+- **CLI + MCP** — 24 CLI commands for direct use; 56 MCP tools for editor integration (search, graph traversal, file operations, code review, git analysis, session memory, federation discovery)
 - **File freshness audit** — `audit_freshness` tool identifies stale and orphaned files across releases
 - **Preflight gates** — Plugin enforces existence scanning before proposing new features
 - **TypeScript import resolution** — Resolve `.js` → `.ts` imports with node16/bundler moduleResolution support, enabling 0.8+ R@10 on cross-package code discovery
@@ -307,7 +320,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 │  + Exact (trigram) · Graph boost · Definition 3.5× · Session     │
 │  SearchPipeline: composable stages, 6 strategies                  │
 │                                                                   │
-│  API: CLI (19 cmds) · MCP (57 tools, JSON-RPC 2.0) · LSP · HTTP  │
+│  API: CLI (24 cmds) · MCP (56 tools, JSON-RPC 2.0) · LSP · HTTP  │
 │       Daemon (Unix socket / Windows named pipe) · File Watcher   │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -318,7 +331,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 931+ tests
+cargo test --workspace        # 982+ tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```
