@@ -138,6 +138,42 @@ impl SearchStage for PersonalizedGraphBoostStage {
     }
 }
 
+/// Boost public API symbols in search results.
+///
+/// Public symbols get a 1.5x boost. Skipped when the query contains
+/// internal-targeting signals like "internal", "private", "helper".
+pub struct VisibilityBoostStage;
+
+impl SearchStage for VisibilityBoostStage {
+    fn apply(&self, results: &mut Vec<SearchResult>, ctx: &SearchContext<'_>) -> Result<()> {
+        let query_lower = ctx.query.to_lowercase();
+        let internal_signals = ["internal", "private", "helper", "impl", "detail"];
+        if internal_signals.iter().any(|s| query_lower.contains(s)) {
+            return Ok(());
+        }
+
+        let mut boosted = false;
+        for r in results.iter_mut() {
+            // Check if any symbol in this chunk's file+line range is public
+            let symbols = ctx.symbols.filter("", Some(&r.file_path));
+            let has_public = symbols.iter().any(|s| {
+                s.visibility == crate::language::Visibility::Public
+                    && r.line_start <= s.line_start as u64
+                    && (s.line_start as u64) < r.line_end
+            });
+            if has_public {
+                r.score *= 1.5;
+                boosted = true;
+            }
+        }
+
+        if boosted {
+            sort_descending(results);
+        }
+        Ok(())
+    }
+}
+
 /// Boost results whose files *define* a symbol matching query identifiers.
 ///
 /// Corrects BM25's tendency to over-rank files that *heavily use* a symbol
@@ -529,6 +565,7 @@ pub fn fast_pipeline() -> SearchPipeline {
     SearchPipeline::new()
         .add(PersonalizedGraphBoostStage)
         .add(ConceptBoostStage)
+        .add(VisibilityBoostStage)
         .add(DefinitionBoostStage)
         .add(PopularityBoostStage)
         .add(RecencyBoostStage)
@@ -547,6 +584,7 @@ pub fn thorough_pipeline() -> SearchPipeline {
     SearchPipeline::new()
         .add(PersonalizedGraphBoostStage)
         .add(ConceptBoostStage)
+        .add(VisibilityBoostStage)
         .add(DefinitionBoostStage)
         .add(PopularityBoostStage)
         .add(RecencyBoostStage)

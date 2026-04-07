@@ -114,6 +114,18 @@ pub fn compute_change_impact(
 }
 
 impl Engine {
+    /// List the public API surface of a file.
+    ///
+    /// Returns all symbols with [`Visibility::Public`] in the given file,
+    /// useful for understanding a file's exported interface before making changes.
+    pub fn api_surface(&self, file_path: &str) -> Vec<crate::symbols::Symbol> {
+        self.symbols
+            .filter("", Some(file_path))
+            .into_iter()
+            .filter(|s| s.visibility == crate::language::Visibility::Public)
+            .collect()
+    }
+
     /// Compute the change impact for a file in this project.
     ///
     /// Returns a [`ChangeImpact`] describing direct dependents, transitive

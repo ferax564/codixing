@@ -13,7 +13,7 @@ use crate::config::IndexConfig;
 use crate::embedder::Embedder;
 use crate::error::{CodixingError, Result};
 use crate::graph::extractor::RawImport;
-use crate::graph::{compute_pagerank, CodeGraph};
+use crate::graph::{CodeGraph, compute_pagerank};
 use crate::index::TantivyIndex;
 
 use crate::language::Language;
@@ -23,16 +23,16 @@ use crate::reranker::Reranker;
 use crate::retriever::{ChunkMeta, ChunkMetaCompact};
 use crate::session::SessionState;
 use crate::shared_session::SharedSession;
+use crate::symbols::SymbolTable;
 use crate::symbols::persistence::{deserialize_symbols, serialize_symbols};
 use crate::symbols::writer::write_mmap_symbols;
-use crate::symbols::SymbolTable;
 use crate::vector::VectorIndex;
 
 use super::indexing::{
-    add_call_edges, add_doc_edges, build_file_trigram_from_content, build_graph,
-    populate_symbol_graph, process_file, unix_timestamp_string, walk_source_files, IndexContext,
+    IndexContext, add_call_edges, add_doc_edges, build_file_trigram_from_content, build_graph,
+    populate_symbol_graph, process_file, unix_timestamp_string, walk_source_files,
 };
-use super::{git_head_commit, Engine};
+use super::{Engine, git_head_commit};
 
 impl Engine {
     /// Initialize a new index for the project at `root`.
@@ -108,8 +108,8 @@ impl Engine {
         // We process files in parallel for parse/chunk/index, but embedding
         // batch is collected and inserted after the parallel phase.
         let pending_embeds: DashMap<u64, String> = DashMap::new(); // chunk_id → content
-                                                                   // Import lists extracted during parse — reused by build_graph to avoid
-                                                                   // a second file-read + parse pass (each file is parsed exactly once).
+        // Import lists extracted during parse — reused by build_graph to avoid
+        // a second file-read + parse pass (each file is parsed exactly once).
         let pending_imports: DashMap<String, (Vec<RawImport>, Language)> = DashMap::new();
         // Call names extracted during parse — resolved into Calls edges after
         // the symbol table is fully populated (end of parallel phase).
