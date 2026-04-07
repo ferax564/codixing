@@ -319,6 +319,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+
+    /// Show type relationships for a symbol (implements, extends, returns, contains).
+    Types {
+        /// Symbol name to look up.
+        symbol: String,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Subcommands for managing federation configurations.
@@ -514,6 +524,7 @@ async fn main() -> Result<()> {
         } => cmd_audit(path, threshold_days, include, exclude),
         Command::Impact { file, json } => cmd_impact(file, json),
         Command::Api { file, json } => cmd_api(file, json),
+        Command::Types { symbol, json } => cmd_types(symbol, json),
     }
 }
 
@@ -1666,6 +1677,60 @@ fn cmd_api(file: String, json: bool) -> Result<()> {
     for s in &symbols {
         let sig = s.signature.as_deref().unwrap_or(&s.name);
         println!("  {:?} {} (line {})", s.kind, sig, s.line_start);
+    }
+    Ok(())
+}
+
+fn cmd_types(symbol: String, json: bool) -> Result<()> {
+    let root = std::env::current_dir().context("cannot determine current directory")?;
+    let engine = Engine::open(&root).with_context(|| {
+        format!(
+            "no index found at {} — run `codixing init` first",
+            root.display()
+        )
+    })?;
+
+    let symbols = engine
+        .symbols(&symbol, None)
+        .context("symbol lookup failed")?;
+
+    if symbols.is_empty() {
+        println!("No symbol found matching '{symbol}'");
+        return Ok(());
+    }
+
+    if json {
+        let entries: Vec<serde_json::Value> = symbols
+            .iter()
+            .flat_map(|s| {
+                s.type_relations.iter().map(move |tr| {
+                    serde_json::json!({
+                        "symbol": &s.name,
+                        "file": &s.file_path,
+                        "relation": format!("{}", tr.kind),
+                        "target": &tr.target,
+                    })
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
+    }
+
+    println!("# Type Relations: {symbol}\n");
+    let mut found = false;
+    for s in &symbols {
+        if s.type_relations.is_empty() {
+            continue;
+        }
+        found = true;
+        println!("  {} ({}:{})", s.name, s.file_path, s.line_start);
+        for tr in &s.type_relations {
+            println!("    {} → {}", tr.kind, tr.target);
+        }
+    }
+    if !found {
+        println!("No type relations found for '{symbol}'");
     }
     Ok(())
 }

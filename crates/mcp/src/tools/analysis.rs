@@ -843,6 +843,37 @@ pub(crate) fn call_api_surface(engine: &Engine, args: &Value) -> (String, bool) 
     (out, false)
 }
 
+pub(crate) fn call_type_relations(engine: &Engine, args: &Value) -> (String, bool) {
+    let symbol = match args.get("symbol").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return ("Error: 'symbol' parameter is required".to_string(), true),
+    };
+
+    let symbols = engine.symbols(symbol, None).unwrap_or_default();
+    let mut out = format!("# Type Relations: {symbol}\n\n");
+    let mut found = false;
+
+    for s in &symbols {
+        if s.type_relations.is_empty() {
+            continue;
+        }
+        found = true;
+        out.push_str(&format!(
+            "## {} ({}:{})\n",
+            s.name, s.file_path, s.line_start
+        ));
+        for tr in &s.type_relations {
+            out.push_str(&format!("- {} → `{}`\n", tr.kind, tr.target));
+        }
+        out.push('\n');
+    }
+
+    if !found {
+        return (format!("No type relations found for '{symbol}'"), false);
+    }
+    (out, false)
+}
+
 /// Simple ISO-8601 timestamp without external dependencies.
 fn chrono_now() -> String {
     let secs = std::time::SystemTime::now()

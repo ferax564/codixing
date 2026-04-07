@@ -23,3 +23,16 @@ medium = true
 type = "string"
 description = "Relative file path to analyze (e.g. 'src/lib.rs')"
 required = true
+
+[[tools]]
+name = "type_relations"
+description = "Show type relationships for a symbol — what it implements, extends, returns, and contains. Use to understand type hierarchies and interfaces."
+handler = "analysis::call_type_relations"
+calling_convention = "engine_args"
+read_only = true
+medium = true
+
+[tools.params.symbol]
+type = "string"
+description = "Symbol name to look up"
+required = true
