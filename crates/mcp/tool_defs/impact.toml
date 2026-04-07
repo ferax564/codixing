@@ -36,3 +36,20 @@ medium = true
 type = "string"
 description = "Symbol name to look up"
 required = true
+
+[[tools]]
+name = "find_examples"
+description = "Find usage examples for a symbol — from tests, call sites, and documentation code blocks. Returns ranked examples showing how the symbol is actually used in the codebase."
+handler = "analysis::call_find_examples"
+calling_convention = "engine_args"
+read_only = true
+medium = true
+
+[tools.params.symbol]
+type = "string"
+description = "Symbol name to find examples for"
+required = true
+
+[tools.params.limit]
+type = "integer"
+description = "Maximum number of examples (default: 5)"

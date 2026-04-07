@@ -874,6 +874,46 @@ pub(crate) fn call_type_relations(engine: &Engine, args: &Value) -> (String, boo
     (out, false)
 }
 
+pub(crate) fn call_find_examples(engine: &Engine, args: &Value) -> (String, bool) {
+    let symbol = match args.get("symbol").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return ("Error: 'symbol' parameter is required".to_string(), true),
+    };
+
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+
+    let examples = engine.find_usage_examples(symbol, limit);
+
+    if examples.is_empty() {
+        return (format!("No usage examples found for '{symbol}'"), false);
+    }
+
+    let mut out = format!("# Usage Examples: {symbol}\n\n");
+    for (i, ex) in examples.iter().enumerate() {
+        let kind_label = match ex.kind {
+            codixing_core::engine::examples::ExampleKind::Test => "TEST",
+            codixing_core::engine::examples::ExampleKind::CallSite => "CALL",
+            codixing_core::engine::examples::ExampleKind::DocBlock => "DOC",
+        };
+        out.push_str(&format!(
+            "## {}. [{}] {}:{}-{}\n",
+            i + 1,
+            kind_label,
+            ex.file_path,
+            ex.line_start,
+            ex.line_end
+        ));
+        out.push_str("```\n");
+        out.push_str(&ex.context);
+        if !ex.context.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("```\n\n");
+    }
+
+    (out, false)
+}
+
 /// Simple ISO-8601 timestamp without external dependencies.
 fn chrono_now() -> String {
     let secs = std::time::SystemTime::now()

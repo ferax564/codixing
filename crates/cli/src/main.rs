@@ -329,6 +329,20 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+
+    /// Find usage examples for a symbol (tests, call sites, doc blocks).
+    Examples {
+        /// Symbol name to look up.
+        symbol: String,
+
+        /// Maximum number of examples.
+        #[arg(short, long, default_value = "5")]
+        limit: usize,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Subcommands for managing federation configurations.
@@ -525,6 +539,11 @@ async fn main() -> Result<()> {
         Command::Impact { file, json } => cmd_impact(file, json),
         Command::Api { file, json } => cmd_api(file, json),
         Command::Types { symbol, json } => cmd_types(symbol, json),
+        Command::Examples {
+            symbol,
+            limit,
+            json,
+        } => cmd_examples(symbol, limit, json),
     }
 }
 
@@ -1731,6 +1750,51 @@ fn cmd_types(symbol: String, json: bool) -> Result<()> {
     }
     if !found {
         println!("No type relations found for '{symbol}'");
+    }
+    Ok(())
+}
+
+fn cmd_examples(symbol: String, limit: usize, json: bool) -> Result<()> {
+    let root = std::env::current_dir().context("cannot determine current directory")?;
+    let engine = Engine::open(&root).with_context(|| {
+        format!(
+            "no index found at {} — run `codixing init` first",
+            root.display()
+        )
+    })?;
+
+    let examples = engine.find_usage_examples(&symbol, limit);
+
+    if examples.is_empty() {
+        println!("No usage examples found for '{symbol}'");
+        return Ok(());
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&examples)?);
+        return Ok(());
+    }
+
+    println!("# Usage Examples: {symbol}\n");
+    for (i, ex) in examples.iter().enumerate() {
+        let kind_label = match ex.kind {
+            codixing_core::engine::examples::ExampleKind::Test => "TEST",
+            codixing_core::engine::examples::ExampleKind::CallSite => "CALL",
+            codixing_core::engine::examples::ExampleKind::DocBlock => "DOC",
+        };
+        println!(
+            "  {}. [{}] {}:{}-{}",
+            i + 1,
+            kind_label,
+            ex.file_path,
+            ex.line_start,
+            ex.line_end
+        );
+        // Indent context lines for readability.
+        for line in ex.context.lines() {
+            println!("     {line}");
+        }
+        println!();
     }
     Ok(())
 }
