@@ -31,7 +31,7 @@ use std::path::Path;
 use memmap2::Mmap;
 
 use crate::error::{CodixingError, Result};
-use crate::language::{EntityKind, Language};
+use crate::language::{EntityKind, Language, Visibility};
 use crate::symbols::Symbol;
 
 /// Magic bytes: "SYMB" as little-endian u32.
@@ -322,6 +322,8 @@ impl MmapSymbolTable {
                 byte_end,
                 signature,
                 scope,
+                doc_comment: None,
+                visibility: Visibility::default(),
             });
         }
 

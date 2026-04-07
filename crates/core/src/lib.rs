@@ -38,7 +38,7 @@ pub use federation::{
     discover::{DiscoveredProject, ProjectType, discover_projects, to_federation_config},
 };
 pub use graph::{CodeEdge, CodeGraph, CodeNode, EdgeKind, GraphStats, RepoMapOptions};
-pub use language::EntityKind;
+pub use language::{EntityKind, Visibility};
 pub use orphans::{OrphanConfidence, OrphanFile, OrphanOptions};
 pub use retriever::{ChunkMeta, DocFilter, SearchQuery, SearchResult, Strategy};
 pub use session::{SessionEvent, SessionEventKind, SessionState};

@@ -1,7 +1,7 @@
 use tree_sitter::{Node, Tree};
 
 use super::{
-    EntityKind, Language, LanguageSupport, SemanticEntity, extract_preceding_comments,
+    EntityKind, Language, LanguageSupport, SemanticEntity, Visibility, extract_preceding_comments,
     find_name_node, node_line_range, node_text,
 };
 
@@ -70,6 +70,7 @@ fn collect_entities(
             byte_range: node.start_byte()..node.end_byte(),
             line_range: node_line_range(node),
             scope: scope.to_vec(),
+            visibility: extract_visibility(node, source),
         };
         entities.push(entity);
 
@@ -170,6 +171,23 @@ fn extract_rust_signature(node: &Node, source: &[u8]) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Extract visibility from a Rust AST node by looking for a `visibility_modifier` child.
+fn extract_visibility(node: &Node, source: &[u8]) -> Visibility {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "visibility_modifier" {
+            let text = node_text(&child, source);
+            if text.contains("pub(crate)") || text.contains("pub(super)") {
+                return Visibility::CrateInternal;
+            }
+            if text.starts_with("pub") {
+                return Visibility::Public;
+            }
+        }
+    }
+    Visibility::Private
 }
 
 #[cfg(test)]

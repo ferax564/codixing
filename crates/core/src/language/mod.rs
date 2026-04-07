@@ -230,6 +230,18 @@ impl std::fmt::Display for EntityKind {
     }
 }
 
+/// Visibility level of a symbol.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Visibility {
+    /// Exported / public API.
+    Public,
+    /// Crate-internal or module-scoped.
+    CrateInternal,
+    /// Private (default for most languages).
+    #[default]
+    Private,
+}
+
 /// A semantic entity extracted from source code via tree-sitter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SemanticEntity {
@@ -241,6 +253,8 @@ pub struct SemanticEntity {
     pub line_range: std::ops::Range<usize>,
     /// Scope chain from outermost to innermost (e.g., `["module", "ClassName"]`).
     pub scope: Vec<String>,
+    /// Visibility level (public, crate-internal, private).
+    pub visibility: Visibility,
 }
 
 /// Per-language entity extraction and tree-sitter integration.

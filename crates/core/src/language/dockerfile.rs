@@ -8,7 +8,7 @@
 //! - `LABEL key=value` -> Variable
 //! - `ENTRYPOINT` / `CMD` -> Function
 
-use super::{ConfigLanguageSupport, EntityKind, Language, SemanticEntity};
+use super::{ConfigLanguageSupport, EntityKind, Language, SemanticEntity, Visibility};
 
 pub struct DockerfileLanguage;
 
@@ -64,6 +64,7 @@ fn extract_dockerfile_entities(text: &str) -> Vec<SemanticEntity> {
                         byte_range: byte_start..byte_end,
                         line_range: i..i + 1,
                         scope: vec![],
+                        visibility: Visibility::default(),
                     });
                 }
             }
@@ -82,6 +83,7 @@ fn extract_dockerfile_entities(text: &str) -> Vec<SemanticEntity> {
                     byte_range: byte_start..byte_end,
                     line_range: i..i + 1,
                     scope: vec![],
+                    visibility: Visibility::default(),
                 });
             }
             continue;
@@ -98,6 +100,7 @@ fn extract_dockerfile_entities(text: &str) -> Vec<SemanticEntity> {
                 byte_range: byte_start..byte_end,
                 line_range: i..i + 1,
                 scope: vec![],
+                visibility: Visibility::default(),
             });
             continue;
         }
@@ -114,6 +117,7 @@ fn extract_dockerfile_entities(text: &str) -> Vec<SemanticEntity> {
                     byte_range: byte_start..byte_end,
                     line_range: i..i + 1,
                     scope: vec![],
+                    visibility: Visibility::default(),
                 });
             }
             continue;
@@ -136,6 +140,7 @@ fn extract_dockerfile_entities(text: &str) -> Vec<SemanticEntity> {
                     byte_range: byte_start..byte_end,
                     line_range: i..i + 1,
                     scope: vec![],
+                    visibility: Visibility::default(),
                 });
             }
             continue;
@@ -155,6 +160,7 @@ fn extract_dockerfile_entities(text: &str) -> Vec<SemanticEntity> {
                         byte_range: byte_start..byte_end,
                         line_range: i..i + 1,
                         scope: vec![],
+                        visibility: Visibility::default(),
                     });
                 }
             }
@@ -172,6 +178,7 @@ fn extract_dockerfile_entities(text: &str) -> Vec<SemanticEntity> {
                 byte_range: byte_start..byte_end,
                 line_range: i..i + 1,
                 scope: vec![],
+                visibility: Visibility::default(),
             });
             continue;
         }
@@ -191,6 +198,7 @@ fn extract_dockerfile_entities(text: &str) -> Vec<SemanticEntity> {
                 byte_range: byte_start..byte_end,
                 line_range: i..i + 1,
                 scope: vec![],
+                visibility: Visibility::default(),
             });
         }
     }

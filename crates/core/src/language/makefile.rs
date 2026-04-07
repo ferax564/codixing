@@ -6,7 +6,7 @@
 //! - `.PHONY: targets` -> marks targets
 //! - `include other.mk` -> Import
 
-use super::{ConfigLanguageSupport, EntityKind, Language, SemanticEntity};
+use super::{ConfigLanguageSupport, EntityKind, Language, SemanticEntity, Visibility};
 
 pub struct MakefileLanguage;
 
@@ -72,6 +72,7 @@ fn extract_makefile_entities(text: &str) -> Vec<SemanticEntity> {
                     byte_range: byte_start..byte_end,
                     line_range: i..i + 1,
                     scope: vec![],
+                    visibility: Visibility::default(),
                 });
             }
             continue;
@@ -98,6 +99,7 @@ fn extract_makefile_entities(text: &str) -> Vec<SemanticEntity> {
                         byte_range: byte_start..byte_end,
                         line_range: i..i + 1,
                         scope: vec![],
+                        visibility: Visibility::default(),
                     });
                     continue;
                 }
@@ -129,6 +131,7 @@ fn extract_makefile_entities(text: &str) -> Vec<SemanticEntity> {
                             byte_range: byte_start..byte_end,
                             line_range: i..i + 1,
                             scope: vec![],
+                            visibility: Visibility::default(),
                         });
                     }
                     continue;
@@ -164,6 +167,7 @@ fn extract_makefile_entities(text: &str) -> Vec<SemanticEntity> {
                         byte_range: byte_start..byte_end,
                         line_range: i..i + 1,
                         scope: vec![],
+                        visibility: Visibility::default(),
                     });
                 }
             }

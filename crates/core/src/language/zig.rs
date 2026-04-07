@@ -1,6 +1,8 @@
 use tree_sitter::{Node, Tree};
 
-use super::{EntityKind, Language, LanguageSupport, SemanticEntity, node_line_range, node_text};
+use super::{
+    EntityKind, Language, LanguageSupport, SemanticEntity, Visibility, node_line_range, node_text,
+};
 
 /// Zig language support using the native `tree-sitter-zig` grammar.
 pub struct ZigLanguage;
@@ -60,6 +62,7 @@ fn collect_entities(
                 byte_range: node.start_byte()..node.end_byte(),
                 line_range: node_line_range(node),
                 scope: scope.to_vec(),
+                visibility: Visibility::default(),
             });
         }
         "variable_declaration" => {
@@ -74,6 +77,7 @@ fn collect_entities(
                     byte_range: node.start_byte()..node.end_byte(),
                     line_range: node_line_range(node),
                     scope: scope.to_vec(),
+                    visibility: Visibility::default(),
                 });
 
                 // Recurse into struct/enum bodies with updated scope.
@@ -109,6 +113,7 @@ fn collect_entities(
                 byte_range: node.start_byte()..node.end_byte(),
                 line_range: node_line_range(node),
                 scope: scope.to_vec(),
+                visibility: Visibility::default(),
             });
         }
         _ => {}

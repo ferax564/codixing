@@ -5,7 +5,7 @@ pub mod writer;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::language::{EntityKind, Language};
+use crate::language::{EntityKind, Language, Visibility};
 
 /// A symbol extracted from source code, representing a named semantic entity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +30,10 @@ pub struct Symbol {
     pub signature: Option<String>,
     /// Scope chain from outermost to innermost.
     pub scope: Vec<String>,
+    /// Optional doc comment text.
+    pub doc_comment: Option<String>,
+    /// Visibility level (public, crate-internal, private).
+    pub visibility: Visibility,
 }
 
 /// Mutable, concurrent symbol table backed by `DashMap`.
@@ -288,6 +292,8 @@ mod tests {
             byte_end: 100,
             signature: Some(format!("fn {}()", name)),
             scope: vec![],
+            doc_comment: None,
+            visibility: Visibility::default(),
         }
     }
 
@@ -628,6 +634,8 @@ mod tests {
             byte_end: 5678,
             signature: Some("fn complex_func(x: i32, y: &str) -> Result<()>".to_string()),
             scope: vec!["engine".to_string(), "Engine".to_string()],
+            doc_comment: None,
+            visibility: Visibility::default(),
         });
 
         let dir = tempfile::tempdir().unwrap();
@@ -705,6 +713,8 @@ mod tests {
             byte_end: 10,
             signature: None,
             scope: vec![],
+            doc_comment: None,
+            visibility: Visibility::default(),
         });
 
         let dir = tempfile::tempdir().unwrap();

@@ -3,7 +3,7 @@
 //! Extracts `[section]` / `[[array]]` headers and top-level `key = value` pairs.
 //! Recognises Cargo.toml: `[dependencies.X]` -> Module, `[package]` name -> Type.
 
-use super::{ConfigLanguageSupport, EntityKind, Language, SemanticEntity};
+use super::{ConfigLanguageSupport, EntityKind, Language, SemanticEntity, Visibility};
 
 pub struct TomlLanguage;
 
@@ -58,6 +58,7 @@ fn extract_toml_entities(text: &str) -> Vec<SemanticEntity> {
                 byte_range: byte_start..byte_end,
                 line_range: i..i + 1,
                 scope: vec![],
+                visibility: Visibility::default(),
             });
             continue;
         }
@@ -78,6 +79,7 @@ fn extract_toml_entities(text: &str) -> Vec<SemanticEntity> {
                 byte_range: byte_start..byte_end,
                 line_range: i..i + 1,
                 scope: vec![],
+                visibility: Visibility::default(),
             });
             continue;
         }
@@ -129,6 +131,7 @@ fn extract_toml_entities(text: &str) -> Vec<SemanticEntity> {
                 byte_range: byte_start..byte_end,
                 line_range: i..i + 1,
                 scope,
+                visibility: Visibility::default(),
             });
         }
     }

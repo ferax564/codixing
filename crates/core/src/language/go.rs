@@ -1,7 +1,7 @@
 use tree_sitter::{Node, Tree};
 
 use super::{
-    EntityKind, Language, LanguageSupport, SemanticEntity, extract_preceding_comments,
+    EntityKind, Language, LanguageSupport, SemanticEntity, Visibility, extract_preceding_comments,
     find_name_node, node_line_range, node_text,
 };
 
@@ -61,6 +61,7 @@ fn collect_entities(
                 if child.kind() == "type_spec" {
                     let name = find_name_node(&child, source).unwrap_or_default();
                     let inner_kind = classify_type_spec(&child);
+                    let vis = go_visibility(&name);
                     let entity = SemanticEntity {
                         kind: inner_kind,
                         name,
@@ -69,6 +70,7 @@ fn collect_entities(
                         byte_range: node.start_byte()..node.end_byte(),
                         line_range: node_line_range(node),
                         scope: scope.to_vec(),
+                        visibility: vis,
                     };
                     entities.push(entity);
                 }
@@ -80,12 +82,13 @@ fn collect_entities(
 
         let entity = SemanticEntity {
             kind: entity_kind,
-            name,
+            name: name.clone(),
             signature: lang.extract_signature(node, source),
             doc_comment: lang.extract_doc_comment(node, source),
             byte_range: node.start_byte()..node.end_byte(),
             line_range: node_line_range(node),
             scope: scope.to_vec(),
+            visibility: go_visibility(&name),
         };
         entities.push(entity);
     }
@@ -153,6 +156,15 @@ fn extract_type_spec_signature(node: &Node, source: &[u8]) -> Option<String> {
         Some(full[..brace].trim().to_string())
     } else {
         Some(full.lines().next().unwrap_or(&full).trim().to_string())
+    }
+}
+
+/// Go visibility: names starting with an uppercase letter are exported (public).
+fn go_visibility(name: &str) -> Visibility {
+    if name.starts_with(|c: char| c.is_uppercase()) {
+        Visibility::Public
+    } else {
+        Visibility::Private
     }
 }
 

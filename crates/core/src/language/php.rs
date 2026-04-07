@@ -1,6 +1,8 @@
 use tree_sitter::{Node, Tree};
 
-use super::{EntityKind, Language, LanguageSupport, SemanticEntity, node_line_range, node_text};
+use super::{
+    EntityKind, Language, LanguageSupport, SemanticEntity, Visibility, node_line_range, node_text,
+};
 
 /// PHP language support using the native `tree-sitter-php` grammar.
 pub struct PhpLanguage;
@@ -65,6 +67,7 @@ fn collect_entities(
             byte_range: node.start_byte()..node.end_byte(),
             line_range: node_line_range(node),
             scope: scope.to_vec(),
+            visibility: Visibility::default(),
         });
 
         // Recurse into class/interface/trait/enum bodies with updated scope.
@@ -113,6 +116,7 @@ fn collect_entities(
                     byte_range: child.start_byte()..child.end_byte(),
                     line_range: node_line_range(&child),
                     scope: scope.to_vec(),
+                    visibility: Visibility::default(),
                 });
             }
         }

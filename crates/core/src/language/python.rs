@@ -1,7 +1,7 @@
 use tree_sitter::{Node, Tree};
 
 use super::{
-    EntityKind, Language, LanguageSupport, SemanticEntity, extract_preceding_comments,
+    EntityKind, Language, LanguageSupport, SemanticEntity, Visibility, extract_preceding_comments,
     find_name_node, node_line_range, node_text,
 };
 
@@ -66,6 +66,7 @@ fn collect_entities(
             byte_range: node.start_byte()..node.end_byte(),
             line_range: node_line_range(node),
             scope: scope.to_vec(),
+            visibility: python_visibility(&name),
         };
         entities.push(entity);
 
@@ -245,6 +246,21 @@ fn extract_python_doc_comment(node: &Node, source: &[u8]) -> Option<String> {
     }
 
     None
+}
+
+/// Determine Python visibility from naming convention.
+///
+/// - `__name` (not dunder `__name__`) -> Private
+/// - `_name` -> CrateInternal (module-private by convention)
+/// - everything else -> Public
+fn python_visibility(name: &str) -> Visibility {
+    if name.starts_with("__") && !name.ends_with("__") {
+        Visibility::Private
+    } else if name.starts_with('_') {
+        Visibility::CrateInternal
+    } else {
+        Visibility::Public
+    }
 }
 
 #[cfg(test)]
