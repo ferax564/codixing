@@ -226,6 +226,33 @@ impl Engine {
             }
         };
 
+        // Build learned reformulations from symbols (name + file + doc_comment).
+        let reformulations = {
+            let mut builder = super::reformulation::ReformulationBuilder::new();
+            for sym in symbols.all_symbols() {
+                builder.add_identifier(&sym.name, &sym.file_path);
+                if let Some(ref doc) = sym.doc_comment {
+                    builder.add_documented_symbol(&sym.name, doc);
+                }
+            }
+            let reform = builder.build();
+            if !reform.is_empty() {
+                match bitcode::serialize(&reform) {
+                    Ok(bytes) => {
+                        if let Err(e) = std::fs::write(store.reformulations_path(), &bytes) {
+                            warn!(error = %e, "failed to persist reformulations");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "failed to serialize reformulations");
+                    }
+                }
+                Some(reform)
+            } else {
+                None
+            }
+        };
+
         // Persist trigram indexes.
         if let Err(e) = trigram_idx.save_mmap_binary(&store.chunk_trigram_path()) {
             warn!(error = %e, "failed to persist chunk trigram index");
@@ -432,6 +459,7 @@ impl Engine {
             chunk_meta: chunk_meta_arc,
             graph,
             concept_index,
+            reformulations,
             reranker,
             trigram,
             session,
@@ -615,6 +643,29 @@ impl Engine {
             None
         };
 
+        // Restore learned reformulations.
+        let reformulations = if store.reformulations_path().exists() {
+            match std::fs::read(store.reformulations_path()) {
+                Ok(bytes) => {
+                    match bitcode::deserialize::<super::reformulation::LearnedReformulations>(
+                        &bytes,
+                    ) {
+                        Ok(reform) => Some(reform),
+                        Err(e) => {
+                            warn!(error = %e, "failed to deserialize reformulations");
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to read reformulations");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let (graph_nodes, graph_edges) = graph
             .as_ref()
             .map(|g| {
@@ -682,6 +733,7 @@ impl Engine {
             chunk_meta: Arc::new(chunk_meta),
             graph,
             concept_index,
+            reformulations,
             reranker,
             trigram,
             session,
@@ -824,6 +876,29 @@ impl Engine {
             None
         };
 
+        // Restore learned reformulations.
+        let reformulations = if store.reformulations_path().exists() {
+            match std::fs::read(store.reformulations_path()) {
+                Ok(bytes) => {
+                    match bitcode::deserialize::<super::reformulation::LearnedReformulations>(
+                        &bytes,
+                    ) {
+                        Ok(reform) => Some(reform),
+                        Err(e) => {
+                            warn!(error = %e, "failed to deserialize reformulations (read-only)");
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to read reformulations (read-only)");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let (graph_nodes, graph_edges) = graph
             .as_ref()
             .map(|g| {
@@ -882,6 +957,7 @@ impl Engine {
             chunk_meta: Arc::new(chunk_meta),
             graph,
             concept_index,
+            reformulations,
             reranker,
             trigram: std::sync::OnceLock::new(),
             session,

@@ -13,6 +13,7 @@ mod init;
 mod orphans;
 pub(crate) mod pipeline;
 pub mod recency;
+pub mod reformulation;
 mod reload;
 mod search;
 mod symbol_graph;
@@ -265,6 +266,8 @@ pub struct Engine {
     pub(super) graph: Option<CodeGraph>,
     /// Semantic concept index mapping domain concepts to symbol clusters.
     pub(super) concept_index: Option<concepts::ConceptIndex>,
+    /// Learned query reformulations — project-specific vocabulary mapping.
+    pub(super) reformulations: Option<reformulation::LearnedReformulations>,
     /// Optional cross-encoder reranker (BGE-Reranker-Base) for the `deep` strategy.
     pub(super) reranker: Option<Arc<Reranker>>,
     /// Trigram index for sub-millisecond exact substring search (Strategy::Exact).

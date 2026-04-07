@@ -27,6 +27,7 @@ const FILE_TRIGRAM_FILE: &str = "file_trigram.bin";
 const CHUNK_TRIGRAM_FILE: &str = "chunk_trigram.bin";
 const SYMBOLS_V2_FILE: &str = "symbols_v2.bin";
 const CONCEPTS_FILE: &str = "concepts.bin";
+const REFORMULATIONS_FILE: &str = "reformulations.bin";
 
 /// Extended file hash entry storing content hash alongside filesystem metadata
 /// (mtime and size) for fast pre-filtering during sync.
@@ -248,6 +249,11 @@ impl IndexStore {
     /// Path to the concept index binary (`concepts.bin`).
     pub fn concepts_path(&self) -> PathBuf {
         self.codixing_dir().join(CONCEPTS_FILE)
+    }
+
+    /// Path to the learned reformulations binary (`reformulations.bin`).
+    pub fn reformulations_path(&self) -> PathBuf {
+        self.codixing_dir().join(REFORMULATIONS_FILE)
     }
 
     /// Save the [`IndexConfig`] to `config.json`.

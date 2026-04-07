@@ -80,7 +80,10 @@ impl Engine {
                 // by favouring prose matches over code structure. See `get_concept_reranker`.
                 let word_count = query.query.split_whitespace().count();
                 if word_count >= 3 {
-                    let reformulations = generate_reformulations_with_synonyms(&query.query);
+                    let reformulations = generate_reformulations_with_synonyms(
+                        &query.query,
+                        self.reformulations.as_ref(),
+                    );
                     if reformulations.len() >= 2 {
                         let mut fused = self.search_multi(&reformulations, &query)?;
                         let ctx = self.search_context(&query_str);
@@ -111,7 +114,10 @@ impl Engine {
                 // Uses synonym expansion + code HyDE patterns to bridge vocabulary gaps.
                 let word_count = query.query.split_whitespace().count();
                 if word_count >= 3 {
-                    let reformulations = generate_reformulations_with_synonyms(&query.query);
+                    let reformulations = generate_reformulations_with_synonyms(
+                        &query.query,
+                        self.reformulations.as_ref(),
+                    );
                     if reformulations.len() >= 2 {
                         let mut fused = self.search_multi(&reformulations, &query)?;
                         let ctx = self.search_context(&query_str);
@@ -737,6 +743,23 @@ impl Engine {
             reformulations.push(synonym_query);
         }
 
+        // Append learned reformulations from project-specific vocabulary.
+        if let Some(ref learned) = self.reformulations {
+            let mut learned_terms: Vec<String> = Vec::new();
+            for word in query.query.split_whitespace() {
+                let expansions = learned.expand(&word.to_lowercase());
+                for exp in expansions {
+                    if !learned_terms.contains(&exp) {
+                        learned_terms.push(exp);
+                    }
+                }
+            }
+            if !learned_terms.is_empty() {
+                learned_terms.truncate(5);
+                reformulations.push(learned_terms.join(" "));
+            }
+        }
+
         debug!(
             reformulations = ?reformulations,
             "deep: multi-query reformulations"
@@ -1254,18 +1277,25 @@ fn path_component_starts_with(path: &str, prefix: &str) -> bool {
     })
 }
 
+use super::reformulation::LearnedReformulations;
 use super::synonyms::{expand_synonyms, reformulate_to_code};
 
-/// Generate query reformulations enriched with synonym expansion and code patterns.
+/// Generate query reformulations enriched with synonym expansion, code patterns,
+/// and optional project-specific learned reformulations.
 ///
 /// Extends [`generate_reformulations`] with:
 /// - A synonym-expanded variant (e.g. "rate limiting" → "rate limiting throttle burst").
 /// - The top-3 code-pattern tokens from [`reformulate_to_code`] joined as a single
 ///   search string (e.g. "rate limiting" → "RateLimiter throttle_count burst_capacity").
+/// - Learned reformulations from the project's vocabulary (term co-occurrence and
+///   doc-to-code bridges).
 ///
 /// Used by the `Fast` and `Thorough` strategies to improve concept recall without
 /// polluting the main BM25 query.
-fn generate_reformulations_with_synonyms(query: &str) -> Vec<String> {
+fn generate_reformulations_with_synonyms(
+    query: &str,
+    learned: Option<&LearnedReformulations>,
+) -> Vec<String> {
     let mut reformulations = generate_reformulations(query);
 
     // Append synonym-expanded variant if it adds new terms.
@@ -1284,6 +1314,25 @@ fn generate_reformulations_with_synonyms(query: &str) -> Vec<String> {
             .collect::<Vec<_>>()
             .join(" ");
         reformulations.push(joined);
+    }
+
+    // Append learned reformulations from project-specific vocabulary.
+    if let Some(learned) = learned {
+        let mut learned_terms: Vec<String> = Vec::new();
+        for word in query.split_whitespace() {
+            let expansions = learned.expand(&word.to_lowercase());
+            for exp in expansions {
+                if !learned_terms.contains(&exp) {
+                    learned_terms.push(exp);
+                }
+            }
+        }
+        if !learned_terms.is_empty() {
+            // Join learned terms as a single additional query variant.
+            // Limit to top 5 to avoid diluting search quality.
+            learned_terms.truncate(5);
+            reformulations.push(learned_terms.join(" "));
+        }
     }
 
     reformulations
