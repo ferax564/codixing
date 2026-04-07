@@ -194,6 +194,39 @@ impl Engine {
             }
         }
 
+        // Build concept index from symbols + graph co-occurrences.
+        let concept_index = {
+            let mut builder = super::concepts::ConceptIndexBuilder::new();
+            for sym in symbols.all_symbols() {
+                // doc_comment not available on Symbol yet (Task 7) — pass None.
+                builder.add_symbol(&sym.name, &sym.file_path, None);
+            }
+            // Add import co-occurrences from graph edges.
+            if let Some(ref g) = graph {
+                let flat = g.to_flat();
+                for (from, to, _edge) in &flat.edges {
+                    builder.add_cooccurrence(from, to);
+                }
+            }
+            let idx = builder.build();
+            if !idx.is_empty() {
+                // Persist concept index.
+                match bitcode::serialize(&idx) {
+                    Ok(bytes) => {
+                        if let Err(e) = std::fs::write(store.concepts_path(), &bytes) {
+                            warn!(error = %e, "failed to persist concept index");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "failed to serialize concept index");
+                    }
+                }
+                Some(idx)
+            } else {
+                None
+            }
+        };
+
         // Persist trigram indexes.
         if let Err(e) = trigram_idx.save_mmap_binary(&store.chunk_trigram_path()) {
             warn!(error = %e, "failed to persist chunk trigram index");
@@ -399,6 +432,7 @@ impl Engine {
             vector: vector_arc,
             chunk_meta: chunk_meta_arc,
             graph,
+            concept_index,
             reranker,
             trigram,
             session,
@@ -563,6 +597,25 @@ impl Engine {
             }
         };
 
+        // Restore concept index.
+        let concept_index = if store.concepts_path().exists() {
+            match std::fs::read(store.concepts_path()) {
+                Ok(bytes) => match bitcode::deserialize::<super::concepts::ConceptIndex>(&bytes) {
+                    Ok(idx) => Some(idx),
+                    Err(e) => {
+                        warn!(error = %e, "failed to deserialize concept index");
+                        None
+                    }
+                },
+                Err(e) => {
+                    warn!(error = %e, "failed to read concept index");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let (graph_nodes, graph_edges) = graph
             .as_ref()
             .map(|g| {
@@ -629,6 +682,7 @@ impl Engine {
             vector: Arc::new(RwLock::new(vector)),
             chunk_meta: Arc::new(chunk_meta),
             graph,
+            concept_index,
             reranker,
             trigram,
             session,
@@ -752,6 +806,25 @@ impl Engine {
             }
         };
 
+        // Restore concept index.
+        let concept_index = if store.concepts_path().exists() {
+            match std::fs::read(store.concepts_path()) {
+                Ok(bytes) => match bitcode::deserialize::<super::concepts::ConceptIndex>(&bytes) {
+                    Ok(idx) => Some(idx),
+                    Err(e) => {
+                        warn!(error = %e, "failed to deserialize concept index (read-only)");
+                        None
+                    }
+                },
+                Err(e) => {
+                    warn!(error = %e, "failed to read concept index (read-only)");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let (graph_nodes, graph_edges) = graph
             .as_ref()
             .map(|g| {
@@ -809,6 +882,7 @@ impl Engine {
             vector: Arc::new(RwLock::new(vector)),
             chunk_meta: Arc::new(chunk_meta),
             graph,
+            concept_index,
             reranker,
             trigram: std::sync::OnceLock::new(),
             session,

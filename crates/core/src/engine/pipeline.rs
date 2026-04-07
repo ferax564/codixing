@@ -25,6 +25,8 @@ pub struct SearchContext<'a> {
     pub recency_map: Option<&'a std::collections::HashMap<String, i64>>,
     /// Chunk metadata table for hydrating injected results (graph propagation).
     pub chunk_meta: Option<&'a dashmap::DashMap<u64, crate::retriever::ChunkMeta>>,
+    /// The concept index (if available) for concept-based boosting.
+    pub concepts: Option<&'a crate::engine::concepts::ConceptIndex>,
 }
 
 /// A single composable stage in the search pipeline.
@@ -325,6 +327,52 @@ impl SearchStage for GraphPropagationStage {
     }
 }
 
+/// Boost results whose files belong to concept clusters matching the query.
+///
+/// Uses the semantic concept index to bridge vocabulary gaps: when query terms
+/// match concept labels (derived from identifier decomposition, doc comments,
+/// and import co-occurrence), files in those clusters receive a score boost
+/// proportional to cluster confidence and hit count.
+pub struct ConceptBoostStage;
+
+impl SearchStage for ConceptBoostStage {
+    fn apply(&self, results: &mut Vec<SearchResult>, ctx: &SearchContext<'_>) -> Result<()> {
+        let concepts = match ctx.concepts {
+            Some(c) if !c.is_empty() => c,
+            _ => return Ok(()),
+        };
+
+        let matches = concepts.lookup_query(ctx.query);
+        if matches.is_empty() {
+            return Ok(());
+        }
+
+        // Collect file boosts from matching clusters
+        let mut file_boosts: std::collections::HashMap<&str, f32> =
+            std::collections::HashMap::new();
+        for (cluster, hit_count) in &matches {
+            let boost = 0.3 * cluster.score * (*hit_count as f32);
+            for file in &cluster.files {
+                let entry = file_boosts.entry(file.as_str()).or_insert(0.0);
+                *entry = entry.max(boost);
+            }
+        }
+
+        let mut boosted = false;
+        for r in results.iter_mut() {
+            if let Some(&boost) = file_boosts.get(r.file_path.as_str()) {
+                r.score *= 1.0 + boost;
+                boosted = true;
+            }
+        }
+
+        if boosted {
+            sort_descending(results);
+        }
+        Ok(())
+    }
+}
+
 /// Boost results whose file path contains a dotted-path or keyword reference
 /// from the query.
 pub struct PathMatchBoostStage;
@@ -480,6 +528,7 @@ pub fn instant_pipeline() -> SearchPipeline {
 pub fn fast_pipeline() -> SearchPipeline {
     SearchPipeline::new()
         .add(PersonalizedGraphBoostStage)
+        .add(ConceptBoostStage)
         .add(DefinitionBoostStage)
         .add(PopularityBoostStage)
         .add(RecencyBoostStage)
@@ -497,6 +546,7 @@ pub fn fast_pipeline() -> SearchPipeline {
 pub fn thorough_pipeline() -> SearchPipeline {
     SearchPipeline::new()
         .add(PersonalizedGraphBoostStage)
+        .add(ConceptBoostStage)
         .add(DefinitionBoostStage)
         .add(PopularityBoostStage)
         .add(RecencyBoostStage)
@@ -549,6 +599,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            concepts: None,
         };
         let mut results = vec![make_result("a", 10.0, "src/a.rs")];
         pipeline.run(&mut results, &ctx).unwrap();
@@ -567,6 +618,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            concepts: None,
         };
         let mut results = vec![
             make_result("a", 10.0, "src/main.rs"),
@@ -588,6 +640,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            concepts: None,
         };
         let mut results = vec![
             SearchResult {
@@ -632,6 +685,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            concepts: None,
         };
         let mut results = vec![
             make_result("a", 10.0, "src/a.rs"),
@@ -657,6 +711,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            concepts: None,
         };
         let mut results = vec![
             make_result("a", 10.0, "src/engine.rs"),
@@ -680,6 +735,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            concepts: None,
         };
         let mut results = vec![make_result("a", 10.0, "src/engine.rs")];
         pipeline.run(&mut results, &ctx).unwrap();
@@ -697,6 +753,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            concepts: None,
         };
         let mut results = vec![make_result("a", 10.0, "src/engine.rs")];
         pipeline.run(&mut results, &ctx).unwrap();
@@ -727,6 +784,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: Some(&recency),
             chunk_meta: None,
+            concepts: None,
         };
 
         let mut results = vec![
@@ -798,6 +856,7 @@ mod tests {
             graph_boost_weight: 0.5,
             recency_map: None,
             chunk_meta: Some(&chunk_meta),
+            concepts: None,
         };
 
         let mut results = vec![make_result("a", 10.0, "src/a.rs")];
@@ -829,6 +888,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            concepts: None,
         };
         let mut results = vec![
             SearchResult {
@@ -882,6 +942,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            concepts: None,
         };
         let mut results = vec![
             SearchResult {
@@ -922,6 +983,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            concepts: None,
         };
         let mut results = vec![
             SearchResult {
@@ -988,6 +1050,7 @@ mod tests {
             graph_boost_weight: 0.5,
             recency_map: None,
             chunk_meta: Some(&chunk_meta),
+            concepts: None,
         };
 
         let mut results = vec![
@@ -1025,6 +1088,7 @@ mod tests {
             graph_boost_weight: 0.5,
             recency_map: None,
             chunk_meta: None,
+            concepts: None,
         };
 
         let mut results = vec![

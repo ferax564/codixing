@@ -26,6 +26,7 @@ const MMAP_VECTOR_FILE: &str = "vectors.mmap";
 const FILE_TRIGRAM_FILE: &str = "file_trigram.bin";
 const CHUNK_TRIGRAM_FILE: &str = "chunk_trigram.bin";
 const SYMBOLS_V2_FILE: &str = "symbols_v2.bin";
+const CONCEPTS_FILE: &str = "concepts.bin";
 
 /// Extended file hash entry storing content hash alongside filesystem metadata
 /// (mtime and size) for fast pre-filtering during sync.
@@ -242,6 +243,11 @@ impl IndexStore {
     /// Path to the chunk-level trigram index (Strategy::Exact fast-path).
     pub fn chunk_trigram_path(&self) -> PathBuf {
         self.codixing_dir().join(CHUNK_TRIGRAM_FILE)
+    }
+
+    /// Path to the concept index binary (`concepts.bin`).
+    pub fn concepts_path(&self) -> PathBuf {
+        self.codixing_dir().join(CONCEPTS_FILE)
     }
 
     /// Save the [`IndexConfig`] to `config.json`.

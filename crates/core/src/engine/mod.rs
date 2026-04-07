@@ -263,6 +263,8 @@ pub struct Engine {
     pub(super) chunk_meta: Arc<DashMap<u64, ChunkMeta>>,
     /// Optional code dependency graph with PageRank scores.
     pub(super) graph: Option<CodeGraph>,
+    /// Semantic concept index mapping domain concepts to symbol clusters.
+    pub(super) concept_index: Option<concepts::ConceptIndex>,
     /// Optional cross-encoder reranker (BGE-Reranker-Base) for the `deep` strategy.
     pub(super) reranker: Option<Arc<Reranker>>,
     /// Trigram index for sub-millisecond exact substring search (Strategy::Exact).
