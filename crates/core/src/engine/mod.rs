@@ -18,6 +18,7 @@ pub mod recency;
 pub mod reformulation;
 mod reload;
 mod search;
+pub mod semantic;
 mod symbol_graph;
 mod sync;
 pub(crate) mod synonyms;
