@@ -768,6 +768,59 @@ pub(crate) fn call_generate_onboarding(engine: &mut Engine) -> (String, bool) {
     )
 }
 
+pub(crate) fn call_change_impact(engine: &Engine, args: &Value) -> (String, bool) {
+    let file = match args.get("file").and_then(|v| v.as_str()) {
+        Some(f) => f,
+        None => return ("Error: 'file' parameter is required".to_string(), true),
+    };
+
+    let impact = engine.change_impact(file);
+
+    let out = format!(
+        "# Change Impact: {}\n\n\
+         Blast radius: {} files\n\n\
+         ## Direct dependents ({})\n{}\n\n\
+         ## Transitive dependents ({})\n{}\n\n\
+         ## Affected tests ({})\n{}",
+        impact.file_path,
+        impact.blast_radius,
+        impact.direct_dependents.len(),
+        if impact.direct_dependents.is_empty() {
+            "None".to_string()
+        } else {
+            impact
+                .direct_dependents
+                .iter()
+                .map(|d| format!("- {d}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        },
+        impact.transitive_dependents.len(),
+        if impact.transitive_dependents.is_empty() {
+            "None".to_string()
+        } else {
+            impact
+                .transitive_dependents
+                .iter()
+                .map(|t| format!("- {t}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        },
+        impact.affected_tests.len(),
+        if impact.affected_tests.is_empty() {
+            "None".to_string()
+        } else {
+            impact
+                .affected_tests
+                .iter()
+                .map(|t| format!("- {t}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        },
+    );
+    (out, false)
+}
+
 /// Simple ISO-8601 timestamp without external dependencies.
 fn chrono_now() -> String {
     let secs = std::time::SystemTime::now()

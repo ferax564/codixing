@@ -85,13 +85,13 @@ func TestHandleRequest(t *testing.T) {
 // -------------------------------------------------------------------------
 
 #[test]
-fn tool_definitions_returns_51_tools() {
+fn tool_definitions_returns_52_tools() {
     let defs = tool_definitions();
     let arr = defs.as_array().expect("tool_definitions returns array");
     assert_eq!(
         arr.len(),
-        51,
-        "expected exactly 51 tool definitions (49 + 2 meta-tools), got {}",
+        52,
+        "expected exactly 52 tool definitions (50 + 2 meta-tools), got {}",
         arr.len()
     );
 }
@@ -1373,7 +1373,7 @@ fn search_tools_finds_search_tools() {
 fn search_tools_empty_query_returns_all() {
     let (out, err) = call_search_tools(&json!({"query": ""}));
     assert!(!err, "search_tools returned error: {out}");
-    // Should list all tools (51 core + 6 federation + 1 deprecated list_projects = 58).
+    // Should list all tools (52 core + 6 federation + 1 deprecated list_projects = 59).
     assert!(
         out.contains("code_search")
             && out.contains("find_symbol")
@@ -1381,8 +1381,8 @@ fn search_tools_empty_query_returns_all() {
         "empty query should return all tools: {out}"
     );
     assert!(
-        out.contains("58 results"),
-        "should report 58 results for empty query: {out}"
+        out.contains("59 results"),
+        "should report 59 results for empty query: {out}"
     );
 }
 

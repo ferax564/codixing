@@ -1,0 +1,12 @@
+[[tools]]
+name = "change_impact"
+description = "Analyze the blast radius of changing a file. Returns direct dependents, transitive dependents, affected tests, and total blast radius count. Use before refactoring to understand what might break."
+handler = "analysis::call_change_impact"
+calling_convention = "engine_args"
+read_only = true
+medium = true
+
+[tools.params.file]
+type = "string"
+description = "Relative file path to analyze (e.g. 'src/auth.rs')"
+required = true
