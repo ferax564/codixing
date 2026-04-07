@@ -298,6 +298,17 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+
+    /// Analyze the blast radius of changing a file: direct dependents,
+    /// transitive dependents, and affected tests.
+    Impact {
+        /// File to analyze (relative path).
+        file: String,
+
+        /// Output results as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Subcommands for managing federation configurations.
@@ -491,6 +502,7 @@ async fn main() -> Result<()> {
             exclude,
             path,
         } => cmd_audit(path, threshold_days, include, exclude),
+        Command::Impact { file, json } => cmd_impact(file, json),
     }
 }
 
@@ -1552,6 +1564,56 @@ fn cmd_audit(
         warning.len(),
         info.len(),
     );
+
+    Ok(())
+}
+
+fn cmd_impact(file: String, json: bool) -> Result<()> {
+    let root = std::env::current_dir().context("cannot determine current directory")?;
+    let engine = Engine::open(&root).with_context(|| {
+        format!(
+            "no index found at {} — run `codixing init` first",
+            root.display()
+        )
+    })?;
+
+    let impact = engine.change_impact(&file);
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&impact)?);
+        return Ok(());
+    }
+
+    println!("# Change Impact: {}", impact.file_path);
+    println!();
+    println!("Blast radius: {} files", impact.blast_radius);
+    println!();
+
+    if !impact.direct_dependents.is_empty() {
+        println!("## Direct dependents ({}):", impact.direct_dependents.len());
+        for d in &impact.direct_dependents {
+            println!("  {d}");
+        }
+        println!();
+    }
+
+    if !impact.transitive_dependents.is_empty() {
+        println!(
+            "## Transitive dependents ({}):",
+            impact.transitive_dependents.len()
+        );
+        for t in &impact.transitive_dependents {
+            println!("  {t}");
+        }
+        println!();
+    }
+
+    if !impact.affected_tests.is_empty() {
+        println!("## Affected tests ({}):", impact.affected_tests.len());
+        for t in &impact.affected_tests {
+            println!("  {t}");
+        }
+    }
 
     Ok(())
 }

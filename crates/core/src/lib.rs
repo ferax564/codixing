@@ -28,9 +28,9 @@ pub mod watcher;
 pub use config::{EmbeddingConfig, EmbeddingModel, GraphConfig, IndexConfig};
 pub use engine::freshness::{FreshnessEntry, FreshnessOptions, FreshnessReport, FreshnessTier};
 pub use engine::{
-    ConflictKind, EmbedTimingStats, Engine, FocusMapEntry, FocusMapOptions, GitSyncStats,
-    GrepMatch, IndexStats, RenameConflict, RenameValidation, StaleReport, SymbolReference,
-    SyncStats,
+    ChangeImpact, ConflictKind, EmbedTimingStats, Engine, FocusMapEntry, FocusMapOptions,
+    GitSyncStats, GrepMatch, IndexStats, RenameConflict, RenameValidation, StaleReport,
+    SymbolReference, SyncStats,
 };
 pub use error::{CodixingError, Result};
 pub use federation::{
