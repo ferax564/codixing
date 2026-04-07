@@ -1,4 +1,5 @@
 pub mod concepts;
+pub mod context_assembly;
 #[cfg(feature = "rustqueue")]
 pub mod embed_queue;
 pub(super) mod embed_state;
