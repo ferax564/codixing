@@ -3,6 +3,7 @@ pub mod concepts;
 pub mod embed_queue;
 pub(super) mod embed_state;
 pub(super) mod embed_stats;
+pub mod examples;
 mod files;
 mod focus_map;
 pub mod freshness;
