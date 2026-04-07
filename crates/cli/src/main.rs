@@ -343,6 +343,24 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+
+    /// Assemble cross-file context for understanding a code location.
+    Context {
+        /// File path (relative to project root).
+        file: String,
+
+        /// Line number (0-indexed).
+        #[arg(long, default_value = "0")]
+        line: u64,
+
+        /// Token budget for context assembly.
+        #[arg(long, default_value = "4096")]
+        token_budget: usize,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Subcommands for managing federation configurations.
@@ -544,6 +562,12 @@ async fn main() -> Result<()> {
             limit,
             json,
         } => cmd_examples(symbol, limit, json),
+        Command::Context {
+            file,
+            line,
+            token_budget,
+            json,
+        } => cmd_context(file, line, token_budget, json),
     }
 }
 
@@ -1796,5 +1820,89 @@ fn cmd_examples(symbol: String, limit: usize, json: bool) -> Result<()> {
         }
         println!();
     }
+    Ok(())
+}
+
+fn cmd_context(file: String, line: u64, token_budget: usize, json: bool) -> Result<()> {
+    let root = std::env::current_dir().context("cannot determine current directory")?;
+    let engine = Engine::open(&root).with_context(|| {
+        format!(
+            "no index found at {} — run `codixing init` first",
+            root.display()
+        )
+    })?;
+
+    let ctx = engine.assemble_context_for_location(&file, line, token_budget);
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&ctx)?);
+        return Ok(());
+    }
+
+    println!("# Context: {}:{}\n", ctx.primary.file_path, line);
+    println!(
+        "Token budget: {} | Used: {}\n",
+        token_budget, ctx.total_tokens
+    );
+
+    println!(
+        "## Primary chunk (L{}-L{})",
+        ctx.primary.line_start, ctx.primary.line_end
+    );
+    println!("```");
+    println!("{}", ctx.primary.content);
+    println!("```\n");
+
+    if !ctx.imports.is_empty() {
+        println!("## Imports ({}):", ctx.imports.len());
+        for imp in &ctx.imports {
+            println!(
+                "  {} (L{}-L{}, relevance: {:.2})",
+                imp.file_path, imp.line_start, imp.line_end, imp.relevance
+            );
+            for line_content in imp.content.lines() {
+                println!("    {line_content}");
+            }
+        }
+        println!();
+    }
+
+    if !ctx.callees.is_empty() {
+        println!("## Callees ({}):", ctx.callees.len());
+        for callee in &ctx.callees {
+            println!(
+                "  {} (L{}-L{}, relevance: {:.2})",
+                callee.file_path, callee.line_start, callee.line_end, callee.relevance
+            );
+            for line_content in callee.content.lines() {
+                println!("    {line_content}");
+            }
+        }
+        println!();
+    }
+
+    if !ctx.examples.is_empty() {
+        println!("## Usage examples ({}):", ctx.examples.len());
+        for (i, ex) in ctx.examples.iter().enumerate() {
+            let kind_label = match ex.kind {
+                codixing_core::engine::examples::ExampleKind::Test => "TEST",
+                codixing_core::engine::examples::ExampleKind::CallSite => "CALL",
+                codixing_core::engine::examples::ExampleKind::DocBlock => "DOC",
+            };
+            println!(
+                "  {}. [{}] {}:{}-{}",
+                i + 1,
+                kind_label,
+                ex.file_path,
+                ex.line_start,
+                ex.line_end
+            );
+            for line_content in ex.context.lines() {
+                println!("     {line_content}");
+            }
+            println!();
+        }
+    }
+
     Ok(())
 }

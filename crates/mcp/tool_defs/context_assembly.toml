@@ -1,0 +1,20 @@
+[[tools]]
+name = "assemble_location_context"
+description = "Assemble cross-file context for understanding a specific code location. Given a file and line, returns the primary chunk plus imported type definitions, callee signatures, and usage examples, all within a token budget."
+handler = "context::call_assemble_location_context"
+calling_convention = "engine_args"
+read_only = true
+medium = true
+
+[tools.params.file]
+type = "string"
+description = "File path to assemble context for"
+required = true
+
+[tools.params.line]
+type = "integer"
+description = "Line number (0-indexed, default: 0)"
+
+[tools.params.token_budget]
+type = "integer"
+description = "Maximum token budget (default: 4096)"
