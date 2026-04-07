@@ -309,6 +309,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+
+    /// List the public API surface of a file.
+    Api {
+        /// File to analyze (relative path).
+        file: String,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Subcommands for managing federation configurations.
@@ -503,6 +513,7 @@ async fn main() -> Result<()> {
             path,
         } => cmd_audit(path, threshold_days, include, exclude),
         Command::Impact { file, json } => cmd_impact(file, json),
+        Command::Api { file, json } => cmd_api(file, json),
     }
 }
 
@@ -1615,5 +1626,46 @@ fn cmd_impact(file: String, json: bool) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn cmd_api(file: String, json: bool) -> Result<()> {
+    let root = std::env::current_dir().context("cannot determine current directory")?;
+    let engine = Engine::open(&root).with_context(|| {
+        format!(
+            "no index found at {} — run `codixing init` first",
+            root.display()
+        )
+    })?;
+
+    let symbols = engine.api_surface(&file);
+
+    if json {
+        let entries: Vec<serde_json::Value> = symbols
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "name": s.name,
+                    "kind": format!("{:?}", s.kind),
+                    "file": &s.file_path,
+                    "line": s.line_start,
+                    "signature": s.signature,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
+    }
+
+    if symbols.is_empty() {
+        println!("No public API symbols found in {file}");
+        return Ok(());
+    }
+
+    println!("# Public API: {file}\n");
+    for s in &symbols {
+        let sig = s.signature.as_deref().unwrap_or(&s.name);
+        println!("  {:?} {} (line {})", s.kind, sig, s.line_start);
+    }
     Ok(())
 }

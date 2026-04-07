@@ -10,3 +10,16 @@ medium = true
 type = "string"
 description = "Relative file path to analyze (e.g. 'src/auth.rs')"
 required = true
+
+[[tools]]
+name = "api_surface"
+description = "List the public API surface of a file — exported functions, structs, traits, and other public symbols. Use to understand a file's public interface before making changes."
+handler = "analysis::call_api_surface"
+calling_convention = "engine_args"
+read_only = true
+medium = true
+
+[tools.params.file]
+type = "string"
+description = "Relative file path to analyze (e.g. 'src/lib.rs')"
+required = true

@@ -821,6 +821,28 @@ pub(crate) fn call_change_impact(engine: &Engine, args: &Value) -> (String, bool
     (out, false)
 }
 
+pub(crate) fn call_api_surface(engine: &Engine, args: &Value) -> (String, bool) {
+    let file = match args.get("file").and_then(|v| v.as_str()) {
+        Some(f) => f,
+        None => return ("Error: 'file' parameter is required".to_string(), true),
+    };
+
+    let symbols = engine.api_surface(file);
+    if symbols.is_empty() {
+        return (format!("No public API symbols found in {file}"), false);
+    }
+
+    let mut out = format!("# Public API: {file}\n\n");
+    for s in &symbols {
+        let sig = s.signature.as_deref().unwrap_or(&s.name);
+        out.push_str(&format!(
+            "- {:?} `{}` (line {})\n",
+            s.kind, sig, s.line_start
+        ));
+    }
+    (out, false)
+}
+
 /// Simple ISO-8601 timestamp without external dependencies.
 fn chrono_now() -> String {
     let secs = std::time::SystemTime::now()
