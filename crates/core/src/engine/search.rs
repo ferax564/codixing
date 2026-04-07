@@ -176,6 +176,27 @@ impl Engine {
             }
             Strategy::Deep => self.search_deep(query)?,
             Strategy::Exact => self.search_exact(&query)?,
+            Strategy::Semantic => {
+                let semantic_results = self.semantic_search(&query.query, query.limit);
+                let mut results: Vec<SearchResult> = Vec::new();
+                for m in semantic_results {
+                    let syms = self.symbols.filter(&m.symbol, Some(&m.file_path));
+                    if let Some(sym) = syms.into_iter().next() {
+                        results.push(SearchResult {
+                            chunk_id: format!("sem_{}", m.symbol),
+                            file_path: m.file_path,
+                            language: sym.language.name().to_string(),
+                            score: m.score,
+                            line_start: sym.line_start as u64,
+                            line_end: sym.line_end as u64,
+                            signature: sym.signature.unwrap_or_default(),
+                            scope_chain: vec![],
+                            content: m.match_reasons.join(", "),
+                        });
+                    }
+                }
+                return Ok(results);
+            }
         };
 
         // Apply the post-retrieval pipeline (boosts, demotions, dedup, truncation).
@@ -196,6 +217,9 @@ impl Engine {
             Strategy::Fast => fast_pipeline(),
             Strategy::Thorough => thorough_pipeline(),
             Strategy::Exact => exact_pipeline(),
+            // Semantic returns early from search() — pipeline is not applied,
+            // but we still need a valid pipeline for the match arm.
+            Strategy::Semantic => SearchPipeline::new(),
             // Explore and Deep handle their own boosts/demotions internally,
             // but still need truncation + dedup from the outer pipeline.
             Strategy::Explore | Strategy::Deep => SearchPipeline::new()

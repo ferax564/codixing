@@ -449,6 +449,8 @@ enum StrategyArg {
     Deep,
     /// Trigram index fast-path for exact identifier lookups.
     Exact,
+    /// Embedding-free semantic matching using behavioral signatures.
+    Semantic,
 }
 
 impl StrategyArg {
@@ -462,6 +464,7 @@ impl StrategyArg {
             StrategyArg::Explore => Strategy::Explore,
             StrategyArg::Deep => Strategy::Deep,
             StrategyArg::Exact => Strategy::Exact,
+            StrategyArg::Semantic => Strategy::Semantic,
         }
     }
 }
