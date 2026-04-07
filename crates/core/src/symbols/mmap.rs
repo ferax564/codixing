@@ -324,6 +324,7 @@ impl MmapSymbolTable {
                 scope,
                 doc_comment: None,
                 visibility: Visibility::default(),
+                type_relations: Vec::new(),
             });
         }
 

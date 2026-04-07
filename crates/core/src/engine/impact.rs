@@ -126,6 +126,14 @@ impl Engine {
             .collect()
     }
 
+    /// Look up type relationships for a symbol by name.
+    ///
+    /// Returns all symbols matching `name` that have at least one type
+    /// relationship (implements, extends, returns, contains).
+    pub fn type_relations(&self, symbol: &str) -> Vec<crate::symbols::Symbol> {
+        self.symbols.lookup(symbol)
+    }
+
     /// Compute the change impact for a file in this project.
     ///
     /// Returns a [`ChangeImpact`] describing direct dependents, transitive

@@ -1,8 +1,8 @@
 use tree_sitter::{Node, Tree};
 
 use super::{
-    EntityKind, Language, LanguageSupport, SemanticEntity, Visibility, extract_preceding_comments,
-    find_name_node, node_line_range, node_text,
+    EntityKind, Language, LanguageSupport, SemanticEntity, TypeRelation, TypeRelationKind,
+    Visibility, extract_preceding_comments, find_name_node, node_line_range, node_text,
 };
 
 /// Python language support.
@@ -67,6 +67,7 @@ fn collect_entities(
             line_range: node_line_range(node),
             scope: scope.to_vec(),
             visibility: python_visibility(&name),
+            type_relations: extract_python_type_relations(&target_node, source),
         };
         entities.push(entity);
 
@@ -261,6 +262,47 @@ fn python_visibility(name: &str) -> Visibility {
     } else {
         Visibility::Public
     }
+}
+
+/// Extract type relationships from a Python AST node.
+fn extract_python_type_relations(node: &Node, source: &[u8]) -> Vec<TypeRelation> {
+    let mut relations = Vec::new();
+    let kind_str = node.kind();
+
+    match kind_str {
+        "class_definition" => {
+            // class A(Base1, Base2): → Extends
+            if let Some(superclasses) = node.child_by_field_name("superclasses") {
+                let mut cursor = superclasses.walk();
+                for child in superclasses.children(&mut cursor) {
+                    if child.kind() == "identifier" || child.kind() == "attribute" {
+                        let text = node_text(&child, source).to_string();
+                        if !text.is_empty() {
+                            relations.push(TypeRelation {
+                                kind: TypeRelationKind::Extends,
+                                target: text,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        "function_definition" => {
+            // def foo(...) -> ReturnType: → Returns
+            if let Some(ret) = node.child_by_field_name("return_type") {
+                let text = node_text(&ret, source).to_string();
+                if !text.is_empty() {
+                    relations.push(TypeRelation {
+                        kind: TypeRelationKind::Returns,
+                        target: text,
+                    });
+                }
+            }
+        }
+        _ => {}
+    }
+
+    relations
 }
 
 #[cfg(test)]

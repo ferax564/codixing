@@ -1,8 +1,8 @@
 use tree_sitter::{Node, Tree};
 
 use super::{
-    EntityKind, Language, LanguageSupport, SemanticEntity, Visibility, find_name_node,
-    node_line_range, node_text,
+    EntityKind, Language, LanguageSupport, SemanticEntity, TypeRelation, TypeRelationKind,
+    Visibility, find_name_node, node_line_range, node_text,
 };
 
 /// TypeScript language support.
@@ -151,6 +151,7 @@ fn collect_entities(
                 line_range: node_line_range(node),
                 scope: scope.to_vec(),
                 visibility: extract_ts_visibility(node),
+                type_relations: extract_ts_type_relations(node, source, kind_str),
             };
             entities.push(entity);
 
@@ -375,6 +376,83 @@ fn extract_ts_visibility(node: &Node) -> Visibility {
         }
     }
     Visibility::Private
+}
+
+/// Extract type relationships from a TS/JS AST node.
+fn extract_ts_type_relations(node: &Node, source: &[u8], kind_str: &str) -> Vec<TypeRelation> {
+    let mut relations = Vec::new();
+
+    match kind_str {
+        "class_declaration" => {
+            // class A extends B implements C, D
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "class_heritage" {
+                    let mut hcursor = child.walk();
+                    for hchild in child.children(&mut hcursor) {
+                        if hchild.kind() == "extends_clause" {
+                            // First type in extends clause
+                            let mut ecursor = hchild.walk();
+                            for echild in hchild.children(&mut ecursor) {
+                                if echild.kind() == "identifier"
+                                    || echild.kind() == "member_expression"
+                                    || echild.kind() == "generic_type"
+                                {
+                                    let text = node_text(&echild, source).to_string();
+                                    if !text.is_empty() && text != "extends" {
+                                        relations.push(TypeRelation {
+                                            kind: TypeRelationKind::Extends,
+                                            target: text,
+                                        });
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                        if hchild.kind() == "implements_clause" {
+                            let mut icursor = hchild.walk();
+                            for ichild in hchild.children(&mut icursor) {
+                                if ichild.kind() == "identifier"
+                                    || ichild.kind() == "generic_type"
+                                    || ichild.kind() == "member_expression"
+                                {
+                                    let text = node_text(&ichild, source).to_string();
+                                    if !text.is_empty() {
+                                        relations.push(TypeRelation {
+                                            kind: TypeRelationKind::Implements,
+                                            target: text,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        "function_declaration" | "method_definition" => {
+            // Extract return type annotation `: ReturnType`
+            if let Some(ret) = node.child_by_field_name("return_type") {
+                // return_type is a type_annotation node; extract its child type
+                let mut cursor = ret.walk();
+                for child in ret.children(&mut cursor) {
+                    if child.kind() != ":" {
+                        let text = node_text(&child, source).to_string();
+                        if !text.is_empty() {
+                            relations.push(TypeRelation {
+                                kind: TypeRelationKind::Returns,
+                                target: text,
+                            });
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    relations
 }
 
 #[cfg(test)]

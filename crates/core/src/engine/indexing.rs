@@ -1076,6 +1076,7 @@ pub(super) fn symbol_from_entity(
         scope: entity.scope.clone(),
         doc_comment: entity.doc_comment.clone(),
         visibility: entity.visibility.clone(),
+        type_relations: entity.type_relations.clone(),
     }
 }
 

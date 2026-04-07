@@ -5,7 +5,7 @@ pub mod writer;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::language::{EntityKind, Language, Visibility};
+use crate::language::{EntityKind, Language, TypeRelation, Visibility};
 
 /// A symbol extracted from source code, representing a named semantic entity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +34,8 @@ pub struct Symbol {
     pub doc_comment: Option<String>,
     /// Visibility level (public, crate-internal, private).
     pub visibility: Visibility,
+    /// Type relationships extracted from AST.
+    pub type_relations: Vec<TypeRelation>,
 }
 
 /// Mutable, concurrent symbol table backed by `DashMap`.
@@ -294,6 +296,7 @@ mod tests {
             scope: vec![],
             doc_comment: None,
             visibility: Visibility::default(),
+            type_relations: Vec::new(),
         }
     }
 
@@ -636,6 +639,7 @@ mod tests {
             scope: vec!["engine".to_string(), "Engine".to_string()],
             doc_comment: None,
             visibility: Visibility::default(),
+            type_relations: Vec::new(),
         });
 
         let dir = tempfile::tempdir().unwrap();
@@ -715,6 +719,7 @@ mod tests {
             scope: vec![],
             doc_comment: None,
             visibility: Visibility::default(),
+            type_relations: Vec::new(),
         });
 
         let dir = tempfile::tempdir().unwrap();

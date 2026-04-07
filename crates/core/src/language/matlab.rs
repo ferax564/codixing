@@ -62,6 +62,7 @@ fn collect_entities(
                 line_range: node_line_range(node),
                 scope: scope.to_vec(),
                 visibility: Visibility::default(),
+                type_relations: Vec::new(),
             });
             let mut s = scope.to_vec();
             if !name.is_empty() {
@@ -80,6 +81,7 @@ fn collect_entities(
                 line_range: node_line_range(node),
                 scope: scope.to_vec(),
                 visibility: Visibility::default(),
+                type_relations: Vec::new(),
             });
             let mut s = scope.to_vec();
             if !name.is_empty() {

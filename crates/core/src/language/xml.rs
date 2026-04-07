@@ -84,6 +84,7 @@ fn emit_entity(
             line_range: 0..1,
             scope: scope.to_vec(),
             visibility: Visibility::default(),
+            type_relations: Vec::new(),
         });
     }
 
@@ -110,6 +111,7 @@ fn emit_entity(
         line_range: 0..1,
         scope: scope.to_vec(),
         visibility: Visibility::default(),
+        type_relations: Vec::new(),
     })
 }
 

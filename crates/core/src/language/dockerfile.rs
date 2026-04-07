@@ -65,6 +65,7 @@ fn extract_dockerfile_entities(text: &str) -> Vec<SemanticEntity> {
                         line_range: i..i + 1,
                         scope: vec![],
                         visibility: Visibility::default(),
+                        type_relations: Vec::new(),
                     });
                 }
             }
@@ -84,6 +85,7 @@ fn extract_dockerfile_entities(text: &str) -> Vec<SemanticEntity> {
                     line_range: i..i + 1,
                     scope: vec![],
                     visibility: Visibility::default(),
+                    type_relations: Vec::new(),
                 });
             }
             continue;
@@ -101,6 +103,7 @@ fn extract_dockerfile_entities(text: &str) -> Vec<SemanticEntity> {
                 line_range: i..i + 1,
                 scope: vec![],
                 visibility: Visibility::default(),
+                type_relations: Vec::new(),
             });
             continue;
         }
@@ -118,6 +121,7 @@ fn extract_dockerfile_entities(text: &str) -> Vec<SemanticEntity> {
                     line_range: i..i + 1,
                     scope: vec![],
                     visibility: Visibility::default(),
+                    type_relations: Vec::new(),
                 });
             }
             continue;
@@ -141,6 +145,7 @@ fn extract_dockerfile_entities(text: &str) -> Vec<SemanticEntity> {
                     line_range: i..i + 1,
                     scope: vec![],
                     visibility: Visibility::default(),
+                    type_relations: Vec::new(),
                 });
             }
             continue;
@@ -161,6 +166,7 @@ fn extract_dockerfile_entities(text: &str) -> Vec<SemanticEntity> {
                         line_range: i..i + 1,
                         scope: vec![],
                         visibility: Visibility::default(),
+                        type_relations: Vec::new(),
                     });
                 }
             }
@@ -179,6 +185,7 @@ fn extract_dockerfile_entities(text: &str) -> Vec<SemanticEntity> {
                 line_range: i..i + 1,
                 scope: vec![],
                 visibility: Visibility::default(),
+                type_relations: Vec::new(),
             });
             continue;
         }
@@ -199,6 +206,7 @@ fn extract_dockerfile_entities(text: &str) -> Vec<SemanticEntity> {
                 line_range: i..i + 1,
                 scope: vec![],
                 visibility: Visibility::default(),
+                type_relations: Vec::new(),
             });
         }
     }

@@ -67,6 +67,7 @@ fn collect_entities(
             line_range: node_line_range(node),
             scope: scope.to_vec(),
             visibility: Visibility::default(),
+            type_relations: Vec::new(),
         };
         entities.push(entity);
 

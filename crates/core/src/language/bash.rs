@@ -57,6 +57,7 @@ fn collect_entities(node: &Node, source: &[u8], entities: &mut Vec<SemanticEntit
                 line_range: node_line_range(node),
                 scope: vec![],
                 visibility: Visibility::default(),
+                type_relations: Vec::new(),
             });
         }
         "variable_assignment" => {
@@ -73,6 +74,7 @@ fn collect_entities(node: &Node, source: &[u8], entities: &mut Vec<SemanticEntit
                         line_range: node_line_range(node),
                         scope: vec![],
                         visibility: Visibility::default(),
+                        type_relations: Vec::new(),
                     });
                 }
             }

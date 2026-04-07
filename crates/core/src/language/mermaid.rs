@@ -81,6 +81,7 @@ fn extract_mermaid_entities(text: &str) -> Vec<SemanticEntity> {
                             line_range: i..i + 1,
                             scope: vec![],
                             visibility: Visibility::default(),
+                            type_relations: Vec::new(),
                         });
                     }
                     break;
@@ -101,6 +102,7 @@ fn extract_mermaid_entities(text: &str) -> Vec<SemanticEntity> {
                     line_range: i..i + 1,
                     scope: vec![],
                     visibility: Visibility::default(),
+                    type_relations: Vec::new(),
                 });
             }
             continue;
@@ -126,6 +128,7 @@ fn extract_mermaid_entities(text: &str) -> Vec<SemanticEntity> {
                         line_range: i..i + 1,
                         scope: vec![],
                         visibility: Visibility::default(),
+                        type_relations: Vec::new(),
                     });
                 }
                 continue;
@@ -207,6 +210,7 @@ fn parse_node_definition(
         line_range: line_idx..line_idx + 1,
         scope: vec![],
         visibility: Visibility::default(),
+        type_relations: Vec::new(),
     })
 }
 
