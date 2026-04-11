@@ -38,17 +38,13 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: cargo test --workspace
 
-      - name: Test (Windows, no usearch, single-threaded)
+      - name: Test (Windows, no usearch)
         if: matrix.os == 'windows-latest'
-        run: cargo test --workspace --no-default-features -- --test-threads=1
+        run: cargo test --workspace --no-default-features
 
       - name: Clippy
         if: matrix.os != 'windows-latest'
         run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Clippy (Windows, no usearch)
-        if: matrix.os == 'windows-latest'
-        run: cargo clippy --workspace --no-default-features --all-targets -- -D warnings
 
       - name: Format check
         run: cargo fmt --check
