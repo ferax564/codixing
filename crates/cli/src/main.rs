@@ -1041,6 +1041,7 @@ fn cmd_graph(
     // --obsidian: export as Obsidian vault.
     if let Some(obsidian_path) = obsidian {
         let output = obsidian_path.unwrap_or_else(|| PathBuf::from("codixing-vault"));
+        engine.detect_communities();
         let opts = codixing_core::ObsidianExportOptions {
             output_dir: output.clone(),
             include_external: false,

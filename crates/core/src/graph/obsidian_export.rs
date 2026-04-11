@@ -3,7 +3,7 @@
 //! Generates a directory of Markdown files with YAML frontmatter, wiki-links,
 //! community notes, and a Map of Content (MOC) for exploring the dependency graph.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use super::CodeGraph;
@@ -55,10 +55,10 @@ pub fn export_obsidian(graph: &CodeGraph, options: &ObsidianExportOptions) -> Re
     // Build edge lookup: for each file, collect callers and callees with edge info.
     let all_edges = graph.all_edges();
 
-    // callers_of[target] = vec![(source, edge)]
-    let mut callers_of: HashMap<&str, Vec<(&str, &str, &str)>> = HashMap::new();
-    // callees_of[source] = vec![(target, edge)]
-    let mut callees_of: HashMap<&str, Vec<(&str, &str, &str)>> = HashMap::new();
+    // callers_of[target] = set of (source, kind, provenance) — deduplicated
+    let mut callers_of: HashMap<&str, BTreeSet<(&str, &str, &str)>> = HashMap::new();
+    // callees_of[source] = set of (target, kind, provenance) — deduplicated
+    let mut callees_of: HashMap<&str, BTreeSet<(&str, &str, &str)>> = HashMap::new();
 
     for (from, to, edge) in &all_edges {
         if !options.include_external && (from.starts_with("__ext__:") || to.starts_with("__ext__:"))
@@ -75,11 +75,11 @@ pub fn export_obsidian(graph: &CodeGraph, options: &ObsidianExportOptions) -> Re
         callers_of
             .entry(to)
             .or_default()
-            .push((from, kind_str, provenance));
+            .insert((from, kind_str, provenance));
         callees_of
             .entry(from)
             .or_default()
-            .push((to, kind_str, provenance));
+            .insert((to, kind_str, provenance));
     }
 
     // Group by community.
@@ -260,6 +260,14 @@ pub fn export_obsidian(graph: &CodeGraph, options: &ObsidianExportOptions) -> Re
 
         let graph_path = obsidian_dir.join("graph.json");
         std::fs::write(&graph_path, &graph_json)?;
+
+        // Write workspace.json so Obsidian recognizes this as a vault.
+        let workspace = r#"{"main":{"id":"main","type":"split","children":[{"id":"leaf","type":"leaf","state":{"type":"markdown","state":{"file":"_MOC.md","mode":"preview"}}}]}}"#;
+        std::fs::write(obsidian_dir.join("workspace.json"), workspace)?;
+
+        // Write app.json with reasonable defaults.
+        let app_json = r#"{"showLineNumber":true,"strictLineBreaks":true}"#;
+        std::fs::write(obsidian_dir.join("app.json"), app_json)?;
     }
 
     Ok(note_count)
