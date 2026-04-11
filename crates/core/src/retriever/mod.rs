@@ -33,6 +33,10 @@ pub enum Strategy {
     /// Uses the trigram inverted index for sub-millisecond exact substring
     /// matching, with BM25 fallback when trigram yields < 3 results.
     Exact,
+    /// Embedding-free semantic matching using behavioral signatures.
+    /// Decomposes queries into intent (verbs, nouns, types) and matches
+    /// against AST-derived function signatures, call patterns, and concepts.
+    Semantic,
 }
 
 /// Hard filter for document type in search results.

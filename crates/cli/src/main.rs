@@ -7,8 +7,8 @@ use tracing_subscriber::EnvFilter;
 
 use codixing_core::{
     EmbedTimingStats, EmbeddingModel, Engine, FederatedEngine, FederationConfig, FreshnessOptions,
-    FreshnessTier, GitSyncStats, IndexConfig, RepoMapOptions, SearchQuery, Strategy, SyncStats,
-    discover_projects, to_federation_config,
+    FreshnessTier, IndexConfig, RepoMapOptions, SearchQuery, Strategy, discover_projects,
+    to_federation_config,
 };
 
 #[derive(Parser)]
@@ -298,6 +298,69 @@ enum Command {
         #[arg(default_value = ".")]
         path: PathBuf,
     },
+
+    /// Analyze the blast radius of changing a file: direct dependents,
+    /// transitive dependents, and affected tests.
+    Impact {
+        /// File to analyze (relative path).
+        file: String,
+
+        /// Output results as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List the public API surface of a file.
+    Api {
+        /// File to analyze (relative path).
+        file: String,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show type relationships for a symbol (implements, extends, returns, contains).
+    Types {
+        /// Symbol name to look up.
+        symbol: String,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Find usage examples for a symbol (tests, call sites, doc blocks).
+    Examples {
+        /// Symbol name to look up.
+        symbol: String,
+
+        /// Maximum number of examples.
+        #[arg(short, long, default_value = "5")]
+        limit: usize,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Assemble cross-file context for understanding a code location.
+    Context {
+        /// File path (relative to project root).
+        file: String,
+
+        /// Line number (0-indexed).
+        #[arg(long, default_value = "0")]
+        line: u64,
+
+        /// Token budget for context assembly.
+        #[arg(long, default_value = "4096")]
+        token_budget: usize,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Subcommands for managing federation configurations.
@@ -386,6 +449,8 @@ enum StrategyArg {
     Deep,
     /// Trigram index fast-path for exact identifier lookups.
     Exact,
+    /// Embedding-free semantic matching using behavioral signatures.
+    Semantic,
 }
 
 impl StrategyArg {
@@ -399,6 +464,7 @@ impl StrategyArg {
             StrategyArg::Explore => Strategy::Explore,
             StrategyArg::Deep => Strategy::Deep,
             StrategyArg::Exact => Strategy::Exact,
+            StrategyArg::Semantic => Strategy::Semantic,
         }
     }
 }
@@ -491,6 +557,36 @@ async fn main() -> Result<()> {
             exclude,
             path,
         } => cmd_audit(path, threshold_days, include, exclude),
+        Command::Impact { file, json } => cmd_impact(file, json),
+        Command::Api { file, json } => cmd_api(file, json),
+        Command::Types { symbol, json } => cmd_types(symbol, json),
+        Command::Examples {
+            symbol,
+            limit,
+            json,
+        } => cmd_examples(symbol, limit, json),
+        Command::Context {
+            file,
+            line,
+            token_budget,
+            json,
+        } => cmd_context(file, line, token_budget, json),
+    }
+}
+
+/// Check if an error indicates write-lock contention and print a helpful message.
+fn check_write_lock_error(err: &anyhow::Error) -> bool {
+    let msg = format!("{err:#}");
+    if msg.contains("read-only mode") || msg.contains("ReadOnly") || msg.contains("write lock") {
+        eprintln!("Error: another process holds the Tantivy write lock (likely the MCP server).");
+        eprintln!();
+        eprintln!("Options:");
+        eprintln!("  1. Use the sync_index or git_sync_index MCP tool");
+        eprintln!("     (the running server can sync for you)");
+        eprintln!("  2. Stop the MCP server, sync, then restart");
+        true
+    } else {
+        false
     }
 }
 
@@ -1073,18 +1169,39 @@ fn cmd_update(path: PathBuf, dry_run: bool) -> Result<()> {
         let abs = root.join(rel_path);
         match engine.reindex_file(&abs) {
             Ok(()) => updated += 1,
-            Err(e) => eprintln!("  warning: skipped {} — {e}", rel_path.display()),
+            Err(e) => {
+                let anyhow_err = anyhow::anyhow!("{e}");
+                if check_write_lock_error(&anyhow_err) {
+                    std::process::exit(1);
+                }
+                eprintln!("  warning: skipped {} — {e}", rel_path.display());
+            }
         }
     }
 
     for rel_path in &to_remove {
         match engine.remove_file(rel_path) {
             Ok(()) => removed += 1,
-            Err(e) => eprintln!("  warning: remove failed {} — {e}", rel_path.display()),
+            Err(e) => {
+                let anyhow_err = anyhow::anyhow!("{e}");
+                if check_write_lock_error(&anyhow_err) {
+                    std::process::exit(1);
+                }
+                eprintln!("  warning: remove failed {} — {e}", rel_path.display());
+            }
         }
     }
 
-    engine.save().context("failed to save index after update")?;
+    match engine.save() {
+        Ok(()) => {}
+        Err(e) => {
+            let anyhow_err = anyhow::anyhow!("{e}");
+            if check_write_lock_error(&anyhow_err) {
+                std::process::exit(1);
+            }
+            return Err(anyhow_err).context("failed to save index after update");
+        }
+    }
 
     eprintln!(
         "\nUpdated {updated} file(s), removed {removed} file(s) in {:.2}s",
@@ -1103,19 +1220,23 @@ fn cmd_sync(path: PathBuf) -> Result<()> {
         Engine::open(&root).with_context(|| "no index found — run `codixing init` first")?;
 
     let start = Instant::now();
-    let SyncStats {
-        added,
-        modified,
-        removed,
-        unchanged,
-    } = engine.sync()?;
+    let stats = match engine.sync() {
+        Ok(s) => s,
+        Err(e) => {
+            let anyhow_err = anyhow::anyhow!("{e}");
+            if check_write_lock_error(&anyhow_err) {
+                std::process::exit(1);
+            }
+            return Err(anyhow_err);
+        }
+    };
 
     eprintln!(
         "sync complete: {} added, {} modified, {} removed, {} unchanged ({:.2}s)",
-        added,
-        modified,
-        removed,
-        unchanged,
+        stats.added,
+        stats.modified,
+        stats.removed,
+        stats.unchanged,
         start.elapsed().as_secs_f64(),
     );
 
@@ -1131,13 +1252,18 @@ fn cmd_git_sync(path: PathBuf) -> Result<()> {
         Engine::open(&root).with_context(|| "no index found — run `codixing init` first")?;
 
     let start = Instant::now();
-    let GitSyncStats {
-        modified,
-        removed,
-        unchanged,
-    } = engine.git_sync()?;
+    let stats = match engine.git_sync() {
+        Ok(s) => s,
+        Err(e) => {
+            let anyhow_err = anyhow::anyhow!("{e}");
+            if check_write_lock_error(&anyhow_err) {
+                std::process::exit(1);
+            }
+            return Err(anyhow_err);
+        }
+    };
 
-    if unchanged {
+    if stats.unchanged {
         eprintln!(
             "index already up-to-date (no git changes since last index, {:.2}s)",
             start.elapsed().as_secs_f64()
@@ -1145,8 +1271,8 @@ fn cmd_git_sync(path: PathBuf) -> Result<()> {
     } else {
         eprintln!(
             "git-sync complete: {} modified, {} removed ({:.2}s)",
-            modified,
-            removed,
+            stats.modified,
+            stats.removed,
             start.elapsed().as_secs_f64()
         );
     }
@@ -1552,6 +1678,280 @@ fn cmd_audit(
         warning.len(),
         info.len(),
     );
+
+    Ok(())
+}
+
+fn cmd_impact(file: String, json: bool) -> Result<()> {
+    let root = std::env::current_dir().context("cannot determine current directory")?;
+    let engine = Engine::open(&root).with_context(|| {
+        format!(
+            "no index found at {} — run `codixing init` first",
+            root.display()
+        )
+    })?;
+
+    let impact = engine.change_impact(&file);
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&impact)?);
+        return Ok(());
+    }
+
+    println!("# Change Impact: {}", impact.file_path);
+    println!();
+    println!("Blast radius: {} files", impact.blast_radius);
+    println!();
+
+    if !impact.direct_dependents.is_empty() {
+        println!("## Direct dependents ({}):", impact.direct_dependents.len());
+        for d in &impact.direct_dependents {
+            println!("  {d}");
+        }
+        println!();
+    }
+
+    if !impact.transitive_dependents.is_empty() {
+        println!(
+            "## Transitive dependents ({}):",
+            impact.transitive_dependents.len()
+        );
+        for t in &impact.transitive_dependents {
+            println!("  {t}");
+        }
+        println!();
+    }
+
+    if !impact.affected_tests.is_empty() {
+        println!("## Affected tests ({}):", impact.affected_tests.len());
+        for t in &impact.affected_tests {
+            println!("  {t}");
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_api(file: String, json: bool) -> Result<()> {
+    let root = std::env::current_dir().context("cannot determine current directory")?;
+    let engine = Engine::open(&root).with_context(|| {
+        format!(
+            "no index found at {} — run `codixing init` first",
+            root.display()
+        )
+    })?;
+
+    let symbols = engine.api_surface(&file);
+
+    if json {
+        let entries: Vec<serde_json::Value> = symbols
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "name": s.name,
+                    "kind": format!("{:?}", s.kind),
+                    "file": &s.file_path,
+                    "line": s.line_start,
+                    "signature": s.signature,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
+    }
+
+    if symbols.is_empty() {
+        println!("No public API symbols found in {file}");
+        return Ok(());
+    }
+
+    println!("# Public API: {file}\n");
+    for s in &symbols {
+        let sig = s.signature.as_deref().unwrap_or(&s.name);
+        println!("  {:?} {} (line {})", s.kind, sig, s.line_start);
+    }
+    Ok(())
+}
+
+fn cmd_types(symbol: String, json: bool) -> Result<()> {
+    let root = std::env::current_dir().context("cannot determine current directory")?;
+    let engine = Engine::open(&root).with_context(|| {
+        format!(
+            "no index found at {} — run `codixing init` first",
+            root.display()
+        )
+    })?;
+
+    let symbols = engine
+        .symbols(&symbol, None)
+        .context("symbol lookup failed")?;
+
+    if symbols.is_empty() {
+        println!("No symbol found matching '{symbol}'");
+        return Ok(());
+    }
+
+    if json {
+        let entries: Vec<serde_json::Value> = symbols
+            .iter()
+            .flat_map(|s| {
+                s.type_relations.iter().map(move |tr| {
+                    serde_json::json!({
+                        "symbol": &s.name,
+                        "file": &s.file_path,
+                        "relation": format!("{}", tr.kind),
+                        "target": &tr.target,
+                    })
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
+    }
+
+    println!("# Type Relations: {symbol}\n");
+    let mut found = false;
+    for s in &symbols {
+        if s.type_relations.is_empty() {
+            continue;
+        }
+        found = true;
+        println!("  {} ({}:{})", s.name, s.file_path, s.line_start);
+        for tr in &s.type_relations {
+            println!("    {} → {}", tr.kind, tr.target);
+        }
+    }
+    if !found {
+        println!("No type relations found for '{symbol}'");
+    }
+    Ok(())
+}
+
+fn cmd_examples(symbol: String, limit: usize, json: bool) -> Result<()> {
+    let root = std::env::current_dir().context("cannot determine current directory")?;
+    let engine = Engine::open(&root).with_context(|| {
+        format!(
+            "no index found at {} — run `codixing init` first",
+            root.display()
+        )
+    })?;
+
+    let examples = engine.find_usage_examples(&symbol, limit);
+
+    if examples.is_empty() {
+        println!("No usage examples found for '{symbol}'");
+        return Ok(());
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&examples)?);
+        return Ok(());
+    }
+
+    println!("# Usage Examples: {symbol}\n");
+    for (i, ex) in examples.iter().enumerate() {
+        let kind_label = match ex.kind {
+            codixing_core::engine::examples::ExampleKind::Test => "TEST",
+            codixing_core::engine::examples::ExampleKind::CallSite => "CALL",
+            codixing_core::engine::examples::ExampleKind::DocBlock => "DOC",
+        };
+        println!(
+            "  {}. [{}] {}:{}-{}",
+            i + 1,
+            kind_label,
+            ex.file_path,
+            ex.line_start,
+            ex.line_end
+        );
+        // Indent context lines for readability.
+        for line in ex.context.lines() {
+            println!("     {line}");
+        }
+        println!();
+    }
+    Ok(())
+}
+
+fn cmd_context(file: String, line: u64, token_budget: usize, json: bool) -> Result<()> {
+    let root = std::env::current_dir().context("cannot determine current directory")?;
+    let engine = Engine::open(&root).with_context(|| {
+        format!(
+            "no index found at {} — run `codixing init` first",
+            root.display()
+        )
+    })?;
+
+    let ctx = engine.assemble_context_for_location(&file, line, token_budget);
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&ctx)?);
+        return Ok(());
+    }
+
+    println!("# Context: {}:{}\n", ctx.primary.file_path, line);
+    println!(
+        "Token budget: {} | Used: {}\n",
+        token_budget, ctx.total_tokens
+    );
+
+    println!(
+        "## Primary chunk (L{}-L{})",
+        ctx.primary.line_start, ctx.primary.line_end
+    );
+    println!("```");
+    println!("{}", ctx.primary.content);
+    println!("```\n");
+
+    if !ctx.imports.is_empty() {
+        println!("## Imports ({}):", ctx.imports.len());
+        for imp in &ctx.imports {
+            println!(
+                "  {} (L{}-L{}, relevance: {:.2})",
+                imp.file_path, imp.line_start, imp.line_end, imp.relevance
+            );
+            for line_content in imp.content.lines() {
+                println!("    {line_content}");
+            }
+        }
+        println!();
+    }
+
+    if !ctx.callees.is_empty() {
+        println!("## Callees ({}):", ctx.callees.len());
+        for callee in &ctx.callees {
+            println!(
+                "  {} (L{}-L{}, relevance: {:.2})",
+                callee.file_path, callee.line_start, callee.line_end, callee.relevance
+            );
+            for line_content in callee.content.lines() {
+                println!("    {line_content}");
+            }
+        }
+        println!();
+    }
+
+    if !ctx.examples.is_empty() {
+        println!("## Usage examples ({}):", ctx.examples.len());
+        for (i, ex) in ctx.examples.iter().enumerate() {
+            let kind_label = match ex.kind {
+                codixing_core::engine::examples::ExampleKind::Test => "TEST",
+                codixing_core::engine::examples::ExampleKind::CallSite => "CALL",
+                codixing_core::engine::examples::ExampleKind::DocBlock => "DOC",
+            };
+            println!(
+                "  {}. [{}] {}:{}-{}",
+                i + 1,
+                kind_label,
+                ex.file_path,
+                ex.line_start,
+                ex.line_end
+            );
+            for line_content in ex.context.lines() {
+                println!("     {line_content}");
+            }
+            println!();
+        }
+    }
 
     Ok(())
 }

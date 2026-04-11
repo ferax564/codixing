@@ -30,6 +30,7 @@ pub(crate) fn call_code_search(
         Some("explore") => Strategy::Explore,
         Some("deep") => Strategy::Deep,
         Some("exact") => Strategy::Exact,
+        Some("semantic") => Strategy::Semantic,
         _ => engine.detect_strategy(&query_str),
     };
 

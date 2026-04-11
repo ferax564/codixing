@@ -6,7 +6,7 @@
 //! - GitHub Actions: `jobs.X` -> Module, `steps[].name` -> Function
 //! - Kubernetes: `kind:` value -> Type
 
-use super::{ConfigLanguageSupport, EntityKind, Language, SemanticEntity};
+use super::{ConfigLanguageSupport, EntityKind, Language, SemanticEntity, Visibility};
 
 pub struct YamlLanguage;
 
@@ -84,6 +84,8 @@ fn extract_yaml_entities(text: &str) -> Vec<SemanticEntity> {
                     byte_range: byte_start..byte_end,
                     line_range: i..i + 1,
                     scope: vec![],
+                    visibility: Visibility::default(),
+                    type_relations: Vec::new(),
                 });
                 break;
             }
@@ -174,6 +176,8 @@ fn extract_yaml_entities(text: &str) -> Vec<SemanticEntity> {
             byte_range: byte_start..byte_end,
             line_range: i..i + 1,
             scope,
+            visibility: Visibility::default(),
+            type_relations: Vec::new(),
         });
 
         stack.push((indent, key.to_string()));
@@ -222,6 +226,8 @@ fn extract_action_step_names(lines: &[&str], entities: &mut Vec<SemanticEntity>)
                         byte_range: byte_start..byte_end,
                         line_range: i..i + 1,
                         scope: vec!["steps".to_string()],
+                        visibility: Visibility::default(),
+                        type_relations: Vec::new(),
                     });
                 }
             }

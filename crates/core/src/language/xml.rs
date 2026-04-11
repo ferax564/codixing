@@ -6,7 +6,7 @@
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
 
-use super::{ConfigLanguageSupport, EntityKind, Language, SemanticEntity};
+use super::{ConfigLanguageSupport, EntityKind, Language, SemanticEntity, Visibility};
 
 pub struct XmlLanguage;
 
@@ -83,6 +83,8 @@ fn emit_entity(
             byte_range: offset..offset + 1,
             line_range: 0..1,
             scope: scope.to_vec(),
+            visibility: Visibility::default(),
+            type_relations: Vec::new(),
         });
     }
 
@@ -108,6 +110,8 @@ fn emit_entity(
         byte_range: offset..offset + 1,
         line_range: 0..1,
         scope: scope.to_vec(),
+        visibility: Visibility::default(),
+        type_relations: Vec::new(),
     })
 }
 

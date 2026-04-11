@@ -573,8 +573,54 @@ impl ImportResolver {
         // and directory paths for `addpath`.
 
         // If it looks like a directory path (addpath), we can't resolve to a single file.
-        // Return None for directory-style imports.
-        if import.ends_with('/') || import.contains('/') {
+        if import.ends_with('/') {
+            return None;
+        }
+
+        // Dot-qualified path: aerotool.core.SessionState
+        if import.contains('.') {
+            let segments: Vec<&str> = import.split('.').collect();
+
+            // Strategy 1: MATLAB +pkg convention
+            // aerotool.core.SessionState → +aerotool/+core/SessionState.m
+            let plus_path = segments
+                .iter()
+                .enumerate()
+                .map(|(i, seg)| {
+                    if i < segments.len() - 1 {
+                        format!("+{seg}")
+                    } else {
+                        seg.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("/")
+                + ".m";
+            if self.indexed_files.contains(&plus_path) {
+                return Some(plus_path);
+            }
+
+            // Strategy 2: Plain path without + prefixes
+            let plain_path = segments.join("/") + ".m";
+            if self.indexed_files.contains(&plain_path) {
+                return Some(plain_path);
+            }
+
+            // Strategy 3: Last-segment fallback (search by function name)
+            let last = segments.last().unwrap_or(&"");
+            let suffix = format!("/{last}.m");
+            let root_name = format!("{last}.m");
+            for f in &self.indexed_files {
+                if f.ends_with(&suffix) || f == &root_name {
+                    return Some(f.clone());
+                }
+            }
+
+            return None;
+        }
+
+        // Non-dot: plain function name → functionname.m
+        if import.contains('/') {
             return None;
         }
 
@@ -1047,6 +1093,65 @@ mod tests {
         };
         // addpath-style directory import should return None.
         assert_eq!(resolver.resolve(&raw, "main.m"), None);
+    }
+
+    #[test]
+    fn resolve_matlab_dot_path_with_plus_prefix() {
+        let resolver = make_resolver(&[
+            "+aerotool/+core/SessionState.m",
+            "+aerotool/+compute/GatingEvaluator.m",
+            "src/utils.m",
+        ]);
+        let raw = RawImport {
+            path: "aerotool.core.SessionState".to_string(),
+            language: Language::Matlab,
+            is_relative: false,
+        };
+        assert_eq!(
+            resolver.resolve(&raw, "main.m"),
+            Some("+aerotool/+core/SessionState.m".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_matlab_dot_path_without_plus() {
+        let resolver = make_resolver(&["aerotool/core/SessionState.m"]);
+        let raw = RawImport {
+            path: "aerotool.core.SessionState".to_string(),
+            language: Language::Matlab,
+            is_relative: false,
+        };
+        assert_eq!(
+            resolver.resolve(&raw, "main.m"),
+            Some("aerotool/core/SessionState.m".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_matlab_dot_path_last_segment_fallback() {
+        let resolver = make_resolver(&["lib/SessionState.m"]);
+        let raw = RawImport {
+            path: "aerotool.core.SessionState".to_string(),
+            language: Language::Matlab,
+            is_relative: false,
+        };
+        let resolved = resolver.resolve(&raw, "main.m");
+        assert!(resolved.is_some());
+        assert!(resolved.unwrap().ends_with("SessionState.m"));
+    }
+
+    #[test]
+    fn resolve_matlab_plain_name_still_works() {
+        let resolver = make_resolver(&["lib/helper.m"]);
+        let raw = RawImport {
+            path: "helper".to_string(),
+            language: Language::Matlab,
+            is_relative: false,
+        };
+        assert_eq!(
+            resolver.resolve(&raw, "lib/main.m"),
+            Some("lib/helper.m".to_string())
+        );
     }
 
     // -----------------------------------------------------------------

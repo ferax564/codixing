@@ -1,8 +1,8 @@
 use tree_sitter::{Node, Tree};
 
 use super::{
-    EntityKind, Language, LanguageSupport, SemanticEntity, extract_preceding_comments,
-    find_name_node, node_line_range, node_text,
+    EntityKind, Language, LanguageSupport, SemanticEntity, TypeRelation, TypeRelationKind,
+    Visibility, extract_preceding_comments, find_name_node, node_line_range, node_text,
 };
 
 /// Rust language support.
@@ -70,6 +70,8 @@ fn collect_entities(
             byte_range: node.start_byte()..node.end_byte(),
             line_range: node_line_range(node),
             scope: scope.to_vec(),
+            visibility: extract_visibility(node, source),
+            type_relations: extract_type_relations(node, source, kind_str),
         };
         entities.push(entity);
 
@@ -170,6 +172,99 @@ fn extract_rust_signature(node: &Node, source: &[u8]) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Extract visibility from a Rust AST node by looking for a `visibility_modifier` child.
+fn extract_visibility(node: &Node, source: &[u8]) -> Visibility {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "visibility_modifier" {
+            let text = node_text(&child, source);
+            if text.contains("pub(crate)") || text.contains("pub(super)") {
+                return Visibility::CrateInternal;
+            }
+            if text.starts_with("pub") {
+                return Visibility::Public;
+            }
+        }
+    }
+    Visibility::Private
+}
+
+/// Extract type relationships from a Rust AST node.
+fn extract_type_relations(node: &Node, source: &[u8], kind_str: &str) -> Vec<TypeRelation> {
+    let mut relations = Vec::new();
+
+    match kind_str {
+        "impl_item" => {
+            // Look for trait in "impl Trait for Type"
+            let mut cursor = node.walk();
+            let children: Vec<_> = node.children(&mut cursor).collect();
+            let has_for = children.iter().any(|c| c.kind() == "for");
+            if has_for {
+                // First type identifier before "for" is the trait
+                for child in &children {
+                    if child.kind() == "type_identifier"
+                        || child.kind() == "scoped_type_identifier"
+                        || child.kind() == "generic_type"
+                    {
+                        let text = node_text(child, source).to_string();
+                        relations.push(TypeRelation {
+                            kind: TypeRelationKind::Implements,
+                            target: text,
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+        "function_item" => {
+            // Extract return type from "-> Type"
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "return_type" {
+                    let mut inner = child.walk();
+                    for type_child in child.children(&mut inner) {
+                        if type_child.kind() != "->" {
+                            let text = node_text(&type_child, source).to_string();
+                            if !text.is_empty() {
+                                relations.push(TypeRelation {
+                                    kind: TypeRelationKind::Returns,
+                                    target: text,
+                                });
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        "struct_item" => {
+            // Extract field types
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "field_declaration_list" {
+                    let mut field_cursor = child.walk();
+                    for field in child.children(&mut field_cursor) {
+                        if field.kind() == "field_declaration" {
+                            if let Some(type_node) = field.child_by_field_name("type") {
+                                let text = node_text(&type_node, source).to_string();
+                                if !text.is_empty() && text != "self" {
+                                    relations.push(TypeRelation {
+                                        kind: TypeRelationKind::Contains,
+                                        target: text,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    relations
 }
 
 #[cfg(test)]

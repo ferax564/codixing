@@ -194,6 +194,69 @@ impl Engine {
             }
         }
 
+        // Build concept index from symbols + graph co-occurrences.
+        let concept_index = {
+            let mut builder = super::concepts::ConceptIndexBuilder::new();
+            for sym in symbols.all_symbols() {
+                builder.add_symbol(&sym.name, &sym.file_path, sym.doc_comment.as_deref());
+            }
+            // Add import co-occurrences from graph edges.
+            if let Some(ref g) = graph {
+                let flat = g.to_flat();
+                for (from, to, _edge) in &flat.edges {
+                    builder.add_cooccurrence(from, to);
+                }
+            }
+            let idx = builder.build();
+            if !idx.is_empty() {
+                // Persist concept index.
+                match bitcode::serialize(&idx) {
+                    Ok(bytes) => {
+                        if let Err(e) = std::fs::write(store.concepts_path(), &bytes) {
+                            warn!(error = %e, "failed to persist concept index");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "failed to serialize concept index");
+                    }
+                }
+                Some(idx)
+            } else {
+                // Clean up stale artifact from previous index
+                let _ = std::fs::remove_file(store.concepts_path());
+                None
+            }
+        };
+
+        // Build learned reformulations from symbols (name + file + doc_comment).
+        let reformulations = {
+            let mut builder = super::reformulation::ReformulationBuilder::new();
+            for sym in symbols.all_symbols() {
+                builder.add_identifier(&sym.name, &sym.file_path);
+                if let Some(ref doc) = sym.doc_comment {
+                    builder.add_documented_symbol(&sym.name, doc);
+                }
+            }
+            let reform = builder.build();
+            if !reform.is_empty() {
+                match bitcode::serialize(&reform) {
+                    Ok(bytes) => {
+                        if let Err(e) = std::fs::write(store.reformulations_path(), &bytes) {
+                            warn!(error = %e, "failed to persist reformulations");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "failed to serialize reformulations");
+                    }
+                }
+                Some(reform)
+            } else {
+                // Clean up stale artifact from previous index
+                let _ = std::fs::remove_file(store.reformulations_path());
+                None
+            }
+        };
+
         // Persist trigram indexes.
         if let Err(e) = trigram_idx.save_mmap_binary(&store.chunk_trigram_path()) {
             warn!(error = %e, "failed to persist chunk trigram index");
@@ -399,6 +462,8 @@ impl Engine {
             vector: vector_arc,
             chunk_meta: chunk_meta_arc,
             graph,
+            concept_index,
+            reformulations,
             reranker,
             trigram,
             session,
@@ -451,26 +516,45 @@ impl Engine {
             Err(e) => return Err(e),
         };
 
-        // Restore symbols: try mmap v2 first, fall back to bitcode v1.
-        let symbols = if store.symbols_v2_path().exists() {
-            match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path()) {
-                Ok(mmap_table) => {
-                    debug!("loaded symbols_v2.bin via mmap (zero-deser)");
-                    SymbolTable::Mmap(mmap_table)
+        // Restore symbols: prefer bitcode symbols.bin (preserves all fields
+        // including doc_comment, visibility, type_relations) over mmap
+        // symbols_v2.bin (which doesn't persist those fields).
+        let symbols = if store.symbols_path().exists() {
+            match store
+                .load_symbols_bytes()
+                .and_then(|b| deserialize_symbols(&b))
+            {
+                Ok(table) => {
+                    debug!("loaded symbols.bin via bitcode (full-fidelity)");
+                    table
                 }
                 Err(e) => {
-                    warn!(error = %e, "failed to load symbols_v2.bin — falling back to symbols.bin");
-                    if store.symbols_path().exists() {
-                        let bytes = store.load_symbols_bytes()?;
-                        deserialize_symbols(&bytes)?
+                    warn!(error = %e, "failed to load symbols.bin — falling back to symbols_v2.bin");
+                    if store.symbols_v2_path().exists() {
+                        match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path())
+                        {
+                            Ok(mmap_table) => SymbolTable::Mmap(mmap_table),
+                            Err(e2) => {
+                                warn!(error = %e2, "failed to load symbols_v2.bin too");
+                                SymbolTable::new()
+                            }
+                        }
                     } else {
                         SymbolTable::new()
                     }
                 }
             }
-        } else if store.symbols_path().exists() {
-            let bytes = store.load_symbols_bytes()?;
-            deserialize_symbols(&bytes)?
+        } else if store.symbols_v2_path().exists() {
+            match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path()) {
+                Ok(mmap_table) => {
+                    debug!("loaded symbols_v2.bin via mmap (no symbols.bin available)");
+                    SymbolTable::Mmap(mmap_table)
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to load symbols_v2.bin");
+                    SymbolTable::new()
+                }
+            }
         } else {
             SymbolTable::new()
         };
@@ -563,6 +647,48 @@ impl Engine {
             }
         };
 
+        // Restore concept index.
+        let concept_index = if store.concepts_path().exists() {
+            match std::fs::read(store.concepts_path()) {
+                Ok(bytes) => match bitcode::deserialize::<super::concepts::ConceptIndex>(&bytes) {
+                    Ok(idx) => Some(idx),
+                    Err(e) => {
+                        warn!(error = %e, "failed to deserialize concept index");
+                        None
+                    }
+                },
+                Err(e) => {
+                    warn!(error = %e, "failed to read concept index");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Restore learned reformulations.
+        let reformulations = if store.reformulations_path().exists() {
+            match std::fs::read(store.reformulations_path()) {
+                Ok(bytes) => {
+                    match bitcode::deserialize::<super::reformulation::LearnedReformulations>(
+                        &bytes,
+                    ) {
+                        Ok(reform) => Some(reform),
+                        Err(e) => {
+                            warn!(error = %e, "failed to deserialize reformulations");
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to read reformulations");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let (graph_nodes, graph_edges) = graph
             .as_ref()
             .map(|g| {
@@ -629,6 +755,8 @@ impl Engine {
             vector: Arc::new(RwLock::new(vector)),
             chunk_meta: Arc::new(chunk_meta),
             graph,
+            concept_index,
+            reformulations,
             reranker,
             trigram,
             session,
@@ -661,26 +789,45 @@ impl Engine {
         let tantivy =
             TantivyIndex::open_read_only_with_config(&store.tantivy_dir(), config.bm25.clone())?;
 
-        // Restore symbols: try mmap v2 first, fall back to bitcode v1.
-        let symbols = if store.symbols_v2_path().exists() {
-            match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path()) {
-                Ok(mmap_table) => {
-                    debug!("loaded symbols_v2.bin via mmap (zero-deser, read-only)");
-                    SymbolTable::Mmap(mmap_table)
+        // Restore symbols: prefer bitcode symbols.bin (preserves all fields
+        // including doc_comment, visibility, type_relations) over mmap
+        // symbols_v2.bin (which doesn't persist those fields).
+        let symbols = if store.symbols_path().exists() {
+            match store
+                .load_symbols_bytes()
+                .and_then(|b| deserialize_symbols(&b))
+            {
+                Ok(table) => {
+                    debug!("loaded symbols.bin via bitcode (full-fidelity, read-only)");
+                    table
                 }
                 Err(e) => {
-                    warn!(error = %e, "failed to load symbols_v2.bin — falling back to symbols.bin");
-                    if store.symbols_path().exists() {
-                        let bytes = store.load_symbols_bytes()?;
-                        deserialize_symbols(&bytes)?
+                    warn!(error = %e, "failed to load symbols.bin — falling back to symbols_v2.bin (read-only)");
+                    if store.symbols_v2_path().exists() {
+                        match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path())
+                        {
+                            Ok(mmap_table) => SymbolTable::Mmap(mmap_table),
+                            Err(e2) => {
+                                warn!(error = %e2, "failed to load symbols_v2.bin too");
+                                SymbolTable::new()
+                            }
+                        }
                     } else {
                         SymbolTable::new()
                     }
                 }
             }
-        } else if store.symbols_path().exists() {
-            let bytes = store.load_symbols_bytes()?;
-            deserialize_symbols(&bytes)?
+        } else if store.symbols_v2_path().exists() {
+            match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path()) {
+                Ok(mmap_table) => {
+                    debug!("loaded symbols_v2.bin via mmap (no symbols.bin available, read-only)");
+                    SymbolTable::Mmap(mmap_table)
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to load symbols_v2.bin");
+                    SymbolTable::new()
+                }
+            }
         } else {
             SymbolTable::new()
         };
@@ -752,6 +899,48 @@ impl Engine {
             }
         };
 
+        // Restore concept index.
+        let concept_index = if store.concepts_path().exists() {
+            match std::fs::read(store.concepts_path()) {
+                Ok(bytes) => match bitcode::deserialize::<super::concepts::ConceptIndex>(&bytes) {
+                    Ok(idx) => Some(idx),
+                    Err(e) => {
+                        warn!(error = %e, "failed to deserialize concept index (read-only)");
+                        None
+                    }
+                },
+                Err(e) => {
+                    warn!(error = %e, "failed to read concept index (read-only)");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Restore learned reformulations.
+        let reformulations = if store.reformulations_path().exists() {
+            match std::fs::read(store.reformulations_path()) {
+                Ok(bytes) => {
+                    match bitcode::deserialize::<super::reformulation::LearnedReformulations>(
+                        &bytes,
+                    ) {
+                        Ok(reform) => Some(reform),
+                        Err(e) => {
+                            warn!(error = %e, "failed to deserialize reformulations (read-only)");
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to read reformulations (read-only)");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let (graph_nodes, graph_edges) = graph
             .as_ref()
             .map(|g| {
@@ -809,6 +998,8 @@ impl Engine {
             vector: Arc::new(RwLock::new(vector)),
             chunk_meta: Arc::new(chunk_meta),
             graph,
+            concept_index,
+            reformulations,
             reranker,
             trigram: std::sync::OnceLock::new(),
             session,

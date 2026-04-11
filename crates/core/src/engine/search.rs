@@ -80,7 +80,10 @@ impl Engine {
                 // by favouring prose matches over code structure. See `get_concept_reranker`.
                 let word_count = query.query.split_whitespace().count();
                 if word_count >= 3 {
-                    let reformulations = generate_reformulations_with_synonyms(&query.query);
+                    let reformulations = generate_reformulations_with_synonyms(
+                        &query.query,
+                        self.reformulations.as_ref(),
+                    );
                     if reformulations.len() >= 2 {
                         let mut fused = self.search_multi(&reformulations, &query)?;
                         let ctx = self.search_context(&query_str);
@@ -111,7 +114,10 @@ impl Engine {
                 // Uses synonym expansion + code HyDE patterns to bridge vocabulary gaps.
                 let word_count = query.query.split_whitespace().count();
                 if word_count >= 3 {
-                    let reformulations = generate_reformulations_with_synonyms(&query.query);
+                    let reformulations = generate_reformulations_with_synonyms(
+                        &query.query,
+                        self.reformulations.as_ref(),
+                    );
                     if reformulations.len() >= 2 {
                         let mut fused = self.search_multi(&reformulations, &query)?;
                         let ctx = self.search_context(&query_str);
@@ -170,6 +176,27 @@ impl Engine {
             }
             Strategy::Deep => self.search_deep(query)?,
             Strategy::Exact => self.search_exact(&query)?,
+            Strategy::Semantic => {
+                let semantic_results = self.semantic_search(&query.query, query.limit);
+                let mut results: Vec<SearchResult> = Vec::new();
+                for m in semantic_results {
+                    let syms = self.symbols.filter(&m.symbol, Some(&m.file_path));
+                    if let Some(sym) = syms.into_iter().next() {
+                        results.push(SearchResult {
+                            chunk_id: format!("sem_{}", m.symbol),
+                            file_path: m.file_path,
+                            language: sym.language.name().to_string(),
+                            score: m.score,
+                            line_start: sym.line_start as u64,
+                            line_end: sym.line_end as u64,
+                            signature: sym.signature.unwrap_or_default(),
+                            scope_chain: vec![],
+                            content: m.match_reasons.join(", "),
+                        });
+                    }
+                }
+                return Ok(results);
+            }
         };
 
         // Apply the post-retrieval pipeline (boosts, demotions, dedup, truncation).
@@ -190,6 +217,9 @@ impl Engine {
             Strategy::Fast => fast_pipeline(),
             Strategy::Thorough => thorough_pipeline(),
             Strategy::Exact => exact_pipeline(),
+            // Semantic returns early from search() — pipeline is not applied,
+            // but we still need a valid pipeline for the match arm.
+            Strategy::Semantic => SearchPipeline::new(),
             // Explore and Deep handle their own boosts/demotions internally,
             // but still need truncation + dedup from the outer pipeline.
             Strategy::Explore | Strategy::Deep => SearchPipeline::new()
@@ -210,6 +240,7 @@ impl Engine {
             graph_boost_weight: self.config.graph.boost_weight,
             recency_map: Some(self.get_recency_map()),
             chunk_meta: Some(&self.chunk_meta),
+            concepts: self.concept_index.as_ref(),
         }
     }
 
@@ -736,6 +767,23 @@ impl Engine {
             reformulations.push(synonym_query);
         }
 
+        // Append learned reformulations from project-specific vocabulary.
+        if let Some(ref learned) = self.reformulations {
+            let mut learned_terms: Vec<String> = Vec::new();
+            for word in query.query.split_whitespace() {
+                let expansions = learned.expand(&word.to_lowercase());
+                for exp in expansions {
+                    if !learned_terms.contains(&exp) {
+                        learned_terms.push(exp);
+                    }
+                }
+            }
+            if !learned_terms.is_empty() {
+                learned_terms.truncate(5);
+                reformulations.push(learned_terms.join(" "));
+            }
+        }
+
         debug!(
             reformulations = ?reformulations,
             "deep: multi-query reformulations"
@@ -1253,18 +1301,25 @@ fn path_component_starts_with(path: &str, prefix: &str) -> bool {
     })
 }
 
+use super::reformulation::LearnedReformulations;
 use super::synonyms::{expand_synonyms, reformulate_to_code};
 
-/// Generate query reformulations enriched with synonym expansion and code patterns.
+/// Generate query reformulations enriched with synonym expansion, code patterns,
+/// and optional project-specific learned reformulations.
 ///
 /// Extends [`generate_reformulations`] with:
 /// - A synonym-expanded variant (e.g. "rate limiting" → "rate limiting throttle burst").
 /// - The top-3 code-pattern tokens from [`reformulate_to_code`] joined as a single
 ///   search string (e.g. "rate limiting" → "RateLimiter throttle_count burst_capacity").
+/// - Learned reformulations from the project's vocabulary (term co-occurrence and
+///   doc-to-code bridges).
 ///
 /// Used by the `Fast` and `Thorough` strategies to improve concept recall without
 /// polluting the main BM25 query.
-fn generate_reformulations_with_synonyms(query: &str) -> Vec<String> {
+fn generate_reformulations_with_synonyms(
+    query: &str,
+    learned: Option<&LearnedReformulations>,
+) -> Vec<String> {
     let mut reformulations = generate_reformulations(query);
 
     // Append synonym-expanded variant if it adds new terms.
@@ -1283,6 +1338,25 @@ fn generate_reformulations_with_synonyms(query: &str) -> Vec<String> {
             .collect::<Vec<_>>()
             .join(" ");
         reformulations.push(joined);
+    }
+
+    // Append learned reformulations from project-specific vocabulary.
+    if let Some(learned) = learned {
+        let mut learned_terms: Vec<String> = Vec::new();
+        for word in query.split_whitespace() {
+            let expansions = learned.expand(&word.to_lowercase());
+            for exp in expansions {
+                if !learned_terms.contains(&exp) {
+                    learned_terms.push(exp);
+                }
+            }
+        }
+        if !learned_terms.is_empty() {
+            // Join learned terms as a single additional query variant.
+            // Limit to top 5 to avoid diluting search quality.
+            learned_terms.truncate(5);
+            reformulations.push(learned_terms.join(" "));
+        }
     }
 
     reformulations

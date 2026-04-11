@@ -3,7 +3,7 @@
 //! Extracts diagram types, subgraph labels, node definitions, and class
 //! definitions from Mermaid diagram files (.mmd, .mermaid).
 
-use super::{ConfigLanguageSupport, EntityKind, Language, SemanticEntity};
+use super::{ConfigLanguageSupport, EntityKind, Language, SemanticEntity, Visibility};
 
 pub struct MermaidLanguage;
 
@@ -80,6 +80,8 @@ fn extract_mermaid_entities(text: &str) -> Vec<SemanticEntity> {
                             byte_range: byte_start..byte_end,
                             line_range: i..i + 1,
                             scope: vec![],
+                            visibility: Visibility::default(),
+                            type_relations: Vec::new(),
                         });
                     }
                     break;
@@ -99,6 +101,8 @@ fn extract_mermaid_entities(text: &str) -> Vec<SemanticEntity> {
                     byte_range: byte_start..byte_end,
                     line_range: i..i + 1,
                     scope: vec![],
+                    visibility: Visibility::default(),
+                    type_relations: Vec::new(),
                 });
             }
             continue;
@@ -123,6 +127,8 @@ fn extract_mermaid_entities(text: &str) -> Vec<SemanticEntity> {
                         byte_range: byte_start..byte_end,
                         line_range: i..i + 1,
                         scope: vec![],
+                        visibility: Visibility::default(),
+                        type_relations: Vec::new(),
                     });
                 }
                 continue;
@@ -203,6 +209,8 @@ fn parse_node_definition(
         byte_range: byte_start..byte_end,
         line_range: line_idx..line_idx + 1,
         scope: vec![],
+        visibility: Visibility::default(),
+        type_relations: Vec::new(),
     })
 }
 

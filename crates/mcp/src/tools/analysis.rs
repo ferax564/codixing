@@ -768,6 +768,152 @@ pub(crate) fn call_generate_onboarding(engine: &mut Engine) -> (String, bool) {
     )
 }
 
+pub(crate) fn call_change_impact(engine: &Engine, args: &Value) -> (String, bool) {
+    let file = match args.get("file").and_then(|v| v.as_str()) {
+        Some(f) => f,
+        None => return ("Error: 'file' parameter is required".to_string(), true),
+    };
+
+    let impact = engine.change_impact(file);
+
+    let out = format!(
+        "# Change Impact: {}\n\n\
+         Blast radius: {} files\n\n\
+         ## Direct dependents ({})\n{}\n\n\
+         ## Transitive dependents ({})\n{}\n\n\
+         ## Affected tests ({})\n{}",
+        impact.file_path,
+        impact.blast_radius,
+        impact.direct_dependents.len(),
+        if impact.direct_dependents.is_empty() {
+            "None".to_string()
+        } else {
+            impact
+                .direct_dependents
+                .iter()
+                .map(|d| format!("- {d}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        },
+        impact.transitive_dependents.len(),
+        if impact.transitive_dependents.is_empty() {
+            "None".to_string()
+        } else {
+            impact
+                .transitive_dependents
+                .iter()
+                .map(|t| format!("- {t}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        },
+        impact.affected_tests.len(),
+        if impact.affected_tests.is_empty() {
+            "None".to_string()
+        } else {
+            impact
+                .affected_tests
+                .iter()
+                .map(|t| format!("- {t}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        },
+    );
+    (out, false)
+}
+
+pub(crate) fn call_api_surface(engine: &Engine, args: &Value) -> (String, bool) {
+    let file = match args.get("file").and_then(|v| v.as_str()) {
+        Some(f) => f,
+        None => return ("Error: 'file' parameter is required".to_string(), true),
+    };
+
+    let symbols = engine.api_surface(file);
+    if symbols.is_empty() {
+        return (format!("No public API symbols found in {file}"), false);
+    }
+
+    let mut out = format!("# Public API: {file}\n\n");
+    for s in &symbols {
+        let sig = s.signature.as_deref().unwrap_or(&s.name);
+        out.push_str(&format!(
+            "- {:?} `{}` (line {})\n",
+            s.kind, sig, s.line_start
+        ));
+    }
+    (out, false)
+}
+
+pub(crate) fn call_type_relations(engine: &Engine, args: &Value) -> (String, bool) {
+    let symbol = match args.get("symbol").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return ("Error: 'symbol' parameter is required".to_string(), true),
+    };
+
+    let symbols = engine.symbols(symbol, None).unwrap_or_default();
+    let mut out = format!("# Type Relations: {symbol}\n\n");
+    let mut found = false;
+
+    for s in &symbols {
+        if s.type_relations.is_empty() {
+            continue;
+        }
+        found = true;
+        out.push_str(&format!(
+            "## {} ({}:{})\n",
+            s.name, s.file_path, s.line_start
+        ));
+        for tr in &s.type_relations {
+            out.push_str(&format!("- {} → `{}`\n", tr.kind, tr.target));
+        }
+        out.push('\n');
+    }
+
+    if !found {
+        return (format!("No type relations found for '{symbol}'"), false);
+    }
+    (out, false)
+}
+
+pub(crate) fn call_find_examples(engine: &Engine, args: &Value) -> (String, bool) {
+    let symbol = match args.get("symbol").and_then(|v| v.as_str()) {
+        Some(s) => s,
+        None => return ("Error: 'symbol' parameter is required".to_string(), true),
+    };
+
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+
+    let examples = engine.find_usage_examples(symbol, limit);
+
+    if examples.is_empty() {
+        return (format!("No usage examples found for '{symbol}'"), false);
+    }
+
+    let mut out = format!("# Usage Examples: {symbol}\n\n");
+    for (i, ex) in examples.iter().enumerate() {
+        let kind_label = match ex.kind {
+            codixing_core::engine::examples::ExampleKind::Test => "TEST",
+            codixing_core::engine::examples::ExampleKind::CallSite => "CALL",
+            codixing_core::engine::examples::ExampleKind::DocBlock => "DOC",
+        };
+        out.push_str(&format!(
+            "## {}. [{}] {}:{}-{}\n",
+            i + 1,
+            kind_label,
+            ex.file_path,
+            ex.line_start,
+            ex.line_end
+        ));
+        out.push_str("```\n");
+        out.push_str(&ex.context);
+        if !ex.context.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("```\n\n");
+    }
+
+    (out, false)
+}
+
 /// Simple ISO-8601 timestamp without external dependencies.
 fn chrono_now() -> String {
     let secs = std::time::SystemTime::now()

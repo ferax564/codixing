@@ -149,6 +149,44 @@ impl Engine {
         self.trigram = std::sync::OnceLock::new();
         let _ = self.trigram.set(t);
 
+        // Reload concept index.
+        if self.store.concepts_path().exists() {
+            match std::fs::read(self.store.concepts_path()) {
+                Ok(bytes) => match bitcode::deserialize::<super::concepts::ConceptIndex>(&bytes) {
+                    Ok(idx) => {
+                        self.concept_index = Some(idx);
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "failed to deserialize concept index during reload");
+                    }
+                },
+                Err(e) => {
+                    warn!(error = %e, "failed to read concept index during reload");
+                }
+            }
+        }
+
+        // Reload learned reformulations.
+        if self.store.reformulations_path().exists() {
+            match std::fs::read(self.store.reformulations_path()) {
+                Ok(bytes) => {
+                    match bitcode::deserialize::<super::reformulation::LearnedReformulations>(
+                        &bytes,
+                    ) {
+                        Ok(reform) => {
+                            self.reformulations = Some(reform);
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "failed to deserialize reformulations during reload");
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to read reformulations during reload");
+                }
+            }
+        }
+
         // Refresh the Tantivy reader so it picks up new segments.
         self.tantivy.refresh_reader()?;
 

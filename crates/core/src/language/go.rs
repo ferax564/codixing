@@ -1,8 +1,8 @@
 use tree_sitter::{Node, Tree};
 
 use super::{
-    EntityKind, Language, LanguageSupport, SemanticEntity, extract_preceding_comments,
-    find_name_node, node_line_range, node_text,
+    EntityKind, Language, LanguageSupport, SemanticEntity, TypeRelation, TypeRelationKind,
+    Visibility, extract_preceding_comments, find_name_node, node_line_range, node_text,
 };
 
 /// Go language support.
@@ -61,6 +61,8 @@ fn collect_entities(
                 if child.kind() == "type_spec" {
                     let name = find_name_node(&child, source).unwrap_or_default();
                     let inner_kind = classify_type_spec(&child);
+                    let vis = go_visibility(&name);
+                    let type_rels = extract_go_type_relations(&child, source, &inner_kind);
                     let entity = SemanticEntity {
                         kind: inner_kind,
                         name,
@@ -69,6 +71,8 @@ fn collect_entities(
                         byte_range: node.start_byte()..node.end_byte(),
                         line_range: node_line_range(node),
                         scope: scope.to_vec(),
+                        visibility: vis,
+                        type_relations: type_rels,
                     };
                     entities.push(entity);
                 }
@@ -77,15 +81,18 @@ fn collect_entities(
         }
 
         let name = extract_entity_name(node, source, kind_str).unwrap_or_default();
+        let type_rels = extract_go_type_relations(node, source, &entity_kind);
 
         let entity = SemanticEntity {
             kind: entity_kind,
-            name,
+            name: name.clone(),
             signature: lang.extract_signature(node, source),
             doc_comment: lang.extract_doc_comment(node, source),
             byte_range: node.start_byte()..node.end_byte(),
             line_range: node_line_range(node),
             scope: scope.to_vec(),
+            visibility: go_visibility(&name),
+            type_relations: type_rels,
         };
         entities.push(entity);
     }
@@ -154,6 +161,62 @@ fn extract_type_spec_signature(node: &Node, source: &[u8]) -> Option<String> {
     } else {
         Some(full.lines().next().unwrap_or(&full).trim().to_string())
     }
+}
+
+/// Go visibility: names starting with an uppercase letter are exported (public).
+fn go_visibility(name: &str) -> Visibility {
+    if name.starts_with(|c: char| c.is_uppercase()) {
+        Visibility::Public
+    } else {
+        Visibility::Private
+    }
+}
+
+/// Extract type relationships from a Go AST node.
+fn extract_go_type_relations(node: &Node, source: &[u8], kind: &EntityKind) -> Vec<TypeRelation> {
+    let mut relations = Vec::new();
+
+    match kind {
+        EntityKind::Struct => {
+            // Struct field types → Contains
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if child.kind() == "struct_type" {
+                    if let Some(field_list) = child.child_by_field_name("fields") {
+                        let mut fcursor = field_list.walk();
+                        for field in field_list.children(&mut fcursor) {
+                            if field.kind() == "field_declaration" {
+                                if let Some(type_node) = field.child_by_field_name("type") {
+                                    let text = node_text(&type_node, source).to_string();
+                                    if !text.is_empty() {
+                                        relations.push(TypeRelation {
+                                            kind: TypeRelationKind::Contains,
+                                            target: text,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        EntityKind::Function | EntityKind::Method => {
+            // Function/method return types → Returns
+            if let Some(result) = node.child_by_field_name("result") {
+                let text = node_text(&result, source).to_string();
+                if !text.is_empty() {
+                    relations.push(TypeRelation {
+                        kind: TypeRelationKind::Returns,
+                        target: text,
+                    });
+                }
+            }
+        }
+        _ => {}
+    }
+
+    relations
 }
 
 #[cfg(test)]

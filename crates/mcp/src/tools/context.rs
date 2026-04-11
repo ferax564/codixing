@@ -1,4 +1,4 @@
-//! Handler for the `get_context_for_task` MCP tool.
+//! Handlers for the `get_context_for_task` and `assemble_context` MCP tools.
 
 use serde_json::Value;
 
@@ -95,6 +95,78 @@ pub(crate) fn call_get_context_for_task(
             out.push('\n');
         }
         out.push_str("```\n\n");
+    }
+
+    (out, false)
+}
+
+pub(crate) fn call_assemble_location_context(engine: &Engine, args: &Value) -> (String, bool) {
+    let file = match args.get("file").and_then(|v| v.as_str()) {
+        Some(f) => f.to_string(),
+        None => return ("Missing required argument: file".to_string(), true),
+    };
+    let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
+    let token_budget = args
+        .get("token_budget")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(4096) as usize;
+
+    let ctx = engine.assemble_context_for_location(&file, line, token_budget);
+
+    let mut out = format!(
+        "## Context: {}:{}\n\nToken budget: {} | Used: {}\n\n",
+        ctx.primary.file_path, line, token_budget, ctx.total_tokens
+    );
+
+    out.push_str(&format!(
+        "### Primary (L{}\u{2013}L{})\n```\n{}\n```\n\n",
+        ctx.primary.line_start, ctx.primary.line_end, ctx.primary.content
+    ));
+
+    if !ctx.imports.is_empty() {
+        out.push_str(&format!("### Imports ({})\n", ctx.imports.len()));
+        for imp in &ctx.imports {
+            out.push_str(&format!(
+                "- `{}` L{}\u{2013}L{} (relevance: {:.2})\n  ```\n  {}\n  ```\n",
+                imp.file_path, imp.line_start, imp.line_end, imp.relevance, imp.content
+            ));
+        }
+        out.push('\n');
+    }
+
+    if !ctx.callees.is_empty() {
+        out.push_str(&format!("### Callees ({})\n", ctx.callees.len()));
+        for callee in &ctx.callees {
+            out.push_str(&format!(
+                "- `{}` L{}\u{2013}L{} (relevance: {:.2})\n  ```\n  {}\n  ```\n",
+                callee.file_path,
+                callee.line_start,
+                callee.line_end,
+                callee.relevance,
+                callee.content
+            ));
+        }
+        out.push('\n');
+    }
+
+    if !ctx.examples.is_empty() {
+        out.push_str(&format!("### Usage Examples ({})\n", ctx.examples.len()));
+        for (i, ex) in ctx.examples.iter().enumerate() {
+            let kind_label = match ex.kind {
+                codixing_core::engine::examples::ExampleKind::Test => "TEST",
+                codixing_core::engine::examples::ExampleKind::CallSite => "CALL",
+                codixing_core::engine::examples::ExampleKind::DocBlock => "DOC",
+            };
+            out.push_str(&format!(
+                "{}. [{}] `{}` L{}\u{2013}L{}\n```\n{}\n```\n\n",
+                i + 1,
+                kind_label,
+                ex.file_path,
+                ex.line_start,
+                ex.line_end,
+                ex.context
+            ));
+        }
     }
 
     (out, false)

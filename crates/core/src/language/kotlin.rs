@@ -1,6 +1,8 @@
 use tree_sitter::{Node, Tree};
 
-use super::{EntityKind, Language, LanguageSupport, SemanticEntity, node_line_range, node_text};
+use super::{
+    EntityKind, Language, LanguageSupport, SemanticEntity, Visibility, node_line_range, node_text,
+};
 
 /// Kotlin language support.
 pub struct KotlinLanguage;
@@ -62,6 +64,8 @@ fn collect_entities(
             byte_range: node.start_byte()..node.end_byte(),
             line_range: node_line_range(node),
             scope: scope.to_vec(),
+            visibility: Visibility::default(),
+            type_relations: Vec::new(),
         };
         entities.push(entity);
 

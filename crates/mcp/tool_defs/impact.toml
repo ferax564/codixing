@@ -1,0 +1,55 @@
+[[tools]]
+name = "change_impact"
+description = "Analyze the blast radius of changing a file. Returns direct dependents, transitive dependents, affected tests, and total blast radius count. Use before refactoring to understand what might break."
+handler = "analysis::call_change_impact"
+calling_convention = "engine_args"
+read_only = true
+medium = true
+
+[tools.params.file]
+type = "string"
+description = "Relative file path to analyze (e.g. 'src/auth.rs')"
+required = true
+
+[[tools]]
+name = "api_surface"
+description = "List the public API surface of a file — exported functions, structs, traits, and other public symbols. Use to understand a file's public interface before making changes."
+handler = "analysis::call_api_surface"
+calling_convention = "engine_args"
+read_only = true
+medium = true
+
+[tools.params.file]
+type = "string"
+description = "Relative file path to analyze (e.g. 'src/lib.rs')"
+required = true
+
+[[tools]]
+name = "type_relations"
+description = "Show type relationships for a symbol — what it implements, extends, returns, and contains. Use to understand type hierarchies and interfaces."
+handler = "analysis::call_type_relations"
+calling_convention = "engine_args"
+read_only = true
+medium = true
+
+[tools.params.symbol]
+type = "string"
+description = "Symbol name to look up"
+required = true
+
+[[tools]]
+name = "find_examples"
+description = "Find usage examples for a symbol — from tests, call sites, and documentation code blocks. Returns ranked examples showing how the symbol is actually used in the codebase."
+handler = "analysis::call_find_examples"
+calling_convention = "engine_args"
+read_only = true
+medium = true
+
+[tools.params.symbol]
+type = "string"
+description = "Symbol name to find examples for"
+required = true
+
+[tools.params.limit]
+type = "integer"
+description = "Maximum number of examples (default: 5)"

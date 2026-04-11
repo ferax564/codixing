@@ -1,0 +1,15 @@
+[[tools]]
+name = "sync_index"
+description = "Re-index files changed since the last sync using content hash comparison. Use this when the CLI sync command fails due to write lock contention (e.g., when the MCP server is running with --no-daemon-fork). Works without git; handles any form of file drift."
+handler = "files::call_sync_index"
+calling_convention = "engine_mut_only"
+read_only = false
+medium = true
+
+[[tools]]
+name = "git_sync_index"
+description = "Fast git-aware sync: re-indexes only files changed since the last indexed git commit. Much faster than sync_index after git pull. Use when the CLI git-sync command fails due to write lock contention."
+handler = "files::call_git_sync_index"
+calling_convention = "engine_mut_only"
+read_only = false
+medium = true

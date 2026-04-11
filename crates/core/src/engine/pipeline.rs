@@ -25,6 +25,8 @@ pub struct SearchContext<'a> {
     pub recency_map: Option<&'a std::collections::HashMap<String, i64>>,
     /// Chunk metadata table for hydrating injected results (graph propagation).
     pub chunk_meta: Option<&'a dashmap::DashMap<u64, crate::retriever::ChunkMeta>>,
+    /// The concept index (if available) for concept-based boosting.
+    pub concepts: Option<&'a crate::engine::concepts::ConceptIndex>,
 }
 
 /// A single composable stage in the search pipeline.
@@ -82,6 +84,7 @@ fn sort_descending(results: &mut [SearchResult]) {
 }
 
 /// Multiply each result's score by `1 + weight * pagerank` then re-sort.
+#[allow(dead_code)]
 pub struct GraphBoostStage;
 
 impl SearchStage for GraphBoostStage {
@@ -92,6 +95,79 @@ impl SearchStage for GraphBoostStage {
                 let pr = graph.node(&r.file_path).map(|n| n.pagerank).unwrap_or(0.0);
                 r.score *= 1.0 + weight * pr;
             }
+            sort_descending(results);
+        }
+        Ok(())
+    }
+}
+
+/// Replace static PageRank boost with query-personalized PageRank.
+///
+/// Seeds the personalization vector from the top-5 BM25 results (weighted by
+/// their BM25 score), then re-scores all results using the personalized scores.
+pub struct PersonalizedGraphBoostStage;
+
+impl SearchStage for PersonalizedGraphBoostStage {
+    fn apply(&self, results: &mut Vec<SearchResult>, ctx: &SearchContext<'_>) -> Result<()> {
+        let graph = match ctx.graph {
+            Some(g) => g,
+            None => return Ok(()),
+        };
+
+        if results.is_empty() {
+            return Ok(());
+        }
+
+        // Extract top-5 results as weighted seeds
+        let seed_count = results.len().min(5);
+        let seeds: Vec<(&str, f32)> = results[..seed_count]
+            .iter()
+            .map(|r| (r.file_path.as_str(), r.score))
+            .collect();
+
+        let ppr =
+            crate::graph::compute_weighted_personalized_pagerank(graph, 0.85, 20, 1e-6, &seeds);
+
+        let weight = ctx.graph_boost_weight;
+        for r in results.iter_mut() {
+            let pr = ppr.get(&r.file_path).copied().unwrap_or(0.0);
+            r.score *= 1.0 + weight * pr;
+        }
+        sort_descending(results);
+        Ok(())
+    }
+}
+
+/// Boost public API symbols in search results.
+///
+/// Public symbols get a 1.5x boost. Skipped when the query contains
+/// internal-targeting signals like "internal", "private", "helper".
+pub struct VisibilityBoostStage;
+
+impl SearchStage for VisibilityBoostStage {
+    fn apply(&self, results: &mut Vec<SearchResult>, ctx: &SearchContext<'_>) -> Result<()> {
+        let query_lower = ctx.query.to_lowercase();
+        let internal_signals = ["internal", "private", "helper", "impl", "detail"];
+        if internal_signals.iter().any(|s| query_lower.contains(s)) {
+            return Ok(());
+        }
+
+        let mut boosted = false;
+        for r in results.iter_mut() {
+            // Check if any symbol in this chunk's file+line range is public
+            let symbols = ctx.symbols.filter("", Some(&r.file_path));
+            let has_public = symbols.iter().any(|s| {
+                s.visibility == crate::language::Visibility::Public
+                    && r.line_start <= s.line_start as u64
+                    && (s.line_start as u64) < r.line_end
+            });
+            if has_public {
+                r.score *= 1.5;
+                boosted = true;
+            }
+        }
+
+        if boosted {
             sort_descending(results);
         }
         Ok(())
@@ -287,6 +363,52 @@ impl SearchStage for GraphPropagationStage {
     }
 }
 
+/// Boost results whose files belong to concept clusters matching the query.
+///
+/// Uses the semantic concept index to bridge vocabulary gaps: when query terms
+/// match concept labels (derived from identifier decomposition, doc comments,
+/// and import co-occurrence), files in those clusters receive a score boost
+/// proportional to cluster confidence and hit count.
+pub struct ConceptBoostStage;
+
+impl SearchStage for ConceptBoostStage {
+    fn apply(&self, results: &mut Vec<SearchResult>, ctx: &SearchContext<'_>) -> Result<()> {
+        let concepts = match ctx.concepts {
+            Some(c) if !c.is_empty() => c,
+            _ => return Ok(()),
+        };
+
+        let matches = concepts.lookup_query(ctx.query);
+        if matches.is_empty() {
+            return Ok(());
+        }
+
+        // Collect file boosts from matching clusters
+        let mut file_boosts: std::collections::HashMap<&str, f32> =
+            std::collections::HashMap::new();
+        for (cluster, hit_count) in &matches {
+            let boost = 0.3 * cluster.score * (*hit_count as f32);
+            for file in &cluster.files {
+                let entry = file_boosts.entry(file.as_str()).or_insert(0.0);
+                *entry = entry.max(boost);
+            }
+        }
+
+        let mut boosted = false;
+        for r in results.iter_mut() {
+            if let Some(&boost) = file_boosts.get(r.file_path.as_str()) {
+                r.score *= 1.0 + boost;
+                boosted = true;
+            }
+        }
+
+        if boosted {
+            sort_descending(results);
+        }
+        Ok(())
+    }
+}
+
 /// Boost results whose file path contains a dotted-path or keyword reference
 /// from the query.
 pub struct PathMatchBoostStage;
@@ -441,7 +563,9 @@ pub fn instant_pipeline() -> SearchPipeline {
 /// Build the post-retrieval pipeline for `Strategy::Fast`.
 pub fn fast_pipeline() -> SearchPipeline {
     SearchPipeline::new()
-        .add(GraphBoostStage)
+        .add(PersonalizedGraphBoostStage)
+        .add(ConceptBoostStage)
+        .add(VisibilityBoostStage)
         .add(DefinitionBoostStage)
         .add(PopularityBoostStage)
         .add(RecencyBoostStage)
@@ -458,7 +582,9 @@ pub fn fast_pipeline() -> SearchPipeline {
 /// Build the post-retrieval pipeline for `Strategy::Thorough`.
 pub fn thorough_pipeline() -> SearchPipeline {
     SearchPipeline::new()
-        .add(GraphBoostStage)
+        .add(PersonalizedGraphBoostStage)
+        .add(ConceptBoostStage)
+        .add(VisibilityBoostStage)
         .add(DefinitionBoostStage)
         .add(PopularityBoostStage)
         .add(RecencyBoostStage)
@@ -511,6 +637,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            concepts: None,
         };
         let mut results = vec![make_result("a", 10.0, "src/a.rs")];
         pipeline.run(&mut results, &ctx).unwrap();
@@ -529,6 +656,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            concepts: None,
         };
         let mut results = vec![
             make_result("a", 10.0, "src/main.rs"),
@@ -550,6 +678,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            concepts: None,
         };
         let mut results = vec![
             SearchResult {
@@ -594,6 +723,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            concepts: None,
         };
         let mut results = vec![
             make_result("a", 10.0, "src/a.rs"),
@@ -619,6 +749,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            concepts: None,
         };
         let mut results = vec![
             make_result("a", 10.0, "src/engine.rs"),
@@ -642,6 +773,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            concepts: None,
         };
         let mut results = vec![make_result("a", 10.0, "src/engine.rs")];
         pipeline.run(&mut results, &ctx).unwrap();
@@ -659,6 +791,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            concepts: None,
         };
         let mut results = vec![make_result("a", 10.0, "src/engine.rs")];
         pipeline.run(&mut results, &ctx).unwrap();
@@ -689,6 +822,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: Some(&recency),
             chunk_meta: None,
+            concepts: None,
         };
 
         let mut results = vec![
@@ -760,6 +894,7 @@ mod tests {
             graph_boost_weight: 0.5,
             recency_map: None,
             chunk_meta: Some(&chunk_meta),
+            concepts: None,
         };
 
         let mut results = vec![make_result("a", 10.0, "src/a.rs")];
@@ -791,6 +926,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            concepts: None,
         };
         let mut results = vec![
             SearchResult {
@@ -844,6 +980,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            concepts: None,
         };
         let mut results = vec![
             SearchResult {
@@ -884,6 +1021,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            concepts: None,
         };
         let mut results = vec![
             SearchResult {
@@ -950,6 +1088,7 @@ mod tests {
             graph_boost_weight: 0.5,
             recency_map: None,
             chunk_meta: Some(&chunk_meta),
+            concepts: None,
         };
 
         let mut results = vec![
@@ -964,6 +1103,70 @@ mod tests {
         assert!(
             (b.score - 8.0).abs() < 0.01,
             "existing result score should be unchanged"
+        );
+    }
+
+    #[test]
+    fn personalized_graph_boost_uses_seed_results() {
+        use crate::graph::CodeGraph;
+        use crate::language::Language;
+
+        let mut graph = CodeGraph::new();
+        graph.add_edge("src/a.rs", "src/b.rs", "b", Language::Rust, Language::Rust);
+        graph.add_edge("src/b.rs", "src/c.rs", "c", Language::Rust, Language::Rust);
+        let pr = crate::graph::compute_pagerank(&graph, 0.85, 20);
+        graph.apply_pagerank(&pr);
+
+        let stage = PersonalizedGraphBoostStage;
+        let symbols = crate::symbols::SymbolTable::new();
+        let ctx = SearchContext {
+            query: "test",
+            symbols: &symbols,
+            graph: Some(&graph),
+            graph_boost_weight: 0.5,
+            recency_map: None,
+            chunk_meta: None,
+            concepts: None,
+        };
+
+        let mut results = vec![
+            make_result("a", 10.0, "src/a.rs"),
+            make_result("b", 5.0, "src/b.rs"),
+            make_result("c", 5.0, "src/c.rs"),
+        ];
+        stage.apply(&mut results, &ctx).unwrap();
+
+        // Personalized PageRank seeded from a.rs (top result) should boost
+        // both b.rs and c.rs (graph neighbors) above their initial score of 5.0.
+        let a_score = results
+            .iter()
+            .find(|r| r.file_path == "src/a.rs")
+            .unwrap()
+            .score;
+        let b_score = results
+            .iter()
+            .find(|r| r.file_path == "src/b.rs")
+            .unwrap()
+            .score;
+        let c_score = results
+            .iter()
+            .find(|r| r.file_path == "src/c.rs")
+            .unwrap()
+            .score;
+
+        // The seed file (a.rs) should remain the top result.
+        assert!(
+            a_score > b_score && a_score > c_score,
+            "seed file a.rs should remain top, got a={a_score}, b={b_score}, c={c_score}"
+        );
+        // Both graph neighbors should be boosted above their initial 5.0.
+        assert!(
+            b_score > 5.0,
+            "b.rs should be boosted above 5.0, got {b_score}"
+        );
+        assert!(
+            c_score > 5.0,
+            "c.rs should be boosted above 5.0, got {c_score}"
         );
     }
 }

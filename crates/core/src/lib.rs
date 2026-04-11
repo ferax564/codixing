@@ -28,9 +28,9 @@ pub mod watcher;
 pub use config::{EmbeddingConfig, EmbeddingModel, GraphConfig, IndexConfig};
 pub use engine::freshness::{FreshnessEntry, FreshnessOptions, FreshnessReport, FreshnessTier};
 pub use engine::{
-    ConflictKind, EmbedTimingStats, Engine, FocusMapEntry, FocusMapOptions, GitSyncStats,
-    GrepMatch, IndexStats, RenameConflict, RenameValidation, StaleReport, SymbolReference,
-    SyncStats,
+    ChangeImpact, ConflictKind, EmbedTimingStats, Engine, FocusMapEntry, FocusMapOptions,
+    GitSyncStats, GrepMatch, IndexStats, RenameConflict, RenameValidation, StaleReport,
+    SymbolReference, SyncStats,
 };
 pub use error::{CodixingError, Result};
 pub use federation::{
@@ -38,7 +38,7 @@ pub use federation::{
     discover::{DiscoveredProject, ProjectType, discover_projects, to_federation_config},
 };
 pub use graph::{CodeEdge, CodeGraph, CodeNode, EdgeKind, GraphStats, RepoMapOptions};
-pub use language::EntityKind;
+pub use language::{EntityKind, TypeRelation, TypeRelationKind, Visibility};
 pub use orphans::{OrphanConfidence, OrphanFile, OrphanOptions};
 pub use retriever::{ChunkMeta, DocFilter, SearchQuery, SearchResult, Strategy};
 pub use session::{SessionEvent, SessionEventKind, SessionState};

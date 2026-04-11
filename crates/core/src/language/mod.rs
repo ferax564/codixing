@@ -230,6 +230,49 @@ impl std::fmt::Display for EntityKind {
     }
 }
 
+/// Visibility level of a symbol.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Visibility {
+    /// Exported / public API.
+    Public,
+    /// Crate-internal or module-scoped.
+    CrateInternal,
+    /// Private (default for most languages).
+    #[default]
+    Private,
+}
+
+/// Kind of type relationship between symbols.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TypeRelationKind {
+    /// impl Trait for Struct / class implements Interface
+    Implements,
+    /// class A extends B / class A(Base)
+    Extends,
+    /// fn() -> ReturnType
+    Returns,
+    /// struct field of type X / class attribute type
+    Contains,
+}
+
+impl std::fmt::Display for TypeRelationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Implements => "implements",
+            Self::Extends => "extends",
+            Self::Returns => "returns",
+            Self::Contains => "contains",
+        })
+    }
+}
+
+/// A type relationship from a symbol to a type name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TypeRelation {
+    pub kind: TypeRelationKind,
+    pub target: String,
+}
+
 /// A semantic entity extracted from source code via tree-sitter.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SemanticEntity {
@@ -241,6 +284,10 @@ pub struct SemanticEntity {
     pub line_range: std::ops::Range<usize>,
     /// Scope chain from outermost to innermost (e.g., `["module", "ClassName"]`).
     pub scope: Vec<String>,
+    /// Visibility level (public, crate-internal, private).
+    pub visibility: Visibility,
+    /// Type relationships (implements, extends, returns, contains).
+    pub type_relations: Vec<TypeRelation>,
 }
 
 /// Per-language entity extraction and tree-sitter integration.

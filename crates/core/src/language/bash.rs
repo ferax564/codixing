@@ -5,7 +5,7 @@
 use tree_sitter::{Node, Tree};
 
 use super::{
-    EntityKind, Language, LanguageSupport, SemanticEntity, extract_preceding_comments,
+    EntityKind, Language, LanguageSupport, SemanticEntity, Visibility, extract_preceding_comments,
     node_line_range, node_text,
 };
 
@@ -56,6 +56,8 @@ fn collect_entities(node: &Node, source: &[u8], entities: &mut Vec<SemanticEntit
                 byte_range: node.start_byte()..node.end_byte(),
                 line_range: node_line_range(node),
                 scope: vec![],
+                visibility: Visibility::default(),
+                type_relations: Vec::new(),
             });
         }
         "variable_assignment" => {
@@ -71,6 +73,8 @@ fn collect_entities(node: &Node, source: &[u8], entities: &mut Vec<SemanticEntit
                         byte_range: node.start_byte()..node.end_byte(),
                         line_range: node_line_range(node),
                         scope: vec![],
+                        visibility: Visibility::default(),
+                        type_relations: Vec::new(),
                     });
                 }
             }

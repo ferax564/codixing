@@ -1,8 +1,8 @@
 use tree_sitter::{Node, Tree};
 
 use super::{
-    EntityKind, Language, LanguageSupport, SemanticEntity, find_name_node, node_line_range,
-    node_text,
+    EntityKind, Language, LanguageSupport, SemanticEntity, Visibility, find_name_node,
+    node_line_range, node_text,
 };
 
 /// Java language support.
@@ -66,6 +66,8 @@ fn collect_entities(
             byte_range: node.start_byte()..node.end_byte(),
             line_range: node_line_range(node),
             scope: scope.to_vec(),
+            visibility: Visibility::default(),
+            type_relations: Vec::new(),
         };
         entities.push(entity);
 

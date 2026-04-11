@@ -1,18 +1,24 @@
+pub mod concepts;
+pub mod context_assembly;
 #[cfg(feature = "rustqueue")]
 pub mod embed_queue;
 pub(super) mod embed_state;
 pub(super) mod embed_stats;
+pub mod examples;
 mod files;
 mod focus_map;
 pub mod freshness;
 mod graph;
+pub mod impact;
 pub(crate) mod indexing;
 mod init;
 mod orphans;
 pub(crate) mod pipeline;
 pub mod recency;
+pub mod reformulation;
 mod reload;
 mod search;
+pub mod semantic;
 mod symbol_graph;
 mod sync;
 pub(crate) mod synonyms;
@@ -22,6 +28,7 @@ mod validation;
 
 pub use embed_stats::EmbedTimingStats;
 pub use focus_map::{FocusMapEntry, FocusMapOptions};
+pub use impact::{ChangeImpact, compute_change_impact};
 pub use symbol_graph::SymbolReference;
 
 use std::collections::HashMap;
@@ -260,6 +267,10 @@ pub struct Engine {
     pub(super) chunk_meta: Arc<DashMap<u64, ChunkMeta>>,
     /// Optional code dependency graph with PageRank scores.
     pub(super) graph: Option<CodeGraph>,
+    /// Semantic concept index mapping domain concepts to symbol clusters.
+    pub(super) concept_index: Option<concepts::ConceptIndex>,
+    /// Learned query reformulations — project-specific vocabulary mapping.
+    pub(super) reformulations: Option<reformulation::LearnedReformulations>,
     /// Optional cross-encoder reranker (BGE-Reranker-Base) for the `deep` strategy.
     pub(super) reranker: Option<Arc<Reranker>>,
     /// Trigram index for sub-millisecond exact substring search (Strategy::Exact).
