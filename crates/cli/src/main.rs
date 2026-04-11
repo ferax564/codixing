@@ -139,6 +139,28 @@ enum Command {
         /// Export graph as a self-contained HTML visualization.
         #[arg(long)]
         html: Option<Option<PathBuf>>,
+
+        /// Export graph as GraphML (for Gephi/yEd).
+        #[arg(long)]
+        graphml: Option<Option<PathBuf>>,
+
+        /// Export graph as Neo4j Cypher statements.
+        #[arg(long)]
+        cypher: Option<Option<PathBuf>>,
+
+        /// Export graph as an Obsidian vault directory.
+        #[arg(long)]
+        obsidian: Option<Option<PathBuf>>,
+
+        /// Token budget for output truncation (communities/surprises).
+        #[arg(long)]
+        budget: Option<usize>,
+    },
+
+    /// Manage git hooks for automatic index updates.
+    Hook {
+        #[command(subcommand)]
+        action: HookAction,
     },
 
     /// Find the shortest path between two files in the dependency graph.
@@ -454,6 +476,17 @@ enum FederationAction {
     },
 }
 
+/// Git hook management actions.
+#[derive(Subcommand)]
+enum HookAction {
+    /// Install a post-commit hook for automatic git-sync.
+    Install,
+    /// Remove the codixing post-commit hook.
+    Uninstall,
+    /// Show hook installation status.
+    Status,
+}
+
 /// Clap-parseable strategy argument.
 #[derive(Debug, Clone, clap::ValueEnum)]
 enum StrategyArg {
@@ -557,7 +590,23 @@ async fn main() -> Result<()> {
             communities,
             surprises,
             html,
-        } => cmd_graph(path, token_budget, map, communities, surprises, html),
+            graphml,
+            cypher,
+            obsidian,
+            budget,
+        } => cmd_graph(
+            path,
+            token_budget,
+            map,
+            communities,
+            surprises,
+            html,
+            graphml,
+            cypher,
+            obsidian,
+            budget,
+        ),
+        Command::Hook { action } => cmd_hook(action),
         Command::Path { from, to } => cmd_path(from, to),
         Command::Callers { file, depth } => cmd_callers(file, depth),
         Command::Callees { file, depth } => cmd_callees(file, depth),
@@ -908,6 +957,7 @@ fn cmd_symbols(filter: String, file: Option<String>) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_graph(
     path: PathBuf,
     token_budget: usize,
@@ -915,6 +965,10 @@ fn cmd_graph(
     communities: bool,
     surprises: Option<usize>,
     html: Option<Option<PathBuf>>,
+    graphml: Option<Option<PathBuf>>,
+    cypher: Option<Option<PathBuf>>,
+    obsidian: Option<Option<PathBuf>>,
+    _budget: Option<usize>,
 ) -> Result<()> {
     let root = path
         .canonicalize()
@@ -951,6 +1005,54 @@ fn cmd_graph(
             .export_html(opts)
             .with_context(|| "failed to export HTML graph")?;
         println!("Graph exported to {}", output.display());
+        return Ok(());
+    }
+
+    // --graphml: export as GraphML.
+    if let Some(graphml_path) = graphml {
+        let output = graphml_path.unwrap_or_else(|| PathBuf::from("graph.graphml"));
+        engine.detect_communities();
+        let opts = codixing_core::GraphmlExportOptions {
+            output_path: output.clone(),
+            include_external: false,
+        };
+        engine
+            .export_graphml(opts)
+            .with_context(|| "failed to export GraphML")?;
+        println!("GraphML exported to {}", output.display());
+        return Ok(());
+    }
+
+    // --cypher: export as Neo4j Cypher.
+    if let Some(cypher_path) = cypher {
+        let output = cypher_path.unwrap_or_else(|| PathBuf::from("graph.cypher"));
+        engine.detect_communities();
+        let opts = codixing_core::CypherExportOptions {
+            output_path: output.clone(),
+            include_external: false,
+        };
+        engine
+            .export_cypher(opts)
+            .with_context(|| "failed to export Cypher")?;
+        println!("Cypher exported to {}", output.display());
+        return Ok(());
+    }
+
+    // --obsidian: export as Obsidian vault.
+    if let Some(obsidian_path) = obsidian {
+        let output = obsidian_path.unwrap_or_else(|| PathBuf::from("codixing-vault"));
+        let opts = codixing_core::ObsidianExportOptions {
+            output_dir: output.clone(),
+            include_external: false,
+        };
+        let count = engine
+            .export_obsidian(opts)
+            .with_context(|| "failed to export Obsidian vault")?;
+        println!(
+            "Obsidian vault exported to {} ({} notes)",
+            output.display(),
+            count
+        );
         return Ok(());
     }
 
@@ -2083,5 +2185,85 @@ fn cmd_context(file: String, line: u64, token_budget: usize, json: bool) -> Resu
         }
     }
 
+    Ok(())
+}
+
+fn cmd_hook(action: HookAction) -> Result<()> {
+    let root = std::env::current_dir().context("cannot determine current directory")?;
+    let git_dir = root.join(".git");
+    if !git_dir.exists() {
+        anyhow::bail!("not a git repository — run from a project with .git/");
+    }
+
+    let hooks_dir = git_dir.join("hooks");
+    let hook_path = hooks_dir.join("post-commit");
+    let codixing_marker = "# codixing: auto-sync index after commit";
+    let codixing_line = "codixing git-sync . 2>/dev/null &";
+
+    match action {
+        HookAction::Install => {
+            std::fs::create_dir_all(&hooks_dir)?;
+
+            if hook_path.exists() {
+                let content = std::fs::read_to_string(&hook_path)?;
+                if content.contains(codixing_marker) {
+                    println!("Codixing hook already installed in {}", hook_path.display());
+                    return Ok(());
+                }
+                // Append to existing hook.
+                let mut new_content = content;
+                new_content.push_str(&format!("\n{codixing_marker}\n{codixing_line}\n"));
+                std::fs::write(&hook_path, new_content)?;
+            } else {
+                let content = format!("#!/bin/sh\n{codixing_marker}\n{codixing_line}\n");
+                std::fs::write(&hook_path, content)?;
+            }
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755))?;
+            }
+
+            println!("Installed post-commit hook: {}", hook_path.display());
+            println!("Index will auto-sync after each commit.");
+        }
+        HookAction::Uninstall => {
+            if !hook_path.exists() {
+                println!("No post-commit hook found.");
+                return Ok(());
+            }
+            let content = std::fs::read_to_string(&hook_path)?;
+            if !content.contains(codixing_marker) {
+                println!("No codixing hook found in {}", hook_path.display());
+                return Ok(());
+            }
+            let new_content: String = content
+                .lines()
+                .filter(|l| !l.contains("codixing"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let trimmed = new_content.trim();
+            if trimmed.is_empty() || trimmed == "#!/bin/sh" {
+                std::fs::remove_file(&hook_path)?;
+                println!("Removed post-commit hook (was codixing-only).");
+            } else {
+                std::fs::write(&hook_path, format!("{}\n", new_content.trim()))?;
+                println!("Removed codixing lines from post-commit hook.");
+            }
+        }
+        HookAction::Status => {
+            if !hook_path.exists() {
+                println!("No post-commit hook installed.");
+            } else {
+                let content = std::fs::read_to_string(&hook_path)?;
+                if content.contains(codixing_marker) {
+                    println!("Codixing post-commit hook: installed");
+                } else {
+                    println!("Post-commit hook exists but does not contain codixing.");
+                }
+            }
+        }
+    }
     Ok(())
 }

@@ -473,6 +473,40 @@ impl Engine {
             }
         }
 
+        // Cascade: re-index direct callers of changed files to refresh stale edges.
+        let changed_paths: std::collections::HashSet<String> = changes
+            .iter()
+            .filter_map(|c| self.config.normalize_path(&c.path))
+            .collect();
+
+        let mut cascade_paths: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(ref graph) = self.graph {
+            for changed in &changed_paths {
+                for caller in graph.callers(changed) {
+                    if !changed_paths.contains(&caller) {
+                        let abs = self.config.root.join(&caller);
+                        if abs.exists()
+                            && !cascade_paths.iter().any(|p| p.as_path() == abs.as_path())
+                        {
+                            cascade_paths.push(abs);
+                        }
+                    }
+                }
+            }
+        }
+
+        if !cascade_paths.is_empty() {
+            info!(
+                count = cascade_paths.len(),
+                "cascading re-index to callers of changed files"
+            );
+            for path in &cascade_paths {
+                if let Err(e) = self.reindex_file_impl(path, false) {
+                    warn!(path = %path.display(), error = %e, "cascade-reindex caller failed");
+                }
+            }
+        }
+
         // Single Tantivy commit for all pending adds + deletes.
         self.tantivy.commit()?;
 

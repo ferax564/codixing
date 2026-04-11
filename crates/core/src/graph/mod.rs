@@ -1,7 +1,10 @@
 pub mod community;
+pub mod cypher_export;
 pub mod extract;
 pub mod extractor;
+pub mod graphml_export;
 pub mod html_export;
+pub mod obsidian_export;
 pub mod pagerank;
 pub mod persistence;
 pub mod repomap;
@@ -19,8 +22,11 @@ use crate::language::Language;
 
 // Re-export public types from sub-modules.
 pub use community::CommunityResult;
+pub use cypher_export::{CypherExportOptions, export_cypher};
 pub use extractor::{CallExtractor, ImportExtractor};
+pub use graphml_export::{GraphmlExportOptions, export_graphml};
 pub use html_export::HtmlExportOptions;
+pub use obsidian_export::{ObsidianExportOptions, export_obsidian};
 pub use pagerank::{
     compute_pagerank, compute_personalized_pagerank, compute_weighted_personalized_pagerank,
 };
@@ -40,6 +46,24 @@ pub enum EdgeConfidence {
     Medium,
     /// External/unresolved (EdgeKind::External).
     Low,
+}
+
+impl EdgeConfidence {
+    /// Return the provenance label for this confidence level.
+    pub fn provenance(&self) -> &'static str {
+        match self {
+            Self::Verified => "EXTRACTED",
+            Self::High => "RESOLVED",
+            Self::Medium => "INFERRED",
+            Self::Low => "EXTERNAL",
+        }
+    }
+}
+
+impl std::fmt::Display for EdgeConfidence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.provenance())
+    }
 }
 
 /// Kind of a dependency edge between files.
