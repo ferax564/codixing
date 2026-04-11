@@ -812,6 +812,39 @@ fn apply_hunks(original: &[&str], hunks: &[DiffHunk]) -> Result<Vec<String>, Str
     Ok(output)
 }
 
+pub(crate) fn call_sync_index(engine: &mut Engine) -> (String, bool) {
+    match engine.sync() {
+        Ok(stats) => {
+            let out = format!(
+                "Sync complete: {} added, {} modified, {} removed, {} unchanged",
+                stats.added, stats.modified, stats.removed, stats.unchanged
+            );
+            (out, false)
+        }
+        Err(e) => (format!("Sync failed: {e}"), true),
+    }
+}
+
+pub(crate) fn call_git_sync_index(engine: &mut Engine) -> (String, bool) {
+    match engine.git_sync() {
+        Ok(stats) => {
+            if stats.unchanged {
+                (
+                    "Index is up to date (no changes since last indexed commit)".to_string(),
+                    false,
+                )
+            } else {
+                let out = format!(
+                    "Git sync complete: {} modified, {} removed",
+                    stats.modified, stats.removed
+                );
+                (out, false)
+            }
+        }
+        Err(e) => (format!("Git sync failed: {e}"), true),
+    }
+}
+
 pub(crate) fn call_run_tests(engine: &mut Engine, args: &Value) -> (String, bool) {
     let command = match args.get("command").and_then(|v| v.as_str()) {
         Some(c) => c,

@@ -283,8 +283,8 @@ fn e2e_medium_mode_lists_curated_tools() {
         tools.len()
     );
     assert!(
-        tools.len() <= 25,
-        "medium mode should list at most 25 tools, got {}",
+        tools.len() <= 27,
+        "medium mode should list at most 27 tools, got {}",
         tools.len()
     );
 
