@@ -334,11 +334,6 @@ impl Engine {
             .as_ref()
     }
 
-    /// Return a reference to the output filter pipeline.
-    pub fn filter_pipeline(&self) -> &FilterPipeline {
-        &self.filter_pipeline
-    }
-
     /// Apply the filter pipeline to the given output for the specified tool.
     pub fn filter_output(
         &self,
@@ -346,6 +341,14 @@ impl Engine {
         tool_name: &str,
     ) -> crate::filter_pipeline::FilterResult {
         self.filter_pipeline.apply(output, tool_name)
+    }
+
+    /// Write a tee file for output that will be truncated by non-pipeline code
+    /// (e.g. char-based truncation in `read_file`, byte cap in `git_diff`).
+    /// Returns the tee hint string to append, or empty string if tee failed.
+    pub fn tee_if_truncated(&self, full_output: &str, tool_name: &str) -> String {
+        self.filter_pipeline
+            .tee_if_truncated(full_output, tool_name)
     }
 
     /// Return the git recency map, lazily building it on first access.

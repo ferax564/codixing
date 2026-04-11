@@ -1,5 +1,3 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
@@ -35,7 +33,6 @@ pub fn write_tee(tee_dir: &Path, tool_name: &str, full_output: &str) -> Option<S
     let filename = format!("{tool_name}-{hash}.txt");
     let file_path = tee_dir.join(&filename);
 
-    // Dedup: if the file already exists (same hash), reuse it.
     if file_path.exists() {
         return Some(format!(".codixing/tee/{filename}"));
     }
@@ -61,15 +58,14 @@ pub fn cleanup_tee(tee_dir: &Path) {
     };
 
     for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        if let Ok(meta) = std::fs::metadata(&path) {
+        if let Ok(meta) = entry.metadata() {
+            if !meta.is_file() {
+                continue;
+            }
             if let Ok(modified) = meta.modified() {
                 if let Ok(age) = now.duration_since(modified) {
                     if age > max_age {
-                        let _ = std::fs::remove_file(&path);
+                        let _ = std::fs::remove_file(entry.path());
                     }
                 }
             }
@@ -94,11 +90,9 @@ pub fn clear_tee(tee_dir: &Path) {
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
-/// Compute an 8-hex-char content hash using `DefaultHasher`.
+/// Compute a 16-hex-char content hash using xxh3-64 (stable, fast).
 fn content_hash(s: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    s.hash(&mut hasher);
-    format!("{:08x}", hasher.finish() & 0xffff_ffff)
+    format!("{:016x}", xxhash_rust::xxh3::xxh3_64(s.as_bytes()))
 }
 
 /// Return a byte slice of `s` capped at `max_bytes`, respecting UTF-8 char
@@ -122,17 +116,15 @@ fn enforce_dir_cap(tee_dir: &Path) {
         return;
     };
 
-    // Collect (modified_time, path, size) for all files.
     let mut files: Vec<(SystemTime, std::path::PathBuf, u64)> = entries
         .flatten()
         .filter_map(|e| {
-            let path = e.path();
-            let meta = std::fs::metadata(&path).ok()?;
+            let meta = e.metadata().ok()?;
             if !meta.is_file() {
                 return None;
             }
             let modified = meta.modified().ok()?;
-            Some((modified, path, meta.len()))
+            Some((modified, e.path(), meta.len()))
         })
         .collect();
 
@@ -141,7 +133,6 @@ fn enforce_dir_cap(tee_dir: &Path) {
         return;
     }
 
-    // Sort oldest first.
     files.sort_by_key(|(t, _, _)| *t);
 
     let mut remaining = total;
@@ -269,6 +260,6 @@ mod tests {
         let h3 = content_hash("world");
         assert_eq!(h1, h2, "same input must produce same hash");
         assert_ne!(h1, h3, "different input should produce different hash");
-        assert_eq!(h1.len(), 8, "hash should be 8 hex chars");
+        assert_eq!(h1.len(), 16, "hash should be 16 hex chars");
     }
 }

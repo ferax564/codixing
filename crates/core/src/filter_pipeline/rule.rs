@@ -117,31 +117,28 @@ pub fn parse_filter_rules(toml_str: &str) -> Result<Vec<FilterRule>> {
 impl FilterRule {
     /// Returns `true` when this rule applies to the given tool output.
     ///
-    /// Checks:
+    /// Checks (in order, short-circuiting):
+    /// 0. `disabled` — disabled rules never match.
     /// 1. `match_tool` — exact match or `"*"` wildcard.
     /// 2. `match_output` — regex must match anywhere in `output` (if set).
     /// 3. `match_min_lines` — `output` must have at least this many lines (if set).
     pub fn matches(&self, tool_name: &str, output: &str) -> bool {
-        // Tool name check
+        if self.disabled {
+            return false;
+        }
         if self.match_tool != "*" && self.match_tool != tool_name {
             return false;
         }
-
-        // Output pattern check
         if let Some(re) = &self.match_output {
             if !re.is_match(output) {
                 return false;
             }
         }
-
-        // Minimum line count check
         if let Some(min) = self.match_min_lines {
-            let line_count = output.lines().count();
-            if line_count < min {
+            if output.lines().take(min).count() < min {
                 return false;
             }
         }
-
         true
     }
 }

@@ -64,11 +64,7 @@ impl FilterPipeline {
 
     /// Apply first matching rule. Write tee if output is reduced.
     pub fn apply(&self, output: &str, tool_name: &str) -> FilterResult {
-        let matched = self
-            .rules
-            .iter()
-            .find(|r| !r.disabled && r.matches(tool_name, output));
-        let rule = match matched {
+        let rule = match self.rules.iter().find(|r| r.matches(tool_name, output)) {
             Some(r) => r,
             None => {
                 return FilterResult {
@@ -80,11 +76,10 @@ impl FilterPipeline {
             }
         };
 
-        let original_lines = output.lines().count();
         let filtered = apply_stages(&rule.stages, output);
-        let filtered_lines = filtered.lines().count();
 
-        let tee_path = if filtered_lines < original_lines {
+        // Use byte length as a cheap proxy for "did filtering reduce the output?"
+        let tee_path = if filtered.len() < output.len() {
             write_tee(&self.tee_dir, tool_name, output)
         } else {
             None

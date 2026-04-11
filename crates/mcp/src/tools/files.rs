@@ -41,9 +41,7 @@ pub(crate) fn call_read_file(engine: &Engine, args: &Value) -> (String, bool) {
             });
             let max_chars = token_budget * 4;
             let tee_hint = if content.len() > max_chars {
-                engine
-                    .filter_pipeline()
-                    .tee_if_truncated(&content, "read_file")
+                engine.tee_if_truncated(&content, "read_file")
             } else {
                 String::new()
             };
@@ -524,9 +522,7 @@ pub(crate) fn call_git_diff(engine: &Engine, args: &Value) -> (String, bool) {
             } else {
                 let max = 12000;
                 if stdout.len() > max {
-                    let tee_hint = engine
-                        .filter_pipeline()
-                        .tee_if_truncated(&stdout, "git_diff");
+                    let tee_hint = engine.tee_if_truncated(&stdout, "git_diff");
                     (
                         format!(
                             "{}\n\n... (truncated, {} bytes total){tee_hint}",

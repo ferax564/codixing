@@ -300,20 +300,6 @@ pub fn dispatch_tool_with_progress(
 // Compact output post-processing
 // ---------------------------------------------------------------------------
 
-/// If `compact: true` is present in the args, compress the output to reduce
-/// token usage for AI agents.
-#[allow(dead_code)]
-fn maybe_compact(output: String, args: &Value) -> String {
-    let compact = args
-        .get("compact")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if !compact {
-        return output;
-    }
-    compact_output(&output)
-}
-
 /// Compress tool output for token-constrained AI agents:
 /// - Remove fenced code blocks, keep only `// <file>` headers and signatures
 /// - Truncate lines longer than 120 chars

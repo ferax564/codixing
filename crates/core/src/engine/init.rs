@@ -450,8 +450,8 @@ impl Engine {
         let file_trigram = std::sync::OnceLock::new();
         let _ = file_trigram.set(ft_idx);
 
-        crate::filter_pipeline::clear_tee(&store.codixing_dir().join("tee"));
         let filter_pipeline = FilterPipeline::load(&store.codixing_dir());
+        filter_pipeline.clear();
 
         Ok(Self {
             config,
