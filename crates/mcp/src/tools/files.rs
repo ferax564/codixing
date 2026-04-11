@@ -879,10 +879,16 @@ pub(crate) fn call_run_tests(engine: &mut Engine, args: &Value) -> (String, bool
             let success = out.status.success();
 
             let combined = format!("{stdout}{stderr}");
+            let tee_hint = if combined.len() > 8000 {
+                engine.tee_if_truncated(&combined, "run_tests")
+            } else {
+                String::new()
+            };
             let truncated = if combined.len() > 8000 {
                 format!(
-                    "[output truncated to last 8000 chars]\n...{}",
-                    &combined[combined.len() - 8000..]
+                    "[output truncated to last 8000 chars]\n...{}{}",
+                    &combined[combined.len() - 8000..],
+                    tee_hint
                 )
             } else {
                 combined

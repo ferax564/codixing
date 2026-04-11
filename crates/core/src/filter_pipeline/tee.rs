@@ -30,7 +30,18 @@ pub fn write_tee(tee_dir: &Path, tool_name: &str, full_output: &str) -> Option<S
     std::fs::create_dir_all(tee_dir).ok()?;
 
     let hash = content_hash(full_output);
-    let filename = format!("{tool_name}-{hash}.txt");
+    // Sanitize tool_name: keep only alphanumeric, dash, underscore to prevent path traversal.
+    let safe_name: String = tool_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let filename = format!("{safe_name}-{hash}.txt");
     let file_path = tee_dir.join(&filename);
 
     if file_path.exists() {
