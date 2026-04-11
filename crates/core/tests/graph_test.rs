@@ -435,6 +435,7 @@ fn predict_impact_uses_call_graph() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[serial]
 fn symbol_graph_persists_across_open() {
     let dir = tempdir().unwrap();
     let root = dir.path();
