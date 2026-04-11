@@ -98,6 +98,7 @@ tempfile.workspace = true
 criterion.workspace = true
 serial_test.workspace = true
 rand.workspace = true
+filetime = "0.2"
 
 [[bench]]
 name = "search_bench"

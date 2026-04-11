@@ -6,6 +6,7 @@ pub mod embedder;
 pub mod engine;
 pub mod error;
 pub mod federation;
+pub mod filter_pipeline;
 pub mod formatter;
 pub mod graph;
 pub mod index;
