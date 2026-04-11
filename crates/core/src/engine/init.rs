@@ -222,6 +222,8 @@ impl Engine {
                 }
                 Some(idx)
             } else {
+                // Clean up stale artifact from previous index
+                let _ = std::fs::remove_file(store.concepts_path());
                 None
             }
         };
@@ -249,6 +251,8 @@ impl Engine {
                 }
                 Some(reform)
             } else {
+                // Clean up stale artifact from previous index
+                let _ = std::fs::remove_file(store.reformulations_path());
                 None
             }
         };
@@ -512,26 +516,45 @@ impl Engine {
             Err(e) => return Err(e),
         };
 
-        // Restore symbols: try mmap v2 first, fall back to bitcode v1.
-        let symbols = if store.symbols_v2_path().exists() {
-            match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path()) {
-                Ok(mmap_table) => {
-                    debug!("loaded symbols_v2.bin via mmap (zero-deser)");
-                    SymbolTable::Mmap(mmap_table)
+        // Restore symbols: prefer bitcode symbols.bin (preserves all fields
+        // including doc_comment, visibility, type_relations) over mmap
+        // symbols_v2.bin (which doesn't persist those fields).
+        let symbols = if store.symbols_path().exists() {
+            match store
+                .load_symbols_bytes()
+                .and_then(|b| deserialize_symbols(&b))
+            {
+                Ok(table) => {
+                    debug!("loaded symbols.bin via bitcode (full-fidelity)");
+                    table
                 }
                 Err(e) => {
-                    warn!(error = %e, "failed to load symbols_v2.bin — falling back to symbols.bin");
-                    if store.symbols_path().exists() {
-                        let bytes = store.load_symbols_bytes()?;
-                        deserialize_symbols(&bytes)?
+                    warn!(error = %e, "failed to load symbols.bin — falling back to symbols_v2.bin");
+                    if store.symbols_v2_path().exists() {
+                        match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path())
+                        {
+                            Ok(mmap_table) => SymbolTable::Mmap(mmap_table),
+                            Err(e2) => {
+                                warn!(error = %e2, "failed to load symbols_v2.bin too");
+                                SymbolTable::new()
+                            }
+                        }
                     } else {
                         SymbolTable::new()
                     }
                 }
             }
-        } else if store.symbols_path().exists() {
-            let bytes = store.load_symbols_bytes()?;
-            deserialize_symbols(&bytes)?
+        } else if store.symbols_v2_path().exists() {
+            match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path()) {
+                Ok(mmap_table) => {
+                    debug!("loaded symbols_v2.bin via mmap (no symbols.bin available)");
+                    SymbolTable::Mmap(mmap_table)
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to load symbols_v2.bin");
+                    SymbolTable::new()
+                }
+            }
         } else {
             SymbolTable::new()
         };
@@ -766,26 +789,45 @@ impl Engine {
         let tantivy =
             TantivyIndex::open_read_only_with_config(&store.tantivy_dir(), config.bm25.clone())?;
 
-        // Restore symbols: try mmap v2 first, fall back to bitcode v1.
-        let symbols = if store.symbols_v2_path().exists() {
-            match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path()) {
-                Ok(mmap_table) => {
-                    debug!("loaded symbols_v2.bin via mmap (zero-deser, read-only)");
-                    SymbolTable::Mmap(mmap_table)
+        // Restore symbols: prefer bitcode symbols.bin (preserves all fields
+        // including doc_comment, visibility, type_relations) over mmap
+        // symbols_v2.bin (which doesn't persist those fields).
+        let symbols = if store.symbols_path().exists() {
+            match store
+                .load_symbols_bytes()
+                .and_then(|b| deserialize_symbols(&b))
+            {
+                Ok(table) => {
+                    debug!("loaded symbols.bin via bitcode (full-fidelity, read-only)");
+                    table
                 }
                 Err(e) => {
-                    warn!(error = %e, "failed to load symbols_v2.bin — falling back to symbols.bin");
-                    if store.symbols_path().exists() {
-                        let bytes = store.load_symbols_bytes()?;
-                        deserialize_symbols(&bytes)?
+                    warn!(error = %e, "failed to load symbols.bin — falling back to symbols_v2.bin (read-only)");
+                    if store.symbols_v2_path().exists() {
+                        match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path())
+                        {
+                            Ok(mmap_table) => SymbolTable::Mmap(mmap_table),
+                            Err(e2) => {
+                                warn!(error = %e2, "failed to load symbols_v2.bin too");
+                                SymbolTable::new()
+                            }
+                        }
                     } else {
                         SymbolTable::new()
                     }
                 }
             }
-        } else if store.symbols_path().exists() {
-            let bytes = store.load_symbols_bytes()?;
-            deserialize_symbols(&bytes)?
+        } else if store.symbols_v2_path().exists() {
+            match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path()) {
+                Ok(mmap_table) => {
+                    debug!("loaded symbols_v2.bin via mmap (no symbols.bin available, read-only)");
+                    SymbolTable::Mmap(mmap_table)
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to load symbols_v2.bin");
+                    SymbolTable::new()
+                }
+            }
         } else {
             SymbolTable::new()
         };
