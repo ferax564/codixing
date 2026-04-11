@@ -12,6 +12,7 @@ use super::embed_state::EmbedState;
 use crate::config::IndexConfig;
 use crate::embedder::Embedder;
 use crate::error::{CodixingError, Result};
+use crate::filter_pipeline::FilterPipeline;
 use crate::graph::extractor::RawImport;
 use crate::graph::{CodeGraph, compute_pagerank};
 use crate::index::TantivyIndex;
@@ -449,6 +450,9 @@ impl Engine {
         let file_trigram = std::sync::OnceLock::new();
         let _ = file_trigram.set(ft_idx);
 
+        crate::filter_pipeline::clear_tee(&store.codixing_dir().join("tee"));
+        let filter_pipeline = FilterPipeline::load(&store.codixing_dir());
+
         Ok(Self {
             config,
             store,
@@ -476,6 +480,7 @@ impl Engine {
             last_staleness_check: None,
             embed_state,
             concept_reranker: std::sync::OnceLock::new(),
+            filter_pipeline,
         })
     }
 
@@ -741,6 +746,7 @@ impl Engine {
         // exact-strategy search.
         let trigram = std::sync::OnceLock::new();
         let file_trigram = std::sync::OnceLock::new();
+        let filter_pipeline = FilterPipeline::load(&store.codixing_dir());
 
         Ok(Self {
             config,
@@ -769,6 +775,7 @@ impl Engine {
             last_staleness_check: None,
             embed_state: None,
             concept_reranker: std::sync::OnceLock::new(),
+            filter_pipeline,
         })
     }
 
@@ -984,6 +991,7 @@ impl Engine {
             .and_then(|m| m.modified().ok());
 
         // Trigram indexes are lazy-loaded on first use via OnceLock.
+        let filter_pipeline = FilterPipeline::load(&store.codixing_dir());
 
         Ok(Self {
             config,
@@ -1012,6 +1020,7 @@ impl Engine {
             last_staleness_check: None,
             embed_state: None,
             concept_reranker: std::sync::OnceLock::new(),
+            filter_pipeline,
         })
     }
 

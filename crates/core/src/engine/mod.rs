@@ -42,6 +42,7 @@ use serde::Serialize;
 use crate::config::IndexConfig;
 use crate::embedder::Embedder;
 use crate::error::CodixingError;
+use crate::filter_pipeline::FilterPipeline;
 use crate::graph::CodeGraph;
 use crate::index::TantivyIndex;
 use crate::index::trigram::FileTrigramIndex;
@@ -303,6 +304,8 @@ pub struct Engine {
     /// quality by favouring prose matches over code structure.  Initialised on first call
     /// to `get_concept_reranker`.  `None` inside the lock means the model failed to load.
     pub(super) concept_reranker: std::sync::OnceLock<Option<Arc<Reranker>>>,
+    /// TOML-based output filter pipeline with tee recovery.
+    filter_pipeline: FilterPipeline,
 }
 
 impl Engine {
@@ -329,6 +332,20 @@ impl Engine {
                 },
             )
             .as_ref()
+    }
+
+    /// Return a reference to the output filter pipeline.
+    pub fn filter_pipeline(&self) -> &FilterPipeline {
+        &self.filter_pipeline
+    }
+
+    /// Apply the filter pipeline to the given output for the specified tool.
+    pub fn filter_output(
+        &self,
+        output: &str,
+        tool_name: &str,
+    ) -> crate::filter_pipeline::FilterResult {
+        self.filter_pipeline.apply(output, tool_name)
     }
 
     /// Return the git recency map, lazily building it on first access.
