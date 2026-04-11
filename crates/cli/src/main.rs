@@ -7,8 +7,8 @@ use tracing_subscriber::EnvFilter;
 
 use codixing_core::{
     EmbedTimingStats, EmbeddingModel, Engine, FederatedEngine, FederationConfig, FreshnessOptions,
-    FreshnessTier, GitSyncStats, IndexConfig, RepoMapOptions, SearchQuery, Strategy, SyncStats,
-    discover_projects, to_federation_config,
+    FreshnessTier, IndexConfig, RepoMapOptions, SearchQuery, Strategy, discover_projects,
+    to_federation_config,
 };
 
 #[derive(Parser)]
@@ -571,6 +571,22 @@ async fn main() -> Result<()> {
             token_budget,
             json,
         } => cmd_context(file, line, token_budget, json),
+    }
+}
+
+/// Check if an error indicates write-lock contention and print a helpful message.
+fn check_write_lock_error(err: &anyhow::Error) -> bool {
+    let msg = format!("{err:#}");
+    if msg.contains("read-only mode") || msg.contains("ReadOnly") || msg.contains("write lock") {
+        eprintln!("Error: another process holds the Tantivy write lock (likely the MCP server).");
+        eprintln!();
+        eprintln!("Options:");
+        eprintln!("  1. Use the sync_index or git_sync_index MCP tool");
+        eprintln!("     (the running server can sync for you)");
+        eprintln!("  2. Stop the MCP server, sync, then restart");
+        true
+    } else {
+        false
     }
 }
 
@@ -1153,18 +1169,39 @@ fn cmd_update(path: PathBuf, dry_run: bool) -> Result<()> {
         let abs = root.join(rel_path);
         match engine.reindex_file(&abs) {
             Ok(()) => updated += 1,
-            Err(e) => eprintln!("  warning: skipped {} — {e}", rel_path.display()),
+            Err(e) => {
+                let anyhow_err = anyhow::anyhow!("{e}");
+                if check_write_lock_error(&anyhow_err) {
+                    std::process::exit(1);
+                }
+                eprintln!("  warning: skipped {} — {e}", rel_path.display());
+            }
         }
     }
 
     for rel_path in &to_remove {
         match engine.remove_file(rel_path) {
             Ok(()) => removed += 1,
-            Err(e) => eprintln!("  warning: remove failed {} — {e}", rel_path.display()),
+            Err(e) => {
+                let anyhow_err = anyhow::anyhow!("{e}");
+                if check_write_lock_error(&anyhow_err) {
+                    std::process::exit(1);
+                }
+                eprintln!("  warning: remove failed {} — {e}", rel_path.display());
+            }
         }
     }
 
-    engine.save().context("failed to save index after update")?;
+    match engine.save() {
+        Ok(()) => {}
+        Err(e) => {
+            let anyhow_err = anyhow::anyhow!("{e}");
+            if check_write_lock_error(&anyhow_err) {
+                std::process::exit(1);
+            }
+            return Err(anyhow_err).context("failed to save index after update");
+        }
+    }
 
     eprintln!(
         "\nUpdated {updated} file(s), removed {removed} file(s) in {:.2}s",
@@ -1183,19 +1220,23 @@ fn cmd_sync(path: PathBuf) -> Result<()> {
         Engine::open(&root).with_context(|| "no index found — run `codixing init` first")?;
 
     let start = Instant::now();
-    let SyncStats {
-        added,
-        modified,
-        removed,
-        unchanged,
-    } = engine.sync()?;
+    let stats = match engine.sync() {
+        Ok(s) => s,
+        Err(e) => {
+            let anyhow_err = anyhow::anyhow!("{e}");
+            if check_write_lock_error(&anyhow_err) {
+                std::process::exit(1);
+            }
+            return Err(anyhow_err);
+        }
+    };
 
     eprintln!(
         "sync complete: {} added, {} modified, {} removed, {} unchanged ({:.2}s)",
-        added,
-        modified,
-        removed,
-        unchanged,
+        stats.added,
+        stats.modified,
+        stats.removed,
+        stats.unchanged,
         start.elapsed().as_secs_f64(),
     );
 
@@ -1211,13 +1252,18 @@ fn cmd_git_sync(path: PathBuf) -> Result<()> {
         Engine::open(&root).with_context(|| "no index found — run `codixing init` first")?;
 
     let start = Instant::now();
-    let GitSyncStats {
-        modified,
-        removed,
-        unchanged,
-    } = engine.git_sync()?;
+    let stats = match engine.git_sync() {
+        Ok(s) => s,
+        Err(e) => {
+            let anyhow_err = anyhow::anyhow!("{e}");
+            if check_write_lock_error(&anyhow_err) {
+                std::process::exit(1);
+            }
+            return Err(anyhow_err);
+        }
+    };
 
-    if unchanged {
+    if stats.unchanged {
         eprintln!(
             "index already up-to-date (no git changes since last index, {:.2}s)",
             start.elapsed().as_secs_f64()
@@ -1225,8 +1271,8 @@ fn cmd_git_sync(path: PathBuf) -> Result<()> {
     } else {
         eprintln!(
             "git-sync complete: {} modified, {} removed ({:.2}s)",
-            modified,
-            removed,
+            stats.modified,
+            stats.removed,
             start.elapsed().as_secs_f64()
         );
     }
