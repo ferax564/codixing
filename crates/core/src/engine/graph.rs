@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use crate::error::Result;
-use crate::graph::{GraphData, GraphStats, RepoMapOptions, generate_repo_map};
+use crate::graph::community::CommunityResult;
+use crate::graph::surprise::SurprisingEdge;
+use crate::graph::{GraphData, GraphStats, HtmlExportOptions, RepoMapOptions, generate_repo_map};
 use crate::symbols::Symbol;
 
 use super::Engine;
@@ -165,5 +167,57 @@ impl Engine {
     /// If `file` is provided, also filters by file path.
     pub fn symbols(&self, filter: &str, file: Option<&str>) -> Result<Vec<Symbol>> {
         Ok(self.symbols.filter(filter, file))
+    }
+
+    // -------------------------------------------------------------------------
+    // Graph analysis: community detection, shortest path, surprises, HTML export
+    // -------------------------------------------------------------------------
+
+    /// Run Louvain community detection on the dependency graph.
+    ///
+    /// Returns `None` if the graph is not available. Mutates the graph's
+    /// node community assignments in place.
+    pub fn detect_communities(&mut self) -> Option<CommunityResult> {
+        self.graph.as_mut().map(|g| g.detect_communities())
+    }
+
+    /// Return the cached community assignments from the last detection run.
+    pub fn communities(&self) -> HashMap<String, usize> {
+        self.graph
+            .as_ref()
+            .map(|g| {
+                g.file_paths()
+                    .into_iter()
+                    .filter_map(|p| {
+                        let node = g.node(&p)?;
+                        let comm = node.community?;
+                        Some((p, comm))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Find the shortest path between two files in the dependency graph.
+    pub fn shortest_path(&self, from: &str, to: &str) -> Option<Vec<String>> {
+        self.graph.as_ref().and_then(|g| g.shortest_path(from, to))
+    }
+
+    /// Return the most surprising edges in the dependency graph.
+    pub fn surprising_edges(&self, top_n: usize) -> Vec<SurprisingEdge> {
+        self.graph
+            .as_ref()
+            .map(|g| crate::graph::surprise::detect_surprises(g, top_n))
+            .unwrap_or_default()
+    }
+
+    /// Export the dependency graph as a self-contained interactive HTML file.
+    pub fn export_html(&self, options: HtmlExportOptions) -> Result<()> {
+        match &self.graph {
+            Some(g) => crate::graph::html_export::export_html(g, &options),
+            None => Err(crate::error::CodixingError::Graph(
+                "graph not available — run `codixing init` first".into(),
+            )),
+        }
     }
 }
