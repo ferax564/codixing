@@ -20,13 +20,16 @@ pub struct ObsidianExportOptions {
 
 /// Sanitize a file path for use as an Obsidian note filename.
 /// Replaces characters that are invalid in filenames or problematic in Obsidian.
+///
+/// Uses `-` for path separators (`/`, `\`) to avoid collisions between
+/// `src/foo_bar.rs` and `src/foo/bar.rs` (which would both become
+/// `src_foo_bar.rs` with `_` replacement).
 fn sanitize_filename(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     for c in path.chars() {
         match c {
-            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '#' | '^' | '[' | ']' => {
-                out.push('_')
-            }
+            '/' | '\\' => out.push('-'),
+            ':' | '*' | '?' | '"' | '<' | '>' | '|' | '#' | '^' | '[' | ']' => out.push('_'),
             _ => out.push(c),
         }
     }
@@ -301,9 +304,9 @@ mod tests {
         let count = export_obsidian(&g, &opts).unwrap();
         assert!(count >= 3); // At least 2 file notes + 1 community + MOC
 
-        // Check file notes exist.
-        assert!(dir.path().join("src_main.rs.md").exists());
-        assert!(dir.path().join("src_lib.rs.md").exists());
+        // Check file notes exist (/ → - in filenames).
+        assert!(dir.path().join("src-main.rs.md").exists());
+        assert!(dir.path().join("src-lib.rs.md").exists());
 
         // Check MOC exists.
         assert!(dir.path().join("_MOC.md").exists());
@@ -331,7 +334,7 @@ mod tests {
 
         export_obsidian(&g, &opts).unwrap();
 
-        let content = std::fs::read_to_string(dir.path().join("src_engine_mod.rs.md")).unwrap();
+        let content = std::fs::read_to_string(dir.path().join("src-engine-mod.rs.md")).unwrap();
         // Check frontmatter structure.
         assert!(content.starts_with("---\n"));
         assert!(content.contains("path: \"src/engine/mod.rs\""));
@@ -343,8 +346,13 @@ mod tests {
 
     #[test]
     fn sanitize_filename_replaces_special_chars() {
-        assert_eq!(sanitize_filename("src/main.rs"), "src_main.rs");
+        assert_eq!(sanitize_filename("src/main.rs"), "src-main.rs");
         assert_eq!(sanitize_filename("a:b*c?d"), "a_b_c_d");
-        assert_eq!(sanitize_filename("path/to/[file]"), "path_to__file_");
+        assert_eq!(sanitize_filename("path/to/[file]"), "path-to-_file_");
+        // Collision-safe: these produce different filenames
+        assert_ne!(
+            sanitize_filename("src/foo_bar.rs"),
+            sanitize_filename("src/foo/bar.rs")
+        );
     }
 }

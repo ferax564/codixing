@@ -39,9 +39,9 @@ pub fn export_graphml(graph: &CodeGraph, options: &GraphmlExportOptions) -> Resu
     let mut xml = String::new();
 
     xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-    xml.push_str("<graphml xmlns=\"http://graphml.graphstudio.org\"\n");
+    xml.push_str("<graphml xmlns=\"http://graphml.graphstruct.org/graphml\"\n");
     xml.push_str("  xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\n");
-    xml.push_str("  xsi:schemaLocation=\"http://graphml.graphstudio.org\">\n");
+    xml.push_str("  xsi:schemaLocation=\"http://graphml.graphstruct.org/graphml http://graphml.graphstruct.org/graphml/1.0/graphml.xsd\">\n");
 
     // Key declarations for node attributes.
     xml.push_str(
@@ -122,8 +122,8 @@ pub fn export_graphml(graph: &CodeGraph, options: &GraphmlExportOptions) -> Resu
             edge.kind
         ));
         xml.push_str(&format!(
-            "      <data key=\"confidence\">{}</data>\n",
-            edge.confidence.provenance()
+            "      <data key=\"confidence\">{:?}</data>\n",
+            edge.confidence
         ));
         xml.push_str(&format!(
             "      <data key=\"provenance\">{}</data>\n",

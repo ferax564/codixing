@@ -97,11 +97,12 @@ pub fn export_cypher(graph: &CodeGraph, options: &CypherExportOptions) -> Result
         let to_esc = cypher_escape(to);
         let rel_type = relationship_type(&edge.kind);
         let raw_esc = cypher_escape(&edge.raw_import);
+        let confidence = format!("{:?}", edge.confidence);
         let provenance = edge.confidence.provenance();
 
         cypher.push_str(&format!(
-            "MATCH (a:File {{path: '{}'}}), (b:File {{path: '{}'}}) MERGE (a)-[:{}  {{raw_import: '{}', confidence: '{}', provenance: '{}'}}]->(b);\n",
-            from_esc, to_esc, rel_type, raw_esc, provenance, provenance,
+            "MATCH (a:File {{path: '{}'}}), (b:File {{path: '{}'}}) MERGE (a)-[:{} {{raw_import: '{}', confidence: '{}', provenance: '{}'}}]->(b);\n",
+            from_esc, to_esc, rel_type, raw_esc, confidence, provenance,
         ));
     }
 
