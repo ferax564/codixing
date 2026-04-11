@@ -40,8 +40,9 @@ pub use federation::{
 };
 pub use filter_pipeline::{FilterPipeline, FilterResult};
 pub use graph::{
-    CodeEdge, CodeGraph, CodeNode, CommunityResult, EdgeConfidence, EdgeKind, GraphStats,
-    HtmlExportOptions, RepoMapOptions, SurprisingEdge,
+    CodeEdge, CodeGraph, CodeNode, CommunityResult, CypherExportOptions, EdgeConfidence, EdgeKind,
+    GraphStats, GraphmlExportOptions, HtmlExportOptions, ObsidianExportOptions, RepoMapOptions,
+    SurprisingEdge,
 };
 pub use language::{EntityKind, TypeRelation, TypeRelationKind, Visibility};
 pub use orphans::{OrphanConfidence, OrphanFile, OrphanOptions};

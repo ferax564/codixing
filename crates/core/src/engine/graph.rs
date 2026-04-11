@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use crate::error::Result;
 use crate::graph::community::CommunityResult;
 use crate::graph::surprise::SurprisingEdge;
-use crate::graph::{GraphData, GraphStats, HtmlExportOptions, RepoMapOptions, generate_repo_map};
+use crate::graph::{
+    CypherExportOptions, GraphData, GraphStats, GraphmlExportOptions, HtmlExportOptions,
+    ObsidianExportOptions, RepoMapOptions, generate_repo_map,
+};
 use crate::symbols::Symbol;
 
 use super::Engine;
@@ -215,6 +218,36 @@ impl Engine {
     pub fn export_html(&self, options: HtmlExportOptions) -> Result<()> {
         match &self.graph {
             Some(g) => crate::graph::html_export::export_html(g, &options),
+            None => Err(crate::error::CodixingError::Graph(
+                "graph not available — run `codixing init` first".into(),
+            )),
+        }
+    }
+
+    /// Export the dependency graph as a GraphML XML file (for Gephi/yEd).
+    pub fn export_graphml(&self, options: GraphmlExportOptions) -> Result<()> {
+        match &self.graph {
+            Some(g) => crate::graph::graphml_export::export_graphml(g, &options),
+            None => Err(crate::error::CodixingError::Graph(
+                "graph not available — run `codixing init` first".into(),
+            )),
+        }
+    }
+
+    /// Export the dependency graph as Neo4j Cypher MERGE statements.
+    pub fn export_cypher(&self, options: CypherExportOptions) -> Result<()> {
+        match &self.graph {
+            Some(g) => crate::graph::cypher_export::export_cypher(g, &options),
+            None => Err(crate::error::CodixingError::Graph(
+                "graph not available — run `codixing init` first".into(),
+            )),
+        }
+    }
+
+    /// Export the dependency graph as an Obsidian vault with linked Markdown notes.
+    pub fn export_obsidian(&self, options: ObsidianExportOptions) -> Result<usize> {
+        match &self.graph {
+            Some(g) => crate::graph::obsidian_export::export_obsidian(g, &options),
             None => Err(crate::error::CodixingError::Graph(
                 "graph not available — run `codixing init` first".into(),
             )),
