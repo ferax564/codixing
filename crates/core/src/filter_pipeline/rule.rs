@@ -350,6 +350,19 @@ match_tool = "*"
     }
 
     #[test]
+    fn parse_built_in_defaults() {
+        let defaults = include_str!("defaults.toml");
+        let rules = parse_filter_rules(defaults).unwrap();
+        assert_eq!(rules.len(), 5);
+        let names: Vec<&str> = rules.iter().map(|r| r.name.as_str()).collect();
+        assert!(names.contains(&"cargo-test-failures"));
+        assert!(names.contains(&"pytest-failures"));
+        assert!(names.contains(&"test-output-generic"));
+        assert!(names.contains(&"git-diff-large"));
+        assert!(names.contains(&"grep-high-volume"));
+    }
+
+    #[test]
     fn parse_all_stage_types() {
         let toml = r#"
 schema_version = 1
