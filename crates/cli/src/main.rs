@@ -151,10 +151,6 @@ enum Command {
         /// Export graph as an Obsidian vault directory.
         #[arg(long)]
         obsidian: Option<Option<PathBuf>>,
-
-        /// Token budget for output truncation (communities/surprises).
-        #[arg(long)]
-        budget: Option<usize>,
     },
 
     /// Manage git hooks for automatic index updates.
@@ -593,7 +589,6 @@ async fn main() -> Result<()> {
             graphml,
             cypher,
             obsidian,
-            budget,
         } => cmd_graph(
             path,
             token_budget,
@@ -604,7 +599,6 @@ async fn main() -> Result<()> {
             graphml,
             cypher,
             obsidian,
-            budget,
         ),
         Command::Hook { action } => cmd_hook(action),
         Command::Path { from, to } => cmd_path(from, to),
@@ -968,7 +962,6 @@ fn cmd_graph(
     graphml: Option<Option<PathBuf>>,
     cypher: Option<Option<PathBuf>>,
     obsidian: Option<Option<PathBuf>>,
-    _budget: Option<usize>,
 ) -> Result<()> {
     let root = path
         .canonicalize()
@@ -1014,7 +1007,6 @@ fn cmd_graph(
         engine.detect_communities();
         let opts = codixing_core::GraphmlExportOptions {
             output_path: output.clone(),
-            include_external: false,
         };
         engine
             .export_graphml(opts)
@@ -1029,7 +1021,6 @@ fn cmd_graph(
         engine.detect_communities();
         let opts = codixing_core::CypherExportOptions {
             output_path: output.clone(),
-            include_external: false,
         };
         engine
             .export_cypher(opts)
@@ -1044,7 +1035,6 @@ fn cmd_graph(
         engine.detect_communities();
         let opts = codixing_core::ObsidianExportOptions {
             output_dir: output.clone(),
-            include_external: false,
         };
         let count = engine
             .export_obsidian(opts)
@@ -2190,13 +2180,22 @@ fn cmd_context(file: String, line: u64, token_budget: usize, json: bool) -> Resu
 }
 
 fn cmd_hook(action: HookAction) -> Result<()> {
-    let root = std::env::current_dir().context("cannot determine current directory")?;
-    let git_dir = root.join(".git");
-    if !git_dir.exists() {
-        anyhow::bail!("not a git repository — run from a project with .git/");
-    }
+    // Use git rev-parse to resolve the hooks directory correctly, even in worktrees.
+    let hooks_dir = std::process::Command::new("git")
+        .args(["rev-parse", "--git-path", "hooks"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout)
+                    .ok()
+                    .map(|s| PathBuf::from(s.trim()))
+            } else {
+                None
+            }
+        })
+        .context("not a git repository — run from a project with .git/")?;
 
-    let hooks_dir = git_dir.join("hooks");
     let hook_path = hooks_dir.join("post-commit");
     let codixing_marker = "# codixing: auto-sync index after commit";
     let codixing_line = "codixing git-sync . 2>/dev/null &";
@@ -2239,9 +2238,10 @@ fn cmd_hook(action: HookAction) -> Result<()> {
                 println!("No codixing hook found in {}", hook_path.display());
                 return Ok(());
             }
+            // Only remove lines matching our exact marker and command.
             let new_content: String = content
                 .lines()
-                .filter(|l| !l.contains("codixing"))
+                .filter(|l| l.trim() != codixing_marker && l.trim() != codixing_line)
                 .collect::<Vec<_>>()
                 .join("\n");
             let trimmed = new_content.trim();

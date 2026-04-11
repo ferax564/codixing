@@ -12,8 +12,6 @@ use crate::error::Result;
 pub struct GraphmlExportOptions {
     /// Output file path.
     pub output_path: PathBuf,
-    /// Whether to include `__ext__` pseudo-nodes. Default: false.
-    pub include_external: bool,
 }
 
 /// XML-escape a string for safe embedding in GraphML attributes/data.
@@ -77,7 +75,7 @@ pub fn export_graphml(graph: &CodeGraph, options: &GraphmlExportOptions) -> Resu
     // Collect nodes.
     let nodes = graph.nodes_by_pagerank();
     for node in &nodes {
-        if !options.include_external && node.file_path.starts_with("__ext__:") {
+        if node.file_path.starts_with("__ext__:") {
             continue;
         }
         let id = xml_escape(&node.file_path);
@@ -107,8 +105,7 @@ pub fn export_graphml(graph: &CodeGraph, options: &GraphmlExportOptions) -> Resu
     // Collect edges.
     let edges = graph.all_edges();
     for (i, (from, to, edge)) in edges.iter().enumerate() {
-        if !options.include_external && (from.starts_with("__ext__:") || to.starts_with("__ext__:"))
-        {
+        if from.starts_with("__ext__:") || to.starts_with("__ext__:") {
             continue;
         }
         let from_esc = xml_escape(from);
@@ -164,7 +161,6 @@ mod tests {
         let path = dir.path().join("test.graphml");
         let opts = GraphmlExportOptions {
             output_path: path.clone(),
-            include_external: false,
         };
 
         export_graphml(&g, &opts).unwrap();
@@ -201,7 +197,6 @@ mod tests {
         let path = dir.path().join("test.graphml");
         let opts = GraphmlExportOptions {
             output_path: path.clone(),
-            include_external: false,
         };
 
         export_graphml(&g, &opts).unwrap();

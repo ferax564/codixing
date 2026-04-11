@@ -13,8 +13,6 @@ use crate::error::Result;
 pub struct CypherExportOptions {
     /// Output file path.
     pub output_path: PathBuf,
-    /// Whether to include `__ext__` pseudo-nodes. Default: false.
-    pub include_external: bool,
 }
 
 /// Escape single quotes in strings for Cypher string literals.
@@ -64,7 +62,7 @@ pub fn export_cypher(graph: &CodeGraph, options: &CypherExportOptions) -> Result
     // Emit nodes.
     let nodes = graph.nodes_by_pagerank();
     for node in &nodes {
-        if !options.include_external && node.file_path.starts_with("__ext__:") {
+        if node.file_path.starts_with("__ext__:") {
             continue;
         }
         let path_esc = cypher_escape(&node.file_path);
@@ -89,8 +87,7 @@ pub fn export_cypher(graph: &CodeGraph, options: &CypherExportOptions) -> Result
     // Emit edges.
     let edges = graph.all_edges();
     for (from, to, edge) in &edges {
-        if !options.include_external && (from.starts_with("__ext__:") || to.starts_with("__ext__:"))
-        {
+        if from.starts_with("__ext__:") || to.starts_with("__ext__:") {
             continue;
         }
         let from_esc = cypher_escape(from);
@@ -131,7 +128,6 @@ mod tests {
         let path = dir.path().join("test.cypher");
         let opts = CypherExportOptions {
             output_path: path.clone(),
-            include_external: false,
         };
 
         export_cypher(&g, &opts).unwrap();
@@ -165,7 +161,6 @@ mod tests {
         let path = dir.path().join("test.cypher");
         let opts = CypherExportOptions {
             output_path: path.clone(),
-            include_external: false,
         };
 
         export_cypher(&g, &opts).unwrap();

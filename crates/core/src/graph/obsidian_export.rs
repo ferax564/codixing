@@ -14,8 +14,6 @@ use crate::error::Result;
 pub struct ObsidianExportOptions {
     /// Output directory for the vault.
     pub output_dir: PathBuf,
-    /// Whether to include `__ext__` pseudo-nodes. Default: false.
-    pub include_external: bool,
 }
 
 /// Sanitize a file path for use as an Obsidian note filename.
@@ -52,7 +50,7 @@ pub fn export_obsidian(graph: &CodeGraph, options: &ObsidianExportOptions) -> Re
     let all_nodes = graph.nodes_by_pagerank();
     let nodes: Vec<_> = all_nodes
         .iter()
-        .filter(|n| options.include_external || !n.file_path.starts_with("__ext__:"))
+        .filter(|n| !n.file_path.starts_with("__ext__:"))
         .collect();
 
     // Build edge lookup: for each file, collect callers and callees with edge info.
@@ -64,8 +62,7 @@ pub fn export_obsidian(graph: &CodeGraph, options: &ObsidianExportOptions) -> Re
     let mut callees_of: HashMap<&str, BTreeSet<(&str, &str, &str)>> = HashMap::new();
 
     for (from, to, edge) in &all_edges {
-        if !options.include_external && (from.starts_with("__ext__:") || to.starts_with("__ext__:"))
-        {
+        if from.starts_with("__ext__:") || to.starts_with("__ext__:") {
             continue;
         }
         let kind_str = match edge.kind {
@@ -107,7 +104,10 @@ pub fn export_obsidian(graph: &CodeGraph, options: &ObsidianExportOptions) -> Re
 
         // Frontmatter.
         md.push_str("---\n");
-        md.push_str(&format!("path: \"{}\"\n", node.file_path));
+        md.push_str(&format!(
+            "path: \"{}\"\n",
+            node.file_path.replace('"', "\\\"")
+        ));
         md.push_str(&format!("language: {}\n", lang_lower));
         md.push_str(&format!("pagerank: {:.2}\n", node.pagerank));
         md.push_str(&format!("community: {}\n", community_id));
@@ -201,10 +201,7 @@ pub fn export_obsidian(graph: &CodeGraph, options: &ObsidianExportOptions) -> Re
     {
         let total_edges = all_edges
             .iter()
-            .filter(|(from, to, _)| {
-                options.include_external
-                    || (!from.starts_with("__ext__:") && !to.starts_with("__ext__:"))
-            })
+            .filter(|(from, to, _)| !from.starts_with("__ext__:") && !to.starts_with("__ext__:"))
             .count();
 
         let mut md = String::new();
@@ -298,7 +295,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let opts = ObsidianExportOptions {
             output_dir: dir.path().to_path_buf(),
-            include_external: false,
         };
 
         let count = export_obsidian(&g, &opts).unwrap();
@@ -329,7 +325,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let opts = ObsidianExportOptions {
             output_dir: dir.path().to_path_buf(),
-            include_external: false,
         };
 
         export_obsidian(&g, &opts).unwrap();

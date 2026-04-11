@@ -622,7 +622,11 @@ dependencies = [
 
 [[package]]
 name = "codixing"
+<<<<<<< HEAD
 version = "0.31.1"
+=======
+version = "0.32.0"
+>>>>>>> 2fc193e (fix: address remaining review comments, bump to v0.32.0)
 dependencies = [
  "anyhow",
  "clap",
@@ -637,7 +641,11 @@ dependencies = [
 
 [[package]]
 name = "codixing-core"
+<<<<<<< HEAD
 version = "0.31.1"
+=======
+version = "0.32.0"
+>>>>>>> 2fc193e (fix: address remaining review comments, bump to v0.32.0)
 dependencies = [
  "bitcode",
  "comrak",
@@ -698,7 +706,11 @@ dependencies = [
 
 [[package]]
 name = "codixing-lsp"
+<<<<<<< HEAD
 version = "0.31.1"
+=======
+version = "0.32.0"
+>>>>>>> 2fc193e (fix: address remaining review comments, bump to v0.32.0)
 dependencies = [
  "codixing-core",
  "serde_json",
@@ -711,7 +723,11 @@ dependencies = [
 
 [[package]]
 name = "codixing-mcp"
+<<<<<<< HEAD
 version = "0.31.1"
+=======
+version = "0.32.0"
+>>>>>>> 2fc193e (fix: address remaining review comments, bump to v0.32.0)
 dependencies = [
  "anyhow",
  "clap",
@@ -728,7 +744,11 @@ dependencies = [
 
 [[package]]
 name = "codixing-server"
+<<<<<<< HEAD
 version = "0.31.1"
+=======
+version = "0.32.0"
+>>>>>>> 2fc193e (fix: address remaining review comments, bump to v0.32.0)
 dependencies = [
  "anyhow",
  "axum 0.8.8",
