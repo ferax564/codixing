@@ -40,6 +40,11 @@ pub(crate) fn call_read_file(engine: &Engine, args: &Value) -> (String, bool) {
                 agent_id: engine.session().session_id().to_string(),
             });
             let max_chars = token_budget * 4;
+            let tee_hint = if content.len() > max_chars {
+                engine.tee_if_truncated(&content, "read_file")
+            } else {
+                String::new()
+            };
             let (body, truncated) = if content.len() > max_chars {
                 (&content[..max_chars], true)
             } else {
@@ -59,6 +64,7 @@ pub(crate) fn call_read_file(engine: &Engine, args: &Value) -> (String, bool) {
                     "\n\n*(output truncated at {token_budget} tokens \u{2014} \
                      use line_start/line_end to read a specific section)*"
                 ));
+                out.push_str(&tee_hint);
             }
             (out, false)
         }
@@ -516,9 +522,10 @@ pub(crate) fn call_git_diff(engine: &Engine, args: &Value) -> (String, bool) {
             } else {
                 let max = 12000;
                 if stdout.len() > max {
+                    let tee_hint = engine.tee_if_truncated(&stdout, "git_diff");
                     (
                         format!(
-                            "{}\n\n... (truncated, {} bytes total)",
+                            "{}\n\n... (truncated, {} bytes total){tee_hint}",
                             &stdout[..max],
                             stdout.len()
                         ),
@@ -872,10 +879,16 @@ pub(crate) fn call_run_tests(engine: &mut Engine, args: &Value) -> (String, bool
             let success = out.status.success();
 
             let combined = format!("{stdout}{stderr}");
+            let tee_hint = if combined.len() > 8000 {
+                engine.tee_if_truncated(&combined, "run_tests")
+            } else {
+                String::new()
+            };
             let truncated = if combined.len() > 8000 {
                 format!(
-                    "[output truncated to last 8000 chars]\n...{}",
-                    &combined[combined.len() - 8000..]
+                    "[output truncated to last 8000 chars]\n...{}{}",
+                    &combined[combined.len() - 8000..],
+                    tee_hint
                 )
             } else {
                 combined

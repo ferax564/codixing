@@ -1,0 +1,56 @@
+schema_version = 1
+
+# --- Test runners ---
+
+[[rules]]
+name = "cargo-test-failures"
+match_tool = "run_tests"
+match_output = "FAILED"
+stages = [
+    { type = "strip_ansi" },
+    { type = "keep_lines", pattern = "(FAILED|failures|error\\[|panicked|test result:|---- .+ stdout)" },
+    { type = "head", lines = 80 },
+    { type = "on_empty", message = "All tests passed." },
+]
+
+[[rules]]
+name = "pytest-failures"
+match_tool = "run_tests"
+match_output = "(FAILED|ERROR|ERRORS)"
+stages = [
+    { type = "strip_ansi" },
+    { type = "keep_lines", pattern = "(FAILED|ERROR|short test summary|=====)" },
+    { type = "head", lines = 80 },
+    { type = "on_empty", message = "All tests passed." },
+]
+
+[[rules]]
+name = "test-output-generic"
+match_tool = "run_tests"
+match_min_lines = 200
+stages = [
+    { type = "strip_ansi" },
+    { type = "max_lines", lines = 200 },
+]
+
+# --- Git ---
+
+[[rules]]
+name = "git-diff-large"
+match_tool = "git_diff"
+match_min_lines = 200
+stages = [
+    { type = "strip_lines", pattern = "^index [a-f0-9]+\\.\\.([a-f0-9]+)? " },
+    { type = "max_lines", lines = 300 },
+]
+
+# --- Grep ---
+
+[[rules]]
+name = "grep-high-volume"
+match_tool = "grep_code"
+match_min_lines = 100
+stages = [
+    { type = "dedup_lines" },
+    { type = "head", lines = 150 },
+]

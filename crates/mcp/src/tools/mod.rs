@@ -233,7 +233,16 @@ pub fn dispatch_tool_ref_with_progress(
             Some(result) => result,
             None => (format!("Unknown read-only tool: {name}"), true),
         };
-    (maybe_compact(output, args), is_error)
+    let final_output = if args
+        .get("compact")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        compact_output(&output)
+    } else {
+        engine.filter_output(&output, name).output
+    };
+    (final_output, is_error)
 }
 
 /// Dispatch a `tools/call` invocation to the appropriate engine method.
@@ -275,25 +284,21 @@ pub fn dispatch_tool_with_progress(
             }
         }
     };
-    (maybe_compact(output, args), is_error)
+    let final_output = if args
+        .get("compact")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        compact_output(&output)
+    } else {
+        engine.filter_output(&output, name).output
+    };
+    (final_output, is_error)
 }
 
 // ---------------------------------------------------------------------------
 // Compact output post-processing
 // ---------------------------------------------------------------------------
-
-/// If `compact: true` is present in the args, compress the output to reduce
-/// token usage for AI agents.
-fn maybe_compact(output: String, args: &Value) -> String {
-    let compact = args
-        .get("compact")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if !compact {
-        return output;
-    }
-    compact_output(&output)
-}
 
 /// Compress tool output for token-constrained AI agents:
 /// - Remove fenced code blocks, keep only `// <file>` headers and signatures

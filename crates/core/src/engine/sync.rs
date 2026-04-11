@@ -722,6 +722,8 @@ impl Engine {
             info!("index already up-to-date");
         }
 
+        self.filter_pipeline.cleanup();
+
         Ok(SyncStats {
             added,
             modified,
@@ -847,6 +849,8 @@ impl Engine {
         }
 
         on_progress("sync complete");
+
+        self.filter_pipeline.cleanup();
 
         Ok(SyncStats {
             added,
