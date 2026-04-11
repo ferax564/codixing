@@ -518,6 +518,17 @@ impl Engine {
                     TantivyIndex::open_read_only_with_config(&store.tantivy_dir(), bm25_config)?;
                 (idx, true)
             }
+            Err(CodixingError::Tantivy(ref e))
+                if e.to_string().contains("IncompatibleIndex")
+                    || e.to_string().contains("index version")
+                    || e.to_string().contains("incompatible") =>
+            {
+                warn!(
+                    error = %e,
+                    "index format incompatible with current Tantivy version — rebuilding automatically"
+                );
+                return Self::init(root, config);
+            }
             Err(e) => return Err(e),
         };
 
@@ -793,8 +804,24 @@ impl Engine {
 
         let store = IndexStore::open(&root)?;
         let config = store.load_config()?;
-        let tantivy =
-            TantivyIndex::open_read_only_with_config(&store.tantivy_dir(), config.bm25.clone())?;
+        let tantivy = match TantivyIndex::open_read_only_with_config(
+            &store.tantivy_dir(),
+            config.bm25.clone(),
+        ) {
+            Ok(idx) => idx,
+            Err(CodixingError::Tantivy(ref e))
+                if e.to_string().contains("IncompatibleIndex")
+                    || e.to_string().contains("index version")
+                    || e.to_string().contains("incompatible") =>
+            {
+                warn!(
+                    error = %e,
+                    "index format incompatible with current Tantivy version — rebuilding automatically"
+                );
+                return Self::init(root, config);
+            }
+            Err(e) => return Err(e),
+        };
 
         // Restore symbols: prefer bitcode symbols.bin (preserves all fields
         // including doc_comment, visibility, type_relations) over mmap
