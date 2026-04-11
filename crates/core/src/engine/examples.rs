@@ -187,7 +187,7 @@ mod tests {
 
     #[test]
     fn sort_examples_test_first() {
-        let mut examples = vec![
+        let mut examples = [
             UsageExample {
                 file_path: "src/caller.rs".into(),
                 line_start: 10,
