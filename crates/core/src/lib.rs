@@ -38,6 +38,7 @@ pub use federation::{
     FederatedEngine, FederatedResult, FederatedStats, FederationConfig, ProjectInfo,
     discover::{DiscoveredProject, ProjectType, discover_projects, to_federation_config},
 };
+pub use filter_pipeline::{FilterPipeline, FilterResult};
 pub use graph::{
     CodeEdge, CodeGraph, CodeNode, CommunityResult, EdgeConfidence, EdgeKind, GraphStats,
     HtmlExportOptions, RepoMapOptions, SurprisingEdge,
