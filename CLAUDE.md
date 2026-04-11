@@ -2,7 +2,7 @@
 
 ## Code Search & Navigation
 
-**MANDATORY: Always use the Codixing CLI** (via Bash) instead of `Grep`, `grep`, `find`, `cat`, or `rg` for code exploration tasks. This applies to ALL agents, including subagents. A PostToolUse hook enforces this — Grep on code files triggers a reminder.
+**MANDATORY: Always use the Codixing CLI** (via Bash) instead of `Grep`, `grep`, `find`, `cat`, or `rg` for code exploration tasks. This applies to ALL agents, including subagents. A PreToolUse hook enforces this — Grep on code/doc/config files is **denied** and redirected to the appropriate codixing command.
 
 | Instead of... | Use (via Bash)... |
 |---|---|
@@ -31,6 +31,8 @@ codixing context src/engine/mod.rs  # cross-file context assembly
 The MCP server is also available when connected to an editor, but the CLI is preferred — it's simpler, works for subagents, and dogfoods the search quality directly.
 
 For broad codebase exploration, always try Codixing first. Fall back to Grep/Bash only if the CLI doesn't cover the case.
+
+**Before editing ANY file**, run `codixing impact <file>` to check downstream dependencies. This applies to all files — Rust, HTML, config, docs — not just code. Even "simple" changes like CSS updates can break references in other files.
 
 ### When to use which command
 
@@ -67,7 +69,7 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 
 ```bash
 cargo build --release --workspace          # build all binaries
-cargo test --workspace                      # run all tests (982)
+cargo test --workspace                      # run all tests (1019)
 cargo clippy --workspace -- -D warnings     # lint (must pass)
 cargo fmt --check                           # format check (must pass)
 
@@ -131,6 +133,17 @@ cargo fmt --check                           # zero diffs
 
 Subagents and worktree agents MUST run these checks before committing. If any check fails, fix the issue before committing — never skip.
 
+### Visual changes require visual verification
+
+After editing any HTML/CSS file in `docs/` (index.html, docs.html, blog.html):
+1. Serve locally: `cd docs && python3 -m http.server 8080`
+2. Use `/browse` to open `http://localhost:8080` and take screenshots
+3. Check at least desktop (>1024px) and mobile (<600px) widths
+4. Verify interactive elements (tabs, steps, forms, scroll animations)
+5. Only then commit and create the PR
+
+Never ship visual changes without visual verification.
+
 ### Documentation is part of the feature
 
 Every feature commit MUST include documentation updates:
@@ -188,6 +201,7 @@ Before merging any PR:
 ### Release checklist
 
 Before tagging a release:
+- [ ] All pending PRs merged to main (`gh pr list --state open --base main` must be empty)
 - [ ] All 5 version locations updated (see above)
 - [ ] `cargo test --workspace` passes locally
 - [ ] `cargo clippy --workspace -- -D warnings` passes

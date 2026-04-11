@@ -5,16 +5,37 @@ Code retrieval engine plugin that saves your agent 73% of its token budget — A
 ## Install
 
 ```bash
-claude plugin add /path/to/codixing/claude-plugin
+claude plugin marketplace add ferax564/codixing
+claude plugin install codixing@codixing
 ```
 
-Or if you cloned the repo:
+Or from a local clone:
 
 ```bash
 claude plugin add ./claude-plugin
 ```
 
-## Skills
+## What you get
+
+### PreToolUse hook (automatic)
+
+The plugin ships a **PreToolUse hook** that intercepts Grep calls targeting code, docs, and config files and redirects them to `codixing` CLI commands. This is deterministic enforcement — the Grep call is denied before execution, so the agent must use Codixing instead.
+
+**Denied** (redirected to codixing):
+- Code files: `*.rs`, `*.py`, `*.ts`, `*.js`, `*.go`, `*.java`, `*.c`, `*.cpp`, etc.
+- Doc files: `*.md`, `*.html`
+- Config files: `*.json`, `*.toml`, `*.yaml`, `*.yml`
+- Unfiltered searches for identifiers or concept queries
+
+**Passthrough** (Grep allowed):
+- Version strings (e.g., `0.31.0`)
+- Single-file targets (already know which file)
+- Count mode (`output_mode: "count"`)
+- Very short patterns (<3 chars)
+- Non-indexed paths (`target/`, `node_modules/`, `.git/`)
+- Conflict markers, URLs
+
+### 5 slash commands
 
 | Command | Description |
 |---------|-------------|
@@ -24,13 +45,9 @@ claude plugin add ./claude-plugin
 | `/codixing-preflight` | Duplicate detection — searches for existing implementations before new features |
 | `/codixing-release` | Automated release pipeline — version bump, tests, docs, CI, blog, X post |
 
-## MCP Server
+### MCP server (57 tools)
 
 The plugin bundles the Codixing MCP server via `npx`. On first use, it downloads the `codixing-mcp` binary (~45MB) which then runs locally — no external APIs, no cloud dependencies.
-
-### Tool listing modes
-
-The server supports three modes for how many tools are exposed in `tools/list`:
 
 | Mode | Flag | Tools in `tools/list` | Tokens | Best for |
 |------|------|-----------------------|--------|----------|
@@ -38,27 +55,26 @@ The server supports three modes for how many tools are exposed in `tools/list`:
 | Compact | `--compact` | 2 meta-tools only | ~200 | Token-constrained clients |
 | Full | *(none)* | All 57 tools | ~6,600 | Clients that handle large tool lists |
 
-**All 57 tools remain callable** regardless of mode — the flag only controls which tools appear in `tools/list`. With `--compact`, Claude must call `search_tools` → `get_tool_schema` → actual tool (3 round-trips). With `--medium`, the 17 most-used tools are immediately available.
+All 57 tools remain callable regardless of mode.
 
-### Daemon mode
+### CLI commands (25)
 
-By default, the server auto-forks a daemon process for fast subsequent calls (~1ms vs ~30ms cold start). For MCP clients like Claude Code that manage their own process lifecycle, use `--no-daemon-fork` to prevent stale socket issues.
-
-### Available tools (57)
-
-**Search**: `code_search`, `find_symbol`, `grep_code`, `search_usages`, `read_symbol`, `find_similar`, `stitch_context`
-
-**Graph**: `get_repo_map`, `focus_map`, `get_references`, `get_transitive_deps`, `symbol_callers`, `symbol_callees`, `predict_impact`, `find_orphans`, `explain`
-
-**Files**: `read_file`, `write_file`, `edit_file`, `delete_file`, `apply_patch`, `list_files`, `outline_file`
-
-**Analysis**: `find_tests`, `find_source_for_test`, `get_complexity`, `review_context`, `rename_symbol`, `run_tests`, `get_context_for_task`, `check_staleness`, `generate_onboarding`, `audit_freshness`
-
-**Git**: `git_diff`, `get_hotspots`, `search_changes`, `get_blame`
-
-**Session**: `remember`, `recall`, `forget`, `get_session_summary`, `session_status`, `session_reset_focus`
-
-**Meta**: `index_status`, `search_tools`, `get_tool_schema`, `enrich_docs`
+```bash
+codixing search "query"          # Semantic code search
+codixing symbols Widget          # Find symbol definitions
+codixing usages add_chunk        # Find call sites and imports
+codixing callers src/engine.rs   # Who imports this file
+codixing callees src/engine.rs   # What this file imports
+codixing graph --map             # Architecture overview
+codixing graph --communities     # Louvain community detection
+codixing graph --surprises 10    # Top N surprising edges
+codixing graph --html graph.html # Interactive HTML visualization
+codixing path src/a.rs src/b.rs  # Shortest import chain
+codixing impact src/engine.rs    # Blast radius analysis
+codixing init .                  # Index a project
+codixing sync                    # Incremental re-index
+codixing audit                   # Find stale files
+```
 
 ## Requirements
 

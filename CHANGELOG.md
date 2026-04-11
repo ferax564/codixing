@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.31.0] — 2026-04-11
+
+### Added
+- **Community detection** — Pure-Rust Louvain algorithm on the import graph; `codixing graph --communities` shows natural module clusters with modularity score
+- **Shortest path** — `codixing path <from> <to>` finds the shortest import chain between two files via BFS
+- **Surprise detection** — Scores edges by unexpectedness (cross-community, PageRank disparity, cross-directory, low confidence); `codixing graph --surprises N`
+- **HTML graph export** — `codixing graph --html` generates a self-contained interactive visualization with force-directed layout, community coloring, confidence-styled edges, and surprise highlights
+- **Edge confidence** — Every dependency edge tagged `Verified`/`High`/`Medium`/`Low` based on extraction method
+- **PreToolUse hook** — Plugin ships a deterministic hook that denies Grep on code/doc/config files and redirects to codixing CLI (replaces the advisory PostToolUse reminder)
+
+### Fixed
+- Shortest path BFS excludes `__ext__` pseudo-nodes to prevent false paths through shared external imports
+- Legacy graph deserialization derives edge confidence from edge kind instead of defaulting all to Verified
+- HTML export escapes `</script>` in embedded JSON to prevent XSS breakout
+
 ## [0.21.0] — 2026-03-28
 
 ### Changed
