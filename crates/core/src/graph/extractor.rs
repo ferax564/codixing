@@ -787,42 +787,123 @@ fn extract_bash(tree: &Tree, source: &[u8]) -> Vec<RawImport> {
 // Matlab
 // ---------------------------------------------------------------------------
 
+/// Extract the identifier name from a `field` child of a `field_expression`.
+///
+/// A field child can be an `identifier` (property access) or a `function_call`
+/// (method/constructor call).  For function calls we return the `name` field
+/// (the bare identifier before the parentheses).
+fn matlab_field_name(node: &Node, source: &[u8]) -> Option<String> {
+    match node.kind() {
+        "identifier" => {
+            let t = node_text(node, source).trim().to_string();
+            if t.is_empty() { None } else { Some(t) }
+        }
+        "function_call" => {
+            let name_node = node.child_by_field_name("name")?;
+            let t = node_text(&name_node, source).trim().to_string();
+            if t.is_empty() { None } else { Some(t) }
+        }
+        _ => None,
+    }
+}
+
+/// Build the full dot-qualified path from a `field_expression` node.
+///
+/// The tree-sitter-matlab grammar represents `a.b.c` as a single
+/// `field_expression` with one `object` (identifier) and one or more `field`
+/// children.  Each field child may be an identifier or a function_call.
+/// We concatenate the identifier names with dots.
+fn matlab_dot_path(node: &Node, source: &[u8]) -> Option<String> {
+    if node.kind() != "field_expression" {
+        return None;
+    }
+    let obj = node.child_by_field_name("object")?;
+    let obj_name = matlab_field_name(&obj, source)?;
+    let mut parts = vec![obj_name];
+
+    let mut cursor = node.walk();
+    for child in node.children_by_field_name("field", &mut cursor) {
+        if let Some(name) = matlab_field_name(&child, source) {
+            parts.push(name);
+        }
+    }
+
+    if parts.len() < 2 {
+        return None;
+    }
+
+    let path = parts.join(".");
+    // Only accept paths where every character is alphanumeric, dot, or underscore.
+    if path
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '.' || c == '_')
+    {
+        Some(path)
+    } else {
+        None
+    }
+}
+
 fn extract_matlab(tree: &Tree, source: &[u8]) -> Vec<RawImport> {
     let mut imports = Vec::new();
-    walk_all(tree.root_node(), &mut |node| {
-        // Look for function calls: `addpath('dir')` and direct function calls
-        // that could reference .m files.
-        if node.kind() != "function_call" {
-            return;
-        }
-        // Get the function name.
-        let mut c = node.walk();
-        let children: Vec<_> = node.children(&mut c).collect();
-        if children.is_empty() {
-            return;
-        }
-        let func_name = node_text(&children[0], source).trim().to_string();
+    let mut seen = std::collections::HashSet::new();
 
-        if func_name == "addpath" || func_name == "run" {
-            // Extract string argument for addpath/run.
-            for child in &children {
-                if child.kind() == "arguments" {
-                    let mut ac = child.walk();
-                    for arg in child.children(&mut ac) {
-                        if arg.kind() == "string" {
-                            let text = node_text(&arg, source);
-                            let path = text.trim_matches('\'').trim_matches('"').trim().to_string();
-                            if !path.is_empty() {
-                                imports.push(RawImport {
-                                    path,
-                                    language: Language::Matlab,
-                                    is_relative: false,
-                                });
+    walk_all(tree.root_node(), &mut |node| {
+        match node.kind() {
+            "function_call" => {
+                // addpath('dir') / run('script') — existing behavior.
+                let name_node = match node.child_by_field_name("name") {
+                    Some(n) => n,
+                    None => return,
+                };
+                if name_node.kind() != "identifier" {
+                    return;
+                }
+                let func_name = node_text(&name_node, source).trim();
+                if func_name != "addpath" && func_name != "run" {
+                    return;
+                }
+                let mut c = node.walk();
+                for child in node.children(&mut c) {
+                    if child.kind() == "arguments" {
+                        let mut ac = child.walk();
+                        for arg in child.children(&mut ac) {
+                            if arg.kind() == "string" {
+                                let text = node_text(&arg, source);
+                                let path =
+                                    text.trim_matches('\'').trim_matches('"').trim().to_string();
+                                if !path.is_empty() && seen.insert(path.clone()) {
+                                    imports.push(RawImport {
+                                        path,
+                                        language: Language::Matlab,
+                                        is_relative: false,
+                                    });
+                                }
                             }
                         }
                     }
                 }
             }
+            "field_expression" => {
+                // Only capture the outermost field_expression — skip if this
+                // node's parent is also a field_expression (part of a longer
+                // chain that will be captured by the parent).
+                if let Some(parent) = node.parent() {
+                    if parent.kind() == "field_expression" {
+                        return;
+                    }
+                }
+                if let Some(dot_path) = matlab_dot_path(&node, source) {
+                    if seen.insert(dot_path.clone()) {
+                        imports.push(RawImport {
+                            path: dot_path,
+                            language: Language::Matlab,
+                            is_relative: false,
+                        });
+                    }
+                }
+            }
+            _ => {}
         }
     });
     imports
@@ -1260,5 +1341,68 @@ mod tests {
         let imports = ImportExtractor::extract(&tree, src.as_bytes(), Language::Bash);
         // Variable expansion paths should be skipped.
         assert!(imports.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // MATLAB
+    // -----------------------------------------------------------------------
+
+    fn parse_matlab(source: &str) -> Tree {
+        let mut parser = tree_sitter::Parser::new();
+        parser
+            .set_language(&tree_sitter_matlab::LANGUAGE.into())
+            .unwrap();
+        parser.parse(source, None).unwrap()
+    }
+
+    #[test]
+    fn matlab_dot_notation_import() {
+        let src = concat!(
+            "x = aerotool.core.SessionState();\n",
+            "y = aerotool.compute.GatingEvaluator.apply();\n",
+        );
+        let tree = parse_matlab(src);
+        let imports = ImportExtractor::extract(&tree, src.as_bytes(), Language::Matlab);
+        let paths: Vec<&str> = imports.iter().map(|i| i.path.as_str()).collect();
+        assert!(
+            paths.contains(&"aerotool.core.SessionState"),
+            "expected aerotool.core.SessionState, got: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"aerotool.compute.GatingEvaluator.apply"),
+            "expected aerotool.compute.GatingEvaluator.apply, got: {paths:?}"
+        );
+        // Dot-path imports are not relative.
+        for imp in &imports {
+            assert!(!imp.is_relative);
+        }
+    }
+
+    #[test]
+    fn matlab_dot_notation_deduplicates() {
+        let src = concat!("a = pkg.Foo();\n", "b = pkg.Foo();\n", "c = pkg.Foo();\n",);
+        let tree = parse_matlab(src);
+        let imports = ImportExtractor::extract(&tree, src.as_bytes(), Language::Matlab);
+        let foo_count = imports.iter().filter(|i| i.path == "pkg.Foo").count();
+        assert_eq!(
+            foo_count, 1,
+            "duplicate pkg.Foo should be deduplicated, got {foo_count}"
+        );
+    }
+
+    #[test]
+    fn matlab_mixed_addpath_and_dots() {
+        let src = concat!("addpath('/tools/lib');\n", "mypackage.utils.Helper();\n",);
+        let tree = parse_matlab(src);
+        let imports = ImportExtractor::extract(&tree, src.as_bytes(), Language::Matlab);
+        let paths: Vec<&str> = imports.iter().map(|i| i.path.as_str()).collect();
+        assert!(
+            paths.contains(&"/tools/lib"),
+            "expected addpath import, got: {paths:?}"
+        );
+        assert!(
+            paths.contains(&"mypackage.utils.Helper"),
+            "expected dot-notation import, got: {paths:?}"
+        );
     }
 }
