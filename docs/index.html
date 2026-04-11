@@ -25,30 +25,32 @@
 
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
   <link rel="icon" type="image/svg+xml" href="favicon.svg" />
   <style>
     :root {
-      --bg: #000000;
-      --bg-1: #0a0a0f;
-      --bg-2: #0d1117;
-      --bg-3: #161b22;
-      --border: rgba(48, 54, 61, 0.8);
-      --border-glow: rgba(0, 212, 170, 0.25);
-      --cyan: #00d4aa;
-      --cyan-dim: rgba(0, 212, 170, 0.08);
-      --cyan-mid: rgba(0, 212, 170, 0.15);
-      --purple: #8b5cf6;
-      --purple-dim: rgba(139, 92, 246, 0.08);
-      --orange: #f97316;
-      --text: #f0f6fc;
-      --text-muted: #8b949e;
-      --text-dim: #484f58;
-      --green: #3fb950;
-      --red: #f85149;
-      --yellow: #e3b341;
-      --radius: 12px;
-      --radius-lg: 20px;
+      /* OpenCode-inspired warm terminal palette */
+      --bg: #201d1d;
+      --bg-1: #201d1d;
+      --bg-2: #302c2c;
+      --bg-3: #302c2c;
+      --border: rgba(15, 0, 0, 0.12);
+      --border-glow: #646262;
+      --border-strong: #646262;
+      --cyan: #007aff;
+      --cyan-dim: rgba(0, 122, 255, 0.08);
+      --cyan-mid: rgba(0, 122, 255, 0.12);
+      --purple: #007aff;
+      --purple-dim: rgba(0, 122, 255, 0.06);
+      --orange: #ff9f0a;
+      --text: #fdfcfc;
+      --text-muted: #9a9898;
+      --text-dim: #6e6e73;
+      --green: #30d158;
+      --red: #ff3b30;
+      --yellow: #ff9f0a;
+      --radius: 4px;
+      --radius-lg: 4px;
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -56,66 +58,19 @@
     html { scroll-behavior: smooth; }
 
     body {
-      font-family: "Inter", system-ui, sans-serif;
+      font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
       background: var(--bg);
       color: var(--text);
-      line-height: 1.6;
+      line-height: 1.5;
       overflow-x: hidden;
+      font-size: 16px;
+      font-weight: 400;
     }
 
-    ::selection { background: rgba(0, 212, 170, 0.2); }
-
-    /* ── Scrollbar ── */
-    ::-webkit-scrollbar { width: 6px; }
-    ::-webkit-scrollbar-track { background: var(--bg); }
-    ::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 3px; }
-
-    /* ── Grid background ── */
-    .grid-bg {
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      z-index: 0;
-      background-image:
-        linear-gradient(rgba(0,212,170,0.07) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(0,212,170,0.07) 1px, transparent 1px);
-      background-size: 60px 60px;
-    }
-
-    /* ── Glows ── */
-    .glow-orb {
-      position: fixed;
-      border-radius: 50%;
-      pointer-events: none;
-      z-index: 0;
-      filter: blur(100px);
-      opacity: 1;
-    }
-    .glow-orb-1 {
-      width: 700px; height: 700px;
-      top: -250px; left: -150px;
-      background: radial-gradient(circle, rgba(0,212,170,0.38) 0%, transparent 70%);
-      animation: drift1 20s ease-in-out infinite alternate;
-    }
-    .glow-orb-2 {
-      width: 600px; height: 600px;
-      top: 15%; right: -200px;
-      background: radial-gradient(circle, rgba(139,92,246,0.3) 0%, transparent 70%);
-      animation: drift2 25s ease-in-out infinite alternate;
-    }
-    .glow-orb-3 {
-      width: 500px; height: 500px;
-      bottom: 15%; left: 25%;
-      background: radial-gradient(circle, rgba(0,153,255,0.22) 0%, transparent 70%);
-      animation: drift3 18s ease-in-out infinite alternate;
-    }
-
-    @keyframes drift1 { from { transform: translate(0,0); } to { transform: translate(60px, 80px); } }
-    @keyframes drift2 { from { transform: translate(0,0); } to { transform: translate(-50px, 60px); } }
-    @keyframes drift3 { from { transform: translate(0,0); } to { transform: translate(40px, -60px); } }
+    ::selection { background: rgba(0, 122, 255, 0.2); }
 
     /* ── Layout ── */
-    .wrapper { position: relative; z-index: 1; max-width: 1160px; margin: 0 auto; padding: 0 24px; }
+    .wrapper { position: relative; z-index: 1; max-width: 900px; margin: 0 auto; padding: 0 24px; }
 
     /* ── Nav ── */
     nav {
@@ -123,22 +78,15 @@
       top: 0; left: 0; right: 0;
       z-index: 100;
       padding: 0 24px;
-      height: 64px;
+      height: 56px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      background: rgba(0, 0, 0, 0.7);
-      backdrop-filter: blur(20px);
+      background: var(--bg);
       border-bottom: 1px solid var(--border);
-      animation: slideDown 0.6s ease both;
     }
 
-    @keyframes slideDown {
-      from { opacity: 0; transform: translateY(-16px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-
-    .nav-inner { max-width: 1160px; margin: 0 auto; width: 100%; display: flex; align-items: center; justify-content: space-between; }
+    .nav-inner { max-width: 900px; margin: 0 auto; width: 100%; display: flex; align-items: center; justify-content: space-between; }
 
     .brand {
       display: flex;
@@ -147,26 +95,16 @@
       text-decoration: none;
       color: var(--text);
       font-weight: 700;
-      font-size: 1.05rem;
-      letter-spacing: -0.01em;
+      font-size: 1rem;
     }
 
     .brand-icon {
       width: 32px; height: 32px;
-      background: linear-gradient(135deg, var(--cyan), #0099ff);
-      border-radius: 8px;
+      border-radius: var(--radius);
       display: flex; align-items: center; justify-content: center;
-      box-shadow: 0 0 20px rgba(0,212,170,0.4), inset 0 1px 0 rgba(255,255,255,0.1);
       font-size: 16px;
       position: relative;
       overflow: hidden;
-    }
-
-    .brand-icon::after {
-      content: '';
-      position: absolute;
-      inset: 0;
-      background: linear-gradient(135deg, transparent 40%, rgba(255,255,255,0.15));
     }
 
     .brand-icon svg { position: relative; z-index: 1; }
@@ -178,15 +116,17 @@
     }
 
     .nav-links a {
-      text-decoration: none;
+      text-decoration: underline;
+      text-underline-offset: 3px;
+      text-decoration-color: transparent;
       color: var(--text-muted);
-      font-size: 0.9rem;
-      padding: 7px 14px;
-      border-radius: 8px;
-      transition: color 0.2s, background 0.2s;
+      font-size: 16px;
+      font-weight: 500;
+      padding: 7px 12px;
+      transition: color 0.15s, text-decoration-color 0.15s;
     }
 
-    .nav-links a:hover { color: var(--text); background: var(--bg-3); }
+    .nav-links a:hover { color: var(--text); text-decoration-color: var(--text); }
 
     .nav-cta {
       display: flex;
@@ -194,19 +134,19 @@
       gap: 6px;
       text-decoration: none;
       color: var(--bg);
-      background: var(--cyan);
-      font-size: 0.88rem;
-      font-weight: 600;
-      padding: 7px 16px;
-      border-radius: 8px;
-      transition: opacity 0.2s, box-shadow 0.2s, transform 0.2s;
+      background: var(--text);
+      font-size: 16px;
+      font-weight: 500;
+      padding: 4px 20px;
+      border-radius: var(--radius);
+      transition: opacity 0.15s;
     }
 
-    .nav-cta:hover { opacity: 0.9; transform: translateY(-1px); box-shadow: 0 8px 20px rgba(0,212,170,0.3); }
+    .nav-cta:hover { opacity: 0.85; }
 
     /* ── Hero ── */
     .hero {
-      padding: 160px 0 100px;
+      padding: 140px 0 80px;
       text-align: center;
       position: relative;
     }
@@ -215,15 +155,14 @@
       display: inline-flex;
       align-items: center;
       gap: 8px;
-      background: var(--cyan-dim);
-      border: 1px solid var(--border-glow);
-      color: var(--cyan);
+      border: 1px solid var(--border-strong);
+      color: var(--text-muted);
       font-size: 0.78rem;
-      font-weight: 600;
-      letter-spacing: 0.06em;
+      font-weight: 500;
+      letter-spacing: 0.04em;
       text-transform: uppercase;
       padding: 6px 14px;
-      border-radius: 999px;
+      border-radius: var(--radius);
       margin-bottom: 28px;
       animation: fadeInUp 0.7s ease 0.1s both;
     }
@@ -241,27 +180,25 @@
     }
 
     .hero h1 {
-      font-size: clamp(2.8rem, 6vw, 5.2rem);
+      font-size: clamp(2.2rem, 5vw, 3.6rem);
       font-weight: 700;
-      line-height: 1.04;
-      letter-spacing: -0.04em;
+      line-height: 1.15;
+      letter-spacing: -0.02em;
       margin-bottom: 24px;
       animation: fadeInUp 0.7s ease 0.2s both;
     }
 
     .grad {
-      background: linear-gradient(135deg, var(--cyan) 0%, #0099ff 50%, var(--purple) 100%);
-      -webkit-background-clip: text;
-      background-clip: text;
-      -webkit-text-fill-color: transparent;
+      color: var(--cyan);
     }
 
     .hero-sub {
       color: var(--text-muted);
-      font-size: 1.15rem;
+      font-size: 1rem;
       max-width: 58ch;
       margin: 0 auto 36px;
-      line-height: 1.7;
+      line-height: 1.5;
+      font-weight: 400;
       animation: fadeInUp 0.7s ease 0.3s both;
     }
 
@@ -279,18 +216,17 @@
       display: inline-flex;
       align-items: center;
       gap: 8px;
-      background: var(--cyan);
+      background: var(--text);
       color: var(--bg);
       text-decoration: none;
-      font-weight: 600;
-      font-size: 0.95rem;
-      padding: 13px 24px;
-      border-radius: 10px;
-      transition: transform 0.2s, box-shadow 0.2s, opacity 0.2s;
-      box-shadow: 0 0 0 1px rgba(0,212,170,0.4), 0 8px 30px rgba(0,212,170,0.2);
+      font-weight: 500;
+      font-size: 16px;
+      padding: 8px 24px;
+      border-radius: var(--radius);
+      transition: opacity 0.15s;
     }
 
-    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 0 0 1px rgba(0,212,170,0.6), 0 16px 40px rgba(0,212,170,0.3); opacity: 0.95; }
+    .btn-primary:hover { opacity: 0.85; }
 
     .btn-secondary {
       display: inline-flex;
@@ -300,55 +236,51 @@
       color: var(--text);
       text-decoration: none;
       font-weight: 500;
-      font-size: 0.95rem;
-      padding: 13px 24px;
-      border-radius: 10px;
-      border: 1px solid var(--border);
-      transition: transform 0.2s, border-color 0.2s, background 0.2s;
+      font-size: 16px;
+      padding: 8px 24px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border-strong);
+      transition: border-color 0.15s;
     }
 
-    .btn-secondary:hover { transform: translateY(-2px); border-color: var(--cyan); background: var(--cyan-dim); }
+    .btn-secondary:hover { border-color: var(--text); }
 
     /* ── Metrics strip ── */
     .metrics-strip {
       display: grid;
       grid-template-columns: repeat(4, 1fr);
       gap: 1px;
-      background: var(--border);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-lg);
+      background: var(--border-strong);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
       overflow: hidden;
       animation: fadeInUp 0.7s ease 0.5s both;
     }
 
     .metric-item {
-      background: var(--bg-1);
+      background: var(--bg);
       padding: 24px 20px;
       text-align: center;
-      transition: background 0.2s;
     }
-
-    .metric-item:hover { background: var(--bg-2); }
 
     .metric-val {
       display: block;
-      font-size: 1.8rem;
+      font-size: 1.6rem;
       font-weight: 700;
-      letter-spacing: -0.03em;
       color: var(--cyan);
       font-variant-numeric: tabular-nums;
     }
 
     .metric-label {
       display: block;
-      font-size: 0.8rem;
+      font-size: 0.78rem;
       color: var(--text-muted);
       margin-top: 4px;
     }
 
     /* ── Section layout ── */
     section {
-      padding: 100px 0;
+      padding: 96px 0;
     }
 
     .section-label {
@@ -356,7 +288,7 @@
       align-items: center;
       gap: 6px;
       font-size: 0.75rem;
-      font-weight: 600;
+      font-weight: 700;
       letter-spacing: 0.1em;
       text-transform: uppercase;
       color: var(--cyan);
@@ -370,24 +302,24 @@
     }
 
     .section-title {
-      font-size: clamp(1.8rem, 3vw, 2.6rem);
+      font-size: clamp(1.6rem, 3vw, 2.4rem);
       font-weight: 700;
-      letter-spacing: -0.03em;
+      letter-spacing: -0.02em;
       margin-bottom: 16px;
       line-height: 1.15;
     }
 
     .section-sub {
       color: var(--text-muted);
-      font-size: 1.05rem;
+      font-size: 1rem;
       max-width: 60ch;
       margin-bottom: 48px;
-      line-height: 1.7;
+      line-height: 1.5;
     }
 
     /* ── Demo Terminal ── */
     .demo-section {
-      background: var(--bg-1);
+      background: var(--bg);
       border-top: 1px solid var(--border);
       border-bottom: 1px solid var(--border);
     }
@@ -419,7 +351,7 @@
 
     .demo-stat-icon {
       width: 32px; height: 32px;
-      border-radius: 8px;
+      border-radius: var(--radius);
       display: flex; align-items: center; justify-content: center;
       font-size: 15px;
       flex-shrink: 0;
@@ -427,17 +359,16 @@
 
     .demo-stat-icon.cyan { background: var(--cyan-dim); }
     .demo-stat-icon.purple { background: var(--purple-dim); }
-    .demo-stat-icon.orange { background: rgba(249,115,22,0.08); }
+    .demo-stat-icon.orange { background: rgba(255,159,10,0.08); }
 
-    .demo-stat-text strong { display: block; font-size: 0.9rem; font-weight: 600; }
+    .demo-stat-text strong { display: block; font-size: 0.88rem; font-weight: 700; }
     .demo-stat-text span { font-size: 0.82rem; color: var(--text-muted); }
 
     .terminal {
       background: var(--bg-2);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-lg);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
       overflow: hidden;
-      box-shadow: 0 0 0 1px rgba(0,212,170,0.05), 0 40px 80px rgba(0,0,0,0.6);
     }
 
     .terminal-header {
@@ -450,27 +381,23 @@
     }
 
     .dot { width: 12px; height: 12px; border-radius: 50%; }
-    .dot-r { background: #ff5f57; }
-    .dot-y { background: #ffbd2e; }
-    .dot-g { background: #28ca41; }
+    .dot-r { background: #ff3b30; }
+    .dot-y { background: #ff9f0a; }
+    .dot-g { background: #30d158; }
 
     .terminal-title {
       margin-left: 8px;
-      font-family: "JetBrains Mono", monospace;
       font-size: 0.78rem;
       color: var(--text-dim);
     }
 
     .terminal-body {
       padding: 20px 24px;
-      font-family: "JetBrains Mono", monospace;
       font-size: 0.82rem;
       line-height: 1.7;
       min-height: 340px;
       overflow-x: auto;
     }
-
-    .t-line { white-space: nowrap; }
 
     .t-line { display: flex; gap: 8px; white-space: nowrap; }
     .t-prompt { color: var(--cyan); user-select: none; }
@@ -481,7 +408,7 @@
     .t-info { color: var(--cyan); }
     .t-warn { color: var(--yellow); }
     .t-blank { height: 8px; }
-    .t-section { color: var(--purple); font-weight: 600; }
+    .t-section { color: var(--cyan); font-weight: 700; }
 
     .cursor {
       display: inline-block;
@@ -506,26 +433,25 @@
     .bench-card {
       background: var(--bg-1);
       border: 1px solid var(--border);
-      border-radius: var(--radius-lg);
+      border-radius: var(--radius);
       padding: 28px;
-      transition: border-color 0.3s;
+      transition: border-color 0.15s;
     }
 
-    .bench-card:hover { border-color: var(--border-glow); }
+    .bench-card:hover { border-color: var(--border-strong); }
 
     .bench-card h3 {
       font-size: 1rem;
-      font-weight: 600;
+      font-weight: 700;
       margin-bottom: 20px;
       color: var(--text-muted);
     }
 
     .bench-card h3 code {
-      font-family: "JetBrains Mono", monospace;
       color: var(--cyan);
       background: var(--cyan-dim);
       padding: 2px 6px;
-      border-radius: 4px;
+      border-radius: var(--radius);
       font-size: 0.85em;
     }
 
@@ -549,22 +475,21 @@
       letter-spacing: 0.06em;
       text-transform: uppercase;
       padding: 3px 8px;
-      border-radius: 4px;
+      border-radius: var(--radius);
       margin-bottom: 10px;
     }
 
-    .comp-tag.bad { background: rgba(248, 81, 73, 0.15); color: var(--red); border: 1px solid rgba(248,81,73,0.2); }
-    .comp-tag.good { background: rgba(63, 185, 80, 0.15); color: var(--green); border: 1px solid rgba(63,185,80,0.2); }
+    .comp-tag.bad { background: rgba(255, 59, 48, 0.12); color: var(--red); border: 1px solid rgba(255,59,48,0.2); }
+    .comp-tag.good { background: rgba(48, 209, 88, 0.12); color: var(--green); border: 1px solid rgba(48,209,88,0.2); }
 
     .comp-code {
-      font-family: "JetBrains Mono", monospace;
       font-size: 0.8rem;
       color: var(--text-muted);
       line-height: 1.6;
     }
 
     .comp-code .cmd { color: var(--text); }
-    .comp-code .num { color: var(--orange); font-weight: 600; }
+    .comp-code .num { color: var(--orange); font-weight: 700; }
     .comp-code .ok { color: var(--green); }
 
     .bar-chart { margin-top: 16px; }
@@ -582,37 +507,37 @@
       flex: 1;
       height: 8px;
       background: var(--bg-3);
-      border-radius: 4px;
+      border-radius: var(--radius);
       overflow: hidden;
     }
 
     .bar-fill {
       height: 100%;
-      border-radius: 4px;
+      border-radius: var(--radius);
       transform-origin: left;
       transform: scaleX(0);
       transition: transform 1s ease 0.3s;
     }
 
-    .bar-fill.bad { background: linear-gradient(90deg, var(--red), #ff8080); }
-    .bar-fill.good { background: linear-gradient(90deg, var(--cyan), #00ffcc); }
+    .bar-fill.bad { background: var(--red); }
+    .bar-fill.good { background: var(--cyan); }
     .bar-fill.animated { transform: scaleX(var(--w, 1)); }
 
-    .bar-val { font-size: 0.8rem; font-family: "JetBrains Mono", monospace; color: var(--text-muted); width: 80px; text-align: right; flex-shrink: 0; }
+    .bar-val { font-size: 0.8rem; color: var(--text-muted); width: 80px; text-align: right; flex-shrink: 0; }
 
     .insight-card {
       background: var(--bg-1);
       border: 1px solid var(--border);
-      border-radius: var(--radius-lg);
+      border-radius: var(--radius);
       padding: 28px;
       display: flex;
       flex-direction: column;
       justify-content: center;
     }
 
-    .insight-card h3 { font-size: 1.05rem; margin-bottom: 12px; }
-    .insight-card p { color: var(--text-muted); font-size: 0.95rem; line-height: 1.7; }
-    .insight-card .highlight { color: var(--cyan); font-weight: 600; }
+    .insight-card h3 { font-size: 1rem; font-weight: 700; margin-bottom: 12px; }
+    .insight-card p { color: var(--text-muted); font-size: 0.95rem; line-height: 1.5; }
+    .insight-card .highlight { color: var(--cyan); font-weight: 700; }
 
     /* ── Features ── */
     .features-section { background: var(--bg); }
@@ -626,9 +551,9 @@
     .feature-card {
       background: var(--bg-1);
       border: 1px solid var(--border);
-      border-radius: var(--radius-lg);
+      border-radius: var(--radius);
       padding: 28px;
-      transition: border-color 0.3s, transform 0.3s, background 0.3s;
+      transition: border-color 0.15s;
       cursor: default;
       opacity: 0;
       transform: translateY(24px);
@@ -637,51 +562,49 @@
     .feature-card.visible {
       opacity: 1;
       transform: translateY(0);
-      transition: opacity 0.5s ease, transform 0.5s ease, border-color 0.3s, background 0.3s;
+      transition: opacity 0.5s ease, transform 0.5s ease, border-color 0.15s;
     }
 
     .feature-card:hover {
-      border-color: var(--border-glow);
-      background: var(--bg-2);
-      transform: translateY(-4px) !important;
+      border-color: var(--border-strong);
     }
 
     .feature-icon {
-      width: 44px; height: 44px;
-      border-radius: 10px;
+      width: 40px; height: 40px;
+      border-radius: var(--radius);
       display: flex; align-items: center; justify-content: center;
-      font-size: 22px;
-      margin-bottom: 18px;
+      font-size: 20px;
+      margin-bottom: 16px;
+      border: 1px solid var(--border);
     }
 
-    .feature-icon.cyan { background: var(--cyan-dim); box-shadow: 0 0 20px rgba(0,212,170,0.1); }
-    .feature-icon.purple { background: var(--purple-dim); box-shadow: 0 0 20px rgba(139,92,246,0.1); }
-    .feature-icon.orange { background: rgba(249,115,22,0.08); }
-    .feature-icon.blue { background: rgba(0,153,255,0.08); }
-    .feature-icon.green { background: rgba(63,185,80,0.08); }
-    .feature-icon.pink { background: rgba(236,72,153,0.08); }
+    .feature-icon.cyan { background: var(--cyan-dim); }
+    .feature-icon.purple { background: var(--purple-dim); }
+    .feature-icon.orange { background: rgba(255,159,10,0.06); }
+    .feature-icon.blue { background: rgba(0,122,255,0.06); }
+    .feature-icon.green { background: rgba(48,209,88,0.06); }
+    .feature-icon.pink { background: rgba(255,59,48,0.06); }
 
     .feature-card h3 {
       font-size: 1rem;
-      font-weight: 600;
+      font-weight: 700;
       margin-bottom: 8px;
     }
 
     .feature-card p {
       color: var(--text-muted);
       font-size: 0.88rem;
-      line-height: 1.65;
+      line-height: 1.5;
     }
 
     .feature-tag {
       display: inline-block;
       margin-top: 14px;
-      font-family: "JetBrains Mono", monospace;
       font-size: 0.72rem;
       color: var(--cyan);
       background: var(--cyan-dim);
       padding: 3px 8px;
-      border-radius: 4px;
+      border-radius: var(--radius);
     }
 
     /* ── MCP Tools ── */
@@ -705,17 +628,16 @@
       border: 1px solid var(--border);
       border-radius: var(--radius);
       padding: 14px 16px;
-      transition: border-color 0.2s, background 0.2s;
+      transition: border-color 0.15s;
       cursor: default;
     }
 
-    .tool-card:hover { border-color: var(--border-glow); background: var(--bg-3); }
+    .tool-card:hover { border-color: var(--border-strong); }
 
     .tool-name {
-      font-family: "JetBrains Mono", monospace;
       font-size: 0.82rem;
       color: var(--cyan);
-      font-weight: 600;
+      font-weight: 700;
       margin-bottom: 4px;
     }
 
@@ -727,8 +649,8 @@
 
     .mcp-code-block {
       background: var(--bg-2);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-lg);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
       overflow: hidden;
     }
 
@@ -749,8 +671,7 @@
       color: var(--text-muted);
       cursor: pointer;
       border-bottom: 2px solid transparent;
-      transition: color 0.2s, border-color 0.2s;
-      font-family: "JetBrains Mono", monospace;
+      transition: color 0.15s, border-color 0.15s;
       user-select: none;
     }
 
@@ -761,7 +682,6 @@
       position: absolute;
       inset: 0;
       padding: 20px 24px;
-      font-family: "JetBrains Mono", monospace;
       font-size: 0.8rem;
       line-height: 1.7;
       white-space: pre;
@@ -771,7 +691,7 @@
 
     .code-pane.active { display: block; }
 
-    .c-key { color: var(--purple); }
+    .c-key { color: var(--cyan); }
     .c-str { color: var(--yellow); }
     .c-num { color: var(--orange); }
     .c-cmt { color: var(--text-dim); }
@@ -801,7 +721,7 @@
       padding: 20px 0;
       border-bottom: 1px solid var(--border);
       cursor: pointer;
-      transition: opacity 0.2s;
+      transition: opacity 0.15s;
     }
 
     .step:last-child { border-bottom: none; }
@@ -817,26 +737,25 @@
       font-weight: 700;
       color: var(--text-muted);
       flex-shrink: 0;
-      transition: background 0.2s, border-color 0.2s, color 0.2s;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
     }
 
     .step.active .step-num {
       background: var(--cyan);
       border-color: var(--cyan);
-      color: var(--bg);
+      color: var(--text);
     }
 
-    .step-content h4 { font-size: 0.95rem; margin-bottom: 4px; }
+    .step-content h4 { font-size: 0.95rem; font-weight: 700; margin-bottom: 4px; }
     .step-content p { font-size: 0.85rem; color: var(--text-muted); line-height: 1.5; }
 
     .code-window {
       background: var(--bg-2);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-lg);
+      border: 1px solid var(--border-strong);
+      border-radius: var(--radius);
       overflow: hidden;
-      box-shadow: 0 0 0 1px rgba(0,212,170,0.04), 0 40px 80px rgba(0,0,0,0.5);
       position: sticky;
-      top: 80px;
+      top: 72px;
     }
 
     .code-window-header {
@@ -850,7 +769,6 @@
 
     .code-window-title {
       margin-left: 8px;
-      font-family: "JetBrains Mono", monospace;
       font-size: 0.78rem;
       color: var(--text-dim);
     }
@@ -866,7 +784,6 @@
       position: absolute;
       inset: 0;
       padding: 24px;
-      font-family: "JetBrains Mono", monospace;
       font-size: 0.83rem;
       line-height: 1.75;
       white-space: pre;
@@ -881,22 +798,22 @@
     /* ── CTA Banner ── */
     .cta-banner {
       margin: 0;
-      padding: 100px 0;
+      padding: 96px 0;
       text-align: center;
       background: var(--bg-1);
       border-top: 1px solid var(--border);
     }
 
     .cta-banner h2 {
-      font-size: clamp(2rem, 4vw, 3.2rem);
+      font-size: clamp(1.8rem, 4vw, 2.8rem);
       font-weight: 700;
-      letter-spacing: -0.03em;
+      letter-spacing: -0.02em;
       margin-bottom: 16px;
     }
 
     .cta-banner p {
       color: var(--text-muted);
-      font-size: 1.05rem;
+      font-size: 1rem;
       max-width: 50ch;
       margin: 0 auto 36px;
     }
@@ -910,7 +827,6 @@
     .waitlist-section h2 {
       font-size: clamp(1.5rem, 3vw, 2rem);
       font-weight: 700;
-      letter-spacing: -0.03em;
       margin-bottom: 12px;
     }
 
@@ -922,7 +838,7 @@
 
     .hero-waitlist {
       animation: fadeInUp 0.7s ease 0.5s both;
-      margin-bottom: 72px;
+      margin-bottom: 64px;
     }
 
     .waitlist-form {
@@ -934,40 +850,39 @@
 
     .waitlist-form input[type="email"] {
       flex: 1;
-      background: var(--bg-3);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 12px 16px;
-      color: var(--text);
-      font-size: 0.95rem;
+      background: #f8f7f7;
+      border: 1px solid rgba(15, 0, 0, 0.12);
+      border-radius: 6px;
+      padding: 12px 20px;
+      color: #201d1d;
+      font-size: 16px;
       font-family: inherit;
       outline: none;
-      transition: border-color 0.2s;
+      transition: border-color 0.15s;
     }
 
     .waitlist-form input[type="email"]::placeholder { color: var(--text-dim); }
 
     .waitlist-form input[type="email"]:focus {
       border-color: var(--cyan);
-      box-shadow: 0 0 0 3px rgba(0,212,170,0.1);
     }
 
     .waitlist-form button {
-      background: var(--cyan);
-      color: #000;
-      border: none;
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border-strong);
       border-radius: var(--radius);
-      padding: 12px 22px;
-      font-size: 0.9rem;
-      font-weight: 600;
+      padding: 4px 20px;
+      font-size: 16px;
+      font-weight: 500;
       font-family: inherit;
       cursor: pointer;
       white-space: nowrap;
-      transition: opacity 0.2s, transform 0.2s;
+      transition: opacity 0.15s;
     }
 
-    .waitlist-form button:hover { opacity: 0.88; transform: translateY(-1px); }
-    .waitlist-form button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+    .waitlist-form button:hover { opacity: 0.85; }
+    .waitlist-form button:disabled { opacity: 0.5; cursor: not-allowed; }
 
     .waitlist-fine {
       font-size: 0.8rem;
@@ -977,8 +892,8 @@
 
     .waitlist-success {
       display: none;
-      background: rgba(63, 185, 80, 0.08);
-      border: 1px solid rgba(63, 185, 80, 0.3);
+      background: rgba(48, 209, 88, 0.08);
+      border: 1px solid rgba(48, 209, 88, 0.3);
       border-radius: var(--radius);
       padding: 14px 20px;
       color: var(--green);
@@ -1009,12 +924,12 @@
       font-size: 0.88rem;
     }
 
-    footer a { color: var(--cyan); text-decoration: none; }
-    footer a:hover { opacity: 0.8; }
+    footer a { color: var(--text-muted); text-decoration: underline; text-underline-offset: 3px; }
+    footer a:hover { color: var(--text); }
 
-    .footer-inner { max-width: 1160px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; }
+    .footer-inner { max-width: 900px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; }
 
-    .footer-brand { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--text); }
+    .footer-brand { display: flex; align-items: center; gap: 8px; font-weight: 700; color: var(--text); }
 
     .footer-links { display: flex; gap: 24px; }
     .footer-links a { color: var(--text-muted); }
@@ -1028,7 +943,7 @@
     .reveal {
       opacity: 0;
       transform: translateY(24px);
-      transition: opacity 0.6s ease, transform 0.6s ease;
+      transition: opacity 0.5s ease, transform 0.5s ease;
     }
 
     .reveal.visible {
@@ -1047,20 +962,17 @@
     }
 
     @media (max-width: 600px) {
-      .hero h1 { font-size: 2.4rem; }
-      .hero { padding: 120px 0 60px; }
+      .hero h1 { font-size: 2rem; }
+      .hero { padding: 100px 0 48px; }
       .nav-links { display: none; }
       .feature-grid { grid-template-columns: 1fr; }
       .metrics-strip { grid-template-columns: 1fr 1fr; }
       .footer-inner { flex-direction: column; align-items: center; }
+      section { padding: 64px 0; }
     }
   </style>
 </head>
 <body>
-  <div class="grid-bg"></div>
-  <div class="glow-orb glow-orb-1"></div>
-  <div class="glow-orb glow-orb-2"></div>
-  <div class="glow-orb glow-orb-3"></div>
 
   <!-- Nav -->
   <nav>
@@ -1153,7 +1065,7 @@
           <div class="demo-stat-list">
             <div class="demo-stat">
               <div class="demo-stat-icon cyan">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#00d4aa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/><path d="M11 8v6M8 11h6"/></svg>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#007aff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/><path d="M11 8v6M8 11h6"/></svg>
               </div>
               <div class="demo-stat-text">
                 <strong>Hybrid search</strong>
@@ -1162,7 +1074,7 @@
             </div>
             <div class="demo-stat">
               <div class="demo-stat-icon purple">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><path d="M7 12h5l5-5M7 12h5l5 5"/></svg>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#007aff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><path d="M7 12h5l5-5M7 12h5l5 5"/></svg>
               </div>
               <div class="demo-stat-text">
                 <strong>Graph-boosted ranking</strong>
@@ -1171,7 +1083,7 @@
             </div>
             <div class="demo-stat">
               <div class="demo-stat-icon orange">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f97316" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/><path d="M7 8h3M7 11h5"/></svg>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ff9f0a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/><path d="M7 8h3M7 11h5"/></svg>
               </div>
               <div class="demo-stat-text">
                 <strong>Token-budgeted output</strong>
@@ -1274,7 +1186,7 @@
       </div>
       <!-- Real-world benchmark grid -->
       <div class="reveal" style="margin-top:64px">
-        <h3 style="font-size:1.5rem;font-weight:600;margin-bottom:8px">Tested on 6 real-world repos</h3>
+        <h3 style="font-size:1.3rem;font-weight:700;margin-bottom:8px">Tested on 6 real-world repos</h3>
         <p class="section-sub" style="margin-bottom:32px">tokio, ripgrep, axum, django, fastapi, react &mdash; 9,493 files, 55,869 symbols, 3 languages. All indexed in under 9 seconds.</p>
       </div>
       <div class="bench-grid reveal" style="transition-delay:0.1s">
@@ -1282,11 +1194,11 @@
           <h3>26 tasks, 6 repos</h3>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:16px">
             <div>
-              <div style="font-size:2.5rem;font-weight:700;color:var(--cyan)">73%</div>
+              <div style="font-size:2.2rem;font-weight:700;color:var(--cyan)">73%</div>
               <div style="color:var(--text-muted);font-size:0.85rem">fewer tokens consumed</div>
             </div>
             <div>
-              <div style="font-size:2.5rem;font-weight:700;color:var(--cyan)">55%</div>
+              <div style="font-size:2.2rem;font-weight:700;color:var(--cyan)">55%</div>
               <div style="color:var(--text-muted);font-size:0.85rem">fewer tool calls</div>
             </div>
           </div>
@@ -1308,47 +1220,47 @@
           <div style="margin-top:16px;display:flex;flex-direction:column;gap:10px">
             <div style="display:flex;justify-content:space-between;align-items:center">
               <span style="color:var(--text-muted);font-size:0.9rem">Symbol lookup</span>
-              <span style="color:var(--green);font-weight:600">93% saved</span>
+              <span style="color:var(--green);font-weight:700">93% saved</span>
             </div>
             <div style="display:flex;justify-content:space-between;align-items:center">
               <span style="color:var(--text-muted);font-size:0.9rem">Impact analysis</span>
-              <span style="color:var(--green);font-weight:600">90% saved</span>
+              <span style="color:var(--green);font-weight:700">90% saved</span>
             </div>
             <div style="display:flex;justify-content:space-between;align-items:center">
               <span style="color:var(--text-muted);font-size:0.9rem">Code understanding</span>
-              <span style="color:var(--green);font-weight:600">84% saved</span>
+              <span style="color:var(--green);font-weight:700">84% saved</span>
             </div>
             <div style="display:flex;justify-content:space-between;align-items:center">
               <span style="color:var(--text-muted);font-size:0.9rem">Bug localization</span>
-              <span style="color:var(--green);font-weight:600">83% saved</span>
+              <span style="color:var(--green);font-weight:700">83% saved</span>
             </div>
             <div style="display:flex;justify-content:space-between;align-items:center">
               <span style="color:var(--text-muted);font-size:0.9rem">Call graph</span>
-              <span style="color:var(--green);font-weight:600">72% saved</span>
+              <span style="color:var(--green);font-weight:700">72% saved</span>
             </div>
           </div>
         </div>
       </div>
       <!-- Cost savings card -->
       <div class="bench-grid reveal" style="margin-top:24px;transition-delay:0.15s">
-        <div class="bench-card" style="grid-column: span 2; background: linear-gradient(135deg, rgba(0,212,170,0.06), rgba(139,92,246,0.04)); border-color: var(--border-glow);">
-          <h3 style="font-size:1.3rem">What this means for your bill</h3>
-          <p style="margin-top:12px;color:var(--text-muted);font-size:0.95rem;line-height:1.7">
+        <div class="bench-card" style="grid-column: span 2; border-color: var(--border-strong);">
+          <h3 style="font-size:1.2rem">What this means for your bill</h3>
+          <p style="margin-top:12px;color:var(--text-muted);font-size:0.95rem;line-height:1.5">
             Every token your agent reads costs money. With grep, a 26-task coding session consumes
             <strong style="color:var(--red)">~84,600 tokens</strong> of raw output. With Codixing, the same session uses
             <strong style="color:var(--green)">~22,900 tokens</strong>&mdash;same signal, 73% less noise.
           </p>
           <div style="margin-top:24px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px">
             <div style="text-align:center">
-              <div style="font-size:2.2rem;font-weight:700;color:var(--green)">$0.93</div>
+              <div style="font-size:2rem;font-weight:700;color:var(--green)">$0.93</div>
               <div style="color:var(--text-muted);font-size:0.85rem">saved per session<br><span style="font-size:0.8em">(Opus @ $15/M tokens)</span></div>
             </div>
             <div style="text-align:center">
-              <div style="font-size:2.2rem;font-weight:700;color:var(--green)">$46</div>
+              <div style="font-size:2rem;font-weight:700;color:var(--green)">$46</div>
               <div style="color:var(--text-muted);font-size:0.85rem">saved per day<br><span style="font-size:0.8em">(50 sessions/day)</span></div>
             </div>
             <div style="text-align:center">
-              <div style="font-size:2.2rem;font-weight:700;color:var(--green)">$1,400</div>
+              <div style="font-size:2rem;font-weight:700;color:var(--green)">$1,400</div>
               <div style="color:var(--text-muted);font-size:0.85rem">saved per month<br><span style="font-size:0.8em">(small team)</span></div>
             </div>
           </div>
@@ -1362,15 +1274,15 @@
           <p style="margin-top:8px">300 real bug reports across 12 Python repos:</p>
           <div style="margin-top:16px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px">
             <div>
-              <div style="font-size:2rem;font-weight:700;color:var(--cyan)">48.7%</div>
+              <div style="font-size:1.8rem;font-weight:700;color:var(--cyan)">48.7%</div>
               <div style="color:var(--text-muted);font-size:0.85rem">Recall@1<br><span style="font-size:0.8em">vs grep 14.7%</span></div>
             </div>
             <div>
-              <div style="font-size:2rem;font-weight:700;color:var(--cyan)">74.3%</div>
+              <div style="font-size:1.8rem;font-weight:700;color:var(--cyan)">74.3%</div>
               <div style="color:var(--text-muted);font-size:0.85rem">Recall@5<br><span style="font-size:0.8em">vs grep 41.3%</span></div>
             </div>
             <div>
-              <div style="font-size:2rem;font-weight:700;color:var(--cyan)">77.3%</div>
+              <div style="font-size:1.8rem;font-weight:700;color:var(--cyan)">77.3%</div>
               <div style="color:var(--text-muted);font-size:0.85rem">Recall@10<br><span style="font-size:0.8em">vs grep 54.7%</span></div>
             </div>
           </div>
@@ -1381,23 +1293,23 @@
           <p style="margin-top:8px">Symbol localization across 5 languages, 50 queries (BM25-only, no GPU):</p>
           <div style="margin-top:16px;display:grid;grid-template-columns:repeat(5,1fr);gap:12px;text-align:center">
             <div>
-              <div style="font-size:1.5rem;font-weight:700;color:var(--cyan)">90%</div>
+              <div style="font-size:1.3rem;font-weight:700;color:var(--cyan)">90%</div>
               <div style="color:var(--text-muted);font-size:0.82rem">Rust<br><span style="font-size:0.8em">Hit@5</span></div>
             </div>
             <div>
-              <div style="font-size:1.5rem;font-weight:700;color:var(--cyan)">100%</div>
+              <div style="font-size:1.3rem;font-weight:700;color:var(--cyan)">100%</div>
               <div style="color:var(--text-muted);font-size:0.82rem">Python<br><span style="font-size:0.8em">Hit@5</span></div>
             </div>
             <div>
-              <div style="font-size:1.5rem;font-weight:700;color:var(--cyan)">90%</div>
+              <div style="font-size:1.3rem;font-weight:700;color:var(--cyan)">90%</div>
               <div style="color:var(--text-muted);font-size:0.82rem">Go<br><span style="font-size:0.8em">Hit@5</span></div>
             </div>
             <div>
-              <div style="font-size:1.5rem;font-weight:700;color:var(--cyan)">70%</div>
+              <div style="font-size:1.3rem;font-weight:700;color:var(--cyan)">70%</div>
               <div style="color:var(--text-muted);font-size:0.82rem">C++<br><span style="font-size:0.8em">Hit@5</span></div>
             </div>
             <div>
-              <div style="font-size:1.5rem;font-weight:700;color:var(--cyan)">90%</div>
+              <div style="font-size:1.3rem;font-weight:700;color:var(--cyan)">90%</div>
               <div style="color:var(--text-muted);font-size:0.82rem">JavaScript<br><span style="font-size:0.8em">Hit@5</span></div>
             </div>
           </div>
@@ -1449,15 +1361,15 @@
           <p style="margin-top:8px;color:var(--text-muted);font-size:0.9rem">73,374 files &bull; 881,672 chunks &bull; 935,303 symbols &bull; 30M lines of C</p>
           <div style="margin-top:16px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px">
             <div>
-              <div style="font-size:2rem;font-weight:700;color:var(--cyan)">1.57s</div>
+              <div style="font-size:1.8rem;font-weight:700;color:var(--cyan)">1.57s</div>
               <div style="color:var(--text-muted);font-size:0.85rem">Cold start<br><span style="font-size:0.8em">search</span></div>
             </div>
             <div>
-              <div style="font-size:2rem;font-weight:700;color:var(--cyan)">0.79s</div>
+              <div style="font-size:1.8rem;font-weight:700;color:var(--cyan)">0.79s</div>
               <div style="color:var(--text-muted);font-size:0.85rem">Warm cache<br><span style="font-size:0.8em">search</span></div>
             </div>
             <div>
-              <div style="font-size:2rem;font-weight:700;color:var(--cyan)">134MB</div>
+              <div style="font-size:1.8rem;font-weight:700;color:var(--cyan)">134MB</div>
               <div style="color:var(--text-muted);font-size:0.85rem">chunk_meta<br><span style="font-size:0.8em">was 1.5 GB</span></div>
             </div>
           </div>
@@ -1506,27 +1418,27 @@
       <!-- Retrieval accuracy (OpenClaw) -->
       <div class="bench-grid reveal" style="margin-top:24px;transition-delay:0.3s">
         <div class="bench-card" style="grid-column: span 2;">
-          <h3 style="font-size:1.2rem">Retrieval accuracy &mdash; OpenClaw benchmark (9,493 files)</h3>
+          <h3 style="font-size:1.1rem">Retrieval accuracy &mdash; OpenClaw benchmark (9,493 files)</h3>
           <p style="margin-top:8px;color:var(--text-muted);font-size:0.9rem">Mixed C/C++/ObjC codebase. 4 query categories, multiple ground-truth file targets per query.</p>
           <div style="margin-top:20px;display:grid;grid-template-columns:repeat(5,1fr);gap:16px;text-align:center">
             <div>
-              <div style="font-size:2rem;font-weight:700;color:var(--cyan)">0.763</div>
+              <div style="font-size:1.8rem;font-weight:700;color:var(--cyan)">0.763</div>
               <div style="color:var(--text-muted);font-size:0.82rem">R@10<br><span style="font-size:0.8em">Overall</span></div>
             </div>
             <div>
-              <div style="font-size:2rem;font-weight:700;color:var(--cyan)">1.000</div>
+              <div style="font-size:1.8rem;font-weight:700;color:var(--cyan)">1.000</div>
               <div style="color:var(--text-muted);font-size:0.82rem">R@10<br><span style="font-size:0.8em">Symbol</span></div>
             </div>
             <div>
-              <div style="font-size:2rem;font-weight:700;color:var(--cyan)">0.800</div>
+              <div style="font-size:1.8rem;font-weight:700;color:var(--cyan)">0.800</div>
               <div style="color:var(--text-muted);font-size:0.82rem">R@10<br><span style="font-size:0.8em">Cross-pkg</span></div>
             </div>
             <div>
-              <div style="font-size:2rem;font-weight:700;color:var(--cyan)">0.740</div>
+              <div style="font-size:1.8rem;font-weight:700;color:var(--cyan)">0.740</div>
               <div style="color:var(--text-muted);font-size:0.82rem">R@10<br><span style="font-size:0.8em">Usage</span></div>
             </div>
             <div>
-              <div style="font-size:2rem;font-weight:700;color:var(--cyan)">0.513</div>
+              <div style="font-size:1.8rem;font-weight:700;color:var(--cyan)">0.513</div>
               <div style="color:var(--text-muted);font-size:0.82rem">R@10<br><span style="font-size:0.8em">Concept</span></div>
             </div>
           </div>
@@ -1559,7 +1471,7 @@
       <div class="feature-grid">
         <div class="feature-card">
           <div class="feature-icon cyan">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#00d4aa" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="4" r="2"/><circle cx="4" cy="18" r="2"/><circle cx="20" cy="18" r="2"/><path d="M12 6v4M12 10l-6 6M12 10l6 6"/></svg>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#007aff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="4" r="2"/><circle cx="4" cy="18" r="2"/><circle cx="20" cy="18" r="2"/><path d="M12 6v4M12 10l-6 6M12 10l6 6"/></svg>
           </div>
           <h3>AST-aware chunking</h3>
           <p>Tree-sitter parsing across 24 languages keeps functions and classes semantically intact. No more mid-function splits corrupting context.</p>
@@ -1567,7 +1479,7 @@
         </div>
         <div class="feature-card" style="--delay:0.07s">
           <div class="feature-icon purple">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3H6a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3h12a3 3 0 0 0 3-3 3 3 0 0 0-3-3z"/></svg>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#007aff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 3a3 3 0 0 0-3 3v12a3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3H6a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3V6a3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3h12a3 3 0 0 0 3-3 3 3 0 0 0-3-3z"/></svg>
           </div>
           <h3>Hybrid retrieval</h3>
           <p>BM25 + vector fusion with asymmetric RRF, concept-to-path boost, synonym expansion, and query-to-code reformulation. Trigram pre-filtering skips files before disk I/O for instant grep. Achieves <strong>10/10 top-1 accuracy</strong> across diverse query types.</p>
@@ -1575,7 +1487,7 @@
         </div>
         <div class="feature-card" style="--delay:0.14s">
           <div class="feature-icon orange">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#f97316" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><circle cx="19" cy="10" r="2"/><path d="M12 7l-5.5 10M12 7l5.5 11M12 7l7 1M19 12l-12 5.5"/></svg>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ff9f0a" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><circle cx="19" cy="10" r="2"/><path d="M12 7l-5.5 10M12 7l5.5 11M12 7l7 1M19 12l-12 5.5"/></svg>
           </div>
           <h3>Graph intelligence</h3>
           <p>Import and call graph with iterative PageRank. Callers, callees, and transitive dependency traversal exposed as first-class queries.</p>
@@ -1583,7 +1495,7 @@
         </div>
         <div class="feature-card" style="--delay:0.21s">
           <div class="feature-icon blue">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#0099ff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#007aff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
           </div>
           <h3>Live index state</h3>
           <p>Hash-based incremental sync, <code style="color:var(--cyan);font-size:0.85em">.gitignore</code>-aware file walking, and daemon watcher keep your index aligned with every save.</p>
@@ -1591,7 +1503,7 @@
         </div>
         <div class="feature-card" style="--delay:0.28s">
           <div class="feature-icon green">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#3fb950" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 17h6M17 14v6"/><path d="M7 10v4M10 7h4M17 10v4"/></svg>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#30d158" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 17h6M17 14v6"/><path d="M7 10v4M10 7h4M17 10v4"/></svg>
           </div>
           <h3>CLI + MCP</h3>
           <p>24 CLI commands for direct use, plus 56 JSON-RPC 2.0 tools for Claude Code and any MCP-capable client. <code style="color:var(--cyan);font-size:0.85em">--compact</code> mode sends only 2 meta-tools on init (96.7% token savings), with all 56 tools discoverable on demand.</p>
@@ -1599,7 +1511,7 @@
         </div>
         <div class="feature-card" style="--delay:0.35s">
           <div class="feature-icon pink">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#ec4899" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ff3b30" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
           </div>
           <h3>Zero runtime stack</h3>
           <p>Single statically-linked Rust binary under 50MB. No JVM, no Docker, no external database required. Works on macOS, Linux, and Windows.</p>
@@ -1607,7 +1519,7 @@
         </div>
         <div class="feature-card" style="--delay:0.42s">
           <div class="feature-icon cyan">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#00d4aa" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M12 6v6l4 2"/></svg>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#007aff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="M12 6v6l4 2"/></svg>
           </div>
           <h3>Code understanding</h3>
           <p>Five new commands go beyond search: <code style="color:var(--cyan);font-size:0.85em">impact</code> computes blast radius, <code style="color:var(--cyan);font-size:0.85em">api</code> lists public surfaces, <code style="color:var(--cyan);font-size:0.85em">types</code> maps relationships, <code style="color:var(--cyan);font-size:0.85em">examples</code> mines usage, and <code style="color:var(--cyan);font-size:0.85em">context</code> assembles cross-file understanding.</p>
@@ -1615,7 +1527,7 @@
         </div>
         <div class="feature-card" style="--delay:0.49s">
           <div class="feature-icon purple">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#007aff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
           </div>
           <h3>Semantic intelligence</h3>
           <p>Embedding-free <code style="color:var(--cyan);font-size:0.85em">--semantic</code> strategy matches code by behavioral signatures, not names. Query-personalized PageRank and learned reformulation adapt ranking to each query and project.</p>
@@ -1884,7 +1796,6 @@
       entries.forEach(e => {
         if (e.isIntersecting) {
           e.target.classList.add('visible');
-          // Also trigger bar animations
           e.target.querySelectorAll('.bar-fill').forEach(b => b.classList.add('animated'));
           observer.unobserve(e.target);
         }
@@ -1893,12 +1804,10 @@
 
     document.querySelectorAll('.reveal, .feature-card').forEach(el => observer.observe(el));
 
-    // Staggered feature cards
     document.querySelectorAll('.feature-card').forEach((card, i) => {
       card.style.transitionDelay = (i * 0.07) + 's';
     });
 
-    // Trigger bar animations for in-viewport bench cards
     const barObserver = new IntersectionObserver((entries) => {
       entries.forEach(e => {
         if (e.isIntersecting) {
@@ -1984,7 +1893,8 @@
         a.style.color = a.getAttribute('href') === '#' + current ? 'var(--cyan)' : '';
       });
     }, { passive: true });
-    // ── Waitlist form — AJAX submit via Formspree ──
+
+    // ── Waitlist form ──
     const form = document.getElementById('waitlist-form');
     if (form) {
       form.addEventListener('submit', async (e) => {
