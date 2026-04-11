@@ -1,14 +1,14 @@
 {
   "hooks": {
-    "PostToolUse": [
+    "PreToolUse": [
       {
         "matcher": "Grep",
         "hooks": [
           {
             "type": "command",
-            "command": "jq -r 'def is_code_search: ((.tool_input.glob // \"\") | test(\"\\\\*\\\\.(rs|py|ts|tsx|js|jsx|go|java|c|cpp|cs|rb|swift|kt|scala|php|zig)($|\\\\})\")) or ((.tool_input.pattern // \"\") | test(\"fn |struct |class |def |impl |trait |enum |interface |type |pub |async |export \")); if is_code_search then {\"hookSpecificOutput\":{\"hookEventName\":\"PostToolUse\",\"additionalContext\":\"DOGFOODING REMINDER: You used Grep for code exploration. Use the codixing CLI instead:\\n  codixing search \\\"<query>\\\"      — semantic code search\\n  codixing symbols <filter>       — find symbol definitions\\n  codixing usages <symbol>        — find call sites and imports\\n  codixing callers <file>         — who imports this file\\n  codixing callees <file>         — what this file imports\\nRun from the repo root via Bash. This dogfoods our own tool and tests search quality.\"}} | tojson else empty end'",
+            "command": "bash .claude/hooks/pretool-codixing.sh",
             "timeout": 5,
-            "statusMessage": "Checking dogfooding..."
+            "statusMessage": "Codixing dogfooding check..."
           }
         ]
       }

@@ -128,7 +128,7 @@ Requires ONNX Runtime (`pip install onnxruntime` or download from GitHub).
 
 ## CLI Commands
 
-24 commands for code intelligence:
+25 commands for code intelligence:
 
 ```bash
 codixing search "query"          # Semantic code search
@@ -137,6 +137,10 @@ codixing usages add_chunk        # Find call sites and imports
 codixing callers src/engine.rs   # Who imports this file
 codixing callees src/engine.rs   # What this file imports
 codixing graph --map             # Architecture overview
+codixing graph --communities     # Louvain community detection
+codixing graph --surprises 10    # Top N surprising edges
+codixing graph --html graph.html # Interactive HTML visualization
+codixing path src/a.rs src/b.rs  # Shortest import chain
 codixing impact src/engine.rs    # Blast radius analysis
 codixing api src/engine.rs       # Public API surface
 codixing types Engine            # Type relationships
@@ -245,7 +249,9 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Documentation indexing** — indexes Markdown and HTML docs alongside code with section-aware chunking, breadcrumb metadata, and doc-to-code graph linking; use `--docs-only` to restrict results to docs or `--code-only` to exclude them
 - **Hybrid search** — BM25 + optional vector embeddings, fused with Reciprocal Rank Fusion
 - **Symbol-level call graph** — Function-to-function call edges extracted from AST, including Rust trait dispatch, Python class inheritance, and TypeScript interface implementations
-- **Dependency graph** — Import + call extraction, PageRank scoring, Personalized PageRank for focus-aware maps
+- **Dependency graph** — Import + call extraction, PageRank scoring, Personalized PageRank for focus-aware maps, Louvain community detection, shortest path queries, surprise/anomaly edge scoring
+- **Interactive graph visualization** — `codixing graph --html` generates a self-contained HTML file with force-directed layout, community coloring, confidence-styled edges, surprise highlights, search/filter, zoom/pan
+- **Edge confidence** — Every dependency edge tagged Verified/High/Medium/Low based on extraction method (AST-resolved, call extraction, doc reference, external)
 - **Ranked cross-imports** — PageRank + git recency scoring for relevance-ranked graph queries across directory boundaries
 - **Memory relations** — `memory_relate` tool creates typed edges between agent memory entries, enabling associative recall across sessions
 - **Feature hub** — One-call feature exploration combining search + callers + callees + tests for unified understanding
@@ -320,7 +326,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 │  + Exact (trigram) · Graph boost · Definition 3.5× · Session     │
 │  SearchPipeline: composable stages, 6 strategies                  │
 │                                                                   │
-│  API: CLI (24 cmds) · MCP (56 tools, JSON-RPC 2.0) · LSP · HTTP  │
+│  API: CLI (25 cmds) · MCP (56 tools, JSON-RPC 2.0) · LSP · HTTP  │
 │       Daemon (Unix socket / Windows named pipe) · File Watcher   │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -331,7 +337,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 982+ tests
+cargo test --workspace        # 1019+ tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```

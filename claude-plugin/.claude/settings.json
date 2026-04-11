@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -d .codixing ] || exit 0; jq -r '.tool_input as $t | if (($t.path // \"\") | test(\"\\\\.[a-zA-Z0-9]+$\")) then empty elif (($t.pattern // \"\") | length < 3) then empty elif (($t.pattern // \"\") | test(\"^v?[0-9]+\\\\.[0-9]\")) then empty elif (($t.output_mode // \"\") == \"count\") then empty elif (($t.path // \"\") | test(\"(target/|node_modules/|\\\\.git/|\\\\.codixing/)\")) then empty elif (($t.pattern // \"\") | test(\"^(<<<<|>>>>|https?://|/|\\\\./)\")) then empty elif (($t.glob // \"\") | test(\"\\\\.(rs|py|ts|tsx|js|jsx|go|java|c|cpp|h|hpp|cs|rb|swift|kt|scala|php|zig|bash|sh|md|html|json|toml|yaml|yml)($|\\\\})\")) or (($t.type // \"\") | test(\"^(rs|rust|py|python|ts|typescript|js|javascript|go|java|c|cpp|cs|rb|ruby|swift|kotlin|scala|php|zig|md|markdown|json|toml|yaml|html)$\")) or (($t.glob // \"\") == \"\" and ($t.type // \"\") == \"\" and (($t.pattern // \"\") | test(\"^[A-Za-z_]\")) and (($t.pattern // \"\") | length > 2)) then {\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"additionalContext\":\"CODIXING: Use the codixing CLI instead of Grep for code/doc/config search.\\n\\n  codixing search \\\"<query>\\\"   — semantic search (code, docs, config)\\n  codixing symbols <name>      — find definitions\\n  codixing usages <name>       — find call sites and imports\\n  codixing callers <file>      — who imports this file\\n  codixing callees <file>      — what this file imports\\n\\nRun via Bash. Passthrough: version strings, single-file targets, count mode, short patterns.\"}} else empty end'",
+            "timeout": 5,
+            "statusMessage": "Codixing dogfooding check..."
+          }
+        ]
+      }
+    ]
+  }
+}
