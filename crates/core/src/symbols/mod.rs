@@ -758,4 +758,129 @@ mod tests {
         table.insert(make_symbol("y", "b.rs", EntityKind::Struct, Language::Rust));
         assert_eq!(table.len(), 2);
     }
+
+    #[test]
+    fn bitcode_preserves_doc_comment_visibility_type_relations() {
+        use crate::language::{TypeRelation, TypeRelationKind};
+
+        let table = SymbolTable::new();
+        table.insert(Symbol {
+            name: "Widget".to_string(),
+            kind: EntityKind::Struct,
+            language: Language::Rust,
+            file_path: "src/widget.rs".to_string(),
+            line_start: 10,
+            line_end: 50,
+            byte_start: 200,
+            byte_end: 1200,
+            signature: Some("pub struct Widget".to_string()),
+            scope: vec!["ui".to_string()],
+            doc_comment: Some("A reusable UI widget component.".to_string()),
+            visibility: Visibility::Public,
+            type_relations: vec![
+                TypeRelation {
+                    kind: TypeRelationKind::Implements,
+                    target: "Display".to_string(),
+                },
+                TypeRelation {
+                    kind: TypeRelationKind::Contains,
+                    target: "WidgetState".to_string(),
+                },
+            ],
+        });
+        table.insert(Symbol {
+            name: "internal_helper".to_string(),
+            kind: EntityKind::Function,
+            language: Language::Rust,
+            file_path: "src/helpers.rs".to_string(),
+            line_start: 1,
+            line_end: 5,
+            byte_start: 0,
+            byte_end: 100,
+            signature: Some("fn internal_helper()".to_string()),
+            scope: vec![],
+            doc_comment: None,
+            visibility: Visibility::CrateInternal,
+            type_relations: vec![],
+        });
+
+        let bytes = persistence::serialize_symbols(&table).expect("serialize");
+        let restored = persistence::deserialize_symbols(&bytes).expect("deserialize");
+
+        // Verify Widget retains doc_comment, visibility, and type_relations.
+        let widgets = restored.lookup("Widget");
+        assert_eq!(widgets.len(), 1);
+        let w = &widgets[0];
+        assert_eq!(
+            w.doc_comment.as_deref(),
+            Some("A reusable UI widget component.")
+        );
+        assert_eq!(w.visibility, Visibility::Public);
+        assert_eq!(w.type_relations.len(), 2);
+        assert_eq!(w.type_relations[0].kind, TypeRelationKind::Implements);
+        assert_eq!(w.type_relations[0].target, "Display");
+        assert_eq!(w.type_relations[1].kind, TypeRelationKind::Contains);
+        assert_eq!(w.type_relations[1].target, "WidgetState");
+
+        // Verify internal_helper retains CrateInternal visibility.
+        let helpers = restored.lookup("internal_helper");
+        assert_eq!(helpers.len(), 1);
+        assert!(helpers[0].doc_comment.is_none());
+        assert_eq!(helpers[0].visibility, Visibility::CrateInternal);
+        assert!(helpers[0].type_relations.is_empty());
+    }
+
+    #[test]
+    fn mmap_loses_new_fields_but_bitcode_preserves_them() {
+        use crate::language::{TypeRelation, TypeRelationKind};
+
+        // Demonstrate that mmap does NOT preserve the new fields,
+        // confirming that bitcode must be preferred over mmap.
+        let in_mem = InMemorySymbolTable::new();
+        in_mem.insert(Symbol {
+            name: "ApiEndpoint".to_string(),
+            kind: EntityKind::Function,
+            language: Language::Rust,
+            file_path: "src/api.rs".to_string(),
+            line_start: 5,
+            line_end: 20,
+            byte_start: 100,
+            byte_end: 500,
+            signature: Some("pub fn api_endpoint()".to_string()),
+            scope: vec![],
+            doc_comment: Some("Handles /api/v1/users.".to_string()),
+            visibility: Visibility::Public,
+            type_relations: vec![TypeRelation {
+                kind: TypeRelationKind::Returns,
+                target: "Response".to_string(),
+            }],
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+
+        // Write and load via mmap — new fields are lost.
+        let mmap_path = dir.path().join("symbols_v2.bin");
+        writer::write_mmap_symbols(&in_mem, &mmap_path).unwrap();
+        let mmap_table = mmap::MmapSymbolTable::load(&mmap_path).unwrap();
+        let mmap_syms = mmap_table.lookup("ApiEndpoint");
+        assert_eq!(mmap_syms.len(), 1);
+        assert!(mmap_syms[0].doc_comment.is_none()); // lost!
+        assert_eq!(mmap_syms[0].visibility, Visibility::Private); // defaulted!
+        assert!(mmap_syms[0].type_relations.is_empty()); // lost!
+
+        // Write and load via bitcode — all fields preserved.
+        let bitcode_table =
+            SymbolTable::InMemory(InMemorySymbolTable::from_symbols(in_mem.all_symbols()));
+        let bytes = persistence::serialize_symbols(&bitcode_table).unwrap();
+        let restored = persistence::deserialize_symbols(&bytes).unwrap();
+        let bc_syms = restored.lookup("ApiEndpoint");
+        assert_eq!(bc_syms.len(), 1);
+        assert_eq!(
+            bc_syms[0].doc_comment.as_deref(),
+            Some("Handles /api/v1/users.")
+        );
+        assert_eq!(bc_syms[0].visibility, Visibility::Public);
+        assert_eq!(bc_syms[0].type_relations.len(), 1);
+        assert_eq!(bc_syms[0].type_relations[0].kind, TypeRelationKind::Returns);
+    }
 }
