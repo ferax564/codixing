@@ -1,9 +1,12 @@
+pub mod community;
 pub mod extract;
 pub mod extractor;
+pub mod html_export;
 pub mod pagerank;
 pub mod persistence;
 pub mod repomap;
 pub mod resolver;
+pub mod surprise;
 pub mod types;
 
 use std::collections::HashMap;
@@ -15,13 +18,29 @@ use serde::{Deserialize, Serialize};
 use crate::language::Language;
 
 // Re-export public types from sub-modules.
+pub use community::CommunityResult;
 pub use extractor::{CallExtractor, ImportExtractor};
+pub use html_export::HtmlExportOptions;
 pub use pagerank::{
     compute_pagerank, compute_personalized_pagerank, compute_weighted_personalized_pagerank,
 };
 pub use repomap::{RepoMapOptions, generate_repo_map};
 pub use resolver::ImportResolver;
+pub use surprise::SurprisingEdge;
 pub use types::{ReferenceKind, SymbolKind, SymbolNode};
+
+/// Confidence level of a dependency edge, auto-derived from [`EdgeKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EdgeConfidence {
+    /// AST-resolved imports (EdgeKind::Resolved).
+    Verified,
+    /// Call extraction (EdgeKind::Calls).
+    High,
+    /// Doc-to-code references (EdgeKind::DocumentedBy).
+    Medium,
+    /// External/unresolved (EdgeKind::External).
+    Low,
+}
 
 /// Kind of a dependency edge between files.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +57,18 @@ pub enum EdgeKind {
     DocumentedBy,
 }
 
+impl EdgeKind {
+    /// Return the default confidence level for this edge kind.
+    pub fn default_confidence(&self) -> EdgeConfidence {
+        match self {
+            EdgeKind::Resolved => EdgeConfidence::Verified,
+            EdgeKind::Calls => EdgeConfidence::High,
+            EdgeKind::DocumentedBy => EdgeConfidence::Medium,
+            EdgeKind::External => EdgeConfidence::Low,
+        }
+    }
+}
+
 /// A node in the dependency graph representing a single source file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeNode {
@@ -51,6 +82,9 @@ pub struct CodeNode {
     pub out_degree: usize,
     /// Number of incoming import edges.
     pub in_degree: usize,
+    /// Community ID assigned by Louvain detection, `None` until detection runs.
+    #[serde(default)]
+    pub community: Option<usize>,
 }
 
 /// An edge in the dependency graph representing an import relationship.
@@ -60,6 +94,13 @@ pub struct CodeEdge {
     pub raw_import: String,
     /// Whether the import resolved to a known file or is external.
     pub kind: EdgeKind,
+    /// Confidence level, auto-derived from [`EdgeKind`].
+    #[serde(default = "default_edge_confidence")]
+    pub confidence: EdgeConfidence,
+}
+
+fn default_edge_confidence() -> EdgeConfidence {
+    EdgeConfidence::Verified
 }
 
 /// Flat, serialization-friendly representation of the graph.
@@ -87,6 +128,8 @@ pub struct GraphStats {
     pub symbol_nodes: usize,
     /// Number of edges in the symbol-level graph.
     pub symbol_edges: usize,
+    /// Confidence breakdown: (verified, high, medium, low).
+    pub confidence_counts: (usize, usize, usize, usize),
 }
 
 /// In-memory dependency graph over source files.
@@ -166,6 +209,7 @@ impl CodeGraph {
             pagerank: 0.0,
             out_degree: 0,
             in_degree: 0,
+            community: None,
         };
         let idx = self.graph.add_node(node);
         self.path_to_node.insert(file_path.to_string(), idx);
@@ -183,12 +227,15 @@ impl CodeGraph {
     ) {
         let from_idx = self.get_or_insert_node(from, from_lang);
         let to_idx = self.get_or_insert_node(to, to_lang);
+        let kind = EdgeKind::Resolved;
+        let confidence = kind.default_confidence();
         self.graph.add_edge(
             from_idx,
             to_idx,
             CodeEdge {
                 raw_import: raw_import.to_string(),
-                kind: EdgeKind::Resolved,
+                kind,
+                confidence,
             },
         );
         // Update degree counters.
@@ -206,12 +253,15 @@ impl CodeGraph {
         // External target represented as a pseudo-node with the raw import as path.
         let ext_key = format!("__ext__:{raw_import}");
         let to_idx = self.get_or_insert_node(&ext_key, from_lang);
+        let kind = EdgeKind::External;
+        let confidence = kind.default_confidence();
         self.graph.add_edge(
             from_idx,
             to_idx,
             CodeEdge {
                 raw_import: raw_import.to_string(),
-                kind: EdgeKind::External,
+                kind,
+                confidence,
             },
         );
         if let Some(n) = self.graph.node_weight_mut(from_idx) {
@@ -522,12 +572,15 @@ impl CodeGraph {
     ) {
         let from_idx = self.get_or_insert_node(from, from_lang);
         let to_idx = self.get_or_insert_node(to, to_lang);
+        let kind = EdgeKind::Calls;
+        let confidence = kind.default_confidence();
         self.graph.add_edge(
             from_idx,
             to_idx,
             CodeEdge {
                 raw_import: callee_name.to_string(),
-                kind: EdgeKind::Calls,
+                kind,
+                confidence,
             },
         );
         if let Some(n) = self.graph.node_weight_mut(from_idx) {
@@ -552,12 +605,15 @@ impl CodeGraph {
     ) {
         let from_idx = self.get_or_insert_node(from, from_lang);
         let to_idx = self.get_or_insert_node(to, to_lang);
+        let kind = EdgeKind::DocumentedBy;
+        let confidence = kind.default_confidence();
         self.graph.add_edge(
             from_idx,
             to_idx,
             CodeEdge {
                 raw_import: symbol_name.to_string(),
-                kind: EdgeKind::DocumentedBy,
+                kind,
+                confidence,
             },
         );
         if let Some(n) = self.graph.node_weight_mut(from_idx) {
@@ -574,12 +630,22 @@ impl CodeGraph {
         let mut external = 0usize;
         let mut calls = 0usize;
         let mut docs = 0usize;
+        let mut conf_verified = 0usize;
+        let mut conf_high = 0usize;
+        let mut conf_medium = 0usize;
+        let mut conf_low = 0usize;
         for e in self.graph.edge_weights() {
             match e.kind {
                 EdgeKind::Resolved => resolved += 1,
                 EdgeKind::External => external += 1,
                 EdgeKind::Calls => calls += 1,
                 EdgeKind::DocumentedBy => docs += 1,
+            }
+            match e.confidence {
+                EdgeConfidence::Verified => conf_verified += 1,
+                EdgeConfidence::High => conf_high += 1,
+                EdgeConfidence::Medium => conf_medium += 1,
+                EdgeConfidence::Low => conf_low += 1,
             }
         }
         GraphStats {
@@ -591,6 +657,7 @@ impl CodeGraph {
             doc_edges: docs,
             symbol_nodes: self.inner.node_count(),
             symbol_edges: self.inner.edge_count(),
+            confidence_counts: (conf_verified, conf_high, conf_medium, conf_low),
         }
     }
 
@@ -713,6 +780,158 @@ impl CodeGraph {
         for idx in to_remove.into_iter().rev() {
             self.inner.remove_node(idx);
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Graph analysis methods
+    // -----------------------------------------------------------------
+
+    /// Find the shortest path between two files using BFS.
+    ///
+    /// Returns `None` if either file is missing or no path exists.
+    /// The returned vector includes both endpoints.
+    pub fn shortest_path(&self, from: &str, to: &str) -> Option<Vec<String>> {
+        let &from_idx = self.path_to_node.get(from)?;
+        let &to_idx = self.path_to_node.get(to)?;
+
+        if from_idx == to_idx {
+            return Some(vec![from.to_string()]);
+        }
+
+        // BFS tracking predecessors.
+        let mut visited: HashMap<NodeIndex, Option<NodeIndex>> = HashMap::new();
+        visited.insert(from_idx, None);
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(from_idx);
+
+        while let Some(current) = queue.pop_front() {
+            if current == to_idx {
+                // Reconstruct path.
+                let mut path = Vec::new();
+                let mut cur = Some(to_idx);
+                while let Some(idx) = cur {
+                    if let Some(node) = self.graph.node_weight(idx) {
+                        path.push(node.file_path.clone());
+                    }
+                    cur = visited.get(&idx).copied().flatten();
+                }
+                path.reverse();
+                return Some(path);
+            }
+
+            // Traverse both outgoing and incoming edges (undirected BFS).
+            let neighbors: Vec<NodeIndex> = self
+                .graph
+                .neighbors_directed(current, petgraph::Direction::Outgoing)
+                .chain(
+                    self.graph
+                        .neighbors_directed(current, petgraph::Direction::Incoming),
+                )
+                .collect();
+
+            for nb in neighbors {
+                if let std::collections::hash_map::Entry::Vacant(e) = visited.entry(nb) {
+                    e.insert(Some(current));
+                    queue.push_back(nb);
+                }
+            }
+        }
+
+        None // No path found
+    }
+
+    /// Run Louvain community detection and store results on nodes.
+    pub fn detect_communities(&mut self) -> CommunityResult {
+        let result = community::detect_communities(self);
+        // Store community assignments on nodes.
+        for (path, &community_id) in &result.assignments {
+            if let Some(&idx) = self.path_to_node.get(path.as_str()) {
+                if let Some(node) = self.graph.node_weight_mut(idx) {
+                    node.community = Some(community_id);
+                }
+            }
+        }
+        result
+    }
+
+    // -----------------------------------------------------------------
+    // Internal accessors used by community / surprise / html_export modules.
+    // -----------------------------------------------------------------
+
+    /// Return all real (non-external) file paths.
+    pub fn file_paths(&self) -> Vec<String> {
+        self.graph
+            .node_weights()
+            .filter(|n| !n.file_path.starts_with("__ext__:"))
+            .map(|n| n.file_path.clone())
+            .collect()
+    }
+
+    /// Return the number of file-level nodes (including external).
+    pub fn file_node_count(&self) -> usize {
+        self.graph.node_count()
+    }
+
+    /// Iterate over all edges as `(from_path, to_path, edge_ref)` triples.
+    pub fn all_edges(&self) -> Vec<(&str, &str, &CodeEdge)> {
+        self.graph
+            .edge_references()
+            .filter_map(|e| {
+                let from = self.graph.node_weight(e.source())?;
+                let to = self.graph.node_weight(e.target())?;
+                Some((from.file_path.as_str(), to.file_path.as_str(), e.weight()))
+            })
+            .collect()
+    }
+
+    /// Return the set of neighbor paths (both directions) for a given path,
+    /// ignoring external nodes. Used by Louvain community detection.
+    pub fn undirected_neighbors(&self, file_path: &str) -> Vec<String> {
+        let Some(&idx) = self.path_to_node.get(file_path) else {
+            return Vec::new();
+        };
+        let mut seen = std::collections::HashSet::new();
+        let incoming = self
+            .graph
+            .neighbors_directed(idx, petgraph::Direction::Incoming);
+        let outgoing = self
+            .graph
+            .neighbors_directed(idx, petgraph::Direction::Outgoing);
+        for nb in incoming.chain(outgoing) {
+            if let Some(node) = self.graph.node_weight(nb) {
+                if !node.file_path.starts_with("__ext__:") {
+                    seen.insert(node.file_path.clone());
+                }
+            }
+        }
+        seen.into_iter().collect()
+    }
+
+    /// Total number of edges between real (non-external) nodes.
+    pub fn real_edge_count(&self) -> usize {
+        self.graph
+            .edge_references()
+            .filter(|e| {
+                let src = &self.graph[e.source()];
+                let tgt = &self.graph[e.target()];
+                !src.file_path.starts_with("__ext__:") && !tgt.file_path.starts_with("__ext__:")
+            })
+            .count()
+    }
+
+    /// Count edges between two specific file paths (in either direction).
+    pub fn edges_between(&self, a: &str, b: &str) -> usize {
+        let (Some(&a_idx), Some(&b_idx)) = (self.path_to_node.get(a), self.path_to_node.get(b))
+        else {
+            return 0;
+        };
+        self.graph
+            .edge_references()
+            .filter(|e| {
+                (e.source() == a_idx && e.target() == b_idx)
+                    || (e.source() == b_idx && e.target() == a_idx)
+            })
+            .count()
     }
 }
 
@@ -940,5 +1159,170 @@ mod tests {
 
         let ranked = g.cross_imports_ranked("src/gateway", "src/auth", None, Some(3));
         assert_eq!(ranked.len(), 3);
+    }
+
+    // --- Edge confidence tests ---
+
+    #[test]
+    fn edge_confidence_auto_derived_from_kind() {
+        assert_eq!(
+            EdgeKind::Resolved.default_confidence(),
+            EdgeConfidence::Verified
+        );
+        assert_eq!(EdgeKind::Calls.default_confidence(), EdgeConfidence::High);
+        assert_eq!(
+            EdgeKind::DocumentedBy.default_confidence(),
+            EdgeConfidence::Medium
+        );
+        assert_eq!(EdgeKind::External.default_confidence(), EdgeConfidence::Low);
+    }
+
+    #[test]
+    fn add_edge_sets_confidence() {
+        let mut g = CodeGraph::new();
+        g.add_edge(
+            "src/a.rs",
+            "src/b.rs",
+            "crate::b",
+            Language::Rust,
+            Language::Rust,
+        );
+        let flat = g.to_flat();
+        assert_eq!(flat.edges.len(), 1);
+        assert_eq!(flat.edges[0].2.confidence, EdgeConfidence::Verified);
+    }
+
+    #[test]
+    fn call_edge_has_high_confidence() {
+        let mut g = CodeGraph::new();
+        g.add_call_edge(
+            "src/a.rs",
+            "src/b.rs",
+            "foo",
+            Language::Rust,
+            Language::Rust,
+        );
+        let flat = g.to_flat();
+        assert_eq!(flat.edges[0].2.confidence, EdgeConfidence::High);
+    }
+
+    #[test]
+    fn doc_edge_has_medium_confidence() {
+        let mut g = CodeGraph::new();
+        g.add_doc_edge(
+            "docs/guide.md",
+            "src/engine.rs",
+            "Engine",
+            Language::Rust,
+            Language::Rust,
+        );
+        let flat = g.to_flat();
+        assert_eq!(flat.edges[0].2.confidence, EdgeConfidence::Medium);
+    }
+
+    #[test]
+    fn stats_includes_confidence_counts() {
+        let mut g = CodeGraph::new();
+        g.add_edge(
+            "src/a.rs",
+            "src/b.rs",
+            "crate::b",
+            Language::Rust,
+            Language::Rust,
+        );
+        g.add_call_edge(
+            "src/a.rs",
+            "src/c.rs",
+            "foo",
+            Language::Rust,
+            Language::Rust,
+        );
+        g.add_doc_edge("docs/x.md", "src/a.rs", "A", Language::Rust, Language::Rust);
+        g.add_external_edge("src/a.rs", "serde", Language::Rust);
+
+        let stats = g.stats();
+        assert_eq!(stats.confidence_counts, (1, 1, 1, 1));
+    }
+
+    // --- Shortest path tests ---
+
+    #[test]
+    fn shortest_path_direct_edge() {
+        let mut g = CodeGraph::new();
+        g.add_edge(
+            "src/a.rs",
+            "src/b.rs",
+            "crate::b",
+            Language::Rust,
+            Language::Rust,
+        );
+
+        let path = g.shortest_path("src/a.rs", "src/b.rs");
+        assert_eq!(
+            path,
+            Some(vec!["src/a.rs".to_string(), "src/b.rs".to_string()])
+        );
+    }
+
+    #[test]
+    fn shortest_path_multi_hop() {
+        let mut g = CodeGraph::new();
+        g.add_edge("src/a.rs", "src/b.rs", "b", Language::Rust, Language::Rust);
+        g.add_edge("src/b.rs", "src/c.rs", "c", Language::Rust, Language::Rust);
+
+        let path = g.shortest_path("src/a.rs", "src/c.rs");
+        assert_eq!(
+            path,
+            Some(vec![
+                "src/a.rs".to_string(),
+                "src/b.rs".to_string(),
+                "src/c.rs".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn shortest_path_same_node() {
+        let mut g = CodeGraph::new();
+        g.get_or_insert_node("src/a.rs", Language::Rust);
+        let path = g.shortest_path("src/a.rs", "src/a.rs");
+        assert_eq!(path, Some(vec!["src/a.rs".to_string()]));
+    }
+
+    #[test]
+    fn shortest_path_no_path() {
+        let mut g = CodeGraph::new();
+        g.get_or_insert_node("src/a.rs", Language::Rust);
+        g.get_or_insert_node("src/b.rs", Language::Rust);
+        // No edge between them.
+        let path = g.shortest_path("src/a.rs", "src/b.rs");
+        assert_eq!(path, None);
+    }
+
+    #[test]
+    fn shortest_path_missing_node() {
+        let g = CodeGraph::new();
+        assert_eq!(g.shortest_path("nonexistent.rs", "also_missing.rs"), None);
+    }
+
+    #[test]
+    fn shortest_path_reverse_direction() {
+        let mut g = CodeGraph::new();
+        // Edge goes a -> b, but BFS is undirected so b -> a should work too.
+        g.add_edge("src/a.rs", "src/b.rs", "b", Language::Rust, Language::Rust);
+        let path = g.shortest_path("src/b.rs", "src/a.rs");
+        assert_eq!(
+            path,
+            Some(vec!["src/b.rs".to_string(), "src/a.rs".to_string()])
+        );
+    }
+
+    // --- Community field on node ---
+
+    #[test]
+    fn community_defaults_to_none() {
+        let mut g = CodeGraph::new();
+        g.get_or_insert_node("src/a.rs", Language::Rust);
+        assert_eq!(g.node("src/a.rs").unwrap().community, None);
     }
 }

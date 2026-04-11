@@ -7,8 +7,8 @@ use tracing_subscriber::EnvFilter;
 
 use codixing_core::{
     EmbedTimingStats, EmbeddingModel, Engine, FederatedEngine, FederationConfig, FreshnessOptions,
-    FreshnessTier, IndexConfig, RepoMapOptions, SearchQuery, Strategy, discover_projects,
-    to_federation_config,
+    FreshnessTier, GitSyncStats, HtmlExportOptions, IndexConfig, RepoMapOptions, SearchQuery,
+    Strategy, SyncStats, discover_projects, to_federation_config,
 };
 
 #[derive(Parser)]
@@ -127,6 +127,26 @@ enum Command {
         /// Print a full repo map instead of just stats.
         #[arg(long)]
         map: bool,
+
+        /// Run community detection and print results grouped by community.
+        #[arg(long)]
+        communities: bool,
+
+        /// Show top N surprising edges (anomaly detection).
+        #[arg(long)]
+        surprises: Option<usize>,
+
+        /// Export graph as a self-contained HTML visualization.
+        #[arg(long)]
+        html: Option<Option<PathBuf>>,
+    },
+
+    /// Find the shortest path between two files in the dependency graph.
+    Path {
+        /// Source file (relative path).
+        from: String,
+        /// Target file (relative path).
+        to: String,
     },
 
     /// Show files that import the given file.
@@ -534,7 +554,11 @@ async fn main() -> Result<()> {
             path,
             token_budget,
             map,
-        } => cmd_graph(path, token_budget, map),
+            communities,
+            surprises,
+            html,
+        } => cmd_graph(path, token_budget, map, communities, surprises, html),
+        Command::Path { from, to } => cmd_path(from, to),
         Command::Callers { file, depth } => cmd_callers(file, depth),
         Command::Callees { file, depth } => cmd_callees(file, depth),
         Command::Dependencies { file, depth } => cmd_dependencies(file, depth),
@@ -884,11 +908,18 @@ fn cmd_symbols(filter: String, file: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_graph(path: PathBuf, token_budget: usize, map: bool) -> Result<()> {
+fn cmd_graph(
+    path: PathBuf,
+    token_budget: usize,
+    map: bool,
+    communities: bool,
+    surprises: Option<usize>,
+    html: Option<Option<PathBuf>>,
+) -> Result<()> {
     let root = path
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
-    let engine = Engine::open(&root).with_context(|| {
+    let mut engine = Engine::open(&root).with_context(|| {
         format!(
             "no index found at {} — run `codixing init` first",
             root.display()
@@ -907,6 +938,81 @@ fn cmd_graph(path: PathBuf, token_budget: usize, map: bool) -> Result<()> {
         return Ok(());
     }
 
+    // --html: export interactive visualization.
+    if let Some(html_path) = html {
+        let output = html_path.unwrap_or_else(|| PathBuf::from("graph.html"));
+        // Run community detection first so the HTML has community colors.
+        engine.detect_communities();
+        let opts = HtmlExportOptions {
+            output_path: output.clone(),
+            ..Default::default()
+        };
+        engine
+            .export_html(opts)
+            .with_context(|| "failed to export HTML graph")?;
+        println!("Graph exported to {}", output.display());
+        return Ok(());
+    }
+
+    // --communities: run Louvain community detection.
+    if communities {
+        match engine.detect_communities() {
+            Some(result) => {
+                println!("Community Detection (Louvain)");
+                println!("  Communities found: {}", result.community_count);
+                println!("  Modularity:        {:.4}", result.modularity);
+                println!();
+
+                // Group files by community.
+                let mut by_community: std::collections::BTreeMap<usize, Vec<String>> =
+                    std::collections::BTreeMap::new();
+                for (path, comm) in &result.assignments {
+                    by_community.entry(*comm).or_default().push(path.clone());
+                }
+                for (comm_id, mut files) in by_community {
+                    files.sort();
+                    println!("  Community {} ({} files):", comm_id, files.len());
+                    for f in files.iter().take(20) {
+                        println!("    {f}");
+                    }
+                    if files.len() > 20 {
+                        println!("    ... and {} more", files.len() - 20);
+                    }
+                    println!();
+                }
+            }
+            None => eprintln!("Graph not available — re-run `codixing init`"),
+        }
+        return Ok(());
+    }
+
+    // --surprises: anomaly detection.
+    if let Some(top_n) = surprises {
+        let n = if top_n == 0 { 10 } else { top_n };
+        // Run community detection first for cross-community scoring.
+        engine.detect_communities();
+        let edges = engine.surprising_edges(n);
+        if edges.is_empty() {
+            println!("No surprising edges found.");
+        } else {
+            println!("Top {} Surprising Edges", edges.len());
+            println!();
+            for (i, edge) in edges.iter().enumerate() {
+                println!(
+                    "  {}. {} -> {} (score: {:.2})",
+                    i + 1,
+                    edge.from,
+                    edge.to,
+                    edge.score
+                );
+                for reason in &edge.reasons {
+                    println!("     - {reason}");
+                }
+            }
+        }
+        return Ok(());
+    }
+
     match engine.graph_stats() {
         Some(stats) => {
             println!("Graph Statistics");
@@ -915,11 +1021,35 @@ fn cmd_graph(path: PathBuf, token_budget: usize, map: bool) -> Result<()> {
             println!("  Resolved edges:    {}", stats.resolved_edges);
             println!("  External edges:    {}", stats.external_edges);
             println!("  Call edges:        {}", stats.call_edges);
+            println!("  Doc edges:         {}", stats.doc_edges);
             println!("  Symbol nodes:      {}", stats.symbol_nodes);
             println!("  Symbol edges:      {}", stats.symbol_edges);
+            let (v, h, m, l) = stats.confidence_counts;
+            println!("  Confidence:        verified={v} high={h} medium={m} low={l}");
         }
         None => eprintln!("Graph not available — re-run `codixing init`"),
     }
+    Ok(())
+}
+
+fn cmd_path(from: String, to: String) -> Result<()> {
+    let root = std::env::current_dir().context("cannot determine current directory")?;
+    let engine = Engine::open(&root).with_context(|| {
+        format!(
+            "no index found at {} — run `codixing init` first",
+            root.display()
+        )
+    })?;
+
+    match engine.shortest_path(&from, &to) {
+        Some(path) => {
+            println!("{}", path.join(" -> "));
+        }
+        None => {
+            eprintln!("No path found between \"{}\" and \"{}\"", from, to);
+        }
+    }
+
     Ok(())
 }
 
