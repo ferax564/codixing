@@ -7,8 +7,8 @@ use tracing_subscriber::EnvFilter;
 
 use codixing_core::{
     EmbedTimingStats, EmbeddingModel, Engine, FederatedEngine, FederationConfig, FreshnessOptions,
-    FreshnessTier, GitSyncStats, HtmlExportOptions, IndexConfig, RepoMapOptions, SearchQuery,
-    Strategy, SyncStats, discover_projects, to_federation_config,
+    FreshnessTier, HtmlExportOptions, IndexConfig, RepoMapOptions, SearchQuery, Strategy,
+    discover_projects, to_federation_config,
 };
 
 #[derive(Parser)]

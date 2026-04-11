@@ -140,6 +140,9 @@ pub fn export_html(graph: &CodeGraph, options: &HtmlExportOptions) -> Result<()>
     let json_data = serde_json::to_string(&data)
         .map_err(|e| crate::error::CodixingError::Serialization(format!("HTML export: {e}")))?;
 
+    // Escape </script> sequences to prevent script-tag breakout (XSS).
+    let json_data = json_data.replace("</script>", "<\\/script>");
+
     let html = generate_html(&json_data);
     std::fs::write(&options.output_path, html)?;
 

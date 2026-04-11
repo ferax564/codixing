@@ -553,6 +553,10 @@ impl CodeGraph {
                 .unwrap_or(Language::Rust);
             let from_idx = g.get_or_insert_node(&from, from_lang);
             let to_idx = g.get_or_insert_node(&to, to_lang);
+            // Fix confidence for legacy data where the field was missing and
+            // serde defaulted to Verified regardless of edge kind.
+            let mut edge = edge;
+            edge.confidence = edge.kind.default_confidence();
             g.graph.add_edge(from_idx, to_idx, edge);
         }
         g
@@ -820,6 +824,8 @@ impl CodeGraph {
             }
 
             // Traverse both outgoing and incoming edges (undirected BFS).
+            // Skip __ext__ pseudo-nodes to avoid false paths through shared
+            // external imports (e.g., a.rs -> __ext__:serde -> b.rs).
             let neighbors: Vec<NodeIndex> = self
                 .graph
                 .neighbors_directed(current, petgraph::Direction::Outgoing)
@@ -827,6 +833,12 @@ impl CodeGraph {
                     self.graph
                         .neighbors_directed(current, petgraph::Direction::Incoming),
                 )
+                .filter(|&nb| {
+                    self.graph
+                        .node_weight(nb)
+                        .map(|n| !n.file_path.starts_with("__ext__:"))
+                        .unwrap_or(false)
+                })
                 .collect();
 
             for nb in neighbors {
