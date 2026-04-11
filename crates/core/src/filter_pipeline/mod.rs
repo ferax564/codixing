@@ -285,4 +285,138 @@ type = "strip_ansi"
         assert!(hint.contains("<!-- full output:"));
         assert!(hint.contains(".codixing/tee/"));
     }
+
+    #[test]
+    fn builtin_cargo_test_failure_extraction() {
+        let dir = tempfile::tempdir().unwrap();
+        let codixing_dir = dir.path().join(".codixing");
+        std::fs::create_dir_all(&codixing_dir).unwrap();
+        let pipeline = FilterPipeline::load(&codixing_dir);
+
+        let cargo_output = "\
+running 50 tests
+test test_a ... ok
+test test_b ... ok
+test test_c ... FAILED
+test test_d ... ok
+
+failures:
+
+---- test_c stdout ----
+thread 'test_c' panicked at 'assertion failed'
+
+failures:
+    test_c
+
+test result: FAILED. 49 passed; 1 failed; 0 ignored";
+
+        let result = pipeline.apply(cargo_output, "run_tests");
+        assert!(result.was_filtered);
+        assert_eq!(result.rule_name.as_deref(), Some("cargo-test-failures"));
+        assert!(result.output.contains("FAILED"));
+        assert!(result.output.contains("test_c"));
+        assert!(!result.output.contains("test_a ... ok"));
+        assert!(result.tee_path.is_some());
+    }
+
+    #[test]
+    fn builtin_grep_high_volume_caps() {
+        let dir = tempfile::tempdir().unwrap();
+        let codixing_dir = dir.path().join(".codixing");
+        std::fs::create_dir_all(&codixing_dir).unwrap();
+        let pipeline = FilterPipeline::load(&codixing_dir);
+
+        let grep_output: String = (0..200)
+            .map(|i| format!("src/file_{i}.rs:10: match line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let result = pipeline.apply(&grep_output, "grep_code");
+        assert!(result.was_filtered);
+        assert_eq!(result.rule_name.as_deref(), Some("grep-high-volume"));
+        assert!(result.output.lines().count() <= 153);
+        assert!(result.tee_path.is_some());
+    }
+
+    #[test]
+    fn builtin_git_diff_large_caps() {
+        let dir = tempfile::tempdir().unwrap();
+        let codixing_dir = dir.path().join(".codixing");
+        std::fs::create_dir_all(&codixing_dir).unwrap();
+        let pipeline = FilterPipeline::load(&codixing_dir);
+
+        let mut diff = String::new();
+        for i in 0..300 {
+            if i % 20 == 0 {
+                diff.push_str("index abc1234..def5678 100644\n");
+                diff.push_str(&format!("--- a/file_{}.rs\n", i / 20));
+                diff.push_str(&format!("+++ b/file_{}.rs\n", i / 20));
+            }
+            diff.push_str(&format!("+added line {i}\n"));
+        }
+
+        let result = pipeline.apply(&diff, "git_diff");
+        assert!(result.was_filtered);
+        assert_eq!(result.rule_name.as_deref(), Some("git-diff-large"));
+        assert!(!result.output.contains("index abc1234..def5678"));
+        assert!(result.tee_path.is_some());
+    }
+
+    #[test]
+    fn local_override_replaces_builtin() {
+        let dir = tempfile::tempdir().unwrap();
+        let codixing_dir = dir.path().join(".codixing");
+        std::fs::create_dir_all(&codixing_dir).unwrap();
+
+        // Write a local filters.toml that overrides cargo-test-failures.
+        // NOTE: uses [[rules]] to match the serde field name.
+        let local_toml = r#"
+schema_version = 1
+
+[[rules]]
+name = "cargo-test-failures"
+match_tool = "run_tests"
+match_output = "FAILED"
+stages = [
+    { type = "tail", lines = 5 },
+]
+"#;
+        std::fs::write(codixing_dir.join("filters.toml"), local_toml).unwrap();
+
+        let pipeline = FilterPipeline::load(&codixing_dir);
+        let output = "line1\nline2\nFAILED\nline4\nline5\nline6\nline7";
+        let result = pipeline.apply(output, "run_tests");
+        assert!(result.was_filtered);
+        assert!(result.output.contains("line7"));
+    }
+
+    #[test]
+    fn local_disable_suppresses_builtin() {
+        let dir = tempfile::tempdir().unwrap();
+        let codixing_dir = dir.path().join(".codixing");
+        std::fs::create_dir_all(&codixing_dir).unwrap();
+
+        let local_toml = r#"
+schema_version = 1
+
+[[rules]]
+name = "cargo-test-failures"
+match_tool = "run_tests"
+disabled = true
+stages = []
+
+[[rules]]
+name = "pytest-failures"
+match_tool = "run_tests"
+disabled = true
+stages = []
+"#;
+        std::fs::write(codixing_dir.join("filters.toml"), local_toml).unwrap();
+
+        let pipeline = FilterPipeline::load(&codixing_dir);
+        let output = "test result: FAILED. 1 failed";
+        let result = pipeline.apply(output, "run_tests");
+        // both cargo-test-failures and pytest-failures disabled; test-output-generic requires 200+ lines
+        assert!(!result.was_filtered);
+    }
 }
