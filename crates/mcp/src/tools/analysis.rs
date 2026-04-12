@@ -274,17 +274,39 @@ fn find_tests_via_mapping(
         mappings
     } else {
         let pat = pattern.to_lowercase();
+        // A mapping is kept if the pattern matches either the file name OR
+        // any test symbol defined inside the mapped test file. Otherwise the
+        // caller would fall back to find_tests_via_symbols and miss tests
+        // that are mapped but whose file name doesn't echo the pattern.
         mappings
             .into_iter()
             .filter(|m| {
-                m.test_file.to_lowercase().contains(&pat)
+                if m.test_file.to_lowercase().contains(&pat)
                     || m.source_file.to_lowercase().contains(&pat)
+                {
+                    return true;
+                }
+                let syms = engine.symbols("", Some(&m.test_file)).unwrap_or_default();
+                syms.iter().any(|s| {
+                    is_test_symbol(&s.name, &s.file_path) && s.name.to_lowercase().contains(&pat)
+                })
             })
             .collect()
     };
 
+    // An empty set here means the source file has mappings but neither the
+    // file name nor any mapped test symbol matched the pattern. Return an
+    // empty mapped result rather than falling back to symbol-based discovery
+    // (which would scan the source file and report unrelated tests as missing).
     if filtered.is_empty() {
-        return None;
+        return Some((
+            format!(
+                "## Tests for `{source_file}` — no matches\n\n\
+                 Mappings exist, but none of the mapped test files or their test \
+                 symbols matched pattern `{pattern}`.\n"
+            ),
+            false,
+        ));
     }
 
     let mut out = format!(
@@ -301,15 +323,20 @@ fn find_tests_via_mapping(
     }
     out.push('\n');
 
-    // Also list test symbols from each mapped test file.
+    // Also list test symbols from each mapped test file. When a pattern is
+    // given, narrow to symbols that contain it so the output reflects the
+    // user's actual query instead of dumping every test in the file.
+    let pat_lower = (!pattern.is_empty()).then(|| pattern.to_lowercase());
     let mut test_syms_out = String::new();
     for m in &filtered {
         let syms = engine.symbols("", Some(&m.test_file)).unwrap_or_default();
         let test_fns: Vec<_> = syms
             .iter()
+            .filter(|s| is_test_symbol(&s.name, &s.file_path))
             .filter(|s| {
-                let n = s.name.to_lowercase();
-                n.starts_with("test_") || n.ends_with("_test") || s.name.starts_with("Test")
+                pat_lower
+                    .as_ref()
+                    .is_none_or(|p| s.name.to_lowercase().contains(p))
             })
             .collect();
         if !test_fns.is_empty() {

@@ -2,7 +2,7 @@
 /// and `codixing usages`.
 ///
 /// These tests verify that:
-///   - `--count` prints only a count line to stdout (no full result table)
+///   - `--count` prints exactly one count line to stdout (no full result table)
 ///   - The count format matches the expected pattern
 use std::process::Command;
 
@@ -12,6 +12,18 @@ fn no_embed_engine(root: &std::path::Path) -> codixing_core::Engine {
     let engine = codixing_core::Engine::init(root, cfg).unwrap();
     engine.save().unwrap();
     engine
+}
+
+/// Pull the single non-empty line of stdout, asserting there is exactly one.
+/// Returns the line without surrounding whitespace.
+fn assert_single_stdout_line(stdout: &str, stderr: &str, context: &str) -> String {
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "{context}: expected exactly one non-empty stdout line\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    lines[0].trim().to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -46,21 +58,18 @@ fn search_count_flag_prints_count_only() {
         "search --count failed\nstdout: {stdout}\nstderr: {stderr}"
     );
 
-    // stdout must match "N result(s)" with no other lines
-    let trimmed = stdout.trim();
+    let line = assert_single_stdout_line(&stdout, &stderr, "search --count");
     assert!(
-        trimmed.starts_with(|c: char| c.is_ascii_digit()),
-        "expected count output to start with a digit\nstdout: {stdout}\nstderr: {stderr}"
+        line.starts_with(|c: char| c.is_ascii_digit()),
+        "expected count line to start with a digit\nline: {line}"
     );
     assert!(
-        trimmed.contains("result") && trimmed.contains("found"),
-        "expected 'N result(s) found' format\nstdout: {stdout}\nstderr: {stderr}"
+        line.contains("result") && line.contains("found"),
+        "expected 'N result(s) found' format\nline: {line}"
     );
-
-    // Must NOT contain full result table headers
     assert!(
         !stdout.contains("score="),
-        "expected no full result listing with --count\nstdout: {stdout}\nstderr: {stderr}"
+        "expected no full result listing with --count\nstdout: {stdout}"
     );
 }
 
@@ -96,20 +105,18 @@ fn symbols_count_flag_prints_count_only() {
         "symbols --count failed\nstdout: {stdout}\nstderr: {stderr}"
     );
 
-    let trimmed = stdout.trim();
+    let line = assert_single_stdout_line(&stdout, &stderr, "symbols --count");
     assert!(
-        trimmed.starts_with(|c: char| c.is_ascii_digit()),
-        "expected count output to start with a digit\nstdout: {stdout}\nstderr: {stderr}"
+        line.starts_with(|c: char| c.is_ascii_digit()),
+        "expected count line to start with a digit\nline: {line}"
     );
     assert!(
-        trimmed.contains("symbol"),
-        "expected 'symbol' in count output\nstdout: {stdout}\nstderr: {stderr}"
+        line.contains("symbol"),
+        "expected 'symbol' in count line\nline: {line}"
     );
-
-    // Must NOT contain table headers
     assert!(
         !stdout.contains("KIND"),
-        "expected no full symbol table with --count\nstdout: {stdout}\nstderr: {stderr}"
+        "expected no full symbol table with --count\nstdout: {stdout}"
     );
 }
 
@@ -145,19 +152,17 @@ fn usages_count_flag_prints_count_only() {
         "usages --count failed\nstdout: {stdout}\nstderr: {stderr}"
     );
 
-    let trimmed = stdout.trim();
+    let line = assert_single_stdout_line(&stdout, &stderr, "usages --count");
     assert!(
-        trimmed.starts_with(|c: char| c.is_ascii_digit()),
-        "expected count output to start with a digit\nstdout: {stdout}\nstderr: {stderr}"
+        line.starts_with(|c: char| c.is_ascii_digit()),
+        "expected count line to start with a digit\nline: {line}"
     );
     assert!(
-        trimmed.contains("usage"),
-        "expected 'usage' in count output\nstdout: {stdout}\nstderr: {stderr}"
+        line.contains("usage"),
+        "expected 'usage' in count line\nline: {line}"
     );
-
-    // Must NOT contain full usage table header
     assert!(
         !stdout.contains("LOCATION"),
-        "expected no full usages table with --count\nstdout: {stdout}\nstderr: {stderr}"
+        "expected no full usages table with --count\nstdout: {stdout}"
     );
 }

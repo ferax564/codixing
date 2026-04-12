@@ -52,9 +52,10 @@ Determine version from git log since last tag. Then update ALL of:
 4. `claude-plugin/.claude-plugin/plugin.json` — `"version"`
 5. `.claude-plugin/marketplace.json` — `metadata.version` AND `plugins[0].version`
 
-Verify (substitute the actual version number):
+Verify (set `NEW_VERSION` to the version you just bumped to):
 ```bash
-grep -rn "0.35.0" Cargo.toml npm/package.json docs/install.sh \
+NEW_VERSION="0.35.0"   # replace with target
+grep -rn "$NEW_VERSION" Cargo.toml npm/package.json docs/install.sh \
   claude-plugin/.claude-plugin/plugin.json .claude-plugin/marketplace.json
 ```
 

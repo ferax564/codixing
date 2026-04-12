@@ -8,7 +8,9 @@ fn update_single_file_flag() {
     let root = dir.path().canonicalize().unwrap();
     let root = root.as_path();
     std::fs::write(root.join("foo.rs"), "pub fn hello() {}").unwrap();
-    let engine = codixing_core::Engine::init(root, codixing_core::IndexConfig::new(root)).unwrap();
+    let mut cfg = codixing_core::IndexConfig::new(root);
+    cfg.embedding.enabled = false;
+    let engine = codixing_core::Engine::init(root, cfg).unwrap();
     engine.save().unwrap();
     drop(engine);
 

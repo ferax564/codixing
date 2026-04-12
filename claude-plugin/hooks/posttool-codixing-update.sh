@@ -41,7 +41,7 @@ FILE_PATH=$(printf '%s' "$INPUT" | jq -r '
 case "$FILE_PATH" in
   *.rs|*.py|*.ts|*.tsx|*.js|*.jsx|*.go|*.java|*.c|*.cpp|*.h|*.hpp|\
   *.cs|*.rb|*.swift|*.kt|*.scala|*.php|*.zig|*.sh|*.toml|*.yaml|*.yml|\
-  *.json|*.md|*.html|*.css)
+  *.json|*.md|*.html)
     ;;
   *)
     exit 0

@@ -41,9 +41,10 @@ TRIMMED=$(echo "$COMMAND" | sed -E 's/^[[:space:]]+//')
 #   cat path             -> cat
 FIRST_BIN=$(echo "$TRIMMED" | awk '{print $1}' | awk -F/ '{print $NF}')
 
-# --- ADVISORY: codixing ... | wc -l → suggest --count flag ---
-# Fires before any blocking logic so it's always seen.
-if echo "$TRIMMED" | grep -qE '^codixing .* \| *wc +-l'; then
+# --- ADVISORY: codixing search|symbols|usages ... | wc -l → suggest --count ---
+# Only fires for subcommands that actually support --count. Fires before any
+# blocking logic so it's always seen.
+if echo "$TRIMMED" | grep -qE '^codixing (search|symbols|usages) .* \| *wc +-l'; then
   echo "Hint: use --count flag instead of piping to wc -l (e.g., codixing search ... --count)" >&2
   exit 0
 fi

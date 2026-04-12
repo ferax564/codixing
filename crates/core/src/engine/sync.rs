@@ -849,9 +849,11 @@ impl Engine {
             );
         }
 
-        // If the caller requested a full graph rebuild, do it now (after
-        // the incremental sync, so the file list is current).
-        if options.rebuild_graph {
+        // If the caller requested a full graph rebuild, do it now — but only
+        // after a successful incremental sync. Running rebuild on a failed
+        // sync wastes work on a half-updated state and would mask the original
+        // sync error with a secondary rebuild error.
+        if options.rebuild_graph && result.is_ok() {
             self.rebuild_graph_from_disk()?;
         }
 
@@ -909,9 +911,12 @@ impl Engine {
             &empty_imports,
         );
 
-        // Resolve call edges using the current symbol table. Parallelize over
-        // files — `Parser` is Sync (doc comment on struct definition says so)
-        // and the output goes into a DashMap.
+        // Refresh the symbol table AND collect call edges in one parallel pass.
+        // SymbolTable::insert / remove_file take &self (DashMap-backed), so the
+        // pass only needs &self. We also refresh symbols here so the downstream
+        // add_call_edges resolves against a current symbol table — important
+        // when this method is called directly on a file set whose contents
+        // changed since the last sync.
         use rayon::prelude::*;
         let pending_calls: dashmap::DashMap<String, Vec<String>> = dashmap::DashMap::new();
         indexed_files.par_iter().for_each(|file| {
@@ -932,6 +937,14 @@ impl Engine {
                     return;
                 }
             };
+
+            // Refresh symbols for this file (drop stale, insert fresh).
+            self.symbols.remove_file(&rel_str);
+            for entity in &result.entities {
+                self.symbols
+                    .insert(symbol_from_entity(entity, &rel_str, result.language));
+            }
+
             let Some(tree) = result.tree.as_ref() else {
                 return;
             };

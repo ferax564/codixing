@@ -155,7 +155,7 @@ Full reference: [codixing.com/docs](https://codixing.com/docs)
 
 ### MCP server (optional)
 
-For editors with MCP support, the `codixing-mcp` binary exposes 56 JSON-RPC 2.0 tools:
+For editors with MCP support, the `codixing-mcp` binary exposes 67 JSON-RPC 2.0 tools:
 
 | Category | Tools |
 |----------|-------|

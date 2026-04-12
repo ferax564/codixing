@@ -195,9 +195,10 @@ fn apply_kind_filter(
         if let Some(idx) = decl_idx {
             let start = idx.saturating_sub(2);
             let end = (idx + 8).min(lines.len());
+            let slice_len = end - start;
             r.content = lines[start..end].join("\n");
             r.line_start += start as u64;
-            r.line_end = r.line_start + (end - start) as u64;
+            r.line_end = r.line_start + slice_len.saturating_sub(1) as u64;
             filtered.push(r);
         }
     }
@@ -737,8 +738,8 @@ pub(crate) fn call_explain(
 
     let definition = match engine.read_symbol_source(&symbol, file_hint) {
         Ok(Some(src)) => src,
-        Ok(None) => format!("Symbol '{symbol}' not found in the index."),
-        Err(e) => format!("Error reading symbol: {e}"),
+        Ok(None) => return (format!("Symbol '{symbol}' not found in the index."), false),
+        Err(e) => return (format!("Error reading symbol: {e}"), true),
     };
 
     let syms = engine.symbols(&symbol, file_hint).unwrap_or_default();

@@ -1044,7 +1044,7 @@
           <span class="metric-label">R@10 retrieval accuracy (vs grep 0.345)</span>
         </div>
         <div class="metric-item">
-          <span class="metric-val" data-count="24" data-suffix="">0</span>
+          <span class="metric-val" data-count="25" data-suffix="">0</span>
           <span class="metric-label">CLI commands</span>
         </div>
       </div>
@@ -1603,7 +1603,8 @@
       <span class="c-str">"command"</span>: <span class="c-str">"codixing-mcp"</span>,
       <span class="c-str">"args"</span>: [
         <span class="c-str">"--root"</span>, <span class="c-str">"."</span>,
-        <span class="c-str">"--medium"</span>  <span class="c-cmt">// curated 27 tools for Codex / clients without dynamic discovery</span>
+        <span class="c-str">"--medium"</span>,  <span class="c-cmt">// curated 27 tools for Codex / clients without dynamic discovery</span>
+        <span class="c-str">"--no-daemon-fork"</span>  <span class="c-cmt">// prevents stale daemon socket issues</span>
       ]
     <span class="c-key">}</span>
   <span class="c-key">}</span>

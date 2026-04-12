@@ -1594,14 +1594,31 @@ fn cmd_update(path: PathBuf, dry_run: bool, file: Option<String>) -> Result<()> 
         if !root.join(".codixing").is_dir() {
             return Ok(());
         }
-        if std::path::Path::new(rel).is_absolute() {
-            anyhow::bail!("--file must be a relative path (e.g. src/main.rs), got: {rel}");
+        let rel_path = std::path::Path::new(rel);
+        if rel_path.is_absolute()
+            || rel_path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            anyhow::bail!(
+                "--file must be a project-relative path with no '..' components, got: {rel}"
+            );
         }
         if dry_run {
             eprintln!("(dry run) would reindex: {rel}");
             return Ok(());
         }
-        let abs = root.join(rel);
+        let abs = match root.join(rel_path).canonicalize() {
+            Ok(p) => p,
+            Err(_) => {
+                // Silent no-op when the target file doesn't exist — the hook
+                // shouldn't error on freshly-deleted or never-created files.
+                return Ok(());
+            }
+        };
+        if !abs.starts_with(&root) {
+            anyhow::bail!("--file must stay within the project root, got: {rel}");
+        }
         let mut engine = Engine::open(&root).with_context(|| {
             format!(
                 "no index found at {} — run `codixing init` first",
