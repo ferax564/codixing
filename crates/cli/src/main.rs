@@ -1387,6 +1387,10 @@ fn cmd_callers(file: String, depth: usize) -> Result<()> {
     }
 
     // Non-empty path (empty case already returned above).
+    debug_assert!(
+        !callers.is_empty(),
+        "empty callers should have returned early"
+    );
     print_file_list(&callers, "", "caller(s) found");
     Ok(())
 }
