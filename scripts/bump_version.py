@@ -80,4 +80,10 @@ if __name__ == "__main__":
     if len(sys.argv) != 2:
         print(f"Usage: {sys.argv[0]} NEW_VERSION", file=sys.stderr)
         sys.exit(1)
+    if not re.fullmatch(r"\d+\.\d+\.\d+", sys.argv[1]):
+        print(
+            f"Error: version must be X.Y.Z (semver), got: {sys.argv[1]!r}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     bump(sys.argv[1])
