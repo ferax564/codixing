@@ -11,6 +11,17 @@
             "statusMessage": "Codixing dogfooding check..."
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/pretool-bash-codixing.sh",
+            "timeout": 5,
+            "statusMessage": "Codixing dogfooding check (Bash)..."
+          }
+        ]
       }
     ]
   }

@@ -1536,7 +1536,14 @@ fn cmd_sync(path: PathBuf) -> Result<()> {
         Engine::open(&root).with_context(|| "no index found — run `codixing init` first")?;
 
     let start = Instant::now();
-    let stats = match engine.sync() {
+    let stage_start = std::sync::Arc::new(std::sync::Mutex::new(Instant::now()));
+    let stage_start_cb = stage_start.clone();
+    let stats = match engine.sync_with_progress(move |msg| {
+        let mut t = stage_start_cb.lock().unwrap_or_else(|e| e.into_inner());
+        let elapsed = t.elapsed();
+        *t = Instant::now();
+        eprintln!("[sync +{:>5.1}s] {}", elapsed.as_secs_f64(), msg);
+    }) {
         Ok(s) => s,
         Err(e) => {
             let anyhow_err = anyhow::anyhow!("{e}");

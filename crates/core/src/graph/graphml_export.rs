@@ -37,9 +37,9 @@ pub fn export_graphml(graph: &CodeGraph, options: &GraphmlExportOptions) -> Resu
     let mut xml = String::new();
 
     xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-    xml.push_str("<graphml xmlns=\"http://graphml.graphstruct.org/graphml\"\n");
+    xml.push_str("<graphml xmlns=\"http://graphml.graphdrawing.org/xmlns\"\n");
     xml.push_str("  xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\n");
-    xml.push_str("  xsi:schemaLocation=\"http://graphml.graphstruct.org/graphml http://graphml.graphstruct.org/graphml/1.0/graphml.xsd\">\n");
+    xml.push_str("  xsi:schemaLocation=\"http://graphml.graphdrawing.org/xmlns http://graphml.graphdrawing.org/xmlns/1.0/graphml.xsd\">\n");
 
     // Key declarations for node attributes.
     xml.push_str(
@@ -172,6 +172,26 @@ mod tests {
         assert!(content.contains("target=\"src/lib.rs\""));
         assert!(content.contains("<data key=\"kind\">Resolved</data>"));
         assert!(content.contains("<data key=\"provenance\">EXTRACTED</data>"));
+    }
+
+    #[test]
+    fn graphml_uses_official_namespace() {
+        let g = CodeGraph::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ns.graphml");
+        export_graphml(
+            &g,
+            &GraphmlExportOptions {
+                output_path: path.clone(),
+            },
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("xmlns=\"http://graphml.graphdrawing.org/xmlns\""),
+            "GraphML must use the official graphdrawing.org xmlns so Gephi/yEd accept it"
+        );
+        assert!(!content.contains("graphstruct.org"));
     }
 
     #[test]
