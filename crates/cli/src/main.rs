@@ -996,7 +996,7 @@ fn cmd_search(
     let results = engine.search(sq).context("search failed")?;
 
     if count {
-        println!("{} result(s)", results.len());
+        println!("{} result(s) found", results.len());
         return Ok(());
     }
 

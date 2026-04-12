@@ -53,8 +53,8 @@ fn search_count_flag_prints_count_only() {
         "expected count output to start with a digit\nstdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
-        trimmed.contains("result"),
-        "expected 'result' in count output\nstdout: {stdout}\nstderr: {stderr}"
+        trimmed.contains("result") && trimmed.contains("found"),
+        "expected 'N result(s) found' format\nstdout: {stdout}\nstderr: {stderr}"
     );
 
     // Must NOT contain full result table headers
@@ -110,5 +110,54 @@ fn symbols_count_flag_prints_count_only() {
     assert!(
         !stdout.contains("KIND"),
         "expected no full symbol table with --count\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// usages --count
+// ---------------------------------------------------------------------------
+
+#[test]
+fn usages_count_flag_prints_count_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let root = root.as_path();
+
+    std::fs::write(
+        root.join("hello.rs"),
+        "pub fn hello_world() {}\npub fn call_hello() { hello_world(); }\n",
+    )
+    .unwrap();
+    let engine = no_embed_engine(root);
+    drop(engine);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_codixing"))
+        .args(["usages", "hello_world", "--count"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    assert!(
+        output.status.success(),
+        "usages --count failed\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    let trimmed = stdout.trim();
+    assert!(
+        trimmed.starts_with(|c: char| c.is_ascii_digit()),
+        "expected count output to start with a digit\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        trimmed.contains("usage"),
+        "expected 'usage' in count output\nstdout: {stdout}\nstderr: {stderr}"
+    );
+
+    // Must NOT contain full usage table header
+    assert!(
+        !stdout.contains("LOCATION"),
+        "expected no full usages table with --count\nstdout: {stdout}\nstderr: {stderr}"
     );
 }
