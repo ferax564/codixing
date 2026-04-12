@@ -238,78 +238,105 @@ pub(crate) fn call_rename_symbol(engine: &mut Engine, args: &Value) -> (String, 
     )
 }
 
-pub(crate) fn call_find_tests(engine: &Engine, args: &Value) -> (String, bool) {
-    let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
-    let file_filter = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
+// ── call_find_tests helpers ─────────────────────────────────────────────────
 
-    // If a specific source file is given, try test-to-code mapping first.
-    if !file_filter.is_empty() {
-        let mappings = engine.find_tests_for_file(file_filter);
-        if !mappings.is_empty() {
-            let filtered: Vec<_> = if pattern.is_empty() {
-                mappings
-            } else {
-                let pat = pattern.to_lowercase();
-                mappings
-                    .into_iter()
-                    .filter(|m| {
-                        m.test_file.to_lowercase().contains(&pat)
-                            || m.source_file.to_lowercase().contains(&pat)
-                    })
-                    .collect()
-            };
-            if !filtered.is_empty() {
-                let mut out = format!(
-                    "## Tests for `{file_filter}` ({} mapping(s))\n\n",
-                    filtered.len()
-                );
-                for m in &filtered {
-                    out.push_str(&format!(
-                        "  - **{}** (confidence: {:.0}%, {})\n",
-                        m.test_file,
-                        m.confidence * 100.0,
-                        m.reason,
-                    ));
-                }
-                out.push('\n');
+/// Return true if a symbol name / file path matches test naming conventions.
+///
+/// Conventions covered:
+/// - `test_` prefix or `_test` suffix (Rust, Python, C)
+/// - `Test` prefix (Go: `TestXxx`)
+/// - File path contains `test` or `spec`
+fn is_test_symbol(name: &str, file: &str) -> bool {
+    let n = name.to_lowercase();
+    let f = file.to_lowercase();
+    n.starts_with("test_")
+        || n.ends_with("_test")
+        || name.starts_with("Test")
+        || f.contains("test")
+        || f.contains("spec")
+}
 
-                // Also list test symbols from mapped test files.
-                let mut test_syms_out = String::new();
-                for m in &filtered {
-                    let syms = engine.symbols("", Some(&m.test_file)).unwrap_or_default();
-                    let test_fns: Vec<_> = syms
-                        .iter()
-                        .filter(|s| {
-                            let n = s.name.to_lowercase();
-                            n.starts_with("test_")
-                                || n.ends_with("_test")
-                                || s.name.starts_with("Test")
-                        })
-                        .collect();
-                    if !test_fns.is_empty() {
-                        test_syms_out.push_str(&format!("**{}**\n", m.test_file));
-                        let mut sorted = test_fns;
-                        sorted.sort_by_key(|t| t.line_start);
-                        for t in sorted {
-                            test_syms_out.push_str(&format!(
-                                "  L{:>4}  {:?}  {}\n",
-                                t.line_start, t.kind, t.name
-                            ));
-                        }
-                        test_syms_out.push('\n');
-                    }
-                }
-                if !test_syms_out.is_empty() {
-                    out.push_str("### Test functions in mapped files\n\n");
-                    out.push_str(&test_syms_out);
-                }
-
-                return (out, false);
-            }
-        }
+/// Try the test-mapping fast-path: look up mapped test files for `source_file`,
+/// optionally narrow by `pattern`, and format the result.
+///
+/// Returns `Some((output, is_error))` when mapped tests were found, `None` to
+/// signal that the caller should fall back to symbol-based discovery.
+fn find_tests_via_mapping(
+    engine: &Engine,
+    source_file: &str,
+    pattern: &str,
+) -> Option<(String, bool)> {
+    let mappings = engine.find_tests_for_file(source_file);
+    if mappings.is_empty() {
+        return None;
     }
 
-    // Fallback: symbol-based discovery (original behavior).
+    let filtered: Vec<_> = if pattern.is_empty() {
+        mappings
+    } else {
+        let pat = pattern.to_lowercase();
+        mappings
+            .into_iter()
+            .filter(|m| {
+                m.test_file.to_lowercase().contains(&pat)
+                    || m.source_file.to_lowercase().contains(&pat)
+            })
+            .collect()
+    };
+
+    if filtered.is_empty() {
+        return None;
+    }
+
+    let mut out = format!(
+        "## Tests for `{source_file}` ({} mapping(s))\n\n",
+        filtered.len()
+    );
+    for m in &filtered {
+        out.push_str(&format!(
+            "  - **{}** (confidence: {:.0}%, {})\n",
+            m.test_file,
+            m.confidence * 100.0,
+            m.reason,
+        ));
+    }
+    out.push('\n');
+
+    // Also list test symbols from each mapped test file.
+    let mut test_syms_out = String::new();
+    for m in &filtered {
+        let syms = engine.symbols("", Some(&m.test_file)).unwrap_or_default();
+        let test_fns: Vec<_> = syms
+            .iter()
+            .filter(|s| {
+                let n = s.name.to_lowercase();
+                n.starts_with("test_") || n.ends_with("_test") || s.name.starts_with("Test")
+            })
+            .collect();
+        if !test_fns.is_empty() {
+            test_syms_out.push_str(&format!("**{}**\n", m.test_file));
+            let mut sorted = test_fns;
+            sorted.sort_by_key(|t| t.line_start);
+            for t in sorted {
+                test_syms_out.push_str(&format!(
+                    "  L{:>4}  {:?}  {}\n",
+                    t.line_start, t.kind, t.name
+                ));
+            }
+            test_syms_out.push('\n');
+        }
+    }
+    if !test_syms_out.is_empty() {
+        out.push_str("### Test functions in mapped files\n\n");
+        out.push_str(&test_syms_out);
+    }
+
+    Some((out, false))
+}
+
+/// Symbol-based discovery fallback: scan all symbols, filter by test conventions
+/// and optional `pattern` / `file_filter`, then format grouped by file.
+fn find_tests_via_symbols(engine: &Engine, pattern: &str, file_filter: &str) -> (String, bool) {
     let syms = match engine.symbols(
         "",
         if file_filter.is_empty() {
@@ -322,27 +349,14 @@ pub(crate) fn call_find_tests(engine: &Engine, args: &Value) -> (String, bool) {
         Err(e) => return (format!("Symbol lookup error: {e}"), true),
     };
 
-    // Test naming conventions:
-    // - Name starts with "test_" or ends with "_test" (Rust, Python, C)
-    // - Name starts with "Test" (Go: TestXxx)
-    // - File path contains "test" or "spec"
-    let is_test = |name: &str, file: &str| -> bool {
-        let n = name.to_lowercase();
-        let f = file.to_lowercase();
-        n.starts_with("test_")
-            || n.ends_with("_test")
-            || name.starts_with("Test")
-            || f.contains("test")
-            || f.contains("spec")
-    };
-
+    let pat_lower = pattern.to_lowercase();
     let tests: Vec<_> = syms
         .iter()
         .filter(|s| {
-            let matches_test = is_test(&s.name, &s.file_path);
+            let matches_test = is_test_symbol(&s.name, &s.file_path);
             let matches_pattern = pattern.is_empty()
-                || s.name.to_lowercase().contains(&pattern.to_lowercase())
-                || s.file_path.to_lowercase().contains(&pattern.to_lowercase());
+                || s.name.to_lowercase().contains(&pat_lower)
+                || s.file_path.to_lowercase().contains(&pat_lower);
             matches_test && matches_pattern
         })
         .collect();
@@ -390,6 +404,21 @@ pub(crate) fn call_find_tests(engine: &Engine, args: &Value) -> (String, bool) {
     }
 
     (out, false)
+}
+
+pub(crate) fn call_find_tests(engine: &Engine, args: &Value) -> (String, bool) {
+    let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+    let file_filter = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Fast-path: when a source file is given, try the test-mapping index first.
+    if !file_filter.is_empty() {
+        if let Some(result) = find_tests_via_mapping(engine, file_filter, pattern) {
+            return result;
+        }
+    }
+
+    // Fallback: symbol-based discovery.
+    find_tests_via_symbols(engine, pattern, file_filter)
 }
 
 pub(crate) fn call_find_source_for_test(engine: &Engine, args: &Value) -> (String, bool) {
