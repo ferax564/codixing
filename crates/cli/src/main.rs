@@ -1222,7 +1222,40 @@ fn cmd_callers(file: String, depth: usize) -> Result<()> {
     };
 
     if callers.is_empty() {
-        eprintln!("No callers found for \"{}\"", file);
+        // Distinguish "file exists and is a true leaf" from "file isn't in
+        // the graph" (either the index is stale or the path doesn't match).
+        // Probe the callees side too — if BOTH sides are empty, the file is
+        // almost certainly not represented in the graph at all.
+        let callees = engine.callees(&file);
+        let file_exists_on_disk = root.join(&file).exists();
+        if callees.is_empty() {
+            if file_exists_on_disk {
+                eprintln!(
+                    "No callers found for \"{}\".\n\
+                     The file exists on disk but has no graph edges in either direction. \
+                     This usually means the index doesn't know about this file yet — \
+                     run `codixing sync` or `codixing init` to rebuild, or check the \
+                     path spelling (paths are relative to the repo root).",
+                    file
+                );
+            } else {
+                eprintln!(
+                    "No callers found for \"{}\".\n\
+                     The file does not exist on disk at {}. Check the path — codixing \
+                     expects repo-root-relative paths like `crates/core/src/lib.rs`.",
+                    file,
+                    root.join(&file).display()
+                );
+            }
+        } else {
+            eprintln!(
+                "No callers found for \"{}\" — the file is imported by nothing, but it does \
+                 import {} other file(s). It is likely an entry point (main, lib root, binary), \
+                 a test harness, or a leaf module that no one uses yet.",
+                file,
+                callees.len()
+            );
+        }
         return Ok(());
     }
 
