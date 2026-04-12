@@ -592,13 +592,26 @@ impl TantivyIndex {
     }
 
     /// Commit all staged additions and deletions, making them visible to readers.
+    ///
+    /// On Windows the commit path is wrapped in
+    /// [`crate::index::windows_retry::retry_transient_io`] because Tantivy's
+    /// segment rename/delete during commit races with Windows Defender on
+    /// freshly-written segment files, producing intermittent ERROR_ACCESS_DENIED
+    /// (os error 5). The retry backoff rides out the ~microsecond AV scan
+    /// window. On Unix this compiles to a direct call.
     pub fn commit(&self) -> Result<()> {
         let writer_mutex = self.writer.as_ref().ok_or(CodixingError::ReadOnly)?;
         let mut writer = writer_mutex
             .lock()
             .map_err(|e| CodixingError::Index(format!("writer lock poisoned: {e}")))?;
-        writer.commit()?;
-        self.reader.reload()?;
+        crate::index::windows_retry::retry_transient_io(|| -> Result<()> {
+            writer.commit()?;
+            Ok(())
+        })?;
+        crate::index::windows_retry::retry_transient_io(|| -> Result<()> {
+            self.reader.reload()?;
+            Ok(())
+        })?;
         Ok(())
     }
 
