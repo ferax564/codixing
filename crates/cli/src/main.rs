@@ -111,6 +111,10 @@ enum Command {
         /// Only return documentation results (no code/config).
         #[arg(long)]
         docs_only: bool,
+
+        /// Print only the result count, not the full results.
+        #[arg(long)]
+        count: bool,
     },
 
     /// List symbols (functions, structs, classes, etc.) in the index.
@@ -122,6 +126,10 @@ enum Command {
         /// Only show symbols from this file.
         #[arg(short, long)]
         file: Option<String>,
+
+        /// Print only the result count, not the full results.
+        #[arg(long)]
+        count: bool,
     },
 
     /// Show dependency graph stats and optionally generate a repo map.
@@ -233,6 +241,10 @@ enum Command {
         /// Filter results to files matching this substring.
         #[arg(short, long)]
         file: Option<String>,
+
+        /// Print only the result count, not the full results.
+        #[arg(long)]
+        count: bool,
     },
 
     /// Re-index files changed since the last git commit (git-diff aware incremental update).
@@ -639,6 +651,7 @@ async fn main() -> Result<()> {
             token_budget,
             code_only,
             docs_only,
+            count,
         } => {
             let doc_filter = if code_only {
                 Some(codixing_core::DocFilter::CodeOnly)
@@ -656,9 +669,14 @@ async fn main() -> Result<()> {
                 json,
                 token_budget,
                 doc_filter,
+                count,
             )
         }
-        Command::Symbols { filter, file } => cmd_symbols(filter, file),
+        Command::Symbols {
+            filter,
+            file,
+            count,
+        } => cmd_symbols(filter, file, count),
         Command::Graph {
             path,
             token_budget,
@@ -690,7 +708,8 @@ async fn main() -> Result<()> {
             symbol,
             limit,
             file,
-        } => cmd_usages(symbol, limit, file),
+            count,
+        } => cmd_usages(symbol, limit, file, count),
         Command::Update {
             path,
             dry_run,
@@ -918,6 +937,7 @@ fn cmd_search(
     json: bool,
     token_budget: Option<usize>,
     doc_filter: Option<codixing_core::DocFilter>,
+    count: bool,
 ) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
 
@@ -930,6 +950,8 @@ fn cmd_search(
     // preserve, and --file / specific strategies / token_budget require
     // flags the code_search tool doesn't fully expose, so those fall through
     // to the in-process path.
+    // --count also bypasses the daemon: we need to parse individual results to
+    // get an accurate count, and the daemon returns a formatted text block.
     // The `format` flag doesn't change anything here because the MCP body is
     // already a formatted markdown text block — the daemon path effectively
     // always produces "formatted" output, which is what agents and humans
@@ -937,6 +959,7 @@ fn cmd_search(
     {
         let _ = format;
         let can_use_daemon = !json
+            && !count
             && file.is_none()
             && token_budget.is_none()
             && doc_filter.is_none()
@@ -971,6 +994,11 @@ fn cmd_search(
     }
 
     let results = engine.search(sq).context("search failed")?;
+
+    if count {
+        println!("{} result(s)", results.len());
+        return Ok(());
+    }
 
     if results.is_empty() {
         eprintln!("No results for \"{}\"", query);
@@ -1053,11 +1081,12 @@ fn cmd_search(
     Ok(())
 }
 
-fn cmd_symbols(filter: String, file: Option<String>) -> Result<()> {
+fn cmd_symbols(filter: String, file: Option<String>, count: bool) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
 
     // Fast path: proxy through the daemon if one is running.
-    if !filter.is_empty() {
+    // Skip daemon proxy for --count: we need the raw symbol list to count accurately.
+    if !filter.is_empty() && !count {
         if let Some(text) = daemon_proxy::try_symbols(&root, &filter, file.as_deref()) {
             print!("{text}");
             return Ok(());
@@ -1074,6 +1103,11 @@ fn cmd_symbols(filter: String, file: Option<String>) -> Result<()> {
     let symbols = engine
         .symbols(&filter, file.as_deref())
         .context("symbol lookup failed")?;
+
+    if count {
+        println!("{} symbol(s) found", symbols.len());
+        return Ok(());
+    }
 
     if symbols.is_empty() {
         if filter.is_empty() {
@@ -1479,12 +1513,13 @@ fn cmd_cross_imports(from: String, to: String) -> Result<()> {
     Ok(())
 }
 
-fn cmd_usages(symbol: String, limit: usize, file: Option<String>) -> Result<()> {
+fn cmd_usages(symbol: String, limit: usize, file: Option<String>, count: bool) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
 
     // Fast path: proxy through the daemon when no file filter (the MCP
     // search_usages tool doesn't expose a file filter parameter).
-    if file.is_none() {
+    // Skip daemon proxy for --count: we need the raw result list to count accurately.
+    if file.is_none() && !count {
         let _ = limit; // MCP tool uses its own limit; CLI limit is approximated
         if let Some(text) = daemon_proxy::try_usages(&root, &symbol) {
             print!("{text}");
@@ -1505,6 +1540,11 @@ fn cmd_usages(symbol: String, limit: usize, file: Option<String>) -> Result<()> 
 
     if let Some(ref f) = file {
         results.retain(|r| r.file_path.contains(f.as_str()));
+    }
+
+    if count {
+        println!("{} usage(s) found", results.len());
+        return Ok(());
     }
 
     if results.is_empty() {
