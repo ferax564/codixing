@@ -7,7 +7,7 @@ mod common;
 
 use std::fs;
 
-use codixing_core::{Engine, IndexConfig};
+use codixing_core::{Engine, GrepOptions, IndexConfig};
 use tempfile::tempdir;
 
 /// Create an `IndexConfig` with embeddings disabled (BM25-only mode).
@@ -192,6 +192,116 @@ fn grep_with_glob_and_trigram_filter() {
             m.file_path
         );
     }
+}
+
+// ── GrepOptions: case-insensitive, invert, asymmetric context ────────────────
+
+fn opts(pattern: &str) -> GrepOptions {
+    GrepOptions::from_simple(pattern, true, None, 0, 50)
+}
+
+#[test]
+fn grep_case_insensitive_literal_matches_mixed_case() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let src = root.join("src");
+    fs::create_dir_all(&src).unwrap();
+
+    fs::write(
+        src.join("mixed.rs"),
+        "struct WidgetFactory;\nfn make_widgetfactory() {}\nfn WIDGETFACTORY_PANIC() {}\n",
+    )
+    .unwrap();
+
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
+
+    let mut o = opts("widgetfactory");
+    o.case_insensitive = true;
+    let results = engine.grep_code_opts(&o).unwrap();
+
+    assert_eq!(
+        results.len(),
+        3,
+        "expected 3 case-insensitive matches, got {}: {results:?}",
+        results.len()
+    );
+}
+
+#[test]
+fn grep_case_insensitive_regex_builds_via_regex_builder() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let src = root.join("src");
+    fs::create_dir_all(&src).unwrap();
+
+    fs::write(
+        src.join("todo.rs"),
+        "// TODO: fix\n// todo(alice): here\n// Normal line\n",
+    )
+    .unwrap();
+
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
+
+    let mut o = GrepOptions::from_simple("todo", false, None, 0, 50);
+    o.case_insensitive = true;
+    let results = engine.grep_code_opts(&o).unwrap();
+
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn grep_invert_returns_non_matching_lines() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let src = root.join("src");
+    fs::create_dir_all(&src).unwrap();
+
+    fs::write(
+        src.join("mixed.rs"),
+        "use foo::bar;\nfn a() {}\nuse baz::qux;\nfn b() {}\n",
+    )
+    .unwrap();
+
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
+
+    let mut o = GrepOptions::from_simple("^use ", false, None, 0, 50);
+    o.invert = true;
+    let results = engine.grep_code_opts(&o).unwrap();
+
+    let lines: Vec<&str> = results.iter().map(|m| m.line.as_str()).collect();
+    assert!(lines.iter().all(|l| !l.starts_with("use ")), "{lines:?}");
+    assert!(lines.iter().any(|l| l.contains("fn a()")));
+    assert!(lines.iter().any(|l| l.contains("fn b()")));
+}
+
+#[test]
+fn grep_asymmetric_before_after_context() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let src = root.join("src");
+    fs::create_dir_all(&src).unwrap();
+
+    let content = (0..10)
+        .map(|i| format!("line_{i}_content"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(src.join("numbered.rs"), content).unwrap();
+
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
+
+    let mut o = opts("line_5_content");
+    o.before_context = 2;
+    o.after_context = 4;
+    let results = engine.grep_code_opts(&o).unwrap();
+
+    assert_eq!(results.len(), 1);
+    let m = &results[0];
+    assert_eq!(m.before.len(), 2, "expected 2 before-context lines");
+    assert_eq!(m.after.len(), 4, "expected 4 after-context lines");
+    assert_eq!(m.before[0], "line_3_content");
+    assert_eq!(m.before[1], "line_4_content");
+    assert_eq!(m.after[0], "line_6_content");
+    assert_eq!(m.after[3], "line_9_content");
 }
 
 // ── Chunk boundary trigrams ──────────────────────────────────────────────────

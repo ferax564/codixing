@@ -180,6 +180,59 @@ pub struct GrepMatch {
     pub after: Vec<String>,
 }
 
+/// Options controlling [`Engine::grep_code_opts`].
+///
+/// Prefer this over the legacy [`Engine::grep_code`] positional signature when
+/// callers need case-insensitive matching, inverted line selection, or
+/// asymmetric before/after context.
+#[derive(Debug, Clone)]
+pub struct GrepOptions {
+    /// Pattern to search for. Treated as a regular expression unless
+    /// `literal == true`.
+    pub pattern: String,
+    /// When true, treat `pattern` as a plain string (regex metacharacters are
+    /// escaped before compilation).
+    pub literal: bool,
+    /// When true, the regex engine ignores ASCII case. Implemented via
+    /// `regex::RegexBuilder::case_insensitive` — no `(?i)` prefix manipulation.
+    pub case_insensitive: bool,
+    /// When true, emit lines that do **not** match the pattern. Context lines
+    /// are still taken from the surrounding file content.
+    pub invert: bool,
+    /// Optional glob pattern (e.g. `"*.rs"`, `"src/**/*.py"`) restricting
+    /// which files are scanned. `None` searches all indexed files.
+    pub file_glob: Option<String>,
+    /// Context lines to include before each match. Clamped to 5.
+    pub before_context: usize,
+    /// Context lines to include after each match. Clamped to 5.
+    pub after_context: usize,
+    /// Maximum total matches to return. `0` is treated as the default (50).
+    pub limit: usize,
+}
+
+impl GrepOptions {
+    /// Convenience constructor matching the legacy [`Engine::grep_code`]
+    /// positional API — symmetric context, no case-insensitive, no invert.
+    pub fn from_simple(
+        pattern: impl Into<String>,
+        literal: bool,
+        file_glob: Option<&str>,
+        context_lines: usize,
+        limit: usize,
+    ) -> Self {
+        Self {
+            pattern: pattern.into(),
+            literal,
+            case_insensitive: false,
+            invert: false,
+            file_glob: file_glob.map(|s| s.to_string()),
+            before_context: context_lines,
+            after_context: context_lines,
+            limit,
+        }
+    }
+}
+
 // -------------------------------------------------------------------------
 // Git helpers (private free functions, no external dependency)
 // -------------------------------------------------------------------------

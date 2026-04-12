@@ -5,14 +5,16 @@
 # Mirrors the intent of pretool-codixing.sh (which targets the Grep tool) but
 # covers the bypass where agents call `Bash("grep -r foo crates/")` directly.
 #
+# v0.36: `codixing grep` replaces the single-file / count / version
+# passthroughs — those legitimate use cases are now native CLI commands, so
+# the exception list shrinks to the one we cannot serve (non-indexed paths).
+#
 # PASSTHROUGH when:
 #   - No codixing index exists (.codixing/ directory missing)
 #   - Command does not start with grep/rg/find/cat (or their absolute paths)
 #   - Command targets non-indexed paths (target/, node_modules/, .git/, /tmp/)
-#   - Command is piped with | wc -l (count mode)
-#   - Command is a version check (grep 'version')
-#   - Command is `cat` on a single specific file (Read-replacement use)
 #   - Command uses find with -name/-iname only (file-finding, not content search)
+#   - Command is `cat` on a single file without a grep pipe (Read-replacement)
 
 set -euo pipefail
 
@@ -41,11 +43,11 @@ TRIMMED=$(echo "$COMMAND" | sed -E 's/^[[:space:]]+//')
 #   cat path             -> cat
 FIRST_BIN=$(echo "$TRIMMED" | awk '{print $1}' | awk -F/ '{print $NF}')
 
-# --- ADVISORY: codixing search|symbols|usages ... | wc -l → suggest --count ---
+# --- ADVISORY: codixing search|symbols|usages|grep ... | wc -l → suggest --count ---
 # Only fires for subcommands that actually support --count. Fires before any
 # blocking logic so it's always seen.
-if echo "$TRIMMED" | grep -qE '^codixing (search|symbols|usages) .* \| *wc +-l'; then
-  echo "Hint: use --count flag instead of piping to wc -l (e.g., codixing search ... --count)" >&2
+if echo "$TRIMMED" | grep -qE '^codixing (search|symbols|usages|grep) .* \| *wc +-l'; then
+  echo "Hint: use --count flag instead of piping to wc -l (e.g., codixing grep ... --count)" >&2
   exit 0
 fi
 
@@ -83,31 +85,14 @@ if [ "$TOOL_TYPE" = "read" ]; then
   fi
 fi
 
-# --- PASSTHROUGH for count mode (| wc -l) ---
-if echo "$TRIMMED" | grep -qE '\\| *wc +-l'; then
-  exit 0
-fi
-
-# --- PASSTHROUGH for version/semver searches ---
-if echo "$TRIMMED" | grep -qE "['\"]v?[0-9]+\.[0-9]+(\.[0-9]+)?['\"]"; then
-  exit 0
-fi
-
 # --- PASSTHROUGH for non-indexed target directories ---
 if echo "$TRIMMED" | grep -qE '(target/|node_modules/|\.git/|\.codixing/|vendor/|/tmp/|/private/tmp/)'; then
   exit 0
 fi
 
-# --- PASSTHROUGH: command targets a single file with an extension (not a dir walk) ---
-# e.g. `grep foo src/main.rs` — the agent already knows the file, let them search it.
-# Heuristic: if any argument ends in a known extension AND no -r/-R/--recursive flag is present.
-if ! echo "$TRIMMED" | grep -qE '( -r| -R| --recursive| -rn| -rH)'; then
-  if echo "$TRIMMED" | grep -qE '\.(rs|py|ts|tsx|js|jsx|go|java|c|cpp|h|hpp|cs|rb|swift|kt|scala|php|zig|sh|md|html|json|toml|yaml|yml)( |$)'; then
-    exit 0
-  fi
-fi
-
 # --- DENY: this is a code-exploration content search ---
+# v0.36 removes the single-file, count, and version passthroughs: every legit
+# use case below is now covered by `codixing grep`.
 
 # Try to extract the search pattern for a helpful suggestion.
 PATTERN=$(echo "$TRIMMED" | sed -nE "s/^[^ ]+ +(-[a-zA-Z]+ +)*['\"]?([^'\" ]+)['\"]?.*/\2/p" | head -1)
@@ -120,7 +105,7 @@ cat <<DENY_JSON
   "hookSpecificOutput": {
     "hookEventName": "PreToolUse",
     "permissionDecision": "deny",
-    "additionalContext": "CODIXING DOGFOODING: Your Bash command shelled out to '${FIRST_BIN}' against indexed code. Use the codixing CLI instead.\n\nSuggested commands:\n  codixing search \"${PATTERN}\"       — semantic search\n  codixing symbols ${PATTERN}         — find symbol definitions\n  codixing usages ${PATTERN}          — find call sites and imports\n\nAll available commands:\n  codixing search \"<query>\"           — semantic search (code, docs, config)\n  codixing symbols <name>             — find symbol definitions\n  codixing usages <symbol>            — find call sites and imports\n  codixing callers <file>             — who imports this file\n  codixing callees <file>             — what this file imports\n  codixing impact <file>              — blast radius analysis\n  codixing graph --map                — architecture overview\n\nPassthrough exceptions: single-file targets, count mode (| wc -l), version searches, non-indexed paths (target/, node_modules/, .git/), find without -exec."
+    "additionalContext": "CODIXING DOGFOODING: Your Bash command shelled out to '${FIRST_BIN}' against indexed code. Use the codixing CLI instead.\n\nSuggested commands:\n  codixing grep \"${PATTERN}\"          — literal/regex text scan with line numbers (new in v0.36)\n  codixing search \"${PATTERN}\"       — semantic search\n  codixing symbols ${PATTERN}         — find symbol definitions\n  codixing usages ${PATTERN}          — find call sites and imports\n\nAll available commands:\n  codixing grep \"<pattern>\"           — literal/regex scan (path:line:col:text) — supports --count, --files-with-matches, --invert, -i, --glob, --file, --json\n  codixing search \"<query>\"           — semantic search (code, docs, config)\n  codixing symbols <name>             — find symbol definitions\n  codixing usages <symbol>            — find call sites and imports\n  codixing callers <file>             — who imports this file\n  codixing callees <file>             — what this file imports\n  codixing impact <file>              — blast radius analysis\n  codixing graph --map                — architecture overview\n\nPassthrough exceptions: non-indexed paths (target/, node_modules/, .git/, vendor/, /tmp/), pure find (no -exec), cat on a single file without a grep pipe."
   }
 }
 DENY_JSON

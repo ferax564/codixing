@@ -5,7 +5,9 @@ use std::time::Instant;
 
 use serde_json::Value;
 
-use codixing_core::{Engine, GrepMatch, SessionEventKind, SharedEventType, SharedSessionEvent};
+use codixing_core::{
+    Engine, GrepMatch, GrepOptions, SessionEventKind, SharedEventType, SharedSessionEvent,
+};
 
 pub(crate) fn call_read_file(engine: &Engine, args: &Value) -> (String, bool) {
     let file = match args.get("file").and_then(|v| v.as_str()) {
@@ -74,7 +76,7 @@ pub(crate) fn call_read_file(engine: &Engine, args: &Value) -> (String, bool) {
 
 pub(crate) fn call_grep_code(engine: &Engine, args: &Value) -> (String, bool) {
     let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
-        Some(p) => p,
+        Some(p) => p.to_string(),
         None => return ("Missing required argument: pattern".to_string(), true),
     };
 
@@ -82,18 +84,83 @@ pub(crate) fn call_grep_code(engine: &Engine, args: &Value) -> (String, bool) {
         .get("literal")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let file_glob = args.get("file_glob").and_then(|v| v.as_str());
-    let context_lines = args
+    let case_insensitive = args
+        .get("case_insensitive")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let invert = args
+        .get("invert")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let file_glob = args
+        .get("file_glob")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    // Accept both legacy `context_lines` (symmetric) and new asymmetric
+    // `before_context` / `after_context` params. Explicit before/after wins.
+    let legacy_context = args
         .get("context_lines")
         .and_then(|v| v.as_u64())
-        .unwrap_or(0)
-        .min(5) as usize;
-    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+        .unwrap_or(0) as usize;
+    let before_context = args
+        .get("before_context")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(legacy_context);
+    let after_context = args
+        .get("after_context")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(legacy_context);
 
-    match engine.grep_code(pattern, literal, file_glob, context_lines, limit) {
+    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+    let count_only = args
+        .get("count_only")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let files_only = args
+        .get("files_with_matches")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let opts = GrepOptions {
+        pattern: pattern.clone(),
+        literal,
+        case_insensitive,
+        invert,
+        file_glob,
+        before_context,
+        after_context,
+        limit,
+    };
+
+    match engine.grep_code_opts(&opts) {
         Err(e) => (format!("grep_code error: {e}"), true),
         Ok(matches) if matches.is_empty() => (format!("No matches found for `{pattern}`."), false),
-        Ok(matches) => (format_grep_matches(pattern, &matches), false),
+        Ok(matches) if count_only => {
+            let files: std::collections::BTreeSet<&str> =
+                matches.iter().map(|m| m.file_path.as_str()).collect();
+            (
+                format!(
+                    "{} match(es) for `{pattern}` across {} file(s).",
+                    matches.len(),
+                    files.len()
+                ),
+                false,
+            )
+        }
+        Ok(matches) if files_only => {
+            let files: std::collections::BTreeSet<&str> =
+                matches.iter().map(|m| m.file_path.as_str()).collect();
+            let mut out = format!("{} file(s) containing `{pattern}`:\n", files.len());
+            for f in files {
+                out.push_str(f);
+                out.push('\n');
+            }
+            (out, false)
+        }
+        Ok(matches) => (format_grep_matches(&pattern, &matches), false),
     }
 }
 

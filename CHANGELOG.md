@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **`codixing grep` CLI command** — literal or regex text scan across indexed files, trigram-accelerated. Emits `path:line:col:text` by default (1-indexed line/col to match `grep -n`). Supports `--literal`, `-i/--ignore-case`, `--invert`, `--file`, `--glob`, `-C/-B/-A` (symmetric or asymmetric context), `--count`, `--files-with-matches`, `--json`, and `--limit`. Closes the last grep-fallback gap surfaced during v0.35 polish work. Fast-path auto-proxies through a running `codixing-mcp` daemon when available.
+- **`Engine::grep_code_opts(&GrepOptions)`** — structured variant of `Engine::grep_code` that adds case-insensitive matching (via `regex::RegexBuilder`), inverted line selection, and asymmetric before/after context. Legacy positional `Engine::grep_code(...)` remains as a thin forwarder for backward compatibility.
+- **MCP `grep_code` tool gains new params** — `case_insensitive`, `invert`, `before_context`, `after_context`, `count_only`, `files_with_matches`. Existing `context_lines` still accepted as a symmetric shorthand.
+
+### Changed
+- **Bash dogfooding hook shrink** — `claude-plugin/hooks/pretool-bash-codixing.sh` drops the single-file, `| wc -l`, and version-string passthroughs (127 → 112 lines). All three cases are now native `codixing grep` features, so the compliance leaks close. Deny message now suggests `codixing grep "<pattern>"` first.
+
 ## [0.34.0] — 2026-04-12
 
 Audit-driven release bundling v0.33 prep and v0.34 follow-ups. 8 PRs: #69, #70, #71, #72, #73, #74, #75, #76. Skipping the v0.33.0 tag — all v0.33 work is included here.

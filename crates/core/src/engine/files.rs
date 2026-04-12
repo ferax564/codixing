@@ -8,7 +8,7 @@ use tracing::warn;
 use crate::error::{CodixingError, Result};
 use crate::index::trigram::build_query_plan;
 
-use super::{Engine, GrepMatch};
+use super::{Engine, GrepMatch, GrepOptions};
 
 impl Engine {
     // -------------------------------------------------------------------------
@@ -68,11 +68,15 @@ impl Engine {
     /// `grep_code` scans the raw file content — ideal for exact identifiers,
     /// string literals, TODO comments, or any pattern requiring verbatim matching.
     ///
+    /// Thin wrapper around [`Engine::grep_code_opts`] retained for backward
+    /// compatibility with existing callers. New features (`case_insensitive`,
+    /// `invert`, asymmetric context) are only reachable via `grep_code_opts`.
+    ///
     /// - `literal`: when `true`, the pattern is treated as a plain string (all
     ///   regex metacharacters are escaped before compilation).
     /// - `file_glob`: optional glob pattern (e.g. `"*.rs"`, `"src/**/*.py"`) to
     ///   restrict which files are searched.  `None` searches all indexed files.
-    /// - `context_lines`: number of surrounding lines to include (clamped to 5).
+    /// - `context_lines`: symmetric surrounding lines to include (clamped to 5).
     /// - `limit`: maximum total matches to return (default 50).
     ///
     /// Returns [`CodixingError::Index`] if the pattern fails to compile.
@@ -84,21 +88,36 @@ impl Engine {
         context_lines: usize,
         limit: usize,
     ) -> Result<Vec<GrepMatch>> {
-        use regex::Regex;
+        let opts = GrepOptions::from_simple(pattern, literal, file_glob, context_lines, limit);
+        self.grep_code_opts(&opts)
+    }
 
-        let context_lines = context_lines.min(5);
-        let limit = if limit == 0 { 50 } else { limit };
+    /// Structured variant of [`Engine::grep_code`].
+    ///
+    /// Accepts a [`GrepOptions`] struct so callers can request case-insensitive
+    /// matching, inverted line selection, or asymmetric before/after context
+    /// without bloating the positional signature. Uses the file-level trigram
+    /// index to narrow the candidate set before any disk I/O — except in
+    /// invert mode, where every indexed file must be scanned (a file with no
+    /// matching trigrams still has plenty of non-matching lines to emit).
+    pub fn grep_code_opts(&self, opts: &GrepOptions) -> Result<Vec<GrepMatch>> {
+        use regex::RegexBuilder;
 
-        let compiled_pattern = if literal {
-            regex::escape(pattern)
+        let before_context = opts.before_context.min(5);
+        let after_context = opts.after_context.min(5);
+        let limit = if opts.limit == 0 { 50 } else { opts.limit };
+
+        let compiled_pattern = if opts.literal {
+            regex::escape(&opts.pattern)
         } else {
-            pattern.to_string()
+            opts.pattern.clone()
         };
-        let re = Regex::new(&compiled_pattern)
+        let re = RegexBuilder::new(&compiled_pattern)
+            .case_insensitive(opts.case_insensitive)
+            .build()
             .map_err(|e| CodixingError::Index(format!("grep pattern error: {e}")))?;
 
-        // Build a glob matcher if file_glob is provided.
-        let glob_pat: Option<glob::Pattern> = match file_glob {
+        let glob_pat: Option<glob::Pattern> = match opts.file_glob.as_deref() {
             Some(g) => Some(
                 glob::Pattern::new(g)
                     .map_err(|e| CodixingError::Index(format!("invalid file glob: {e}")))?,
@@ -106,26 +125,27 @@ impl Engine {
             None => None,
         };
 
-        // Use the file-level trigram index to narrow the candidate set before
-        // doing any disk I/O.  For a literal pattern all trigrams must be
-        // present; for a regex we build a full QueryPlan (with OR support).
-        let candidate_set: Option<std::collections::HashSet<&str>> = if literal {
-            // Use the raw pattern bytes, NOT compiled_pattern — the latter has
-            // regex escaping applied (e.g. `foo.bar` → `foo\.bar`) which would
-            // produce wrong trigrams and cause false negatives.
-            self.get_file_trigram()
-                .candidates_for_literal(pattern.as_bytes())
-                .map(|v| v.into_iter().collect())
-        } else {
-            let plan = build_query_plan(pattern);
-            self.get_file_trigram()
-                .execute_plan(&plan)
-                .map(|v| v.into_iter().collect())
-        };
+        // Trigram pre-filter is only sound for positive matches. Invert mode
+        // needs the full indexed set — a file with no matching trigrams still
+        // has plenty of non-matching lines to emit. Case-insensitive literal
+        // matching also bypasses the prefilter because the trigram index is
+        // case-sensitive.
+        let candidate_set: Option<std::collections::HashSet<&str>> =
+            if opts.invert || (opts.literal && opts.case_insensitive) {
+                None
+            } else if opts.literal {
+                self.get_file_trigram()
+                    .candidates_for_literal(opts.pattern.as_bytes())
+                    .map(|v| v.into_iter().collect())
+            } else {
+                let plan = build_query_plan(&opts.pattern);
+                self.get_file_trigram()
+                    .execute_plan(&plan)
+                    .map(|v| v.into_iter().collect())
+            };
 
-        // Collect candidate file paths after trigram + glob filtering.
         let mut rel_paths: Vec<String> = self.file_chunk_counts.keys().cloned().collect();
-        rel_paths.sort_unstable(); // deterministic ordering
+        rel_paths.sort_unstable();
 
         let candidate_paths: Vec<&String> = rel_paths
             .iter()
@@ -148,11 +168,10 @@ impl Engine {
             })
             .collect();
 
-        // Scan candidate files in parallel using rayon.  An AtomicBool
-        // provides approximate early termination once enough matches are found.
         let done = AtomicBool::new(false);
         let results = Mutex::new(Vec::<GrepMatch>::new());
         let config = &self.config;
+        let invert = opts.invert;
 
         candidate_paths.par_iter().for_each(|rel_path| {
             if done.load(Ordering::Relaxed) {
@@ -175,28 +194,40 @@ impl Engine {
             let mut file_matches = Vec::new();
 
             for (i, line) in lines.iter().enumerate() {
-                if let Some(m) = re.find(line) {
-                    let before: Vec<String> = lines[i.saturating_sub(context_lines)..i]
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect();
-                    let after_start = (i + 1).min(n);
-                    let after_end = (i + 1 + context_lines).min(n);
-                    let after: Vec<String> = lines[after_start..after_end]
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect();
-
-                    file_matches.push(GrepMatch {
-                        file_path: rel_path.to_string(),
-                        line_number: i as u64,
-                        line: line.to_string(),
-                        match_start: m.start(),
-                        match_end: m.end(),
-                        before,
-                        after,
-                    });
+                let m = re.find(line);
+                let hit = if invert { m.is_none() } else { m.is_some() };
+                if !hit {
+                    continue;
                 }
+
+                let before: Vec<String> = lines[i.saturating_sub(before_context)..i]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                let after_start = (i + 1).min(n);
+                let after_end = (i + 1 + after_context).min(n);
+                let after: Vec<String> = lines[after_start..after_end]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+
+                // In invert mode there is no regex match span — report the full
+                // line extent so downstream renderers can still highlight a
+                // range if they want to.
+                let (match_start, match_end) = match m {
+                    Some(found) => (found.start(), found.end()),
+                    None => (0, line.len()),
+                };
+
+                file_matches.push(GrepMatch {
+                    file_path: rel_path.to_string(),
+                    line_number: i as u64,
+                    line: line.to_string(),
+                    match_start,
+                    match_end,
+                    before,
+                    after,
+                });
             }
 
             if !file_matches.is_empty() {
@@ -209,7 +240,6 @@ impl Engine {
         });
 
         let mut matches = results.into_inner().unwrap_or_else(|e| e.into_inner());
-        // Sort by file path + line number for deterministic output.
         matches.sort_by(|a, b| {
             a.file_path
                 .cmp(&b.file_path)

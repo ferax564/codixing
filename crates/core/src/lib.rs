@@ -31,8 +31,8 @@ pub use engine::freshness::{FreshnessEntry, FreshnessOptions, FreshnessReport, F
 pub use engine::sync::SyncOptions;
 pub use engine::{
     ChangeImpact, ConflictKind, EmbedTimingStats, Engine, FocusMapEntry, FocusMapOptions,
-    GitSyncStats, GrepMatch, IndexStats, RenameConflict, RenameValidation, StaleReport,
-    SymbolReference, SyncStats,
+    GitSyncStats, GrepMatch, GrepOptions, IndexStats, RenameConflict, RenameValidation,
+    StaleReport, SymbolReference, SyncStats,
 };
 pub use error::{CodixingError, Result};
 pub use federation::{

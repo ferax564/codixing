@@ -128,10 +128,11 @@ Requires ONNX Runtime (`pip install onnxruntime` or download from GitHub).
 
 ## CLI Commands
 
-25 commands for code intelligence:
+26 commands for code intelligence:
 
 ```bash
 codixing search "query"          # Semantic code search
+codixing grep "pattern"          # Literal/regex text scan (path:line:col:text)
 codixing symbols Widget          # Find symbol definitions
 codixing usages add_chunk        # Find call sites and imports
 codixing callers src/engine.rs   # Who imports this file
