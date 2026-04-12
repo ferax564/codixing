@@ -25,3 +25,7 @@ tracing-subscriber.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+codixing-core = { path = "../core", default-features = false }
