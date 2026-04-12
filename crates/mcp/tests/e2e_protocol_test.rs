@@ -108,10 +108,10 @@ struct TestDaemon {
 impl Drop for TestDaemon {
     fn drop(&mut self) {
         if let Err(error) = self.child.kill() {
-            eprintln!("failed to kill test daemon during cleanup: {error}");
+            tracing::warn!("failed to kill test daemon during cleanup: {error}");
         }
         if let Err(error) = self.child.wait() {
-            eprintln!("failed to wait for test daemon during cleanup: {error}");
+            tracing::warn!("failed to wait for test daemon during cleanup: {error}");
         }
     }
 }
@@ -137,10 +137,10 @@ fn spawn_daemon(root: &str, socket: &str, extra_args: &[&str]) -> TestDaemon {
     }
 
     if let Err(error) = child.kill() {
-        eprintln!("failed to kill test daemon after startup timeout: {error}");
+        tracing::warn!("failed to kill test daemon after startup timeout: {error}");
     }
     if let Err(error) = child.wait() {
-        eprintln!("failed to wait for test daemon after startup timeout: {error}");
+        tracing::warn!("failed to wait for test daemon after startup timeout: {error}");
     }
     panic!("daemon did not become ready for socket {socket}");
 }
