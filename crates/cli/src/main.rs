@@ -1832,10 +1832,17 @@ fn cmd_audit(
     let report = engine.audit_freshness(options);
 
     if report.entries.is_empty() {
-        eprintln!(
-            "All {} indexed file(s) are fresh — no stale or orphaned files detected.",
-            report.files_audited
-        );
+        if report.files_audited == 0 {
+            eprintln!(
+                "audit found 0 indexed files — the index is empty or its metadata failed to \
+                 reload. Run `codixing sync` or rebuild with `codixing init` to repopulate."
+            );
+        } else {
+            eprintln!(
+                "All {} indexed file(s) are fresh — no stale or orphaned files detected.",
+                report.files_audited
+            );
+        }
         return Ok(());
     }
 
