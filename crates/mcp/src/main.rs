@@ -50,10 +50,8 @@ pub(crate) enum ListingMode {
     Full,
     /// Return a curated subset of ~15 most-used tools.
     /// All tools remain callable via `tools/call`.
+    /// Useful for MCP clients that cannot do dynamic tool discovery (e.g. Codex CLI).
     Medium,
-    /// Return only the 2 meta-tools (`search_tools`, `get_tool_schema`).
-    /// All tools remain callable via `tools/call`.
-    Compact,
 }
 
 // ---------------------------------------------------------------------------
@@ -87,18 +85,21 @@ struct Args {
     #[arg(long)]
     no_session: bool,
 
-    /// Enable compact tool listing: `tools/list` returns only the 2 meta-tools
-    /// (`search_tools`, `get_tool_schema`) instead of all tools. All tools remain
-    /// callable via `tools/call`. Reduces initial token usage by ~90%.
-    #[arg(long, conflicts_with = "medium")]
-    compact: bool,
-
     /// Enable medium tool listing: `tools/list` returns a curated set of ~15
     /// most-used tools instead of all tools. All tools remain callable via
     /// `tools/call`. Useful for MCP clients that cannot do dynamic tool
     /// discovery (e.g. Codex CLI).
-    #[arg(long, conflicts_with = "compact")]
+    #[arg(long)]
     medium: bool,
+
+    /// Accepted and ignored for one release (v0.33). The `--compact` flag
+    /// previously exposed only 2 meta-tools via `tools/list`, but it was
+    /// order-sensitive and invisible through daemon proxying (see issue #67).
+    /// The feature has been removed — agents should use standard MCP
+    /// capabilities or `--medium` for a curated list. This flag will be
+    /// hard-removed in v0.34.
+    #[arg(long, hide = true)]
+    compact: bool,
 
     /// Path to a `codixing-federation.json` config file for cross-repo
     /// federation.  When provided, a `FederatedEngine` is created alongside
@@ -139,9 +140,15 @@ async fn main() -> Result<()> {
         .socket
         .unwrap_or_else(|| root.join(".codixing/daemon.sock"));
 
-    let listing_mode = if args.compact {
-        ListingMode::Compact
-    } else if args.medium {
+    if args.compact {
+        tracing::warn!(
+            "--compact is deprecated and ignored (removed in v0.33, see issue #67). \
+             Use --medium for a curated 15-tool listing, or rely on your MCP client's \
+             built-in tool discovery. --compact will be hard-removed in v0.34."
+        );
+    }
+
+    let listing_mode = if args.medium {
         ListingMode::Medium
     } else {
         ListingMode::Full
@@ -206,9 +213,6 @@ async fn main() -> Result<()> {
                 "--socket".to_string(),
                 socket_path.to_str().unwrap().to_string(),
             ];
-            if args.compact {
-                daemon_args.push("--compact".to_string());
-            }
             if args.medium {
                 daemon_args.push("--medium".to_string());
             }
@@ -248,9 +252,6 @@ async fn main() -> Result<()> {
                 root.to_str().unwrap().to_string(),
                 "--daemon".to_string(),
             ];
-            if args.compact {
-                daemon_args.push("--compact".to_string());
-            }
             if args.medium {
                 daemon_args.push("--medium".to_string());
             }
@@ -281,10 +282,10 @@ async fn main() -> Result<()> {
         // Try to proxy through an existing daemon (Unix).
         #[cfg(unix)]
         if daemon::socket_alive(&socket_path).await {
-            if args.compact || args.medium {
+            if args.medium {
                 tracing::warn!(
                     "proxying through existing daemon — the daemon may have been started \
-                     with different --compact/--medium settings; restart the daemon to change modes"
+                     with different --medium setting; restart the daemon to change the mode"
                 );
             }
             info!(socket = %socket_path.display(), "daemon detected — proxying through socket");
@@ -294,10 +295,10 @@ async fn main() -> Result<()> {
         // Try to proxy through an existing daemon (Windows).
         #[cfg(windows)]
         if daemon_windows::pipe_alive(&pipe_name).await {
-            if args.compact || args.medium {
+            if args.medium {
                 tracing::warn!(
                     "proxying through existing daemon — the daemon may have been started \
-                     with different --compact/--medium settings; restart the daemon to change modes"
+                     with different --medium setting; restart the daemon to change the mode"
                 );
             }
             info!(pipe = %pipe_name, "daemon detected — proxying through named pipe");
