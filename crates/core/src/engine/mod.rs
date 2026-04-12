@@ -20,7 +20,7 @@ mod reload;
 mod search;
 pub mod semantic;
 mod symbol_graph;
-mod sync;
+pub mod sync;
 pub(crate) mod synonyms;
 mod temporal;
 mod test_mapping;

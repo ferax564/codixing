@@ -1,47 +1,47 @@
 //! Blocking daemon proxy helper for CLI commands.
 //!
 //! The MCP server (`codixing-mcp`) can run as a background daemon that holds
-//! the engine in memory, serving JSON-RPC requests over a Unix domain socket
-//! at `.codixing/daemon.sock`. Once the daemon is warm, tool calls cost ~5-40 ms
-//! instead of ~4 s cold process startup on a 2 GB hybrid index.
+//! the engine in memory, serving JSON-RPC requests over:
+//! - a Unix domain socket at `<root>/.codixing/daemon.sock` (Unix)
+//! - a named pipe at `\\.\pipe\codixing-<hash>` (Windows)
 //!
-//! This module lets CLI commands route themselves through a running daemon
-//! so agents and humans both benefit from that warm-cache path without having
-//! to manually run `codixing-mcp`.
+//! Once the daemon is warm, tool calls cost ~5-40 ms instead of ~4 s cold
+//! process startup on a 2 GB hybrid index (measured on the Linux kernel).
 //!
 //! ## Flow
 //!
 //! 1. CLI command calls [`try_tools_call`] with the tool name + arguments.
-//! 2. Helper checks for a live socket at `<root>/.codixing/daemon.sock`.
-//! 3. If found, connects, sends a JSON-RPC `tools/call` request, reads one
-//!    line of response, extracts the text body, returns `Some(text)`.
-//! 4. If no daemon or any error, returns `None` and the caller falls back
-//!    to the in-process `Engine::open()` path.
+//! 2. Helper checks for a live daemon endpoint at the platform-specific path.
+//! 3. If found, opens a connection, sends an initialize + tools/call pair,
+//!    reads responses until it finds the one with `id == 2`, extracts the
+//!    text body, returns `Some(text)`.
+//! 4. If no daemon, stale endpoint, or any I/O step fails, returns `None`
+//!    and the caller falls back to its existing `Engine::open()` path.
 //!
-//! All socket I/O is blocking `std::os::unix::net::UnixStream` with a short
-//! connect timeout. We do not pull in tokio for this path — the CLI has no
-//! other async work and the extra dependency surface is not worth it.
+//! ## Why blocking std instead of tokio
 //!
-//! Windows support is a no-op for now (named pipes require a different code
-//! path that can be added in a follow-up). The enclosing `mod daemon_proxy;`
-//! declaration in main.rs is already gated on `#[cfg(unix)]`, so this file
-//! only compiles on Unix.
+//! The CLI has no other async work. Pulling in tokio for one code path would
+//! more than double the binary's async runtime surface for a pure-sequential
+//! request/response loop. Both platforms use blocking stdlib primitives:
+//! `std::os::unix::net::UnixStream` on Unix, `std::fs::OpenOptions` on
+//! Windows (named pipes behave like bidirectional files once opened).
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
 use serde_json::{Value, json};
 
-/// How long to wait for the daemon to accept a connection before giving up
-/// and falling back to the in-process path. Kept intentionally short: if the
-/// daemon is contended or unhealthy we'd rather run locally than hang.
+/// How long to wait for the daemon to accept a connection before giving up.
+/// Kept intentionally short: if the daemon is contended or unhealthy we'd
+/// rather run locally than hang.
+#[allow(dead_code)]
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// How long to wait for the daemon to respond after we've written the
 /// request. Larger than connect: some tool calls (graph --map, audit) legit
 /// take seconds even warm.
+#[allow(dead_code)]
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Attempt to call an MCP tool through the running daemon.
@@ -49,24 +49,10 @@ const READ_TIMEOUT: Duration = Duration::from_secs(60);
 /// Returns:
 /// - `Some(text)` if the daemon handled the request and returned a text body.
 ///   The caller should print `text` and treat the command as done.
-/// - `None` if the daemon is not running, the socket is stale, the tool
+/// - `None` if the daemon is not running, the endpoint is stale, the tool
 ///   returned an error, or any I/O step failed. The caller should fall back
 ///   to its existing in-process path.
 pub fn try_tools_call(root: &Path, tool_name: &str, arguments: Value) -> Option<String> {
-    let socket_path = root.join(".codixing").join("daemon.sock");
-    if !socket_path.exists() {
-        return None;
-    }
-
-    // Connect with a short timeout. UnixStream::connect itself is blocking
-    // with no timeout flag, so we use connect_timeout.
-    let addr = std::os::unix::net::SocketAddr::from_pathname(&socket_path).ok()?;
-    let stream = UnixStream::connect_addr(&addr).ok()?;
-    stream.set_read_timeout(Some(READ_TIMEOUT)).ok()?;
-    stream.set_write_timeout(Some(CONNECT_TIMEOUT)).ok()?;
-
-    // The MCP protocol requires initialize → tools/call. For a one-shot CLI
-    // request we send both back-to-back over the same connection.
     let initialize = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -82,16 +68,18 @@ pub fn try_tools_call(root: &Path, tool_name: &str, arguments: Value) -> Option<
             "arguments": arguments,
         }
     });
+    let request = format!(
+        "{}\n{}\n",
+        serde_json::to_string(&initialize).ok()?,
+        serde_json::to_string(&call).ok()?
+    );
 
-    let mut writer = stream.try_clone().ok()?;
-    writeln!(writer, "{}", serde_json::to_string(&initialize).ok()?).ok()?;
-    writeln!(writer, "{}", serde_json::to_string(&call).ok()?).ok()?;
-    // Half-close the write side so the daemon knows there are no more
-    // requests. Without this, the daemon will wait forever on reader.next_line().
-    writer.shutdown(std::net::Shutdown::Write).ok()?;
+    let response_reader = send_jsonrpc(root, request.as_bytes())?;
+    parse_response(response_reader)
+}
 
-    // Read responses line-by-line until we find the one whose id == 2.
-    let mut reader = BufReader::new(stream);
+/// Parse the daemon's response stream, looking for the tools/call reply.
+fn parse_response<R: BufRead>(mut reader: R) -> Option<String> {
     let mut line = String::new();
     loop {
         line.clear();
@@ -124,10 +112,135 @@ pub fn try_tools_call(root: &Path, tool_name: &str, arguments: Value) -> Option<
     }
 }
 
-/// Convenience wrapper for `code_search` — the highest-traffic CLI path.
+// ---------------------------------------------------------------------------
+// Unix: connect via domain socket at `<root>/.codixing/daemon.sock`
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+fn send_jsonrpc(root: &Path, request: &[u8]) -> Option<Box<dyn BufRead + Send>> {
+    use std::os::unix::net::UnixStream;
+
+    let socket_path = root.join(".codixing").join("daemon.sock");
+    if !socket_path.exists() {
+        return None;
+    }
+
+    let addr = std::os::unix::net::SocketAddr::from_pathname(&socket_path).ok()?;
+    let stream = UnixStream::connect_addr(&addr).ok()?;
+    stream.set_read_timeout(Some(READ_TIMEOUT)).ok()?;
+    stream.set_write_timeout(Some(CONNECT_TIMEOUT)).ok()?;
+
+    let mut writer = stream.try_clone().ok()?;
+    writer.write_all(request).ok()?;
+    // Half-close the write side so the daemon knows no more requests are
+    // coming. Without this, the daemon reader blocks forever.
+    writer.shutdown(std::net::Shutdown::Write).ok()?;
+
+    Some(Box::new(BufReader::new(stream)))
+}
+
+// ---------------------------------------------------------------------------
+// Windows: connect via named pipe at `\\.\pipe\codixing-<hash>`
+// ---------------------------------------------------------------------------
+
+/// Derive the named-pipe name from the project root, mirroring
+/// `crates/mcp/src/daemon_windows.rs::pipe_name_for_root`.
 ///
-/// Returns the formatted markdown text from the daemon, or `None` to signal
-/// the caller should fall back to `Engine::open()`.
+/// Must match the server-side hashing or connections silently fail.
+#[cfg(windows)]
+fn pipe_name_for_root(root: &Path) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    root.hash(&mut hasher);
+    let hash = hasher.finish();
+    format!(r"\\.\pipe\codixing-{hash:016x}")
+}
+
+#[cfg(windows)]
+fn send_jsonrpc(root: &Path, request: &[u8]) -> Option<Box<dyn BufRead + Send>> {
+    use std::fs::OpenOptions;
+    use std::io::Read;
+
+    let pipe_name = pipe_name_for_root(root);
+
+    // Windows named pipes are opened like files. If the daemon is not
+    // running the path doesn't exist; if it's busy serving another client
+    // we get ERROR_PIPE_BUSY and would need to WaitNamedPipe, but since
+    // the daemon spawns a fresh pipe instance per connection we usually
+    // don't hit that case. Keep it simple: try once, fall back on any
+    // error.
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&pipe_name)
+        .ok()?;
+
+    file.write_all(request).ok()?;
+    // No half-close on Windows named pipes — the daemon's JSON-RPC loop
+    // handles framing by reading line-by-line, so once it sees both our
+    // JSON messages (initialize + tools/call) it will respond. We
+    // explicitly read until we find our id==2 reply.
+
+    // Read the full response into a buffer. The daemon writes at most a
+    // few KB for our tool calls, and reading into a Vec<u8> lets us close
+    // the handle cleanly before parsing.
+    let mut buf = Vec::with_capacity(8192);
+    // Read with a short overall budget — if the daemon hangs we fall
+    // back to in-process rather than blocking the CLI.
+    let read_start = std::time::Instant::now();
+    let max_wait = READ_TIMEOUT;
+    loop {
+        let mut chunk = [0u8; 4096];
+        match file.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                // Stop once we see the id==2 response — it's on its own
+                // line so we can search for a newline and try to parse.
+                if contains_id2_response(&buf) {
+                    break;
+                }
+                if read_start.elapsed() > max_wait {
+                    return None;
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+
+    Some(Box::new(BufReader::new(std::io::Cursor::new(buf))))
+}
+
+/// Fast-path check: has the buffer already received a JSON-RPC response
+/// with `"id":2`? Used to avoid waiting for EOF on Windows where the
+/// daemon keeps the pipe open after responding.
+#[cfg(windows)]
+fn contains_id2_response(buf: &[u8]) -> bool {
+    let s = std::str::from_utf8(buf).unwrap_or("");
+    for line in s.lines() {
+        if line.contains("\"id\":2") || line.contains("\"id\": 2") {
+            return true;
+        }
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------
+// Non-Unix, non-Windows platforms: no daemon support
+// ---------------------------------------------------------------------------
+
+#[cfg(not(any(unix, windows)))]
+fn send_jsonrpc(_root: &Path, _request: &[u8]) -> Option<Box<dyn BufRead + Send>> {
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Per-command convenience wrappers
+// ---------------------------------------------------------------------------
+
+/// Convenience wrapper for `code_search` — the highest-traffic CLI path.
 pub fn try_search(root: &Path, query: &str, limit: usize) -> Option<String> {
     try_tools_call(
         root,
@@ -137,4 +250,33 @@ pub fn try_search(root: &Path, query: &str, limit: usize) -> Option<String> {
             "limit": limit,
         }),
     )
+}
+
+/// Proxy `codixing symbols <name>` through the daemon's `find_symbol` tool.
+pub fn try_symbols(root: &Path, name: &str, file_filter: Option<&str>) -> Option<String> {
+    let mut args = serde_json::Map::new();
+    args.insert("name".into(), json!(name));
+    if let Some(f) = file_filter {
+        args.insert("file".into(), json!(f));
+    }
+    try_tools_call(root, "find_symbol", Value::Object(args))
+}
+
+/// Proxy `codixing usages <symbol>` through the daemon's `search_usages` tool.
+pub fn try_usages(root: &Path, symbol: &str) -> Option<String> {
+    try_tools_call(root, "search_usages", json!({ "symbol": symbol }))
+}
+
+/// Proxy `codixing impact <file>` through the daemon's `change_impact` tool.
+pub fn try_impact(root: &Path, file: &str) -> Option<String> {
+    try_tools_call(root, "change_impact", json!({ "file": file }))
+}
+
+/// Proxy `codixing graph --map` through the daemon's `get_repo_map` tool.
+pub fn try_repo_map(root: &Path, token_budget: Option<usize>) -> Option<String> {
+    let mut args = serde_json::Map::new();
+    if let Some(b) = token_budget {
+        args.insert("token_budget".into(), json!(b));
+    }
+    try_tools_call(root, "get_repo_map", Value::Object(args))
 }

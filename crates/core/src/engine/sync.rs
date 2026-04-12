@@ -21,6 +21,24 @@ use super::indexing::{
 };
 use super::{Engine, GitSyncStats, SyncStats, git_diff_since, git_head_commit};
 
+/// Options that modify how [`Engine::sync_with_options`] runs.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SyncOptions {
+    /// Skip the vector-embedding step during sync.
+    ///
+    /// When true, the engine's embedder is temporarily stashed for the
+    /// duration of the sync so that [`Engine::reindex_file_impl`] cannot
+    /// reach the embedding path. BM25, symbols, trigrams, file hashes,
+    /// and the dependency graph are all updated as usual; only the
+    /// vector index stays stale.
+    ///
+    /// Use this to avoid runaway CPU on sync. See the Linux kernel
+    /// benchmark finding (68 min before kill) for the canonical bad
+    /// scenario: existing 2GB embedded index + large change set + no
+    /// escape hatch.
+    pub skip_embed: bool,
+}
+
 impl Engine {
     /// Re-index a single file (after modification).
     ///
@@ -764,6 +782,62 @@ impl Engine {
             removed,
             unchanged,
         })
+    }
+
+    /// Sync with explicit options.
+    ///
+    /// When `options.skip_embed` is true, the embedder is temporarily
+    /// stashed for the duration of the sync so `reindex_file_impl` skips
+    /// the vector-embedding path entirely. This is the safety valve for
+    /// the case where a sync on an existing hybrid index would otherwise
+    /// burn minutes of CPU re-embedding an already-embedded corpus — see
+    /// the Linux kernel benchmark finding that hit 68 minutes before
+    /// being killed.
+    ///
+    /// After sync completes, if the graph is missing (older indexes
+    /// that predate graph support, or a corrupted graph file), a warning
+    /// is emitted via `on_progress` directing the user to run `init`
+    /// to rebuild. Sync does NOT rebuild the graph itself — that
+    /// requires reprocessing every file and is effectively a full init.
+    pub fn sync_with_options<F>(
+        &mut self,
+        options: SyncOptions,
+        on_progress: F,
+    ) -> Result<SyncStats>
+    where
+        F: FnMut(&str) + Send + 'static,
+    {
+        // Stash the embedder if the caller opted out of embedding. We
+        // restore it unconditionally in both the Ok and Err paths so
+        // the engine's state is left intact whatever happens.
+        let stashed_embedder = if options.skip_embed {
+            self.embedder.take()
+        } else {
+            None
+        };
+
+        let graph_was_missing = self.graph.is_none();
+        let result = self.sync_with_progress(on_progress);
+
+        if options.skip_embed && stashed_embedder.is_some() {
+            self.embedder = stashed_embedder;
+        }
+
+        // Emit a helpful warning if the index has no graph. We don't fail
+        // the sync — search still works on BM25+symbols — but we tell the
+        // user that graph-dependent features (impact, caller/callee,
+        // graph --map, community detection) will return empty until they
+        // run `codixing init` to rebuild.
+        if graph_was_missing {
+            warn!(
+                "index has no dependency graph — graph-dependent features \
+                 (impact, callers, callees, graph --map, communities) will \
+                 return empty results. Run `codixing init` to rebuild the \
+                 graph. This is normal for indexes created before v0.27."
+            );
+        }
+
+        result
     }
 
     /// Sync the index with progress callbacks for streaming updates.
