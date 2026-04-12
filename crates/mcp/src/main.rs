@@ -92,15 +92,6 @@ struct Args {
     #[arg(long)]
     medium: bool,
 
-    /// Accepted and ignored for one release (v0.33). The `--compact` flag
-    /// previously exposed only 2 meta-tools via `tools/list`, but it was
-    /// order-sensitive and invisible through daemon proxying (see issue #67).
-    /// The feature has been removed — agents should use standard MCP
-    /// capabilities or `--medium` for a curated list. This flag will be
-    /// hard-removed in v0.34.
-    #[arg(long, hide = true)]
-    compact: bool,
-
     /// Path to a `codixing-federation.json` config file for cross-repo
     /// federation.  When provided, a `FederatedEngine` is created alongside
     /// the primary engine, enabling the `list_projects` tool and federated
@@ -139,14 +130,6 @@ async fn main() -> Result<()> {
     let socket_path = args
         .socket
         .unwrap_or_else(|| root.join(".codixing/daemon.sock"));
-
-    if args.compact {
-        tracing::warn!(
-            "--compact is deprecated and ignored (removed in v0.33, see issue #67). \
-             Use --medium for a curated 15-tool listing, or rely on your MCP client's \
-             built-in tool discovery. --compact will be hard-removed in v0.34."
-        );
-    }
 
     let listing_mode = if args.medium {
         ListingMode::Medium

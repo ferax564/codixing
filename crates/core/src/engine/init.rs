@@ -492,6 +492,19 @@ impl Engine {
     /// return [`CodixingError::ReadOnly`] in that case.
     /// Restores the Tantivy index, symbol table, chunk metadata, and optional
     /// vector index from disk.
+    ///
+    /// **Lock retry**: when a previous Engine instance was just dropped in
+    /// the same process (common in tests that do `drop(Engine::init(...))`
+    /// followed immediately by `Engine::open(...)`), the Tantivy writer
+    /// lock file can briefly linger before the OS releases it. On macOS
+    /// this caused intermittent `git_sync().unwrap()` panics with
+    /// `Err(ReadOnly)` — the test already had the #[serial] attribute
+    /// but #[serial] only orders tests, not OS-level lock cleanup.
+    /// Open now retries the writer-lock acquisition up to 10 times with
+    /// exponential backoff (1ms → 512ms, ~1s total) before falling back
+    /// to read-only mode. Genuine multi-process conflicts fall through
+    /// to read-only as before — the retries only buy time for
+    /// intra-process lock cleanup.
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
         let root = root
             .as_ref()
@@ -501,35 +514,56 @@ impl Engine {
         let store = IndexStore::open(&root)?;
         let config = store.load_config()?;
 
-        // Try read-write first; fall back to read-only on lock conflict.
+        // Try read-write first, retrying briefly on lock conflict to absorb
+        // the common intra-process drop-then-reopen race. Fall back to
+        // read-only only after the retry budget is exhausted.
         let bm25_config = config.bm25.clone();
-        let (tantivy, read_only) = match TantivyIndex::open_in_dir_with_config(
-            &store.tantivy_dir(),
-            bm25_config.clone(),
-        ) {
-            Ok(idx) => (idx, false),
-            Err(CodixingError::Tantivy(ref e))
-                if e.to_string().contains("lock")
-                    || e.to_string().contains("Lock")
-                    || e.to_string().contains("already") =>
-            {
-                info!("write lock held by another process — falling back to read-only mode");
+        let is_lock_error = |e: &tantivy::TantivyError| {
+            let s = e.to_string();
+            s.contains("lock") || s.contains("Lock") || s.contains("already")
+        };
+        let mut last_err: Option<CodixingError> = None;
+        let mut acquired: Option<TantivyIndex> = None;
+        for attempt in 0..10u32 {
+            match TantivyIndex::open_in_dir_with_config(&store.tantivy_dir(), bm25_config.clone()) {
+                Ok(idx) => {
+                    acquired = Some(idx);
+                    break;
+                }
+                Err(CodixingError::Tantivy(ref e)) if is_lock_error(e) => {
+                    last_err = Some(CodixingError::Tantivy(
+                        tantivy::TantivyError::InternalError(e.to_string()),
+                    ));
+                    // Exponential backoff capped at 512ms per attempt.
+                    let wait_ms = 1u64 << attempt.min(9);
+                    std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+                    continue;
+                }
+                Err(CodixingError::Tantivy(ref e))
+                    if e.to_string().contains("IncompatibleIndex")
+                        || e.to_string().contains("index version")
+                        || e.to_string().contains("incompatible") =>
+                {
+                    warn!(
+                        error = %e,
+                        "index format incompatible with current Tantivy version — rebuilding automatically"
+                    );
+                    return Self::init(root, config);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        let (tantivy, read_only) = match acquired {
+            Some(idx) => (idx, false),
+            None => {
+                info!(
+                    "write lock held after retry budget exhausted — falling back to read-only mode (last error: {:?})",
+                    last_err
+                );
                 let idx =
                     TantivyIndex::open_read_only_with_config(&store.tantivy_dir(), bm25_config)?;
                 (idx, true)
             }
-            Err(CodixingError::Tantivy(ref e))
-                if e.to_string().contains("IncompatibleIndex")
-                    || e.to_string().contains("index version")
-                    || e.to_string().contains("incompatible") =>
-            {
-                warn!(
-                    error = %e,
-                    "index format incompatible with current Tantivy version — rebuilding automatically"
-                );
-                return Self::init(root, config);
-            }
-            Err(e) => return Err(e),
         };
 
         // Restore symbols: prefer bitcode symbols.bin (preserves all fields

@@ -50,12 +50,6 @@ enum Command {
         #[arg(long)]
         embed: bool,
 
-        /// Deprecated alias for "don't pass --embed". Accepted and ignored
-        /// for v0.33; will be hard-removed in v0.34. BM25+graph-only is now
-        /// the default, so this flag is a no-op.
-        #[arg(long, hide = true)]
-        no_embeddings: bool,
-
         /// Embedding model to use. Only meaningful with --embed.
         /// Options: bge-small-en, bge-base-en, bge-large-en,
         ///          jina-embed-code, nomic-embed-code,
@@ -552,29 +546,20 @@ async fn main() -> Result<()> {
             also,
             languages,
             embed,
-            no_embeddings,
             model,
             reranker,
             defer_embeddings,
             wait,
-        } => {
-            if no_embeddings {
-                eprintln!(
-                    "warning: --no-embeddings is a no-op in v0.33 (BM25+graph-only is now the default). \
-                     Pass --embed to build vector embeddings. --no-embeddings will be hard-removed in v0.34."
-                );
-            }
-            cmd_init(
-                path,
-                also,
-                languages,
-                embed,
-                model,
-                reranker,
-                defer_embeddings,
-                wait,
-            )
-        }
+        } => cmd_init(
+            path,
+            also,
+            languages,
+            embed,
+            model,
+            reranker,
+            defer_embeddings,
+            wait,
+        ),
         Command::Search {
             query,
             limit,

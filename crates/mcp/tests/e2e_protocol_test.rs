@@ -193,53 +193,32 @@ fn e2e_tools_call_code_search() {
 }
 
 #[test]
-fn e2e_compact_flag_is_accepted_and_ignored() {
-    // --compact was removed in v0.33 (issue #67). For one release it is accepted
-    // as a hidden flag and ignored with a deprecation warning, so existing
-    // `.mcp.json` configs don't error out. It must behave exactly like Full
-    // mode — all tools listed, all tools callable.
+fn e2e_compact_flag_is_rejected() {
+    // --compact was soft-deprecated in v0.33 (issue #67) and hard-removed
+    // in v0.34. Passing it should now fail at argument parsing with a
+    // clap error, not silently produce the full list like v0.33.
     let project = setup_indexed_project();
     let root = project.path().to_str().unwrap();
 
-    let responses = run_mcp(
-        &["--root", root, "--compact"],
-        &[
-            initialize_request(1),
-            tools_list_request(2),
-            json!({
-                "jsonrpc": "2.0",
-                "id": 3,
-                "method": "tools/call",
-                "params": {
-                    "name": "code_search",
-                    "arguments": { "query": "greet", "limit": 5 }
-                }
-            }),
-        ],
-    );
+    let output = Command::new(env!("CARGO_BIN_EXE_codixing-mcp"))
+        .args(["--root", root, "--compact"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("failed to spawn codixing-mcp");
 
-    // tools/list should return the full list, not 2 meta-tools.
-    let list_resp = responses
-        .iter()
-        .find(|r| r["id"] == 2)
-        .expect("missing tools/list response");
-    let tools = list_resp["result"]["tools"]
-        .as_array()
-        .expect("tools should be an array");
     assert!(
-        tools.len() > 10,
-        "--compact should be ignored and return the full tool list, got {} tools",
-        tools.len()
+        !output.status.success(),
+        "--compact should be rejected in v0.34 (exit non-zero), \
+         but codixing-mcp exited with status {:?}",
+        output.status.code()
     );
 
-    // tools/call should work as usual.
-    let call_resp = responses
-        .iter()
-        .find(|r| r["id"] == 3)
-        .expect("missing tools/call response");
-    assert_eq!(
-        call_resp["result"]["isError"], false,
-        "code_search should work even with deprecated --compact"
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--compact") || stderr.contains("unexpected argument"),
+        "stderr should mention the unrecognized --compact flag, got: {stderr}"
     );
 }
 
