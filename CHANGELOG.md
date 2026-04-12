@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.34.0] — 2026-04-12
+
+Audit-driven release bundling v0.33 prep and v0.34 follow-ups. 8 PRs: #69, #70, #71, #72, #73, #74, #75, #76. Skipping the v0.33.0 tag — all v0.33 work is included here.
+
+### Added
+- **`codixing filter` CLI subcommand** — validate `.codixing/filters.toml` and run the filter pipeline on stdin without booting the MCP server. `check` and `run` actions. (#75)
+- **`codixing sync --no-embed`** — escape hatch that temporarily stashes the embedder for the duration of sync, preventing runaway CPU on existing hybrid indexes. Canonical bad case: Linux kernel sync hit 68 min CPU before kill in v0.32. (#75)
+- **CLI daemon proxy full coverage** — `symbols`, `usages`, `impact`, `graph --map` now auto-proxy through a running `codixing-mcp` daemon. ~10× speedup on warm daemon, matching v0.33's `search` speedup. (#75, builds on #73)
+- **Windows named-pipe client** — the daemon proxy now works on Windows via `std::fs::OpenOptions` on `\\.\pipe\codixing-<hash>`. First time Windows users see the warm-daemon speedup. (#75)
+- **Sync progress output** — `codixing sync` now emits `[sync +Xs] <stage>` lines instead of running silent for minutes. (#69)
+- **Bash dogfooding hook** — new `PreToolUse` matcher on `Bash` that catches agents shelling out to `grep`/`rg`/`find`/`cat` against indexed files and redirects to the codixing CLI. Closes the biggest bypass in the v0.32 hook. (#69)
+- **Plugin ships dogfooding hooks** — `claude-plugin/hooks/` now contains both hook scripts and `plugin.json` registers them, so downstream plugin users get enforcement automatically. (#69)
+- **`codixing callers <file>` diagnostics** — distinguishes four cases: file not on disk, file on disk but not in graph (stale index), has callees but no callers (entry point), normal listing. (#74)
+
+### Changed
+- **`codixing init` default flipped to BM25+graph-only.** Embeddings are now opt-in via `--embed`. Rationale: embedding a 10K-file repo took 14 min in v0.32, and 63K Linux kernel files took 25 min — unusable defaults. Agent code exploration via `symbols`/`usages`/`callers`/`impact` works fine on BM25+graph alone. (#71) **Breaking for users who expected embedding by default.**
+- **`Engine::open` writer-lock retry loop** — retries 10× with exponential backoff (1ms → 512ms, ~1s total) before falling back to read-only mode. Absorbs the intra-process drop-then-reopen race that caused the macOS `git_sync_no_op_when_already_current` flake. Tests no longer need `thread::sleep(100ms)` workarounds between `drop(Engine::init)` and `Engine::open`. (#76)
+- **Warning on sync with missing graph** — older indexes predate graph support; sync now warns that graph-dependent features (`impact`, `callers`, `callees`, `graph --map`) will return empty until `codixing init` rebuilds. (#75)
+
+### Removed
+- **`codixing-mcp --compact`** — hard-removed. v0.33 accepted+ignored it with a warning; v0.34 rejects it at argument parsing with "unexpected argument". Users with `--compact` in `.mcp.json` must migrate to `--medium` (for clients without dynamic tool discovery) or remove the flag. Closes issue #67. (#70 deprecated, #76 hard-removed)
+- **`codixing init --no-embeddings`** — same deprecation cycle as `--compact`. BM25+graph-only is now the default, so the flag has no remaining semantics. (#71 deprecated, #76 hard-removed)
+
+### Fixed
+- **Audit reported 0 files on populated graphs** — on large indexes (observed on the Linux kernel), `chunk_meta` hydration could partially fail, leaving `file_chunk_counts` empty while the graph was fully populated. `audit_freshness` now unions `file_chunk_counts.keys()` with `graph.file_paths()` so it never under-reports. Regression test included. (#72)
+- **GraphML namespace URI** — was emitting `xmlns="http://graphml.graphstruct.org/graphml"` (a misspelled placeholder). Fixed to the official `http://graphml.graphdrawing.org/xmlns` so Gephi/yEd accept the output without schema warnings. Regression test pins the correct URI and asserts the old wrong one is absent. (#69)
+- **Tantivy `Access is denied` flakes on Windows** — intermittent failures in `Engine::init` and `TantivyIndex::commit` when Windows Defender scans newly-created segment files. New `crates/core/src/index/windows_retry.rs` helper retries operations up to 10× with exponential backoff on recognized transient error codes (5, 32, 33). Zero-cost on Unix. Covers `create_in_dir_with_config`, `open_in_dir_with_config`, `commit()`, and `IndexReader::reload`. (#74)
+- **`claude-plugin/.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`** had duplicate `"version"` keys (technically invalid JSON). Same issue fixed in `npm/package.json` and `docs/install.sh` this release. (#69, #76)
+- **Docs drift** — README, CLAUDE.md, docs/index.html now report 1077 tests (was 1019) and 26 CLI commands (was 24/25), add the v0.31.1/v0.32 features that were undocumented on the landing page (GraphML/Cypher/Obsidian exports, git hooks, caller cascade, filter pipeline), and correct the Linux kernel file count from 73K to 63K C/H. (#69)
+
+### Known gaps (v0.35 backlog)
+- **Stale codixing index after Edit/Write** — the plugin doesn't yet auto-update the index after file edits, so `codixing symbols` and `codixing usages` can return stale line numbers between syncs. Tracked in issue #77. Workaround: run `codixing sync` or `codixing update` manually after a batch of edits.
+- **Daemon proxy for `callers` and `callees`** — the MCP `symbol_callers`/`symbol_callees` tools are symbol-level while CLI works on files. No clean mapping yet; commands stay in-process.
+- **`codixing sync` doesn't rebuild a missing graph** — only warns. A true rebuild is effectively a full init and the user should invoke it explicitly.
+
 ## [0.31.0] — 2026-04-11
 
 ### Added
