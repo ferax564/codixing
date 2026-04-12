@@ -58,7 +58,7 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 
 - `crates/core/` — engine: AST parsing, BM25, graph, embeddings, PageRank, test mapping, shared sessions, queue-based embedding (optional `rustqueue` feature), doc indexing (Markdown + HTML with section-aware chunking and doc-to-code graph edges), change impact analysis, semantic concept graph, API surface analysis, type relations, usage example mining, cross-file context assembly, behavioral signatures, query-personalized PageRank, learned query reformulation, output filter pipeline (TOML-based, tee recovery)
 - `crates/cli/` — `codixing` CLI binary
-- `crates/mcp/` — MCP server (`codixing-mcp`), 56 tools in `src/tools/` (use `--medium` to curate the list for clients without dynamic tool discovery)
+- `crates/mcp/` — MCP server (`codixing-mcp`), 67 tools in `src/tools/` (use `--medium` to curate the list for clients without dynamic tool discovery)
 - `crates/server/` — HTTP API server (`codixing-server`), REST endpoints with SSE streaming for sync
 - `crates/core/src/federation/` — cross-repo federated search (`--federation config.json`)
 - `crates/lsp/` — LSP server (`codixing-lsp`), hover/go-to-def/refs/symbols/call hierarchy/complexity diagnostics/rename/semantic tokens
@@ -69,7 +69,7 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 
 ```bash
 cargo build --release --workspace          # build all binaries
-cargo test --workspace                      # run all tests (1074)
+cargo test --workspace                      # run all tests (1087)
 cargo clippy --workspace -- -D warnings     # lint (must pass)
 cargo fmt --check                           # format check (must pass)
 
@@ -240,7 +240,7 @@ When adding a new crate that depends on `codixing-core`, ALWAYS:
 
 The `.mcp.json` configures the Codixing MCP server for Claude Code. **Required flags:**
 
-- `--medium` — exposes 17 core tools directly. Useful for MCP clients that cannot do dynamic tool discovery (e.g. Codex CLI).
+- `--medium` — exposes 27 core tools directly. Useful for MCP clients that cannot do dynamic tool discovery (e.g. Codex CLI).
 - `--no-daemon-fork` — prevents stale daemon socket issues that silently kill the MCP connection
 
 Example `.mcp.json`:
