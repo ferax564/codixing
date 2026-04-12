@@ -5,7 +5,7 @@
   },
   "metadata": {
     "description": "Code retrieval engine that saves your agent 73% of its tokens \u2014 ranked search, impact prediction, dependency graphs, and hybrid AST-aware retrieval across 56 MCP tools and 5 slash commands",
-    "version": "0.34.0"
+    "version": "0.35.0"
   },
   "plugins": [
     {
@@ -17,7 +17,7 @@
         "ref": "main"
       },
       "description": "Code retrieval engine that saves your agent 73% of its tokens. 56 MCP tools and 5 slash commands \u2014 ranked search, impact prediction, dependency graphs, and hybrid AST-aware retrieval. Runs locally, zero cloud dependencies.",
-      "version": "0.34.0",
+      "version": "0.35.0",
       "author": {
         "name": "ferax564"
       },
