@@ -56,6 +56,27 @@ pub(crate) enum ListingMode {
     Compact,
 }
 
+impl ListingMode {
+    pub(crate) fn as_wire_value(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Medium => "medium",
+            Self::Compact => "compact",
+        }
+    }
+
+    pub(crate) fn from_wire_value(value: &str) -> Option<Self> {
+        match value {
+            "full" => Some(Self::Full),
+            "medium" => Some(Self::Medium),
+            "compact" => Some(Self::Compact),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) const LISTING_MODE_NOTIFICATION_METHOD: &str = "notifications/codixing/listing_mode";
+
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
@@ -206,12 +227,6 @@ async fn main() -> Result<()> {
                 "--socket".to_string(),
                 socket_path.to_str().unwrap().to_string(),
             ];
-            if args.compact {
-                daemon_args.push("--compact".to_string());
-            }
-            if args.medium {
-                daemon_args.push("--medium".to_string());
-            }
             if args.no_session {
                 daemon_args.push("--no-session".to_string());
             }
@@ -248,12 +263,6 @@ async fn main() -> Result<()> {
                 root.to_str().unwrap().to_string(),
                 "--daemon".to_string(),
             ];
-            if args.compact {
-                daemon_args.push("--compact".to_string());
-            }
-            if args.medium {
-                daemon_args.push("--medium".to_string());
-            }
             if args.no_session {
                 daemon_args.push("--no-session".to_string());
             }
@@ -281,27 +290,15 @@ async fn main() -> Result<()> {
         // Try to proxy through an existing daemon (Unix).
         #[cfg(unix)]
         if daemon::socket_alive(&socket_path).await {
-            if args.compact || args.medium {
-                tracing::warn!(
-                    "proxying through existing daemon — the daemon may have been started \
-                     with different --compact/--medium settings; restart the daemon to change modes"
-                );
-            }
             info!(socket = %socket_path.display(), "daemon detected — proxying through socket");
-            return daemon::run_proxy(&socket_path).await;
+            return daemon::run_proxy(&socket_path, listing_mode).await;
         }
 
         // Try to proxy through an existing daemon (Windows).
         #[cfg(windows)]
         if daemon_windows::pipe_alive(&pipe_name).await {
-            if args.compact || args.medium {
-                tracing::warn!(
-                    "proxying through existing daemon — the daemon may have been started \
-                     with different --compact/--medium settings; restart the daemon to change modes"
-                );
-            }
             info!(pipe = %pipe_name, "daemon detected — proxying through named pipe");
-            return daemon_windows::run_proxy(&pipe_name).await;
+            return daemon_windows::run_proxy(&pipe_name, listing_mode).await;
         }
 
         // No daemon available — run directly on stdin/stdout.

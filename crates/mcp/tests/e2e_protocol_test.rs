@@ -5,6 +5,8 @@
 
 use std::io::Write;
 use std::process::{Command, Stdio};
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -95,6 +97,44 @@ fn tools_list_request(id: u64) -> Value {
         "id": id,
         "method": "tools/list"
     })
+}
+
+#[cfg(unix)]
+struct TestDaemon {
+    child: std::process::Child,
+}
+
+#[cfg(unix)]
+impl Drop for TestDaemon {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[cfg(unix)]
+fn spawn_daemon(root: &str, socket: &str, extra_args: &[&str]) -> TestDaemon {
+    let bin = env!("CARGO_BIN_EXE_codixing-mcp");
+    let mut child = Command::new(bin)
+        .args(["--root", root, "--daemon", "--socket", socket])
+        .args(extra_args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn codixing-mcp daemon");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if std::os::unix::net::UnixStream::connect(socket).is_ok() {
+            return TestDaemon { child };
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+    panic!("daemon did not become ready for socket {socket}");
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +295,63 @@ fn e2e_compact_mode_lists_two_tools() {
     assert!(
         text.contains("greet"),
         "compact mode search should find 'greet', got: {text}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_proxy_full_client_overrides_compact_daemon_mode() {
+    let project = setup_indexed_project();
+    let root = project.path().to_str().unwrap();
+    let socket = project.path().join(".codixing/compact-daemon.sock");
+    let socket = socket.to_str().unwrap();
+    let _daemon = spawn_daemon(root, socket, &["--compact"]);
+
+    let responses = run_mcp(
+        &["--root", root, "--socket", socket],
+        &[initialize_request(1), tools_list_request(2)],
+    );
+
+    let list_resp = responses
+        .iter()
+        .find(|r| r["id"] == 2)
+        .expect("missing tools/list response");
+    let tools = list_resp["result"]["tools"]
+        .as_array()
+        .expect("tools should be an array");
+    assert!(
+        tools.len() >= 40,
+        "full client should still receive the full tool list through a compact daemon, got {}",
+        tools.len()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn e2e_proxy_compact_client_overrides_full_daemon_mode() {
+    let project = setup_indexed_project();
+    let root = project.path().to_str().unwrap();
+    let socket = project.path().join(".codixing/full-daemon.sock");
+    let socket = socket.to_str().unwrap();
+    let _daemon = spawn_daemon(root, socket, &[]);
+
+    let responses = run_mcp(
+        &["--root", root, "--socket", socket, "--compact"],
+        &[initialize_request(1), tools_list_request(2)],
+    );
+
+    let list_resp = responses
+        .iter()
+        .find(|r| r["id"] == 2)
+        .expect("missing tools/list response");
+    let tools = list_resp["result"]["tools"]
+        .as_array()
+        .expect("tools should be an array");
+    assert_eq!(
+        tools.len(),
+        2,
+        "compact client should still receive the compact tool list through a full daemon, got {}",
+        tools.len()
     );
 }
 

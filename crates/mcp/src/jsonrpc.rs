@@ -32,6 +32,8 @@ where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
+    let mut listing_mode = listing_mode;
+
     // In --compact mode, track whether we have already sent a
     // `notifications/tools/list_changed` notification so we only send it once.
     let mut compact_notification_sent = false;
@@ -57,6 +59,10 @@ where
         let id = match req.id.clone() {
             Some(id) => id,
             None => {
+                if handle_internal_notification(&req.method, req.params.as_ref(), &mut listing_mode)
+                {
+                    continue;
+                }
                 debug!(method = %req.method, "ignoring notification");
                 continue;
             }
@@ -84,6 +90,32 @@ where
 
     info!("client disconnected");
     Ok(())
+}
+
+fn handle_internal_notification(
+    method: &str,
+    params: Option<&Value>,
+    listing_mode: &mut ListingMode,
+) -> bool {
+    if method != crate::LISTING_MODE_NOTIFICATION_METHOD {
+        return false;
+    }
+
+    let Some(mode) = params
+        .and_then(|value| value.get("mode"))
+        .and_then(Value::as_str)
+        .and_then(ListingMode::from_wire_value)
+    else {
+        warn!("ignoring invalid listing mode override notification");
+        return true;
+    };
+
+    *listing_mode = mode;
+    debug!(
+        mode = mode.as_wire_value(),
+        "updated per-connection listing mode"
+    );
+    true
 }
 
 // ---------------------------------------------------------------------------

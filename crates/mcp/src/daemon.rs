@@ -9,6 +9,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{info, warn};
@@ -204,7 +205,7 @@ impl Drop for SocketGuard {
 // Proxy: pipe stdin/stdout through an existing daemon socket
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn run_proxy(socket_path: &Path) -> Result<()> {
+pub(crate) async fn run_proxy(socket_path: &Path, listing_mode: ListingMode) -> Result<()> {
     let stream = UnixStream::connect(socket_path)
         .await
         .with_context(|| format!("failed to connect to daemon at {}", socket_path.display()))?;
@@ -217,6 +218,21 @@ pub(crate) async fn run_proxy(socket_path: &Path) -> Result<()> {
     // Forward stdin → socket, then half-close the write side so the daemon
     // gets EOF and knows no more requests are coming.
     let to_socket = async {
+        let listing_mode_notification = json!({
+            "jsonrpc": "2.0",
+            "method": crate::LISTING_MODE_NOTIFICATION_METHOD,
+            "params": { "mode": listing_mode.as_wire_value() }
+        });
+        let listing_mode_notification = serde_json::to_vec(&listing_mode_notification)
+            .context("proxy: failed to serialize listing mode notification")?;
+        sock_write
+            .write_all(&listing_mode_notification)
+            .await
+            .context("proxy: failed to write listing mode notification")?;
+        sock_write
+            .write_all(b"\n")
+            .await
+            .context("proxy: failed to terminate listing mode notification")?;
         tokio::io::copy(&mut stdin, &mut sock_write)
             .await
             .context("proxy: stdin→socket copy failed")?;

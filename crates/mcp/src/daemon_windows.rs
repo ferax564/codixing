@@ -14,6 +14,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
 use tracing::{info, warn};
@@ -222,7 +223,7 @@ async fn handle_pipe_connection(
 // Proxy: pipe stdin/stdout through an existing daemon named pipe
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn run_proxy(pipe_name: &str) -> Result<()> {
+pub(crate) async fn run_proxy(pipe_name: &str, listing_mode: ListingMode) -> Result<()> {
     let pipe = ClientOptions::new()
         .open(pipe_name)
         .with_context(|| format!("failed to connect to daemon pipe {pipe_name}"))?;
@@ -233,6 +234,21 @@ pub(crate) async fn run_proxy(pipe_name: &str) -> Result<()> {
 
     // Forward stdin -> pipe, then shut down the write side.
     let to_pipe = async {
+        let listing_mode_notification = json!({
+            "jsonrpc": "2.0",
+            "method": crate::LISTING_MODE_NOTIFICATION_METHOD,
+            "params": { "mode": listing_mode.as_wire_value() }
+        });
+        let listing_mode_notification = serde_json::to_vec(&listing_mode_notification)
+            .context("proxy: failed to serialize listing mode notification")?;
+        pipe_write
+            .write_all(&listing_mode_notification)
+            .await
+            .context("proxy: failed to write listing mode notification")?;
+        pipe_write
+            .write_all(b"\n")
+            .await
+            .context("proxy: failed to terminate listing mode notification")?;
         tokio::io::copy(&mut stdin, &mut pipe_write)
             .await
             .context("proxy: stdin->pipe copy failed")?;
