@@ -1281,6 +1281,26 @@ fn cmd_path(from: String, to: String) -> Result<()> {
 
 fn cmd_callers(file: String, depth: usize) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
+
+    // Fast path: proxy through the daemon when asking for direct callers only
+    // (depth <= 1). Transitive callers require multi-hop graph traversal that
+    // the daemon's `file_callers` tool doesn't expose, so those fall through.
+    if depth <= 1 {
+        if let Some(text) = daemon_proxy::try_callers(&root, &file) {
+            if text.is_empty() {
+                // Daemon reported no callers — mirror the in-process empty
+                // branch message (without the disk-check diagnostics, which
+                // require opening the engine).
+                eprintln!("No callers found for \"{}\".", file);
+            } else {
+                print!("{text}");
+                let count = text.lines().count();
+                eprintln!("\n{} caller(s) found.", count);
+            }
+            return Ok(());
+        }
+    }
+
     let engine = Engine::open(&root).with_context(|| {
         format!(
             "no index found at {} — run `codixing init` first",
@@ -1341,6 +1361,23 @@ fn cmd_callers(file: String, depth: usize) -> Result<()> {
 
 fn cmd_callees(file: String, depth: usize) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
+
+    // Fast path: proxy through the daemon when asking for direct callees only
+    // (depth <= 1). Transitive callees require multi-hop traversal not exposed
+    // by the `file_callees` tool, so those fall through to in-process.
+    if depth <= 1 {
+        if let Some(text) = daemon_proxy::try_callees(&root, &file) {
+            if text.is_empty() {
+                eprintln!("No dependencies found for \"{}\"", file);
+            } else {
+                print!("{text}");
+                let count = text.lines().count();
+                eprintln!("\n{} dependency/dependencies found.", count);
+            }
+            return Ok(());
+        }
+    }
+
     let engine = Engine::open(&root).with_context(|| {
         format!(
             "no index found at {} — run `codixing init` first",
