@@ -58,6 +58,19 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/posttool-codixing-update.sh",
+            "timeout": 5,
+            "statusMessage": "Updating codixing index..."
+          }
+        ]
+      }
     ]
   }
 }
