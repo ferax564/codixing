@@ -235,7 +235,7 @@ code --install-extension codixing.vsix
 
 **Large codebase** (368K LoC, 7,607 files): Init 7.9s, search 94ms, 99% token reduction vs grep.
 
-**Linux kernel** (73K files, 30M lines): 1.57s cold-start search, 0.79s warm. Zero-deserialization mmap for instant startup.
+**Linux kernel** (63K C/H files, 30M+ lines, 84K-node dependency graph): 1.57s cold-start search, 0.79s warm via the MCP daemon path. Zero-deserialization mmap for instant startup. Note: fresh-process CLI invocations on a 2GB+ hybrid index pay startup cost on every call — prefer the MCP daemon or `--no-embeddings` for the CLI path.
 
 **SWE-bench Lite** (300 tasks, 12 repos): Recall@5 = 74.3% (vs grep 41.3%).
 
@@ -251,6 +251,10 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Symbol-level call graph** — Function-to-function call edges extracted from AST, including Rust trait dispatch, Python class inheritance, and TypeScript interface implementations
 - **Dependency graph** — Import + call extraction, PageRank scoring, Personalized PageRank for focus-aware maps, Louvain community detection, shortest path queries, surprise/anomaly edge scoring
 - **Interactive graph visualization** — `codixing graph --html` generates a self-contained HTML file with force-directed layout, community coloring, confidence-styled edges, surprise highlights, search/filter, zoom/pan
+- **Graph exports for external tools** — `codixing graph --graphml` (Gephi/yEd), `--cypher` (Neo4j), `--obsidian` (markdown vault with one note per community) for downstream analysis and knowledge-base integration
+- **Git hooks** — `codixing hook install` wires post-commit hooks for automatic index sync after every commit; `codixing hook status` / `uninstall` manage the lifecycle
+- **Caller cascade** — `codixing callers <file> --depth N` walks the import graph N hops to surface the full transitive caller cascade
+- **TOML output filter pipeline** — Project-local `.codixing/filter_rules.toml` compresses MCP tool output for token-tight agent loops, with tee recovery to disk for full output when agents need it
 - **Edge confidence** — Every dependency edge tagged Verified/High/Medium/Low based on extraction method (AST-resolved, call extraction, doc reference, external)
 - **Ranked cross-imports** — PageRank + git recency scoring for relevance-ranked graph queries across directory boundaries
 - **Memory relations** — `memory_relate` tool creates typed edges between agent memory entries, enabling associative recall across sessions
@@ -263,7 +267,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Cross-file context assembly** — `codixing context` follows import chains and callees to assemble understanding context
 - **Query-personalized PageRank** — Query-time graph boost seeds PageRank from query-relevant nodes for context-aware ranking
 - **Learned query reformulation** — Project-specific vocabulary expansion learns from codebase patterns
-- **CLI + MCP** — 24 CLI commands for direct use; 56 MCP tools for editor integration (search, graph traversal, file operations, code review, git analysis, session memory, federation discovery)
+- **CLI + MCP** — 26 CLI commands for direct use; 56 MCP tools for editor integration (search, graph traversal, file operations, code review, git analysis, session memory, federation discovery)
 - **File freshness audit** — `audit_freshness` tool identifies stale and orphaned files across releases
 - **Preflight gates** — Plugin enforces existence scanning before proposing new features
 - **TypeScript import resolution** — Resolve `.js` → `.ts` imports with node16/bundler moduleResolution support, enabling 0.8+ R@10 on cross-package code discovery
@@ -278,7 +282,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Git recency signal** — Mildly boosts recently modified files (+10% linear decay over 180 days) via lazy-loaded git log timestamps
 - **Overlapping chunks** — Bridge chunks at AST-aware chunk boundaries capture cross-function context; configurable `overlap_ratio` (default 0.0)
 - **File path boosting** — Detects explicit file paths and backtick code references in queries and boosts matching results (2.5×)
-- **Kernel-scale performance** — Tested on the Linux kernel (73K files, 30M lines): 1.57s cold-start search, 0.79s warm. Mmap symbol table AND trigram index (zero-deserialization), compact chunk metadata (11× smaller), lazy trigram loading
+- **Kernel-scale performance** — Tested on the Linux kernel (63K C/H files, 30M+ lines, 84K-node graph): 1.57s cold-start search, 0.79s warm via the MCP daemon. Mmap symbol table AND trigram index (zero-deserialization), compact chunk metadata (11× smaller), lazy trigram loading
 - **Trigram pre-filtering** — File-level trigram inverted index (Russ Cox/trigrep technique) skips files before disk I/O; **110× faster** literal grep at 1K files, **52× faster** at 10K files; persistent bitcode storage, regex HIR walking with OR-branch support, parallel rayon verification
 - **LSP rename + semantic tokens** — Cross-file rename refactoring with conflict detection; semantic highlighting for Rust, Python, TypeScript, Go
 - **Queue-based embedding** — Optional RustQueue-backed pipeline with crash recovery, parallel ONNX workers (N× throughput), deferred embedding (`--defer-embeddings`), and streaming mpsc pattern that fixes OOM on large repos
@@ -337,7 +341,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 1019+ tests
+cargo test --workspace        # 1074+ tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```
