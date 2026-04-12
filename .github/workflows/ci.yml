@@ -24,11 +24,15 @@ jobs:
           def check_no_dups(path):
               text = pathlib.Path(path).read_text()
               def hook(p):
-                  keys = [k for k, _ in p]
-                  dups = [k for k in keys if keys.count(k) > 1]
+                  seen = {}
+                  dups = []
+                  for k, _ in p:
+                      if k in seen:
+                          dups.append(k)
+                      seen[k] = True
                   if dups:
                       raise ValueError(f"{path}: duplicate JSON keys: {dups}")
-                  return dict(p)
+                  return seen
               json.loads(text, object_pairs_hook=hook)
               print(f"OK: {path}")
 

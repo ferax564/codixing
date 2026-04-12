@@ -23,13 +23,13 @@ def bump(new_version: str) -> None:
     # 1. Cargo.toml — use regex to target only workspace.package.version
     cargo = root / "Cargo.toml"
     text = cargo.read_text()
-    # Match: [workspace.package] ... version = "X.Y.Z"
-    # Uses DOTALL to span the header through the version line.
+    # Match: [workspace.package] ... version = "X.Y.Z", stopping at the next
+    # section header (\n[).  Using (?:(?!\n\[)[\s\S])*? allows [ inside string
+    # values (e.g. description = "foo [bar]") while correctly stopping at \n[.
     text = re.sub(
-        r'(\[workspace\.package\][^\[]*?version\s*=\s*)"[^"]*"',
+        r'(\[workspace\.package\](?:(?!\n\[)[\s\S])*?version\s*=\s*)"[^"]*"',
         rf'\g<1>"{new_version}"',
         text,
-        flags=re.DOTALL,
         count=1,
     )
     cargo.write_text(text)
@@ -65,7 +65,11 @@ def bump(new_version: str) -> None:
     market = root / ".claude-plugin" / "marketplace.json"
     data = json.loads(market.read_text())
     data["metadata"]["version"] = new_version
-    data["plugins"][0]["version"] = new_version
+    plugins = data.get("plugins", [])
+    if not plugins:
+        print("Error: marketplace.json has no entries in 'plugins'", file=sys.stderr)
+        sys.exit(1)
+    plugins[0]["version"] = new_version
     market.write_text(json.dumps(data, indent=2) + "\n")
     print(f"  marketplace.json      → {new_version} (metadata + plugins[0])")
 
