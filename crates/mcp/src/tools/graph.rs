@@ -224,6 +224,42 @@ pub(crate) fn call_symbol_callees(engine: &Engine, args: &Value) -> (String, boo
     (out, false)
 }
 
+/// Return a plain newline-separated list of files that import `path`.
+///
+/// Used by the CLI daemon proxy for `codixing callers <file>`. The output
+/// deliberately contains only file paths (no markdown) so that the CLI can
+/// print the lines directly and match in-process output.
+pub(crate) fn call_file_callers(engine: &Engine, args: &Value) -> (String, bool) {
+    let path = match args.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => return ("Missing required argument: path".to_string(), true),
+    };
+
+    let callers = engine.callers(&path);
+    if callers.is_empty() {
+        return (String::new(), false);
+    }
+    (callers.join("\n") + "\n", false)
+}
+
+/// Return a plain newline-separated list of files that `path` imports.
+///
+/// Used by the CLI daemon proxy for `codixing callees <file>`. The output
+/// deliberately contains only file paths (no markdown) so that the CLI can
+/// print the lines directly and match in-process output.
+pub(crate) fn call_file_callees(engine: &Engine, args: &Value) -> (String, bool) {
+    let path = match args.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => return ("Missing required argument: path".to_string(), true),
+    };
+
+    let callees = engine.callees(&path);
+    if callees.is_empty() {
+        return (String::new(), false);
+    }
+    (callees.join("\n") + "\n", false)
+}
+
 pub(crate) fn call_predict_impact(
     engine: &Engine,
     args: &Value,

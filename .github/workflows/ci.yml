@@ -16,6 +16,35 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Validate JSON files (no duplicate keys)
+        shell: bash
+        run: |
+          python3 - <<'EOF'
+          import json, sys, pathlib
+
+          def check_no_dups(path):
+              text = pathlib.Path(path).read_text()
+              def hook(p):
+                  seen = {}
+                  dups = []
+                  for k, _ in p:
+                      if k in seen:
+                          dups.append(k)
+                      seen[k] = True
+                  if dups:
+                      raise ValueError(f"{path}: duplicate JSON keys: {dups}")
+                  return seen
+              json.loads(text, object_pairs_hook=hook)
+              print(f"OK: {path}")
+
+          for p in [
+              ".claude-plugin/marketplace.json",
+              "claude-plugin/.claude-plugin/plugin.json",
+              "npm/package.json",
+          ]:
+              check_no_dups(p)
+          EOF
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

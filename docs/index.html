@@ -1001,7 +1001,7 @@
     <div class="hero">
       <div class="hero-badge">
         <span class="badge-dot"></span>
-        Rust-native &bull; 1074 tests &bull; 26 CLI commands &bull; 73% token savings
+        Rust-native &bull; 1087 tests &bull; 25 CLI commands &bull; 73% token savings
       </div>
       <h1>Your AI agent is<br><span class="grad">burning money on grep</span></h1>
       <p class="hero-sub">
@@ -1044,7 +1044,7 @@
           <span class="metric-label">R@10 retrieval accuracy (vs grep 0.345)</span>
         </div>
         <div class="metric-item">
-          <span class="metric-val" data-count="24" data-suffix="">0</span>
+          <span class="metric-val" data-count="25" data-suffix="">0</span>
           <span class="metric-label">CLI commands</span>
         </div>
       </div>
@@ -1506,8 +1506,8 @@
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#30d158" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 17h6M17 14v6"/><path d="M7 10v4M10 7h4M17 10v4"/></svg>
           </div>
           <h3>CLI + MCP</h3>
-          <p>26 CLI commands for direct use, plus 56 JSON-RPC 2.0 tools for Claude Code and any MCP-capable client. <code style="color:var(--cyan);font-size:0.85em">--medium</code> mode curates a 15-tool subset for clients without dynamic tool discovery (e.g. Codex CLI), while all 56 tools remain callable via <code style="color:var(--cyan);font-size:0.85em">tools/call</code>.</p>
-          <span class="feature-tag">26 CLI cmds &bull; 56 MCP tools &bull; stdin/stdout &bull; Unix socket</span>
+          <p>25 CLI commands for direct use, plus 67 JSON-RPC 2.0 tools for Claude Code and any MCP-capable client. <code style="color:var(--cyan);font-size:0.85em">--medium</code> mode curates a 27-tool subset for clients without dynamic tool discovery (e.g. Codex CLI), while all 67 tools remain callable via <code style="color:var(--cyan);font-size:0.85em">tools/call</code>.</p>
+          <span class="feature-tag">25 CLI cmds &bull; 67 MCP tools &bull; stdin/stdout &bull; Unix socket</span>
         </div>
         <div class="feature-card" style="--delay:0.35s">
           <div class="feature-icon pink">
@@ -1543,8 +1543,8 @@
       <div class="mcp-layout">
         <div>
           <div class="section-label reveal">CLI &amp; MCP Integration</div>
-          <h2 class="section-title reveal">26 CLI commands +<br>56 MCP tools</h2>
-          <p class="section-sub reveal">Use Codixing directly from the terminal with 26 commands, or connect any MCP-capable editor. The MCP server exposes retrieval, symbols, graph traversal, file reading, temporal analysis, and diagnostics. Use <code style="color:var(--cyan);font-size:0.85em">--medium</code> for a curated 15-tool listing if your client cannot do dynamic tool discovery — all 56 tools stay callable via <code style="color:var(--cyan);font-size:0.85em">tools/call</code>.</p>
+          <h2 class="section-title reveal">25 CLI commands +<br>67 MCP tools</h2>
+          <p class="section-sub reveal">Use Codixing directly from the terminal with 25 commands, or connect any MCP-capable editor. The MCP server exposes retrieval, symbols, graph traversal, file reading, temporal analysis, and diagnostics. Use <code style="color:var(--cyan);font-size:0.85em">--medium</code> for a curated 27-tool listing if your client cannot do dynamic tool discovery — all 67 tools stay callable via <code style="color:var(--cyan);font-size:0.85em">tools/call</code>.</p>
           <div class="tools-grid reveal">
             <div class="tool-card">
               <div class="tool-name">code_search</div>
@@ -1603,7 +1603,8 @@
       <span class="c-str">"command"</span>: <span class="c-str">"codixing-mcp"</span>,
       <span class="c-str">"args"</span>: [
         <span class="c-str">"--root"</span>, <span class="c-str">"."</span>,
-        <span class="c-str">"--medium"</span>  <span class="c-cmt">// curated 15 tools for Codex / clients without dynamic discovery</span>
+        <span class="c-str">"--medium"</span>,  <span class="c-cmt">// curated 27 tools for Codex / clients without dynamic discovery</span>
+        <span class="c-str">"--no-daemon-fork"</span>  <span class="c-cmt">// prevents stale daemon socket issues</span>
       ]
     <span class="c-key">}</span>
   <span class="c-key">}</span>

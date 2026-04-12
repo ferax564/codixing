@@ -111,6 +111,10 @@ enum Command {
         /// Only return documentation results (no code/config).
         #[arg(long)]
         docs_only: bool,
+
+        /// Print only the result count, not the full results.
+        #[arg(long)]
+        count: bool,
     },
 
     /// List symbols (functions, structs, classes, etc.) in the index.
@@ -122,6 +126,10 @@ enum Command {
         /// Only show symbols from this file.
         #[arg(short, long)]
         file: Option<String>,
+
+        /// Print only the result count, not the full results.
+        #[arg(long)]
+        count: bool,
     },
 
     /// Show dependency graph stats and optionally generate a repo map.
@@ -233,6 +241,10 @@ enum Command {
         /// Filter results to files matching this substring.
         #[arg(short, long)]
         file: Option<String>,
+
+        /// Print only the result count, not the full results.
+        #[arg(long)]
+        count: bool,
     },
 
     /// Re-index files changed since the last git commit (git-diff aware incremental update).
@@ -240,6 +252,15 @@ enum Command {
         /// Project root to update (defaults to current directory).
         #[arg(default_value = ".")]
         path: PathBuf,
+
+        /// Re-index a single file instead of scanning git status.
+        ///
+        /// Path must be relative to the project root (e.g. `src/main.rs`).
+        /// Used by the PostToolUse plugin hook to keep the index fresh after
+        /// each Edit/Write tool call. Exits 0 silently if no `.codixing/`
+        /// index exists (so non-codixing projects see no noise).
+        #[arg(long)]
+        file: Option<String>,
 
         /// Show what would be updated without making any changes.
         #[arg(long)]
@@ -263,6 +284,17 @@ enum Command {
         /// and will embed later via `codixing embed`.
         #[arg(long)]
         no_embed: bool,
+
+        /// Force a full graph rebuild after the incremental sync.
+        ///
+        /// Re-parses all indexed files to re-extract import and call edges,
+        /// clears the existing graph, recomputes PageRank, and persists the
+        /// result. BM25, symbols, trigrams, and vectors are left untouched.
+        ///
+        /// Faster than `codixing init` when only the call graph is stale
+        /// (e.g. after a large refactor that moved many imports around).
+        #[arg(long)]
+        rebuild_graph: bool,
     },
 
     /// Fast git-aware sync: re-indexes only files changed since the last indexed git commit.
@@ -619,6 +651,7 @@ async fn main() -> Result<()> {
             token_budget,
             code_only,
             docs_only,
+            count,
         } => {
             let doc_filter = if code_only {
                 Some(codixing_core::DocFilter::CodeOnly)
@@ -636,9 +669,14 @@ async fn main() -> Result<()> {
                 json,
                 token_budget,
                 doc_filter,
+                count,
             )
         }
-        Command::Symbols { filter, file } => cmd_symbols(filter, file),
+        Command::Symbols {
+            filter,
+            file,
+            count,
+        } => cmd_symbols(filter, file, count),
         Command::Graph {
             path,
             token_budget,
@@ -670,9 +708,18 @@ async fn main() -> Result<()> {
             symbol,
             limit,
             file,
-        } => cmd_usages(symbol, limit, file),
-        Command::Update { path, dry_run } => cmd_update(path, dry_run),
-        Command::Sync { path, no_embed } => cmd_sync(path, no_embed),
+            count,
+        } => cmd_usages(symbol, limit, file, count),
+        Command::Update {
+            path,
+            dry_run,
+            file,
+        } => cmd_update(path, dry_run, file),
+        Command::Sync {
+            path,
+            no_embed,
+            rebuild_graph,
+        } => cmd_sync(path, no_embed, rebuild_graph),
         Command::GitSync { path } => cmd_git_sync(path),
         Command::Embed { path } => cmd_embed(path),
         Command::BenchEmbed { path, force, json } => cmd_bench_embed(path, force, json),
@@ -716,6 +763,48 @@ fn check_write_lock_error(err: &anyhow::Error) -> bool {
     } else {
         false
     }
+}
+
+/// Wrap a core engine error with context, exiting the process on write-lock
+/// conflicts (so callers get a friendly message rather than a raw panic trace).
+fn handle_engine_err<E: std::fmt::Display>(e: E, ctx: impl FnOnce() -> String) -> anyhow::Error {
+    let err = anyhow::anyhow!("{e}");
+    if check_write_lock_error(&err) {
+        std::process::exit(1);
+    }
+    err.context(ctx())
+}
+
+/// Print a non-empty list of file paths (one per line to stdout) with a count
+/// summary to stderr. Caller must guarantee the slice is non-empty.
+fn print_nonempty_file_list(items: &[String], count_label: &str) {
+    for item in items {
+        println!("{item}");
+    }
+    eprintln!("\n{} {count_label}.", items.len());
+}
+
+/// Print a file list or an empty-message if the list is empty.
+fn print_file_list(items: &[String], empty_msg: &str, count_label: &str) {
+    if items.is_empty() {
+        eprintln!("{empty_msg}");
+    } else {
+        print_nonempty_file_list(items, count_label);
+    }
+}
+
+/// Handle a daemon-proxy response for a file-list command (callers/callees).
+/// Takes the raw text blob returned by the daemon, prints it or an empty
+/// message, and returns `Ok(())`.
+fn emit_daemon_file_list(text: String, empty_msg: &str, count_label: &str) -> Result<()> {
+    if text.is_empty() {
+        eprintln!("{empty_msg}");
+    } else {
+        print!("{text}");
+        let count = text.lines().count();
+        eprintln!("\n{count} {count_label}.");
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -871,6 +960,7 @@ fn cmd_search(
     json: bool,
     token_budget: Option<usize>,
     doc_filter: Option<codixing_core::DocFilter>,
+    count: bool,
 ) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
 
@@ -883,6 +973,8 @@ fn cmd_search(
     // preserve, and --file / specific strategies / token_budget require
     // flags the code_search tool doesn't fully expose, so those fall through
     // to the in-process path.
+    // --count also bypasses the daemon: we need to parse individual results to
+    // get an accurate count, and the daemon returns a formatted text block.
     // The `format` flag doesn't change anything here because the MCP body is
     // already a formatted markdown text block — the daemon path effectively
     // always produces "formatted" output, which is what agents and humans
@@ -890,6 +982,7 @@ fn cmd_search(
     {
         let _ = format;
         let can_use_daemon = !json
+            && !count
             && file.is_none()
             && token_budget.is_none()
             && doc_filter.is_none()
@@ -924,6 +1017,11 @@ fn cmd_search(
     }
 
     let results = engine.search(sq).context("search failed")?;
+
+    if count {
+        println!("{} result(s) found", results.len());
+        return Ok(());
+    }
 
     if results.is_empty() {
         eprintln!("No results for \"{}\"", query);
@@ -1006,11 +1104,12 @@ fn cmd_search(
     Ok(())
 }
 
-fn cmd_symbols(filter: String, file: Option<String>) -> Result<()> {
+fn cmd_symbols(filter: String, file: Option<String>, count: bool) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
 
     // Fast path: proxy through the daemon if one is running.
-    if !filter.is_empty() {
+    // Skip daemon proxy for --count: we need the raw symbol list to count accurately.
+    if !filter.is_empty() && !count {
         if let Some(text) = daemon_proxy::try_symbols(&root, &filter, file.as_deref()) {
             print!("{text}");
             return Ok(());
@@ -1027,6 +1126,11 @@ fn cmd_symbols(filter: String, file: Option<String>) -> Result<()> {
     let symbols = engine
         .symbols(&filter, file.as_deref())
         .context("symbol lookup failed")?;
+
+    if count {
+        println!("{} symbol(s) found", symbols.len());
+        return Ok(());
+    }
 
     if symbols.is_empty() {
         if filter.is_empty() {
@@ -1268,6 +1372,20 @@ fn cmd_path(from: String, to: String) -> Result<()> {
 
 fn cmd_callers(file: String, depth: usize) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
+
+    // Fast path: proxy through the daemon when asking for direct callers only
+    // (depth <= 1). Transitive callers require multi-hop graph traversal that
+    // the daemon's `file_callers` tool doesn't expose, so those fall through.
+    if depth <= 1 {
+        if let Some(text) = daemon_proxy::try_callers(&root, &file) {
+            return emit_daemon_file_list(
+                text,
+                &format!("No callers found for \"{file}\"."),
+                "caller(s) found",
+            );
+        }
+    }
+
     let engine = Engine::open(&root).with_context(|| {
         format!(
             "no index found at {} — run `codixing init` first",
@@ -1319,15 +1437,27 @@ fn cmd_callers(file: String, depth: usize) -> Result<()> {
         return Ok(());
     }
 
-    for c in &callers {
-        println!("{c}");
-    }
-    eprintln!("\n{} caller(s) found.", callers.len());
+    // Empty case was returned above; this branch is always non-empty.
+    print_nonempty_file_list(&callers, "caller(s) found");
     Ok(())
 }
 
 fn cmd_callees(file: String, depth: usize) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
+
+    // Fast path: proxy through the daemon when asking for direct callees only
+    // (depth <= 1). Transitive callees require multi-hop traversal not exposed
+    // by the `file_callees` tool, so those fall through to in-process.
+    if depth <= 1 {
+        if let Some(text) = daemon_proxy::try_callees(&root, &file) {
+            return emit_daemon_file_list(
+                text,
+                &format!("No dependencies found for \"{file}\""),
+                "dependency/dependencies found",
+            );
+        }
+    }
+
     let engine = Engine::open(&root).with_context(|| {
         format!(
             "no index found at {} — run `codixing init` first",
@@ -1340,15 +1470,11 @@ fn cmd_callees(file: String, depth: usize) -> Result<()> {
     } else {
         engine.transitive_callees(&file, depth)
     };
-    if callees.is_empty() {
-        eprintln!("No dependencies found for \"{}\"", file);
-        return Ok(());
-    }
-
-    for c in &callees {
-        println!("{c}");
-    }
-    eprintln!("\n{} dependency/dependencies found.", callees.len());
+    print_file_list(
+        &callees,
+        &format!("No dependencies found for \"{}\"", file),
+        "dependency/dependencies found",
+    );
     Ok(())
 }
 
@@ -1362,15 +1488,11 @@ fn cmd_dependencies(file: String, depth: usize) -> Result<()> {
     })?;
 
     let deps = engine.dependencies(&file, depth);
-    if deps.is_empty() {
-        eprintln!("No transitive dependencies found for \"{}\"", file);
-        return Ok(());
-    }
-
-    for d in &deps {
-        println!("{d}");
-    }
-    eprintln!("\n{} transitive dependency/dependencies found.", deps.len());
+    print_file_list(
+        &deps,
+        &format!("No transitive dependencies found for \"{}\"", file),
+        "transitive dependency/dependencies found",
+    );
     Ok(())
 }
 
@@ -1401,12 +1523,13 @@ fn cmd_cross_imports(from: String, to: String) -> Result<()> {
     Ok(())
 }
 
-fn cmd_usages(symbol: String, limit: usize, file: Option<String>) -> Result<()> {
+fn cmd_usages(symbol: String, limit: usize, file: Option<String>, count: bool) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
 
     // Fast path: proxy through the daemon when no file filter (the MCP
     // search_usages tool doesn't expose a file filter parameter).
-    if file.is_none() {
+    // Skip daemon proxy for --count: we need the raw result list to count accurately.
+    if file.is_none() && !count {
         let _ = limit; // MCP tool uses its own limit; CLI limit is approximated
         if let Some(text) = daemon_proxy::try_usages(&root, &symbol) {
             print!("{text}");
@@ -1427,6 +1550,11 @@ fn cmd_usages(symbol: String, limit: usize, file: Option<String>) -> Result<()> 
 
     if let Some(ref f) = file {
         results.retain(|r| r.file_path.contains(f.as_str()));
+    }
+
+    if count {
+        println!("{} usage(s) found", results.len());
+        return Ok(());
     }
 
     if results.is_empty() {
@@ -1454,10 +1582,59 @@ fn cmd_usages(symbol: String, limit: usize, file: Option<String>) -> Result<()> 
     Ok(())
 }
 
-fn cmd_update(path: PathBuf, dry_run: bool) -> Result<()> {
+fn cmd_update(path: PathBuf, dry_run: bool, file: Option<String>) -> Result<()> {
     let root = path
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
+
+    // Fast path: single-file surgical re-index for PostToolUse hook.
+    if let Some(ref rel) = file {
+        // Silent no-op when no index exists — non-codixing projects must not
+        // see errors from the plugin hook.
+        if !root.join(".codixing").is_dir() {
+            return Ok(());
+        }
+        let rel_path = std::path::Path::new(rel);
+        if rel_path.is_absolute()
+            || rel_path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            anyhow::bail!(
+                "--file must be a project-relative path with no '..' components, got: {rel}"
+            );
+        }
+        if dry_run {
+            eprintln!("(dry run) would reindex: {rel}");
+            return Ok(());
+        }
+        let abs = match root.join(rel_path).canonicalize() {
+            Ok(p) => p,
+            Err(_) => {
+                // Silent no-op when the target file doesn't exist — the hook
+                // shouldn't error on freshly-deleted or never-created files.
+                return Ok(());
+            }
+        };
+        if !abs.starts_with(&root) {
+            anyhow::bail!("--file must stay within the project root, got: {rel}");
+        }
+        let mut engine = Engine::open(&root).with_context(|| {
+            format!(
+                "no index found at {} — run `codixing init` first",
+                root.display()
+            )
+        })?;
+        let start = Instant::now();
+        engine
+            .reindex_file(&abs)
+            .map_err(|e| handle_engine_err(e, || format!("failed to reindex {rel}")))?;
+        engine.save().map_err(|e| {
+            handle_engine_err(e, || "failed to save index after --file update".into())
+        })?;
+        eprintln!("reindexed {} in {:.2}s", rel, start.elapsed().as_secs_f64());
+        return Ok(());
+    }
 
     // Ask git for all paths that differ from the last commit (staged + unstaged).
     // --porcelain gives a stable machine-readable format: "XY filename"
@@ -1598,7 +1775,7 @@ fn cmd_update(path: PathBuf, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_sync(path: PathBuf, no_embed: bool) -> Result<()> {
+fn cmd_sync(path: PathBuf, no_embed: bool, rebuild_graph: bool) -> Result<()> {
     let root = path
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
@@ -1609,12 +1786,16 @@ fn cmd_sync(path: PathBuf, no_embed: bool) -> Result<()> {
     if no_embed {
         eprintln!("[sync] --no-embed active — vector index will be left stale");
     }
+    if rebuild_graph {
+        eprintln!("[sync] --rebuild-graph active — full graph rebuild after sync");
+    }
 
     let start = Instant::now();
     let stage_start = std::sync::Arc::new(std::sync::Mutex::new(Instant::now()));
     let stage_start_cb = stage_start.clone();
     let options = codixing_core::SyncOptions {
         skip_embed: no_embed,
+        rebuild_graph,
     };
     let stats = match engine.sync_with_options(options, move |msg| {
         let mut t = stage_start_cb.lock().unwrap_or_else(|e| e.into_inner());

@@ -34,6 +34,16 @@ If ANY fails, fix first. Do NOT pipe through awk/tail — that masks failures.
 
 ## Step 2: Version Bump (ALL 5 locations)
 
+**Preferred: use the bump script** (prevents duplicate-key corruption):
+
+```bash
+python3 scripts/bump_version.py NEW_VERSION   # e.g. python3 scripts/bump_version.py 0.35.0
+```
+
+The script prints confirmation for each file and a verify command with the actual version substituted.
+
+(Manual fallback instructions below remain for reference.)
+
 Determine version from git log since last tag. Then update ALL of:
 
 1. `Cargo.toml` — `workspace.package.version`
@@ -42,7 +52,12 @@ Determine version from git log since last tag. Then update ALL of:
 4. `claude-plugin/.claude-plugin/plugin.json` — `"version"`
 5. `.claude-plugin/marketplace.json` — `metadata.version` AND `plugins[0].version`
 
-Verify: `grep -rn "NEW_VERSION" Cargo.toml npm/package.json docs/install.sh claude-plugin/.claude-plugin/plugin.json .claude-plugin/marketplace.json`
+Verify (set `NEW_VERSION` to the version you just bumped to):
+```bash
+NEW_VERSION="0.35.0"   # replace with target
+grep -rn "$NEW_VERSION" Cargo.toml npm/package.json docs/install.sh \
+  claude-plugin/.claude-plugin/plugin.json .claude-plugin/marketplace.json
+```
 
 ## Step 3: Documentation Update
 

@@ -556,7 +556,7 @@ pub fn handle_auth_request(req: Request) -&gt; Result&lt;Token&gt;</span>
         <div class="pre-label">Plugin (recommended)</div>
         <pre><code><span class="tok-cmd">claude plugin marketplace add</span> ferax564/codixing
 <span class="tok-cmd">claude plugin install</span> codixing@codixing</code></pre>
-        <p>Installs the MCP server (56 tools) plus five slash commands: <code>/codixing-setup</code> (index + register), <code>/codixing-explore</code> (architecture deep-dive), <code>/codixing-review</code> (code review with impact analysis), <code>/codixing-preflight</code> (duplicate detection), <code>/codixing-release</code> (automated release pipeline). Restart Claude Code after installing.</p>
+        <p>Installs the MCP server (67 tools) plus five slash commands: <code>/codixing-setup</code> (index + register), <code>/codixing-explore</code> (architecture deep-dive), <code>/codixing-review</code> (code review with impact analysis), <code>/codixing-preflight</code> (duplicate detection), <code>/codixing-release</code> (automated release pipeline). Restart Claude Code after installing.</p>
 
         <p>Alternatively, register just the MCP server without the plugin:</p>
         <div class="pre-label">MCP only</div>
@@ -906,7 +906,7 @@ Sync complete in 0.12s</span></code></pre>
 
       <!-- MCP Tools -->
       <section class="doc-section" id="mcp-tools">
-        <h2>MCP — Tools Reference (32 tools)</h2>
+        <h2>MCP — Tools Reference (32 highlighted of 67 total)</h2>
         <p>All tools are called via JSON-RPC 2.0 <code>tools/call</code> with a <code>name</code> and <code>arguments</code> object. Write tools (<code>write_file</code>, <code>edit_file</code>, <code>delete_file</code>) automatically reindex after every operation. Intelligence tools expose the call graph, impact analysis, context stitching, complexity metrics, persistent memory, test discovery, duplicate detection, PR review context, and project onboarding generation.</p>
 
         <div class="tool-card">

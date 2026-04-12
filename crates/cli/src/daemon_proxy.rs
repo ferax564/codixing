@@ -280,3 +280,19 @@ pub fn try_repo_map(root: &Path, token_budget: Option<usize>) -> Option<String> 
     }
     try_tools_call(root, "get_repo_map", Value::Object(args))
 }
+
+/// Proxy `codixing callers <file>` through the daemon's `file_callers` tool.
+///
+/// Returns a newline-separated list of file paths, or `None` if the daemon is
+/// not running or does not respond.
+pub fn try_callers(root: &Path, file: &str) -> Option<String> {
+    try_tools_call(root, "file_callers", json!({ "path": file }))
+}
+
+/// Proxy `codixing callees <file>` through the daemon's `file_callees` tool.
+///
+/// Returns a newline-separated list of file paths, or `None` if the daemon is
+/// not running or does not respond.
+pub fn try_callees(root: &Path, file: &str) -> Option<String> {
+    try_tools_call(root, "file_callees", json!({ "path": file }))
+}

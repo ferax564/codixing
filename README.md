@@ -155,7 +155,7 @@ Full reference: [codixing.com/docs](https://codixing.com/docs)
 
 ### MCP server (optional)
 
-For editors with MCP support, the `codixing-mcp` binary exposes 56 JSON-RPC 2.0 tools:
+For editors with MCP support, the `codixing-mcp` binary exposes 67 JSON-RPC 2.0 tools:
 
 | Category | Tools |
 |----------|-------|
@@ -267,7 +267,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Cross-file context assembly** — `codixing context` follows import chains and callees to assemble understanding context
 - **Query-personalized PageRank** — Query-time graph boost seeds PageRank from query-relevant nodes for context-aware ranking
 - **Learned query reformulation** — Project-specific vocabulary expansion learns from codebase patterns
-- **CLI + MCP** — 26 CLI commands for direct use; 56 MCP tools for editor integration (search, graph traversal, file operations, code review, git analysis, session memory, federation discovery)
+- **CLI + MCP** — 25 CLI commands for direct use; 67 MCP tools for editor integration (search, graph traversal, file operations, code review, git analysis, session memory, federation discovery)
 - **File freshness audit** — `audit_freshness` tool identifies stale and orphaned files across releases
 - **Preflight gates** — Plugin enforces existence scanning before proposing new features
 - **TypeScript import resolution** — Resolve `.js` → `.ts` imports with node16/bundler moduleResolution support, enabling 0.8+ R@10 on cross-package code discovery
@@ -292,7 +292,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Incremental embedding** — `sync` skips re-embedding unchanged chunks (content hash comparison)
 - **Progress notifications** — Long-running MCP tools emit `notifications/progress` with streaming partial results so agents see live status
 - **Windows support** — Named pipe daemon, brute-force vector fallback when usearch (POSIX-only) is unavailable
-- **Curated tool listing** — `--medium` exposes a 15-tool subset via `tools/list` for MCP clients that cannot do dynamic tool discovery (e.g. Codex CLI). All 56 tools remain callable via `tools/call`.
+- **Curated tool listing** — `--medium` exposes a 27-tool subset via `tools/list` for MCP clients that cannot do dynamic tool discovery (e.g. Codex CLI). All 67 tools remain callable via `tools/call`.
 - **GitHub Action** — Automated code review with impact analysis on PRs
 - **Token budgets** — All output respects token limits; adaptive truncation at score cliffs
 - **Cross-repo federation** — Unified search across multiple indexed projects with CLI management and workspace auto-discovery (`codixing federation init/add/remove/list/search/discover`)
@@ -330,7 +330,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 │  + Exact (trigram) · Graph boost · Definition 3.5× · Session     │
 │  SearchPipeline: composable stages, 6 strategies                  │
 │                                                                   │
-│  API: CLI (25 cmds) · MCP (56 tools, JSON-RPC 2.0) · LSP · HTTP  │
+│  API: CLI (25 cmds) · MCP (67 tools, JSON-RPC 2.0) · LSP · HTTP  │
 │       Daemon (Unix socket / Windows named pipe) · File Watcher   │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -341,7 +341,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 1074+ tests
+cargo test --workspace        # 1087 tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```

@@ -96,6 +96,30 @@ type = "integer"
 description = "Maximum results to return (default: 20)"
 
 [[tools]]
+name = "file_callers"
+description = "Return all files that import (depend on) the given file. Returns a plain newline-separated list of relative file paths. Used by the CLI daemon proxy for `codixing callers <file>` to avoid cold process startup."
+handler = "graph::call_file_callers"
+calling_convention = "engine_args"
+read_only = true
+
+[tools.params.path]
+type = "string"
+description = "Relative file path within the indexed project (e.g. 'src/engine.rs', 'crates/core/src/graph/mod.rs')"
+required = true
+
+[[tools]]
+name = "file_callees"
+description = "Return all files that the given file imports (depends on). Returns a plain newline-separated list of relative file paths. Used by the CLI daemon proxy for `codixing callees <file>` to avoid cold process startup."
+handler = "graph::call_file_callees"
+calling_convention = "engine_args"
+read_only = true
+
+[tools.params.path]
+type = "string"
+description = "Relative file path within the indexed project (e.g. 'src/engine.rs', 'crates/core/src/graph/mod.rs')"
+required = true
+
+[[tools]]
 name = "predict_impact"
 description = "Given a unified diff, rank the files most likely to need changes based on the call graph and import graph. Useful for blast-radius analysis before committing a change."
 handler = "graph::call_predict_impact"
