@@ -3,12 +3,12 @@ use std::fs;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
-use crate::chunker::cast::CastChunker;
 use crate::chunker::Chunker;
+use crate::chunker::cast::CastChunker;
 use crate::error::{CodixingError, Result};
 use crate::graph::extract::{extract_definitions, extract_references};
 use crate::graph::types::{ReferenceKind, SymbolKind};
-use crate::graph::{compute_pagerank, CallExtractor, ImportExtractor, ImportResolver};
+use crate::graph::{CallExtractor, ImportExtractor, ImportResolver, compute_pagerank};
 use crate::language::detect_language;
 use crate::persistence::{FileHashEntry, IndexMeta};
 use crate::retriever::ChunkMeta;
@@ -19,7 +19,7 @@ use super::indexing::{
     make_embed_text, normalize_path, serialize_chunk_meta_compact, symbol_from_entity,
     unix_timestamp_string,
 };
-use super::{git_diff_since, git_head_commit, Engine, GitSyncStats, SyncStats};
+use super::{Engine, GitSyncStats, SyncStats, git_diff_since, git_head_commit};
 
 /// Options that modify how [`Engine::sync_with_options`] runs.
 #[derive(Debug, Clone, Copy, Default)]

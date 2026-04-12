@@ -746,6 +746,25 @@ fn check_write_lock_error(err: &anyhow::Error) -> bool {
     }
 }
 
+/// Print a newline-separated list of file paths, or an empty-message when the
+/// list is empty. The count summary is written to stderr so it doesn't pollute
+/// pipeline-friendly stdout.
+///
+/// # Arguments
+/// * `items`       — the list to print (one path per line to stdout)
+/// * `empty_msg`   — message sent to stderr when `items` is empty
+/// * `count_label` — noun phrase appended after the count, e.g. `"caller(s)"`
+fn print_file_list(items: &[String], empty_msg: &str, count_label: &str) {
+    if items.is_empty() {
+        eprintln!("{empty_msg}");
+    } else {
+        for item in items {
+            println!("{item}");
+        }
+        eprintln!("\n{} {count_label}.", items.len());
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_init(
     path: PathBuf,
@@ -1367,10 +1386,8 @@ fn cmd_callers(file: String, depth: usize) -> Result<()> {
         return Ok(());
     }
 
-    for c in &callers {
-        println!("{c}");
-    }
-    eprintln!("\n{} caller(s) found.", callers.len());
+    // Non-empty path (empty case already returned above).
+    print_file_list(&callers, "", "caller(s) found");
     Ok(())
 }
 
@@ -1405,15 +1422,11 @@ fn cmd_callees(file: String, depth: usize) -> Result<()> {
     } else {
         engine.transitive_callees(&file, depth)
     };
-    if callees.is_empty() {
-        eprintln!("No dependencies found for \"{}\"", file);
-        return Ok(());
-    }
-
-    for c in &callees {
-        println!("{c}");
-    }
-    eprintln!("\n{} dependency/dependencies found.", callees.len());
+    print_file_list(
+        &callees,
+        &format!("No dependencies found for \"{}\"", file),
+        "dependency/dependencies found",
+    );
     Ok(())
 }
 
@@ -1427,15 +1440,11 @@ fn cmd_dependencies(file: String, depth: usize) -> Result<()> {
     })?;
 
     let deps = engine.dependencies(&file, depth);
-    if deps.is_empty() {
-        eprintln!("No transitive dependencies found for \"{}\"", file);
-        return Ok(());
-    }
-
-    for d in &deps {
-        println!("{d}");
-    }
-    eprintln!("\n{} transitive dependency/dependencies found.", deps.len());
+    print_file_list(
+        &deps,
+        &format!("No transitive dependencies found for \"{}\"", file),
+        "transitive dependency/dependencies found",
+    );
     Ok(())
 }
 
