@@ -1,3 +1,6 @@
+#[cfg(unix)]
+mod daemon_proxy;
+
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -808,6 +811,36 @@ fn cmd_search(
     doc_filter: Option<codixing_core::DocFilter>,
 ) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
+
+    // Fast path: if a codixing-mcp daemon is running at .codixing/daemon.sock,
+    // proxy the search through it. The daemon holds the engine in memory, so
+    // this avoids the ~4s cold-process startup on large hybrid indexes.
+    //
+    // We only take the fast path when the caller wants plain or formatted
+    // output. --json wants structured results that the MCP text body doesn't
+    // preserve, and --file / specific strategies / token_budget require
+    // flags the code_search tool doesn't fully expose, so those fall through
+    // to the in-process path.
+    // The `format` flag doesn't change anything here because the MCP body is
+    // already a formatted markdown text block — the daemon path effectively
+    // always produces "formatted" output, which is what agents and humans
+    // both want from a warm-index search.
+    #[cfg(unix)]
+    {
+        let _ = format;
+        let can_use_daemon = !json
+            && file.is_none()
+            && token_budget.is_none()
+            && doc_filter.is_none()
+            && matches!(strategy, StrategyArg::Auto);
+        if can_use_daemon {
+            if let Some(text) = daemon_proxy::try_search(&root, &query, limit) {
+                print!("{text}");
+                return Ok(());
+            }
+        }
+    }
+
     let engine = Engine::open(&root).with_context(|| {
         format!(
             "no index found at {} — run `codixing init` first",
