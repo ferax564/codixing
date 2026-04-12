@@ -186,7 +186,7 @@ fn apply_kind_filter(
             filtered.push(r);
             continue;
         }
-        // Find the declaration line and extract ±5 lines of context.
+        // Find the declaration line and extract -2/+8 lines of surrounding context.
         let lines: Vec<&str> = r.content.lines().collect();
         let decl_idx = lines.iter().position(|line| {
             let ll = line.to_lowercase();
@@ -202,9 +202,6 @@ fn apply_kind_filter(
         }
     }
 
-    // If filtering produced no results, retry with a more targeted BM25 query
-    // that includes the kind keyword. This finds definition chunks that BM25
-    // missed because the query word appears more in usage contexts.
     if filtered.is_empty() {
         // BM25 didn't return definition chunks. Fall back to the symbol table
         // which indexes all definitions by name.

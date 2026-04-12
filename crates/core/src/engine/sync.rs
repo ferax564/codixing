@@ -3,12 +3,12 @@ use std::fs;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
-use crate::chunker::cast::CastChunker;
 use crate::chunker::Chunker;
+use crate::chunker::cast::CastChunker;
 use crate::error::{CodixingError, Result};
 use crate::graph::extract::{extract_definitions, extract_references};
 use crate::graph::types::{ReferenceKind, SymbolKind};
-use crate::graph::{compute_pagerank, CallExtractor, ImportExtractor, ImportResolver};
+use crate::graph::{CallExtractor, ImportExtractor, ImportResolver, compute_pagerank};
 use crate::language::detect_language;
 use crate::persistence::{FileHashEntry, IndexMeta};
 use crate::retriever::ChunkMeta;
@@ -19,7 +19,7 @@ use super::indexing::{
     make_embed_text, normalize_path, serialize_chunk_meta_compact, symbol_from_entity,
     unix_timestamp_string,
 };
-use super::{git_diff_since, git_head_commit, Engine, GitSyncStats, SyncStats};
+use super::{Engine, GitSyncStats, SyncStats, git_diff_since, git_head_commit};
 
 /// Options that modify how [`Engine::sync_with_options`] runs.
 #[derive(Debug, Clone, Copy, Default)]
@@ -824,23 +824,15 @@ impl Engine {
     where
         F: FnMut(&str) + Send + 'static,
     {
-        // Stash the embedder if the caller opted out of embedding. We
-        // restore it unconditionally in both the Ok and Err paths so
-        // the engine's state is left intact whatever happens.
-        let stashed_embedder = if options.skip_embed {
-            self.embedder.take()
-        } else {
-            None
-        };
+        // Stash the embedder if the caller opted out of embedding, and restore
+        // it after sync_with_progress runs so state is intact whatever happens.
+        let stashed_embedder = options.skip_embed.then(|| self.embedder.take()).flatten();
 
         let graph_was_missing = self.graph.is_none();
         let result = self.sync_with_progress(on_progress);
 
-        // Restore the stashed embedder (if any) before any further work.
-        if options.skip_embed {
-            if let Some(emb) = stashed_embedder {
-                self.embedder = Some(emb);
-            }
+        if stashed_embedder.is_some() {
+            self.embedder = stashed_embedder;
         }
 
         // Emit a helpful warning if the index has no graph. We don't fail
@@ -889,12 +881,13 @@ impl Engine {
             "rebuilding dependency graph from disk"
         );
 
-        // Collect the set of currently-indexed files (relative paths).
+        // Collect the set of currently-indexed files (absolute paths). Missing
+        // files are handled downstream by build_graph / the call-extraction
+        // loop — each has its own warn!+continue, so we don't pre-stat here.
         let indexed_files: Vec<std::path::PathBuf> = self
             .file_chunk_counts
             .keys()
             .map(|rel| self.config.root.join(rel))
-            .filter(|p| p.exists())
             .collect();
 
         // Build a fresh graph using the same code path as init, but
@@ -916,9 +909,12 @@ impl Engine {
             &empty_imports,
         );
 
-        // Resolve call edges using the current symbol table.
+        // Resolve call edges using the current symbol table. Parallelize over
+        // files — `Parser` is Sync (doc comment on struct definition says so)
+        // and the output goes into a DashMap.
+        use rayon::prelude::*;
         let pending_calls: dashmap::DashMap<String, Vec<String>> = dashmap::DashMap::new();
-        for file in &indexed_files {
+        indexed_files.par_iter().for_each(|file| {
             let rel_str = self.config.normalize_path(file).unwrap_or_else(|| {
                 normalize_path(file.strip_prefix(&self.config.root).unwrap_or(file))
             });
@@ -926,26 +922,25 @@ impl Engine {
                 Ok(s) => s,
                 Err(e) => {
                     warn!(path = %file.display(), error = %e, "skipping file in rebuild_graph");
-                    continue;
+                    return;
                 }
             };
             let result = match self.parser.parse_file(file, &source) {
                 Ok(r) => r,
                 Err(e) => {
                     warn!(path = %file.display(), error = %e, "parse failed in rebuild_graph");
-                    continue;
+                    return;
                 }
             };
-            let call_names = match result.tree.as_ref() {
-                Some(tree) => {
-                    crate::graph::CallExtractor::extract_calls(tree, &source, result.language)
-                }
-                None => Vec::new(),
+            let Some(tree) = result.tree.as_ref() else {
+                return;
             };
+            let call_names =
+                crate::graph::CallExtractor::extract_calls(tree, &source, result.language);
             if !call_names.is_empty() {
                 pending_calls.insert(rel_str, call_names);
             }
-        }
+        });
         super::indexing::add_call_edges(&mut new_graph, &self.symbols, &pending_calls);
 
         // Populate symbol-level call graph.

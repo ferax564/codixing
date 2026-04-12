@@ -245,15 +245,14 @@ pub(crate) fn call_rename_symbol(engine: &mut Engine, args: &Value) -> (String, 
 /// Conventions covered:
 /// - `test_` prefix or `_test` suffix (Rust, Python, C)
 /// - `Test` prefix (Go: `TestXxx`)
-/// - File path contains `test` or `spec`
+/// - File path matches a known test convention (delegates to `test_mapping::is_test_file`,
+///   which handles `_test.rs`, `test_*.py`, `.test.ts`, `.spec.js`, `/tests/`, etc.)
 fn is_test_symbol(name: &str, file: &str) -> bool {
     let n = name.to_lowercase();
-    let f = file.to_lowercase();
     n.starts_with("test_")
         || n.ends_with("_test")
         || name.starts_with("Test")
-        || f.contains("test")
-        || f.contains("spec")
+        || codixing_core::test_mapping::is_test_file(file)
 }
 
 /// Try the test-mapping fast-path: look up mapped test files for `source_file`,

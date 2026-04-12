@@ -767,10 +767,7 @@ fn check_write_lock_error(err: &anyhow::Error) -> bool {
 
 /// Wrap a core engine error with context, exiting the process on write-lock
 /// conflicts (so callers get a friendly message rather than a raw panic trace).
-fn handle_engine_err<E: std::fmt::Display>(
-    e: E,
-    ctx: impl FnOnce() -> String,
-) -> anyhow::Error {
+fn handle_engine_err<E: std::fmt::Display>(e: E, ctx: impl FnOnce() -> String) -> anyhow::Error {
     let err = anyhow::anyhow!("{e}");
     if check_write_lock_error(&err) {
         std::process::exit(1);
@@ -778,23 +775,36 @@ fn handle_engine_err<E: std::fmt::Display>(
     err.context(ctx())
 }
 
-/// Print a newline-separated list of file paths, or an empty-message when the
-/// list is empty. The count summary is written to stderr so it doesn't pollute
-/// pipeline-friendly stdout.
-///
-/// # Arguments
-/// * `items`       — the list to print (one path per line to stdout)
-/// * `empty_msg`   — message sent to stderr when `items` is empty
-/// * `count_label` — noun phrase appended after the count, e.g. `"caller(s)"`
+/// Print a non-empty list of file paths (one per line to stdout) with a count
+/// summary to stderr. Caller must guarantee the slice is non-empty.
+fn print_nonempty_file_list(items: &[String], count_label: &str) {
+    for item in items {
+        println!("{item}");
+    }
+    eprintln!("\n{} {count_label}.", items.len());
+}
+
+/// Print a file list or an empty-message if the list is empty.
 fn print_file_list(items: &[String], empty_msg: &str, count_label: &str) {
     if items.is_empty() {
         eprintln!("{empty_msg}");
     } else {
-        for item in items {
-            println!("{item}");
-        }
-        eprintln!("\n{} {count_label}.", items.len());
+        print_nonempty_file_list(items, count_label);
     }
+}
+
+/// Handle a daemon-proxy response for a file-list command (callers/callees).
+/// Takes the raw text blob returned by the daemon, prints it or an empty
+/// message, and returns `Ok(())`.
+fn emit_daemon_file_list(text: String, empty_msg: &str, count_label: &str) -> Result<()> {
+    if text.is_empty() {
+        eprintln!("{empty_msg}");
+    } else {
+        print!("{text}");
+        let count = text.lines().count();
+        eprintln!("\n{count} {count_label}.");
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1368,17 +1378,11 @@ fn cmd_callers(file: String, depth: usize) -> Result<()> {
     // the daemon's `file_callers` tool doesn't expose, so those fall through.
     if depth <= 1 {
         if let Some(text) = daemon_proxy::try_callers(&root, &file) {
-            if text.is_empty() {
-                // Daemon reported no callers — mirror the in-process empty
-                // branch message (without the disk-check diagnostics, which
-                // require opening the engine).
-                eprintln!("No callers found for \"{}\".", file);
-            } else {
-                print!("{text}");
-                let count = text.lines().count();
-                eprintln!("\n{} caller(s) found.", count);
-            }
-            return Ok(());
+            return emit_daemon_file_list(
+                text,
+                &format!("No callers found for \"{file}\"."),
+                "caller(s) found",
+            );
         }
     }
 
@@ -1433,12 +1437,8 @@ fn cmd_callers(file: String, depth: usize) -> Result<()> {
         return Ok(());
     }
 
-    // Non-empty path (empty case already returned above).
-    debug_assert!(
-        !callers.is_empty(),
-        "empty callers should have returned early"
-    );
-    print_file_list(&callers, "", "caller(s) found");
+    // Empty case was returned above; this branch is always non-empty.
+    print_nonempty_file_list(&callers, "caller(s) found");
     Ok(())
 }
 
@@ -1450,14 +1450,11 @@ fn cmd_callees(file: String, depth: usize) -> Result<()> {
     // by the `file_callees` tool, so those fall through to in-process.
     if depth <= 1 {
         if let Some(text) = daemon_proxy::try_callees(&root, &file) {
-            if text.is_empty() {
-                eprintln!("No dependencies found for \"{}\"", file);
-            } else {
-                print!("{text}");
-                let count = text.lines().count();
-                eprintln!("\n{} dependency/dependencies found.", count);
-            }
-            return Ok(());
+            return emit_daemon_file_list(
+                text,
+                &format!("No dependencies found for \"{file}\""),
+                "dependency/dependencies found",
+            );
         }
     }
 
@@ -1615,9 +1612,9 @@ fn cmd_update(path: PathBuf, dry_run: bool, file: Option<String>) -> Result<()> 
         engine
             .reindex_file(&abs)
             .map_err(|e| handle_engine_err(e, || format!("failed to reindex {rel}")))?;
-        engine
-            .save()
-            .map_err(|e| handle_engine_err(e, || "failed to save index after --file update".into()))?;
+        engine.save().map_err(|e| {
+            handle_engine_err(e, || "failed to save index after --file update".into())
+        })?;
         eprintln!("reindexed {} in {:.2}s", rel, start.elapsed().as_secs_f64());
         return Ok(());
     }
