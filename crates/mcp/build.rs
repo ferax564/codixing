@@ -410,27 +410,6 @@ fn main() {
         code.push_str("}\n\n");
     }
 
-    // compact_tool_definitions() -> Value (only meta-tools)
-    code.push_str(
-        "/// Return the compact tool list for `--compact` mode: only `search_tools` and\n",
-    );
-    code.push_str("/// `get_tool_schema` with their full schemas.\n");
-    code.push_str("pub fn compact_tool_definitions() -> Value {\n");
-    code.push_str("    let defs = tool_definitions();\n");
-    code.push_str("    let empty = vec![];\n");
-    code.push_str("    let all_tools = defs.as_array().unwrap_or(&empty);\n");
-    code.push_str("    let meta_tools: Vec<&Value> = all_tools\n");
-    code.push_str("        .iter()\n");
-    code.push_str("        .filter(|t| {\n");
-    code.push_str("            matches!(\n");
-    code.push_str("                t.get(\"name\").and_then(|v| v.as_str()),\n");
-    code.push_str("                Some(\"search_tools\" | \"get_tool_schema\")\n");
-    code.push_str("            )\n");
-    code.push_str("        })\n");
-    code.push_str("        .collect();\n");
-    code.push_str("    json!(meta_tools)\n");
-    code.push_str("}\n\n");
-
     // MEDIUM_TOOLS constant
     let medium_names: Vec<&str> = main_tools
         .iter()
@@ -483,10 +462,11 @@ fn main() {
     code.push_str("    )\n");
     code.push_str("}\n\n");
 
-    // is_meta_tool()
+    // is_meta_tool() — kept available for future dynamic-discovery use cases.
     code.push_str(
         "/// Returns true if the tool is a meta-tool (used for dynamic tool discovery).\n",
     );
+    code.push_str("#[allow(dead_code)]\n");
     code.push_str("pub fn is_meta_tool(name: &str) -> bool {\n");
     code.push_str("    matches!(name, ");
     let meta_names: Vec<String> = main_tools

@@ -240,7 +240,7 @@ When adding a new crate that depends on `codixing-core`, ALWAYS:
 
 The `.mcp.json` configures the Codixing MCP server for Claude Code. **Required flags:**
 
-- `--medium` — exposes 17 core tools directly (not `--compact` which requires 3 round-trips per use)
+- `--medium` — exposes 17 core tools directly. Useful for MCP clients that cannot do dynamic tool discovery (e.g. Codex CLI).
 - `--no-daemon-fork` — prevents stale daemon socket issues that silently kill the MCP connection
 
 Example `.mcp.json`:
