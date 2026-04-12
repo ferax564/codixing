@@ -143,6 +143,78 @@ jobs:
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
 
+  release-build:
+    name: Build release (${{ matrix.artifact_suffix }})
+    needs: test
+    # Only build release binaries on main pushes and tag pushes — PRs stay
+    # fast. release.yml downloads these artifacts by commit SHA on tag push.
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_suffix: linux-x86_64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact_suffix: macos-aarch64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact_suffix: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Separate key from the test cache so builds don't thrash each other.
+          key: release-${{ matrix.target }}
+
+      - name: Install system deps (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+
+      - name: Build release binaries (Unix)
+        if: runner.os != 'Windows'
+        run: cargo build --release --workspace --target ${{ matrix.target }}
+        env:
+          RUSTFLAGS: "--remap-path-prefix=$HOME/=/build/"
+
+      - name: Build release binaries (Windows, no-default-features)
+        if: runner.os == 'Windows'
+        run: cargo build --release --workspace --no-default-features --target ${{ matrix.target }}
+        env:
+          RUSTFLAGS: "--remap-path-prefix=$HOME/=/build/"
+
+      - name: Stage binaries
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          SUFFIX: ${{ matrix.artifact_suffix }}
+          RUNNER_OS: ${{ runner.os }}
+        run: |
+          mkdir -p staging
+          ext=""
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            ext=".exe"
+          fi
+          for bin in codixing codixing-mcp codixing-lsp; do
+            cp "target/${TARGET}/release/${bin}${ext}" \
+               "staging/${bin}-${SUFFIX}${ext}"
+          done
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.artifact_suffix }}
+          path: staging/*
+          retention-days: 14
+
   benchmarks:
     name: Benchmarks
     runs-on: ubuntu-latest

@@ -13,6 +13,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 - **Bash dogfooding hook shrink** — `claude-plugin/hooks/pretool-bash-codixing.sh` drops the single-file, `| wc -l`, and version-string passthroughs (127 → 112 lines). All three cases are now native `codixing grep` features, so the compliance leaks close. Deny message now suggests `codixing grep "<pattern>"` first.
+- **CI now builds release binaries on main + tag pushes** — `ci.yml` gains a `release-build` matrix job (Linux x86_64, macOS aarch64, Windows x86_64 with `--no-default-features`) that stages binaries as `binaries-<suffix>` artifacts with 14-day retention. PRs remain fast (the job is gated on `github.event_name == 'push'`). Separate rust-cache key (`release-<target>`) so release builds and test builds don't thrash each other.
+- **`release.yml` simplified to download + publish** — the old build matrix is gone. On `v*` tag push, `release.yml` fetches binaries from the CI run on the same commit via `dawidd6/action-download-artifact@v6` (`workflow: ci.yml`, `commit: github.sha`), then uploads to a GitHub Release and publishes the npm wrapper. Saves ~25 min per release by reusing the CI build cache. Release-mode build breaks on `main` now surface in CI instead of post-tag.
 
 ## [0.34.0] — 2026-04-12
 

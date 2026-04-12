@@ -5,92 +5,40 @@ on:
       - 'v*'
 
 jobs:
-  build:
-    name: Build (${{ matrix.target }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            artifact_suffix: linux-x86_64
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            artifact_suffix: macos-aarch64
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            artifact_suffix: windows-x86_64
-          # x86_64-apple-darwin excluded: ort-sys has no prebuilt ONNX Runtime for Intel Mac
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-
-      - name: Install system deps (Ubuntu)
-        if: matrix.os == 'ubuntu-latest'
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
-
-      - name: Build release binaries (Unix)
-        if: runner.os != 'Windows'
-        run: cargo build --release --workspace --target ${{ matrix.target }}
-        env:
-          RUSTFLAGS: "--remap-path-prefix=$HOME/=/build/"
-
-      - name: Build release binaries (Windows, no-default-features)
-        if: runner.os == 'Windows'
-        run: cargo build --release --workspace --no-default-features --target ${{ matrix.target }}
-        env:
-          RUSTFLAGS: "--remap-path-prefix=$HOME/=/build/"
-
-      - name: Stage binaries (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          mkdir -p staging
-          cp target/${{ matrix.target }}/release/codixing staging/codixing-${{ matrix.artifact_suffix }}
-          cp target/${{ matrix.target }}/release/codixing-mcp staging/codixing-mcp-${{ matrix.artifact_suffix }}
-          cp target/${{ matrix.target }}/release/codixing-lsp staging/codixing-lsp-${{ matrix.artifact_suffix }}
-
-      - name: Stage binaries (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path staging
-          Copy-Item "target/${{ matrix.target }}/release/codixing.exe" "staging/codixing-${{ matrix.artifact_suffix }}.exe"
-          Copy-Item "target/${{ matrix.target }}/release/codixing-mcp.exe" "staging/codixing-mcp-${{ matrix.artifact_suffix }}.exe"
-          Copy-Item "target/${{ matrix.target }}/release/codixing-lsp.exe" "staging/codixing-lsp-${{ matrix.artifact_suffix }}.exe"
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: binaries-${{ matrix.artifact_suffix }}
-          path: staging/
-
   release:
     name: Create GitHub Release
-    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      # Download binaries built by ci.yml's release-build job on the same SHA.
+      # Cross-workflow artifact fetch requires a third-party action — the
+      # built-in actions/download-artifact only works inside a single run.
+      # TODO(v0.37): pin to a SHA instead of the v6 tag for supply-chain hygiene.
+      - name: Download release binaries from CI run on this SHA
+        uses: dawidd6/action-download-artifact@v6
         with:
+          workflow: ci.yml
+          commit: ${{ github.sha }}
+          name: binaries-
+          name_is_regexp: true
           path: artifacts/
-          merge-multiple: true
+          if_no_artifact_found: fail
+          check_artifacts: true
+
+      - name: Flatten artifact directories
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f -exec cp {} release-assets/ \;
+          ls -la release-assets/
 
       - name: Create release and upload assets
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*
+          files: release-assets/*
           generate_release_notes: true
 
   npm-publish:

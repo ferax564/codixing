@@ -189,9 +189,13 @@ When launching multiple feature branches in parallel (e.g. via worktree agents):
 The CI workflow (`.github/workflows/ci.yml`) has the following jobs:
 
 - **test** — builds and tests on Ubuntu, macOS, and Windows (matrix); runs clippy and fmt check
+- **vscode** — compiles the VS Code extension on Ubuntu
+- **release-build** — builds optimized release binaries for `x86_64-linux`, `aarch64-darwin`, and `x86_64-windows-msvc` (no-default-features). Runs only on `main` pushes and `v*` tag pushes — never on PRs. Uploads artifacts named `binaries-<suffix>` with 14-day retention. `needs: test` so broken code never produces binaries. Artifacts are downloaded by `release.yml` on tag push instead of rebuilding from scratch (saves ~25 min per release).
 - **audit** — runs `cargo-audit` on Ubuntu only; `continue-on-error: true` (non-blocking while advisories are triaged)
 - **coverage** — runs `cargo-llvm-cov` on Ubuntu only; uploads `lcov.info` as the `coverage-report` artifact
 - **benchmarks** — runs `cargo bench` on Ubuntu only; uploads `bench-results.txt` as the `benchmark-results` artifact; depends on `test` (only runs after tests pass)
+
+**CI → release coupling invariant:** `release.yml` references `workflow: ci.yml` when downloading artifacts via `dawidd6/action-download-artifact`. If you rename `ci.yml`, update `release.yml` at the same time or release.yml will fail to find binaries. Same rule applies to the `release-build` job name and the `binaries-<suffix>` artifact naming convention — both are contractual with the downloader.
 
 ### CI checklist before merging
 
@@ -215,6 +219,7 @@ Before tagging a release:
 - [ ] docs/docs.html has no stale references
 - [ ] Plugin version matches in both `claude-plugin/` and `.claude-plugin/marketplace.json`
 - [ ] GitHub Pages build succeeds (check the deploy workflow)
+- [ ] **CI run on the merge commit produced `binaries-linux-x86_64`, `binaries-macos-aarch64`, and `binaries-windows-x86_64` artifacts** — `release.yml` downloads these by commit SHA instead of rebuilding. Check the Actions tab for the CI run on the target commit. If the release-build job failed or never ran, re-trigger CI (push an empty commit) before tagging, or `release.yml` will fail to find artifacts. Artifact retention is 14 days.
 
 ### Git history hygiene
 
