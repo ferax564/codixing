@@ -1415,36 +1415,6 @@ fn get_tool_schema_unknown_tool() {
 }
 
 // -------------------------------------------------------------------------
-// compact_tool_definitions
-// -------------------------------------------------------------------------
-
-#[test]
-fn compact_tool_definitions_returns_only_meta_tools() {
-    let defs = compact_tool_definitions();
-    let arr = defs
-        .as_array()
-        .expect("compact_tool_definitions returns array");
-    assert_eq!(
-        arr.len(),
-        2,
-        "compact mode should return exactly 2 meta-tools, got {}",
-        arr.len()
-    );
-    let names: Vec<&str> = arr
-        .iter()
-        .filter_map(|t| t.get("name").and_then(|v| v.as_str()))
-        .collect();
-    assert!(
-        names.contains(&"search_tools"),
-        "should contain search_tools: {names:?}"
-    );
-    assert!(
-        names.contains(&"get_tool_schema"),
-        "should contain get_tool_schema: {names:?}"
-    );
-}
-
-// -------------------------------------------------------------------------
 // is_read_only_tool — meta-tools
 // -------------------------------------------------------------------------
 

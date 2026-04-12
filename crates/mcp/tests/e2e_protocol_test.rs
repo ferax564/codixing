@@ -193,7 +193,11 @@ fn e2e_tools_call_code_search() {
 }
 
 #[test]
-fn e2e_compact_mode_lists_two_tools() {
+fn e2e_compact_flag_is_accepted_and_ignored() {
+    // --compact was removed in v0.33 (issue #67). For one release it is accepted
+    // as a hidden flag and ignored with a deprecation warning, so existing
+    // `.mcp.json` configs don't error out. It must behave exactly like Full
+    // mode — all tools listed, all tools callable.
     let project = setup_indexed_project();
     let root = project.path().to_str().unwrap();
 
@@ -202,7 +206,6 @@ fn e2e_compact_mode_lists_two_tools() {
         &[
             initialize_request(1),
             tools_list_request(2),
-            // Even in compact mode, all tools remain callable via tools/call.
             json!({
                 "jsonrpc": "2.0",
                 "id": 3,
@@ -215,7 +218,7 @@ fn e2e_compact_mode_lists_two_tools() {
         ],
     );
 
-    // tools/list in compact mode: exactly 2 meta-tools.
+    // tools/list should return the full list, not 2 meta-tools.
     let list_resp = responses
         .iter()
         .find(|r| r["id"] == 2)
@@ -223,38 +226,20 @@ fn e2e_compact_mode_lists_two_tools() {
     let tools = list_resp["result"]["tools"]
         .as_array()
         .expect("tools should be an array");
-    assert_eq!(
-        tools.len(),
-        2,
-        "compact mode should list exactly 2 tools, got {}",
+    assert!(
+        tools.len() > 10,
+        "--compact should be ignored and return the full tool list, got {} tools",
         tools.len()
     );
 
-    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-    assert!(
-        names.contains(&"search_tools"),
-        "compact mode should include search_tools"
-    );
-    assert!(
-        names.contains(&"get_tool_schema"),
-        "compact mode should include get_tool_schema"
-    );
-
-    // tools/call should still work for code_search in compact mode.
+    // tools/call should work as usual.
     let call_resp = responses
         .iter()
         .find(|r| r["id"] == 3)
-        .expect("missing tools/call response in compact mode");
+        .expect("missing tools/call response");
     assert_eq!(
         call_resp["result"]["isError"], false,
-        "code_search should work in compact mode"
-    );
-    let text = call_resp["result"]["content"][0]["text"]
-        .as_str()
-        .expect("content text should be a string");
-    assert!(
-        text.contains("greet"),
-        "compact mode search should find 'greet', got: {text}"
+        "code_search should work even with deprecated --compact"
     );
 }
 

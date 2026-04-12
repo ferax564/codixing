@@ -51,13 +51,12 @@ The plugin bundles the Codixing MCP server via `npx`. On first use, it downloads
 
 | Mode | Flag | Tools in `tools/list` | Tokens | Best for |
 |------|------|-----------------------|--------|----------|
-| **Medium** | `--medium` | 17 core tools | ~2,600 | **Claude Code (recommended)** |
-| Compact | `--compact` | 2 meta-tools only | ~200 | Token-constrained clients |
-| Full | *(none)* | All 57 tools | ~6,600 | Clients that handle large tool lists |
+| **Medium** | `--medium` | 17 core tools | ~2,600 | **Clients without dynamic tool discovery (e.g. Codex CLI)** |
+| Full | *(none)* | All 56 tools | ~6,600 | Claude Code and clients that handle large tool lists |
 
-All 57 tools remain callable regardless of mode.
+All 56 tools remain callable regardless of mode via `tools/call`. The previous `--compact` mode was removed in v0.33 — see issue #67 for the background on why a daemon-proxy race condition made it silently sticky.
 
-### CLI commands (25)
+### CLI commands (26)
 
 ```bash
 codixing search "query"          # Semantic code search
