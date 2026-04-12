@@ -502,3 +502,143 @@ pub fn unused_func() -> bool {
     )
     .expect("failed to write lib.rs");
 }
+
+// ---------------------------------------------------------------------------
+// rebuild_graph_from_disk_reflects_changed_imports
+// ---------------------------------------------------------------------------
+
+#[test]
+fn rebuild_graph_from_disk_reflects_changed_imports() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    // File A imports file B initially.
+    let src = root.join("src");
+    fs::create_dir_all(&src).unwrap();
+
+    fs::write(
+        src.join("a.rs"),
+        r#"use crate::b::B;
+
+pub struct A;
+"#,
+    )
+    .unwrap();
+    fs::write(
+        src.join("b.rs"),
+        r#"pub struct B;
+"#,
+    )
+    .unwrap();
+    fs::write(
+        src.join("c.rs"),
+        r#"pub struct C;
+"#,
+    )
+    .unwrap();
+
+    let mut engine = Engine::init(root, no_embed_config(root)).unwrap();
+
+    // Verify initial graph: a.rs → b.rs
+    let initial_callees = engine.callees("src/a.rs");
+    assert!(
+        initial_callees.contains(&"src/b.rs".to_string()),
+        "expected src/a.rs to import src/b.rs initially, got: {initial_callees:?}"
+    );
+    assert!(
+        !initial_callees.contains(&"src/c.rs".to_string()),
+        "expected src/a.rs NOT to import src/c.rs initially, got: {initial_callees:?}"
+    );
+
+    // Rewrite a.rs to import c.rs instead of b.rs (without calling sync or reindex).
+    fs::write(
+        src.join("a.rs"),
+        r#"use crate::c::C;
+
+pub struct A;
+"#,
+    )
+    .unwrap();
+
+    // Call rebuild_graph_from_disk — this should pick up the new import.
+    engine.rebuild_graph_from_disk().unwrap();
+
+    let new_callees = engine.callees("src/a.rs");
+    assert!(
+        new_callees.contains(&"src/c.rs".to_string()),
+        "expected src/a.rs to import src/c.rs after rebuild, got: {new_callees:?}"
+    );
+    assert!(
+        !new_callees.contains(&"src/b.rs".to_string()),
+        "expected src/a.rs NOT to import src/b.rs after rebuild, got: {new_callees:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// sync_with_options_rebuild_graph_flag
+// ---------------------------------------------------------------------------
+
+#[test]
+fn sync_with_options_rebuild_graph_flag() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    let src = root.join("src");
+    fs::create_dir_all(&src).unwrap();
+
+    fs::write(
+        src.join("a.rs"),
+        r#"use crate::b::B;
+
+pub struct A;
+"#,
+    )
+    .unwrap();
+    fs::write(
+        src.join("b.rs"),
+        r#"pub struct B;
+"#,
+    )
+    .unwrap();
+    fs::write(
+        src.join("c.rs"),
+        r#"pub struct C;
+"#,
+    )
+    .unwrap();
+
+    let mut engine = Engine::init(root, no_embed_config(root)).unwrap();
+
+    // Verify initial graph: a.rs → b.rs
+    let initial_callees = engine.callees("src/a.rs");
+    assert!(
+        initial_callees.contains(&"src/b.rs".to_string()),
+        "expected src/a.rs to import src/b.rs initially, got: {initial_callees:?}"
+    );
+
+    // Rewrite a.rs to import c.rs instead. Use sync --rebuild-graph to pick it up.
+    fs::write(
+        src.join("a.rs"),
+        r#"use crate::c::C;
+
+pub struct A;
+"#,
+    )
+    .unwrap();
+
+    let options = codixing_core::SyncOptions {
+        skip_embed: false,
+        rebuild_graph: true,
+    };
+    engine.sync_with_options(options, |_| {}).unwrap();
+
+    let new_callees = engine.callees("src/a.rs");
+    assert!(
+        new_callees.contains(&"src/c.rs".to_string()),
+        "expected src/a.rs to import src/c.rs after sync --rebuild-graph, got: {new_callees:?}"
+    );
+    assert!(
+        !new_callees.contains(&"src/b.rs".to_string()),
+        "expected src/a.rs NOT to import src/b.rs after sync --rebuild-graph, got: {new_callees:?}"
+    );
+}

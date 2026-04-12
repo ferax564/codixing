@@ -37,6 +37,19 @@ pub struct SyncOptions {
     /// scenario: existing 2GB embedded index + large change set + no
     /// escape hatch.
     pub skip_embed: bool,
+
+    /// Force a full graph rebuild after the incremental sync completes.
+    ///
+    /// When true, [`Engine::rebuild_graph_from_disk`] is called after the normal
+    /// incremental sync. This re-parses all indexed files to re-extract import
+    /// and call edges, clears the existing graph edges, recomputes PageRank, and
+    /// persists the updated graph.
+    ///
+    /// This is faster than a full `codixing init` because it reuses the existing
+    /// BM25 / symbol / vector indexes — only the graph is rebuilt. Use this when
+    /// the call graph is stale (e.g. after a large refactor) without wanting to
+    /// pay the cost of re-chunking and re-embedding.
+    pub rebuild_graph: bool,
 }
 
 impl Engine {
@@ -794,11 +807,15 @@ impl Engine {
     /// the Linux kernel benchmark finding that hit 68 minutes before
     /// being killed.
     ///
+    /// When `options.rebuild_graph` is true, a full graph rebuild is
+    /// performed after the normal incremental sync completes (see
+    /// [`Engine::rebuild_graph_from_disk`]).
+    ///
     /// After sync completes, if the graph is missing (older indexes
     /// that predate graph support, or a corrupted graph file), a warning
     /// is emitted via `on_progress` directing the user to run `init`
-    /// to rebuild. Sync does NOT rebuild the graph itself — that
-    /// requires reprocessing every file and is effectively a full init.
+    /// to rebuild. Sync does NOT rebuild the graph itself unless
+    /// `options.rebuild_graph` is set.
     pub fn sync_with_options<F>(
         &mut self,
         options: SyncOptions,
@@ -819,8 +836,11 @@ impl Engine {
         let graph_was_missing = self.graph.is_none();
         let result = self.sync_with_progress(on_progress);
 
-        if options.skip_embed && stashed_embedder.is_some() {
-            self.embedder = stashed_embedder;
+        // Restore the stashed embedder (if any) before any further work.
+        if options.skip_embed {
+            if let Some(emb) = stashed_embedder {
+                self.embedder = Some(emb);
+            }
         }
 
         // Emit a helpful warning if the index has no graph. We don't fail
@@ -828,7 +848,7 @@ impl Engine {
         // user that graph-dependent features (impact, caller/callee,
         // graph --map, community detection) will return empty until they
         // run `codixing init` to rebuild.
-        if graph_was_missing {
+        if graph_was_missing && !options.rebuild_graph {
             warn!(
                 "index has no dependency graph — graph-dependent features \
                  (impact, callers, callees, graph --map, communities) will \
@@ -837,7 +857,134 @@ impl Engine {
             );
         }
 
+        // If the caller requested a full graph rebuild, do it now (after
+        // the incremental sync, so the file list is current).
+        if options.rebuild_graph {
+            if let Err(e) = self.rebuild_graph_from_disk() {
+                warn!(error = %e, "rebuild_graph_from_disk failed");
+            }
+        }
+
         result
+    }
+
+    /// Rebuild the dependency graph from scratch by re-parsing all indexed files.
+    ///
+    /// This re-extracts import and call edges for every file currently in the
+    /// index, replaces the in-memory graph with the fresh result, recomputes
+    /// PageRank, and persists the updated graph to disk.
+    ///
+    /// Unlike a full `codixing init`, this method does **not** re-chunk,
+    /// re-embed, or update BM25 — only the graph is rebuilt. This makes it
+    /// significantly faster when the BM25 / vector indexes are already fresh
+    /// but the call graph has drifted (e.g. after a large refactor).
+    ///
+    /// If the engine has no graph (older index that predates graph support),
+    /// a new graph is created and populated.
+    pub fn rebuild_graph_from_disk(&mut self) -> Result<()> {
+        if self.read_only {
+            return Err(CodixingError::ReadOnly);
+        }
+
+        info!(
+            files = self.file_chunk_counts.len(),
+            "rebuilding dependency graph from disk"
+        );
+
+        // Collect the set of currently-indexed files (relative paths).
+        let indexed_files: Vec<std::path::PathBuf> = self
+            .file_chunk_counts
+            .keys()
+            .map(|rel| self.config.root.join(rel))
+            .filter(|p| p.exists())
+            .collect();
+
+        // Build a fresh graph using the same code path as init, but
+        // passing an empty import cache so build_graph falls back to
+        // re-reading + re-parsing each file.
+        let empty_imports: dashmap::DashMap<
+            String,
+            (
+                Vec<crate::graph::extractor::RawImport>,
+                crate::language::Language,
+            ),
+        > = dashmap::DashMap::new();
+
+        let mut new_graph = super::indexing::build_graph(
+            &indexed_files,
+            &self.config.root,
+            &self.config,
+            &self.parser,
+            &empty_imports,
+        );
+
+        // Resolve call edges using the current symbol table.
+        let pending_calls: dashmap::DashMap<String, Vec<String>> = dashmap::DashMap::new();
+        for file in &indexed_files {
+            let rel_str = self.config.normalize_path(file).unwrap_or_else(|| {
+                normalize_path(file.strip_prefix(&self.config.root).unwrap_or(file))
+            });
+            let source = match fs::read(file) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(path = %file.display(), error = %e, "skipping file in rebuild_graph");
+                    continue;
+                }
+            };
+            let result = match self.parser.parse_file(file, &source) {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(path = %file.display(), error = %e, "parse failed in rebuild_graph");
+                    continue;
+                }
+            };
+            let call_names = match result.tree.as_ref() {
+                Some(tree) => {
+                    crate::graph::CallExtractor::extract_calls(tree, &source, result.language)
+                }
+                None => Vec::new(),
+            };
+            if !call_names.is_empty() {
+                pending_calls.insert(rel_str, call_names);
+            }
+        }
+        super::indexing::add_call_edges(&mut new_graph, &self.symbols, &pending_calls);
+
+        // Populate symbol-level call graph.
+        // We pass an empty file_contents DashMap so populate_symbol_graph reads from disk.
+        let empty_contents: dashmap::DashMap<String, Vec<u8>> = dashmap::DashMap::new();
+        super::indexing::populate_symbol_graph(
+            &mut new_graph,
+            &indexed_files,
+            &self.config.root,
+            &self.config,
+            &empty_contents,
+        );
+
+        // Compute PageRank and apply scores.
+        let scores = crate::graph::compute_pagerank(
+            &new_graph,
+            self.config.graph.damping,
+            self.config.graph.iterations,
+        );
+        new_graph.apply_pagerank(&scores);
+
+        // Replace the in-memory graph.
+        self.graph = Some(new_graph);
+
+        // Persist the updated graph.
+        if let Some(ref g) = self.graph {
+            let flat = g.to_flat();
+            if let Err(e) = self.store.save_graph(&flat) {
+                warn!(error = %e, "failed to persist graph after rebuild");
+            }
+            if let Err(e) = self.store.save_symbol_graph(g) {
+                warn!(error = %e, "failed to persist symbol graph after rebuild");
+            }
+        }
+
+        info!("graph rebuild complete");
+        Ok(())
     }
 
     /// Sync the index with progress callbacks for streaming updates.

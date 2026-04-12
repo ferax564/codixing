@@ -272,6 +272,17 @@ enum Command {
         /// and will embed later via `codixing embed`.
         #[arg(long)]
         no_embed: bool,
+
+        /// Force a full graph rebuild after the incremental sync.
+        ///
+        /// Re-parses all indexed files to re-extract import and call edges,
+        /// clears the existing graph, recomputes PageRank, and persists the
+        /// result. BM25, symbols, trigrams, and vectors are left untouched.
+        ///
+        /// Faster than `codixing init` when only the call graph is stale
+        /// (e.g. after a large refactor that moved many imports around).
+        #[arg(long)]
+        rebuild_graph: bool,
     },
 
     /// Fast git-aware sync: re-indexes only files changed since the last indexed git commit.
@@ -685,7 +696,11 @@ async fn main() -> Result<()> {
             dry_run,
             file,
         } => cmd_update(path, dry_run, file),
-        Command::Sync { path, no_embed } => cmd_sync(path, no_embed),
+        Command::Sync {
+            path,
+            no_embed,
+            rebuild_graph,
+        } => cmd_sync(path, no_embed, rebuild_graph),
         Command::GitSync { path } => cmd_git_sync(path),
         Command::Embed { path } => cmd_embed(path),
         Command::BenchEmbed { path, force, json } => cmd_bench_embed(path, force, json),
@@ -1698,7 +1713,7 @@ fn cmd_update(path: PathBuf, dry_run: bool, file: Option<String>) -> Result<()> 
     Ok(())
 }
 
-fn cmd_sync(path: PathBuf, no_embed: bool) -> Result<()> {
+fn cmd_sync(path: PathBuf, no_embed: bool, rebuild_graph: bool) -> Result<()> {
     let root = path
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
@@ -1709,12 +1724,16 @@ fn cmd_sync(path: PathBuf, no_embed: bool) -> Result<()> {
     if no_embed {
         eprintln!("[sync] --no-embed active — vector index will be left stale");
     }
+    if rebuild_graph {
+        eprintln!("[sync] --rebuild-graph active — full graph rebuild after sync");
+    }
 
     let start = Instant::now();
     let stage_start = std::sync::Arc::new(std::sync::Mutex::new(Instant::now()));
     let stage_start_cb = stage_start.clone();
     let options = codixing_core::SyncOptions {
         skip_embed: no_embed,
+        rebuild_graph,
     };
     let stats = match engine.sync_with_options(options, move |msg| {
         let mut t = stage_start_cb.lock().unwrap_or_else(|e| e.into_inner());
