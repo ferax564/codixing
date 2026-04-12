@@ -357,25 +357,34 @@ impl TantivyIndex {
     }
 
     /// Create or open a persistent index with custom BM25 field boost weights.
+    ///
+    /// On Windows, the create + writer-lock sequence is wrapped in
+    /// [`crate::index::windows_retry::retry_transient_io`] to ride out
+    /// Windows Defender real-time scans that intermittently hold a handle
+    /// to freshly-created Tantivy metadata files, causing ERROR_ACCESS_DENIED
+    /// (os error 5) and ERROR_SHARING_VIOLATION (os error 32) flakes. On
+    /// Unix this compiles to a direct call with zero retry overhead.
     pub fn create_in_dir_with_config(path: &Path, bm25_config: Bm25Config) -> Result<Self> {
         std::fs::create_dir_all(path)?;
-        let (schema, fields) = build_schema();
-        let dir = tantivy::directory::MmapDirectory::open(path)
-            .map_err(|e| CodixingError::Index(e.to_string()))?;
-        let index = Index::open_or_create(dir, schema)?;
-        register_code_tokenizer(&index);
-        register_code_stemmed_tokenizer(&index);
-        let writer = index.writer(50_000_000)?;
-        let reader = index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::OnCommitWithDelay)
-            .try_into()?;
-        Ok(Self {
-            index,
-            reader,
-            writer: Some(Mutex::new(writer)),
-            fields,
-            bm25_config,
+        crate::index::windows_retry::retry_transient_io(|| {
+            let (schema, fields) = build_schema();
+            let dir = tantivy::directory::MmapDirectory::open(path)
+                .map_err(|e| CodixingError::Index(e.to_string()))?;
+            let index = Index::open_or_create(dir, schema)?;
+            register_code_tokenizer(&index);
+            register_code_stemmed_tokenizer(&index);
+            let writer = index.writer(50_000_000)?;
+            let reader = index
+                .reader_builder()
+                .reload_policy(ReloadPolicy::OnCommitWithDelay)
+                .try_into()?;
+            Ok(Self {
+                index,
+                reader,
+                writer: Some(Mutex::new(writer)),
+                fields,
+                bm25_config: bm25_config.clone(),
+            })
         })
     }
 
@@ -385,54 +394,59 @@ impl TantivyIndex {
     }
 
     /// Open an existing persistent index with custom BM25 field boost weights.
+    ///
+    /// On Windows, the writer-acquire step is wrapped in the transient-IO
+    /// retry helper (see [`create_in_dir_with_config`] for rationale).
     pub fn open_in_dir_with_config(path: &Path, bm25_config: Bm25Config) -> Result<Self> {
         if !path.exists() {
             return Err(CodixingError::IndexNotFound {
                 path: path.to_path_buf(),
             });
         }
-        let index = Index::open_in_dir(path)?;
-        register_code_tokenizer(&index);
-        register_code_stemmed_tokenizer(&index);
+        crate::index::windows_retry::retry_transient_io(|| {
+            let index = Index::open_in_dir(path)?;
+            register_code_tokenizer(&index);
+            register_code_stemmed_tokenizer(&index);
 
-        // Reconstruct field handles from the existing schema.
-        let schema = index.schema();
-        let field = |name: &str| -> Result<Field> {
-            schema
-                .get_field(name)
-                .map_err(|e| CodixingError::Index(e.to_string()))
-        };
-        let fields = SchemaFields {
-            chunk_id: field("chunk_id")?,
-            file_path: field("file_path")?,
-            file_path_exact: field("file_path_exact")?,
-            language: field("language")?,
-            content: field("content")?,
-            scope_chain: field("scope_chain")?,
-            signature: field("signature")?,
-            entity_names: field("entity_names")?,
-            line_start: field("line_start")?,
-            line_end: field("line_end")?,
-            byte_start: field("byte_start")?,
-            byte_end: field("byte_end")?,
-            doc_comment: field("doc_comment")?,
-            identifier_words: field("identifier_words")?,
-            path_segments: field("path_segments")?,
-            // Graceful fallback for indexes created before this field was added.
-            doc_type: schema.get_field("doc_type").ok(),
-        };
+            // Reconstruct field handles from the existing schema.
+            let schema = index.schema();
+            let field = |name: &str| -> Result<Field> {
+                schema
+                    .get_field(name)
+                    .map_err(|e| CodixingError::Index(e.to_string()))
+            };
+            let fields = SchemaFields {
+                chunk_id: field("chunk_id")?,
+                file_path: field("file_path")?,
+                file_path_exact: field("file_path_exact")?,
+                language: field("language")?,
+                content: field("content")?,
+                scope_chain: field("scope_chain")?,
+                signature: field("signature")?,
+                entity_names: field("entity_names")?,
+                line_start: field("line_start")?,
+                line_end: field("line_end")?,
+                byte_start: field("byte_start")?,
+                byte_end: field("byte_end")?,
+                doc_comment: field("doc_comment")?,
+                identifier_words: field("identifier_words")?,
+                path_segments: field("path_segments")?,
+                // Graceful fallback for indexes created before this field was added.
+                doc_type: schema.get_field("doc_type").ok(),
+            };
 
-        let writer = index.writer(50_000_000)?;
-        let reader = index
-            .reader_builder()
-            .reload_policy(ReloadPolicy::OnCommitWithDelay)
-            .try_into()?;
-        Ok(Self {
-            index,
-            reader,
-            writer: Some(Mutex::new(writer)),
-            fields,
-            bm25_config,
+            let writer = index.writer(50_000_000)?;
+            let reader = index
+                .reader_builder()
+                .reload_policy(ReloadPolicy::OnCommitWithDelay)
+                .try_into()?;
+            Ok(Self {
+                index,
+                reader,
+                writer: Some(Mutex::new(writer)),
+                fields,
+                bm25_config: bm25_config.clone(),
+            })
         })
     }
 
@@ -578,13 +592,26 @@ impl TantivyIndex {
     }
 
     /// Commit all staged additions and deletions, making them visible to readers.
+    ///
+    /// On Windows the commit path is wrapped in
+    /// [`crate::index::windows_retry::retry_transient_io`] because Tantivy's
+    /// segment rename/delete during commit races with Windows Defender on
+    /// freshly-written segment files, producing intermittent ERROR_ACCESS_DENIED
+    /// (os error 5). The retry backoff rides out the ~microsecond AV scan
+    /// window. On Unix this compiles to a direct call.
     pub fn commit(&self) -> Result<()> {
         let writer_mutex = self.writer.as_ref().ok_or(CodixingError::ReadOnly)?;
         let mut writer = writer_mutex
             .lock()
             .map_err(|e| CodixingError::Index(format!("writer lock poisoned: {e}")))?;
-        writer.commit()?;
-        self.reader.reload()?;
+        crate::index::windows_retry::retry_transient_io(|| -> Result<()> {
+            writer.commit()?;
+            Ok(())
+        })?;
+        crate::index::windows_retry::retry_transient_io(|| -> Result<()> {
+            self.reader.reload()?;
+            Ok(())
+        })?;
         Ok(())
     }
 
