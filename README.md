@@ -268,7 +268,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Cross-file context assembly** — `codixing context` follows import chains and callees to assemble understanding context
 - **Query-personalized PageRank** — Query-time graph boost seeds PageRank from query-relevant nodes for context-aware ranking
 - **Learned query reformulation** — Project-specific vocabulary expansion learns from codebase patterns
-- **CLI + MCP** — 25 CLI commands for direct use; 67 MCP tools for editor integration (search, graph traversal, file operations, code review, git analysis, session memory, federation discovery)
+- **CLI + MCP** — 26 CLI commands for direct use (including the new `codixing grep` literal/regex scanner); 67 MCP tools for editor integration (search, graph traversal, file operations, code review, git analysis, session memory, federation discovery)
 - **File freshness audit** — `audit_freshness` tool identifies stale and orphaned files across releases
 - **Preflight gates** — Plugin enforces existence scanning before proposing new features
 - **TypeScript import resolution** — Resolve `.js` → `.ts` imports with node16/bundler moduleResolution support, enabling 0.8+ R@10 on cross-package code discovery
@@ -342,7 +342,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 1087 tests
+cargo test --workspace        # 1098 tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```
