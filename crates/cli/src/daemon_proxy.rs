@@ -296,3 +296,53 @@ pub fn try_callers(root: &Path, file: &str) -> Option<String> {
 pub fn try_callees(root: &Path, file: &str) -> Option<String> {
     try_tools_call(root, "file_callees", json!({ "path": file }))
 }
+
+/// Proxy `codixing grep <pattern>` through the daemon's `grep_code` tool.
+///
+/// The daemon handler formats matches itself; on success we hand back the
+/// pre-rendered text body. Returns `None` if no daemon is running or the
+/// tool call failed — caller should fall back to in-process.
+#[allow(clippy::too_many_arguments)]
+pub fn try_grep(
+    root: &Path,
+    pattern: &str,
+    literal: bool,
+    case_insensitive: bool,
+    invert: bool,
+    file_glob: Option<&str>,
+    before_context: usize,
+    after_context: usize,
+    count_only: bool,
+    files_with_matches: bool,
+    limit: usize,
+) -> Option<String> {
+    let mut args = serde_json::Map::new();
+    args.insert("pattern".into(), json!(pattern));
+    if literal {
+        args.insert("literal".into(), json!(true));
+    }
+    if case_insensitive {
+        args.insert("case_insensitive".into(), json!(true));
+    }
+    if invert {
+        args.insert("invert".into(), json!(true));
+    }
+    if let Some(g) = file_glob {
+        args.insert("file_glob".into(), json!(g));
+    }
+    if before_context > 0 {
+        args.insert("before_context".into(), json!(before_context));
+    }
+    if after_context > 0 {
+        args.insert("after_context".into(), json!(after_context));
+    }
+    if count_only {
+        args.insert("count_only".into(), json!(true));
+    }
+    if files_with_matches {
+        args.insert("files_with_matches".into(), json!(true));
+    }
+    args.insert("limit".into(), json!(limit));
+
+    try_tools_call(root, "grep_code", Value::Object(args))
+}

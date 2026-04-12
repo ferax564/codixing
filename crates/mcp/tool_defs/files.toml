@@ -46,7 +46,31 @@ description = "Glob pattern to restrict which files are searched (e.g. '*.rs', '
 
 [tools.params.context_lines]
 type = "integer"
-description = "Lines of surrounding context to include before and after each match (default: 0, max: 5)."
+description = "Lines of surrounding context to include before and after each match (default: 0, max: 5). Symmetric shorthand — use before_context / after_context for asymmetric context."
+
+[tools.params.before_context]
+type = "integer"
+description = "Lines of context to include before each match (default: 0, max: 5). Overrides context_lines for the before side."
+
+[tools.params.after_context]
+type = "integer"
+description = "Lines of context to include after each match (default: 0, max: 5). Overrides context_lines for the after side."
+
+[tools.params.case_insensitive]
+type = "boolean"
+description = "When true, match is case-insensitive (ASCII). Default: false."
+
+[tools.params.invert]
+type = "boolean"
+description = "When true, emit lines that do NOT match the pattern. Disables the trigram pre-filter — every indexed file is scanned. Default: false."
+
+[tools.params.count_only]
+type = "boolean"
+description = "When true, return only a count summary instead of per-match output. Default: false."
+
+[tools.params.files_with_matches]
+type = "boolean"
+description = "When true, return only the set of file paths containing at least one match, one per line. Default: false."
 
 [tools.params.limit]
 type = "integer"

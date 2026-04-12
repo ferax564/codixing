@@ -9,8 +9,8 @@ use tracing_subscriber::EnvFilter;
 
 use codixing_core::{
     EmbedTimingStats, EmbeddingModel, Engine, FederatedEngine, FederationConfig, FreshnessOptions,
-    FreshnessTier, HtmlExportOptions, IndexConfig, RepoMapOptions, SearchQuery, Strategy,
-    discover_projects, to_federation_config,
+    FreshnessTier, GrepOptions, HtmlExportOptions, IndexConfig, RepoMapOptions, SearchQuery,
+    Strategy, discover_projects, to_federation_config,
 };
 
 #[derive(Parser)]
@@ -227,6 +227,73 @@ enum Command {
         /// Target directory (module being imported from).
         #[arg(long)]
         to: String,
+    },
+
+    /// Literal or regex text scan across indexed files (trigram-accelerated).
+    ///
+    /// Unlike `search` (BM25/vector-ranked semantic retrieval), `grep` does a
+    /// direct file-content scan and emits every matching line. Use it for
+    /// exact identifiers, string literals, drift audits, version lookups, and
+    /// anything where "I want to see the line, not a ranked chunk" is the
+    /// right shape of answer. Respects the indexed file set (no `target/`,
+    /// `node_modules/`, `.git/` noise) and uses the trigram index to skip
+    /// files that can't possibly match.
+    Grep {
+        /// Pattern to search for. Interpreted as a regex (RE2 syntax) unless
+        /// `--literal` is passed.
+        pattern: String,
+
+        /// Restrict scanning to a single file (relative path). Bypasses the
+        /// trigram pre-filter but keeps ignore rules.
+        #[arg(long)]
+        file: Option<String>,
+
+        /// Glob pattern to restrict scanned files (e.g. `*.rs`, `src/**/*.py`).
+        #[arg(long)]
+        glob: Option<String>,
+
+        /// Treat pattern as a plain literal string; regex metacharacters are
+        /// escaped before compilation.
+        #[arg(long)]
+        literal: bool,
+
+        /// Case-insensitive matching (ASCII).
+        #[arg(short = 'i', long = "ignore-case")]
+        case_insensitive: bool,
+
+        /// Emit lines that do NOT match the pattern. Disables the trigram
+        /// pre-filter — every indexed file is scanned.
+        #[arg(long)]
+        invert: bool,
+
+        /// Symmetric surrounding context lines (max 5). Overridden by
+        /// `--before-context` / `--after-context` if those are set.
+        #[arg(short = 'C', long)]
+        context: Option<usize>,
+
+        /// Lines of context before each match (max 5).
+        #[arg(short = 'B', long = "before-context")]
+        before: Option<usize>,
+
+        /// Lines of context after each match (max 5).
+        #[arg(short = 'A', long = "after-context")]
+        after: Option<usize>,
+
+        /// Print only a count summary instead of per-line output.
+        #[arg(long)]
+        count: bool,
+
+        /// Print only the set of file paths that contain at least one match.
+        #[arg(long = "files-with-matches")]
+        files_with_matches: bool,
+
+        /// Emit one JSON object per match (deterministic field order).
+        #[arg(long)]
+        json: bool,
+
+        /// Maximum matches to return (default: 50).
+        #[arg(long, default_value = "50")]
+        limit: usize,
     },
 
     /// Find all code locations that reference a symbol (call sites, imports, usages).
@@ -704,6 +771,35 @@ async fn main() -> Result<()> {
         Command::Callees { file, depth } => cmd_callees(file, depth),
         Command::Dependencies { file, depth } => cmd_dependencies(file, depth),
         Command::CrossImports { from, to } => cmd_cross_imports(from, to),
+        Command::Grep {
+            pattern,
+            file,
+            glob,
+            literal,
+            case_insensitive,
+            invert,
+            context,
+            before,
+            after,
+            count,
+            files_with_matches,
+            json,
+            limit,
+        } => cmd_grep(GrepArgs {
+            pattern,
+            file,
+            glob,
+            literal,
+            case_insensitive,
+            invert,
+            context,
+            before,
+            after,
+            count,
+            files_with_matches,
+            json,
+            limit,
+        }),
         Command::Usages {
             symbol,
             limit,
@@ -1099,6 +1195,134 @@ fn cmd_search(
             println!("{snippet}");
         }
         println!();
+    }
+
+    Ok(())
+}
+
+struct GrepArgs {
+    pattern: String,
+    file: Option<String>,
+    glob: Option<String>,
+    literal: bool,
+    case_insensitive: bool,
+    invert: bool,
+    context: Option<usize>,
+    before: Option<usize>,
+    after: Option<usize>,
+    count: bool,
+    files_with_matches: bool,
+    json: bool,
+    limit: usize,
+}
+
+fn cmd_grep(args: GrepArgs) -> Result<()> {
+    let root = std::env::current_dir().context("cannot determine current directory")?;
+
+    let sym = args.context.unwrap_or(0);
+    let before_context = args.before.unwrap_or(sym).min(5);
+    let after_context = args.after.unwrap_or(sym).min(5);
+
+    // `--file` targets a single file — glob it directly and skip the trigram
+    // prefilter so we see every match even in files outside the indexed set.
+    let effective_glob = match (&args.file, &args.glob) {
+        (Some(f), _) => Some(f.clone()),
+        (None, Some(g)) => Some(g.clone()),
+        (None, None) => None,
+    };
+
+    // Fast path: daemon proxy. Only available when no --json / --file (the
+    // daemon handler ignores args it doesn't recognize, but we want the CLI's
+    // JSON rendering to match byte-for-byte whether warm or cold).
+    if !args.json && args.file.is_none() {
+        if let Some(text) = daemon_proxy::try_grep(
+            &root,
+            &args.pattern,
+            args.literal,
+            args.case_insensitive,
+            args.invert,
+            effective_glob.as_deref(),
+            before_context,
+            after_context,
+            args.count,
+            args.files_with_matches,
+            args.limit,
+        ) {
+            print!("{text}");
+            if !text.ends_with('\n') {
+                println!();
+            }
+            return Ok(());
+        }
+    }
+
+    let engine = Engine::open(&root).with_context(|| {
+        format!(
+            "no index found at {} — run `codixing init` first",
+            root.display()
+        )
+    })?;
+
+    let opts = GrepOptions {
+        pattern: args.pattern.clone(),
+        literal: args.literal,
+        case_insensitive: args.case_insensitive,
+        invert: args.invert,
+        file_glob: effective_glob,
+        before_context,
+        after_context,
+        limit: args.limit,
+    };
+
+    let matches = engine
+        .grep_code_opts(&opts)
+        .map_err(|e| handle_engine_err(e, || "grep failed".into()))?;
+
+    if args.count {
+        let files: std::collections::BTreeSet<&str> =
+            matches.iter().map(|m| m.file_path.as_str()).collect();
+        println!("{} matches across {} files", matches.len(), files.len());
+        return Ok(());
+    }
+
+    if args.files_with_matches {
+        let files: std::collections::BTreeSet<&str> =
+            matches.iter().map(|m| m.file_path.as_str()).collect();
+        for f in files {
+            println!("{f}");
+        }
+        return Ok(());
+    }
+
+    if args.json {
+        for m in &matches {
+            let obj = serde_json::json!({
+                "path": m.file_path,
+                "line": m.line_number + 1,
+                "col": m.match_start + 1,
+                "text": m.line,
+                "match_start": m.match_start,
+                "match_end": m.match_end,
+                "before": m.before,
+                "after": m.after,
+            });
+            println!("{obj}");
+        }
+        return Ok(());
+    }
+
+    // Default format: path:line:col:text (1-indexed line/col to match grep -n).
+    for m in &matches {
+        println!(
+            "{}:{}:{}:{}",
+            m.file_path,
+            m.line_number + 1,
+            m.match_start + 1,
+            m.line
+        );
+    }
+    if matches.is_empty() {
+        eprintln!("No matches for `{}`.", args.pattern);
     }
 
     Ok(())

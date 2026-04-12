@@ -6,6 +6,8 @@
 
 | Instead of... | Use (via Bash)... |
 |---|---|
+| `grep -rn "literal"` | `codixing grep "literal"` |
+| `grep -c "pattern" file` | `codixing grep "pattern" --file file --count` |
 | `Grep "symbol" **/*.rs` | `codixing search "symbol"` |
 | `Grep "fn foo"` to find a definition | `codixing symbols foo` |
 | Manual call-site hunting | `codixing usages foo` |
@@ -16,6 +18,7 @@
 **CLI commands** (run from repo root via Bash):
 ```bash
 codixing search "rate limiting"     # semantic code search
+codixing grep "TODO" --literal      # literal/regex text scan with line numbers
 codixing symbols Widget             # find symbol definitions
 codixing usages add_chunk           # find call sites and imports
 codixing callers src/engine/mod.rs  # who imports this file
@@ -38,6 +41,7 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 
 - **Understanding a symbol** → `codixing usages <name>` (call sites and imports)
 - **Finding where something is defined** → `codixing symbols <name>`
+- **Literal or regex text scan** → `codixing grep "<pattern>"` (emits `path:line:col:text`; supports `--count`, `--files-with-matches`, `-i`, `--invert`, `--glob`, `--file`, `--json`)
 - **Searching by concept / natural language** → `codixing search "<query>"`
 - **Searching by symbol type** → `codixing search "<query>" --kind function` (function, struct, enum, trait, impl, const)
 - **Listing files by glob** → `Glob` tool (Codixing doesn't replace file finding)
