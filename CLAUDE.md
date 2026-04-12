@@ -73,7 +73,7 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 
 ```bash
 cargo build --release --workspace          # build all binaries
-cargo test --workspace                      # run all tests (1087)
+cargo test --workspace                      # run all tests (1098)
 cargo clippy --workspace -- -D warnings     # lint (must pass)
 cargo fmt --check                           # format check (must pass)
 
@@ -130,7 +130,7 @@ When bumping the version, update ALL of these files:
 Every commit MUST pass all 3 checks. No exceptions:
 
 ```bash
-cargo test --workspace                      # ALL tests must pass
+cargo test --workspace                      # ALL tests must pass (1098)
 cargo clippy --workspace -- -D warnings     # zero warnings
 cargo fmt --check                           # zero diffs
 ```

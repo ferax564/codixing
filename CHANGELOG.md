@@ -6,15 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.36.0] — 2026-04-12
+
+v0.36 closes the last grep-fallback gap and collapses the CI→release pipeline so tagging no longer spends ~25 min rebuilding what CI has already cached. 2 PRs: #80 (`codixing grep`), #81 (CI binary reuse). Skipping the v0.35.x patch series — v0.35.0 shipped clean.
+
 ### Added
-- **`codixing grep` CLI command** — literal or regex text scan across indexed files, trigram-accelerated. Emits `path:line:col:text` by default (1-indexed line/col to match `grep -n`). Supports `--literal`, `-i/--ignore-case`, `--invert`, `--file`, `--glob`, `-C/-B/-A` (symmetric or asymmetric context), `--count`, `--files-with-matches`, `--json`, and `--limit`. Closes the last grep-fallback gap surfaced during v0.35 polish work. Fast-path auto-proxies through a running `codixing-mcp` daemon when available.
-- **`Engine::grep_code_opts(&GrepOptions)`** — structured variant of `Engine::grep_code` that adds case-insensitive matching (via `regex::RegexBuilder`), inverted line selection, and asymmetric before/after context. Legacy positional `Engine::grep_code(...)` remains as a thin forwarder for backward compatibility.
-- **MCP `grep_code` tool gains new params** — `case_insensitive`, `invert`, `before_context`, `after_context`, `count_only`, `files_with_matches`. Existing `context_lines` still accepted as a symmetric shorthand.
+- **`codixing grep` CLI command** — literal or regex text scan across indexed files, trigram-accelerated. Emits `path:line:col:text` by default (1-indexed line/col to match `grep -n`). Supports `--literal`, `-i/--ignore-case`, `--invert`, `--file`, `--glob`, `-C/-B/-A` (symmetric or asymmetric context), `--count`, `--files-with-matches`, `--json`, and `--limit`. Closes the last grep-fallback gap surfaced during v0.35 polish work. Fast-path auto-proxies through a running `codixing-mcp` daemon when available. (#80)
+- **`Engine::grep_code_opts(&GrepOptions)`** — structured variant of `Engine::grep_code` that adds case-insensitive matching (via `regex::RegexBuilder`), inverted line selection, and asymmetric before/after context. Legacy positional `Engine::grep_code(...)` remains as a thin forwarder for backward compatibility. (#80)
+- **MCP `grep_code` tool gains new params** — `case_insensitive`, `invert`, `before_context`, `after_context`, `count_only`, `files_with_matches`. Existing `context_lines` still accepted as a symmetric shorthand. (#80)
+- **11 new tests** — 4 core `grep_trigram_test` cases (case-insensitive literal, case-insensitive regex, invert, asymmetric context) and 7 CLI `grep_cli_test` cases covering every output mode. Total 1087 → 1098. (#80)
 
 ### Changed
-- **Bash dogfooding hook shrink** — `claude-plugin/hooks/pretool-bash-codixing.sh` drops the single-file, `| wc -l`, and version-string passthroughs (127 → 112 lines). All three cases are now native `codixing grep` features, so the compliance leaks close. Deny message now suggests `codixing grep "<pattern>"` first.
-- **CI now builds release binaries on main + tag pushes** — `ci.yml` gains a `release-build` matrix job (Linux x86_64, macOS aarch64, Windows x86_64 with `--no-default-features`) that stages binaries as `binaries-<suffix>` artifacts with 14-day retention. PRs remain fast (the job is gated on `github.event_name == 'push'`). Separate rust-cache key (`release-<target>`) so release builds and test builds don't thrash each other.
-- **`release.yml` simplified to download + publish** — the old build matrix is gone. On `v*` tag push, `release.yml` fetches binaries from the CI run on the same commit via `dawidd6/action-download-artifact@v6` (`workflow: ci.yml`, `commit: github.sha`), then uploads to a GitHub Release and publishes the npm wrapper. Saves ~25 min per release by reusing the CI build cache. Release-mode build breaks on `main` now surface in CI instead of post-tag.
+- **Bash dogfooding hook shrink** — `claude-plugin/hooks/pretool-bash-codixing.sh` drops the single-file, `| wc -l`, and version-string passthroughs (127 → 112 lines). All three cases are now native `codixing grep` features, so the compliance leaks close. Deny message now suggests `codixing grep "<pattern>"` first. (#80)
+- **CI now builds release binaries on main + tag pushes** — `ci.yml` gains a `release-build` matrix job (Linux x86_64, macOS aarch64, Windows x86_64 with `--no-default-features`) that stages binaries as `binaries-<suffix>` artifacts with 14-day retention. PRs remain fast (the job is gated on `github.event_name == 'push'`). Separate rust-cache key (`release-<target>`) so release builds and test builds don't thrash each other. `needs: test` so broken code never produces binaries. (#81)
+- **`release.yml` simplified to download + publish** — the old build matrix is gone. On `v*` tag push, `release.yml` fetches binaries from the CI run on the same commit via `dawidd6/action-download-artifact@v6` (`workflow: ci.yml`, `commit: github.sha`), then uploads to a GitHub Release and publishes the npm wrapper. Saves ~25 min per release by reusing the CI build cache. Release-mode build breaks on `main` now surface in CI instead of post-tag. (#81)
 
 ## [0.34.0] — 2026-04-12
 
