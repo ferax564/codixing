@@ -1,8 +1,7 @@
 #!/bin/sh
 set -e
 
-VERSION="0.32.0"
-VERSION="0.32.0"
+VERSION="0.34.0"
 REPO="ferax564/codixing"
 INSTALL_DIR="/usr/local/bin"
 
