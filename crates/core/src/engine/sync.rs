@@ -3,12 +3,12 @@ use std::fs;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
-use crate::chunker::Chunker;
 use crate::chunker::cast::CastChunker;
+use crate::chunker::Chunker;
 use crate::error::{CodixingError, Result};
 use crate::graph::extract::{extract_definitions, extract_references};
 use crate::graph::types::{ReferenceKind, SymbolKind};
-use crate::graph::{CallExtractor, ImportExtractor, ImportResolver, compute_pagerank};
+use crate::graph::{compute_pagerank, CallExtractor, ImportExtractor, ImportResolver};
 use crate::language::detect_language;
 use crate::persistence::{FileHashEntry, IndexMeta};
 use crate::retriever::ChunkMeta;
@@ -19,7 +19,7 @@ use super::indexing::{
     make_embed_text, normalize_path, serialize_chunk_meta_compact, symbol_from_entity,
     unix_timestamp_string,
 };
-use super::{Engine, GitSyncStats, SyncStats, git_diff_since, git_head_commit};
+use super::{git_diff_since, git_head_commit, Engine, GitSyncStats, SyncStats};
 
 /// Options that modify how [`Engine::sync_with_options`] runs.
 #[derive(Debug, Clone, Copy, Default)]
@@ -860,9 +860,7 @@ impl Engine {
         // If the caller requested a full graph rebuild, do it now (after
         // the incremental sync, so the file list is current).
         if options.rebuild_graph {
-            if let Err(e) = self.rebuild_graph_from_disk() {
-                warn!(error = %e, "rebuild_graph_from_disk failed");
-            }
+            self.rebuild_graph_from_disk()?;
         }
 
         result
