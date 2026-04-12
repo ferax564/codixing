@@ -107,8 +107,12 @@ struct TestDaemon {
 #[cfg(unix)]
 impl Drop for TestDaemon {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Err(error) = self.child.kill() {
+            eprintln!("failed to kill test daemon during cleanup: {error}");
+        }
+        if let Err(error) = self.child.wait() {
+            eprintln!("failed to wait for test daemon during cleanup: {error}");
+        }
     }
 }
 
@@ -132,8 +136,12 @@ fn spawn_daemon(root: &str, socket: &str, extra_args: &[&str]) -> TestDaemon {
         std::thread::sleep(Duration::from_millis(25));
     }
 
-    let _ = child.kill();
-    let _ = child.wait();
+    if let Err(error) = child.kill() {
+        eprintln!("failed to kill test daemon after startup timeout: {error}");
+    }
+    if let Err(error) = child.wait() {
+        eprintln!("failed to wait for test daemon after startup timeout: {error}");
+    }
     panic!("daemon did not become ready for socket {socket}");
 }
 

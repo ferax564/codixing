@@ -25,15 +25,13 @@ pub(crate) async fn run_jsonrpc_loop<R, W>(
     engine: Arc<RwLock<Engine>>,
     mut reader: tokio::io::Lines<BufReader<R>>,
     mut writer: BufWriter<W>,
-    listing_mode: ListingMode,
+    mut listing_mode: ListingMode,
     federation: Option<Arc<FederatedEngine>>,
 ) -> Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    let mut listing_mode = listing_mode;
-
     // In --compact mode, track whether we have already sent a
     // `notifications/tools/list_changed` notification so we only send it once.
     let mut compact_notification_sent = false;
