@@ -230,10 +230,11 @@ fn git_sync_no_op_without_git() {
     // Plain directory — not a git repo.
     std::fs::write(root.join("lib.rs"), "pub fn foo() {}").unwrap();
 
-    // Build index, drop engine to release Tantivy lock.
+    // Build index, drop engine to release Tantivy lock. The sleep that
+    // was here before v0.34 is no longer needed — Engine::open now
+    // retries the writer-lock acquisition to absorb the drop-then-reopen
+    // race directly.
     drop(Engine::init(root, bm25_config(root)).unwrap());
-    // Brief pause so the OS fully releases the Tantivy directory lock.
-    std::thread::sleep(std::time::Duration::from_millis(100));
 
     // Open and call git_sync — must not fail.
     let mut engine = Engine::open(root).unwrap();
