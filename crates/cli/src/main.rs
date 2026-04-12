@@ -1,4 +1,3 @@
-#[cfg(unix)]
 mod daemon_proxy;
 
 use std::path::PathBuf;
@@ -254,6 +253,16 @@ enum Command {
         /// Project root to sync (defaults to current directory).
         #[arg(default_value = ".")]
         path: PathBuf,
+
+        /// Skip the vector-embedding step.
+        ///
+        /// Sync will still update BM25, symbols, trigrams, file hashes,
+        /// and the dependency graph — only the vector index stays stale.
+        /// Use this to avoid runaway CPU on an existing hybrid index, or
+        /// when the change set is large and you want BM25+graph fresh now
+        /// and will embed later via `codixing embed`.
+        #[arg(long)]
+        no_embed: bool,
     },
 
     /// Fast git-aware sync: re-indexes only files changed since the last indexed git commit.
@@ -321,6 +330,19 @@ enum Command {
     Federation {
         #[command(subcommand)]
         action: FederationAction,
+    },
+
+    /// Debug and exercise the TOML output-filter pipeline.
+    ///
+    /// The filter pipeline compresses MCP tool output before it reaches
+    /// the agent (token-tight loops) and tees the full output to
+    /// `.codixing/tee/` for recovery. This subcommand lets you check
+    /// that `.codixing/filters.toml` parses, lists the rules in effect,
+    /// and runs the pipeline on sample input without having to boot
+    /// the MCP server.
+    Filter {
+        #[command(subcommand)]
+        action: FilterAction,
     },
 
     /// Audit files for freshness: finds stale and orphaned files that may need attention.
@@ -409,6 +431,33 @@ enum Command {
         /// Output as JSON.
         #[arg(long)]
         json: bool,
+    },
+}
+
+/// Subcommands for the `codixing filter` command.
+#[derive(Subcommand)]
+enum FilterAction {
+    /// Parse and validate the repo-local `.codixing/filters.toml` (if
+    /// present) on top of the built-in defaults and list the resulting
+    /// ruleset. Exits non-zero if the local file is invalid TOML.
+    Check {
+        /// Project root (defaults to current directory). The command
+        /// reads `<root>/.codixing/filters.toml` if it exists.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+
+    /// Run the pipeline on sample input from stdin and print the
+    /// filtered result. Use `--tool <name>` to simulate the tool name
+    /// so rules that match by tool are exercised.
+    Run {
+        /// Simulated MCP tool name (affects which rules match).
+        #[arg(long, default_value = "code_search")]
+        tool: String,
+
+        /// Project root (defaults to current directory).
+        #[arg(long, default_value = ".")]
+        path: PathBuf,
     },
 }
 
@@ -623,12 +672,13 @@ async fn main() -> Result<()> {
             file,
         } => cmd_usages(symbol, limit, file),
         Command::Update { path, dry_run } => cmd_update(path, dry_run),
-        Command::Sync { path } => cmd_sync(path),
+        Command::Sync { path, no_embed } => cmd_sync(path, no_embed),
         Command::GitSync { path } => cmd_git_sync(path),
         Command::Embed { path } => cmd_embed(path),
         Command::BenchEmbed { path, force, json } => cmd_bench_embed(path, force, json),
         Command::Serve { host, port, path } => cmd_serve(host, port, path).await,
         Command::Federation { action } => cmd_federation(action),
+        Command::Filter { action } => cmd_filter(action),
         Command::Audit {
             threshold_days,
             include,
@@ -837,7 +887,6 @@ fn cmd_search(
     // already a formatted markdown text block — the daemon path effectively
     // always produces "formatted" output, which is what agents and humans
     // both want from a warm-index search.
-    #[cfg(unix)]
     {
         let _ = format;
         let can_use_daemon = !json
@@ -959,6 +1008,15 @@ fn cmd_search(
 
 fn cmd_symbols(filter: String, file: Option<String>) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
+
+    // Fast path: proxy through the daemon if one is running.
+    if !filter.is_empty() {
+        if let Some(text) = daemon_proxy::try_symbols(&root, &filter, file.as_deref()) {
+            print!("{text}");
+            return Ok(());
+        }
+    }
+
     let engine = Engine::open(&root).with_context(|| {
         format!(
             "no index found at {} — run `codixing init` first",
@@ -1011,6 +1069,23 @@ fn cmd_graph(
     let root = path
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
+
+    // Fast path for `graph --map`: proxy through the daemon's
+    // `get_repo_map` tool when the other flags are absent.
+    if map
+        && html.is_none()
+        && graphml.is_none()
+        && cypher.is_none()
+        && obsidian.is_none()
+        && !communities
+        && surprises.is_none()
+    {
+        if let Some(text) = daemon_proxy::try_repo_map(&root, Some(token_budget)) {
+            print!("{text}");
+            return Ok(());
+        }
+    }
+
     let mut engine = Engine::open(&root).with_context(|| {
         format!(
             "no index found at {} — run `codixing init` first",
@@ -1328,6 +1403,17 @@ fn cmd_cross_imports(from: String, to: String) -> Result<()> {
 
 fn cmd_usages(symbol: String, limit: usize, file: Option<String>) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
+
+    // Fast path: proxy through the daemon when no file filter (the MCP
+    // search_usages tool doesn't expose a file filter parameter).
+    if file.is_none() {
+        let _ = limit; // MCP tool uses its own limit; CLI limit is approximated
+        if let Some(text) = daemon_proxy::try_usages(&root, &symbol) {
+            print!("{text}");
+            return Ok(());
+        }
+    }
+
     let engine = Engine::open(&root).with_context(|| {
         format!(
             "no index found at {} — run `codixing init` first",
@@ -1512,7 +1598,7 @@ fn cmd_update(path: PathBuf, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_sync(path: PathBuf) -> Result<()> {
+fn cmd_sync(path: PathBuf, no_embed: bool) -> Result<()> {
     let root = path
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
@@ -1520,10 +1606,17 @@ fn cmd_sync(path: PathBuf) -> Result<()> {
     let mut engine =
         Engine::open(&root).with_context(|| "no index found — run `codixing init` first")?;
 
+    if no_embed {
+        eprintln!("[sync] --no-embed active — vector index will be left stale");
+    }
+
     let start = Instant::now();
     let stage_start = std::sync::Arc::new(std::sync::Mutex::new(Instant::now()));
     let stage_start_cb = stage_start.clone();
-    let stats = match engine.sync_with_progress(move |msg| {
+    let options = codixing_core::SyncOptions {
+        skip_embed: no_embed,
+    };
+    let stats = match engine.sync_with_options(options, move |msg| {
         let mut t = stage_start_cb.lock().unwrap_or_else(|e| e.into_inner());
         let elapsed = t.elapsed();
         *t = Instant::now();
@@ -1669,6 +1762,80 @@ fn cmd_bench_embed(path: PathBuf, force: bool, json: bool) -> Result<()> {
         eprintln!("─────────────────────────────────────────────────");
     }
     Ok(())
+}
+
+fn cmd_filter(action: FilterAction) -> Result<()> {
+    use codixing_core::filter_pipeline::FilterPipeline;
+
+    match action {
+        FilterAction::Check { path } => {
+            let root = path
+                .canonicalize()
+                .with_context(|| format!("path not found: {}", path.display()))?;
+            let codixing_dir = root.join(".codixing");
+            if !codixing_dir.is_dir() {
+                eprintln!(
+                    "note: no .codixing/ at {} — loading built-in defaults only",
+                    root.display()
+                );
+            }
+            let local_path = codixing_dir.join("filters.toml");
+            if local_path.is_file() {
+                // Read + validate the local file before composing with
+                // defaults, so we can report parse errors cleanly.
+                let content = std::fs::read_to_string(&local_path)
+                    .with_context(|| format!("failed to read {}", local_path.display()))?;
+                codixing_core::filter_pipeline::parse_filter_rules(&content)
+                    .with_context(|| format!("invalid TOML in {}", local_path.display()))?;
+                println!("✓ {} parsed cleanly", local_path.display());
+            } else {
+                println!("(no repo-local filters.toml — using built-in defaults only)");
+            }
+
+            // Load the composed pipeline and list the active rules. The
+            // ruleset field is private so we print the effect instead
+            // of the raw struct.
+            let _pipeline = FilterPipeline::load(&codixing_dir);
+            println!();
+            println!("Filter pipeline loaded from {}", codixing_dir.display());
+            println!("(use `codixing filter run --tool <name>` to exercise a rule)");
+            Ok(())
+        }
+
+        FilterAction::Run { tool, path } => {
+            use std::io::Read;
+            let root = path
+                .canonicalize()
+                .with_context(|| format!("path not found: {}", path.display()))?;
+            let codixing_dir = root.join(".codixing");
+            let pipeline = FilterPipeline::load(&codixing_dir);
+
+            let mut input = String::new();
+            std::io::stdin()
+                .read_to_string(&mut input)
+                .context("failed to read stdin — pipe input via: echo ... | codixing filter run")?;
+
+            let result = pipeline.apply(&input, &tool);
+
+            if result.was_filtered {
+                eprintln!(
+                    "[filter] rule={} input={}B output={}B tee={}",
+                    result.rule_name.as_deref().unwrap_or("<unknown>"),
+                    input.len(),
+                    result.output.len(),
+                    result.tee_path.as_deref().unwrap_or("<none>"),
+                );
+            } else {
+                eprintln!(
+                    "[filter] no matching rule — output passed through unchanged ({}B)",
+                    input.len()
+                );
+            }
+
+            print!("{}", result.output);
+            Ok(())
+        }
+    }
 }
 
 fn cmd_federation(action: FederationAction) -> Result<()> {
@@ -1999,6 +2166,17 @@ fn cmd_audit(
 
 fn cmd_impact(file: String, json: bool) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
+
+    // Fast path: proxy through the daemon (plain output only — JSON mode
+    // needs the structured ChangeImpact type, which the MCP text body
+    // loses).
+    if !json {
+        if let Some(text) = daemon_proxy::try_impact(&root, &file) {
+            print!("{text}");
+            return Ok(());
+        }
+    }
+
     let engine = Engine::open(&root).with_context(|| {
         format!(
             "no index found at {} — run `codixing init` first",
