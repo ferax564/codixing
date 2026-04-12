@@ -37,29 +37,43 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         languages: Vec<String>,
 
-        /// Disable vector embeddings (BM25-only mode, faster init).
+        /// Enable vector embeddings alongside BM25+graph.
+        ///
+        /// Default since v0.33: `init` builds BM25 + symbol graph only.
+        /// Embeddings are slow to build (14 min on 10K files, 25+ min on the
+        /// Linux kernel) and grow the index by 2GB+. Agent code exploration
+        /// works well on BM25+graph alone — pass `--embed` only if your
+        /// workflow relies on natural-language concept search.
         #[arg(long)]
+        embed: bool,
+
+        /// Deprecated alias for "don't pass --embed". Accepted and ignored
+        /// for v0.33; will be hard-removed in v0.34. BM25+graph-only is now
+        /// the default, so this flag is a no-op.
+        #[arg(long, hide = true)]
         no_embeddings: bool,
 
-        /// Embedding model to use [default: bge-base-en].
+        /// Embedding model to use. Only meaningful with --embed.
         /// Options: bge-small-en, bge-base-en, bge-large-en,
         ///          jina-embed-code, nomic-embed-code,
         ///          snowflake-arctic-l, qwen3
-        #[arg(long, value_name = "MODEL")]
-        model: Option<String>,
+        #[arg(long, value_name = "MODEL", default_value = "bge-base-en")]
+        model: String,
 
         /// Load the BGE-Reranker-Base cross-encoder model (~270 MB) to enable
-        /// the `deep` strategy. Increases startup time by ~2 s.
+        /// the `deep` strategy. Increases startup time by ~2 s. Only meaningful
+        /// with --embed.
         #[arg(long)]
         reranker: bool,
 
-        /// Skip embedding during init — index with BM25 only, embed later
-        /// with `codixing embed`. Useful for large repos where you want
-        /// search available immediately.
+        /// With --embed: embed in the background and return after BM25+graph
+        /// is ready. Search is available immediately; vector hits phase in as
+        /// the background drain completes. No effect without --embed.
         #[arg(long)]
         defer_embeddings: bool,
 
-        /// Block until embeddings complete (old behavior). Default: return after BM25 is ready.
+        /// With --embed: block until embeddings complete before returning.
+        /// No effect without --embed.
         #[arg(long)]
         wait: bool,
     },
@@ -534,21 +548,30 @@ async fn main() -> Result<()> {
             path,
             also,
             languages,
+            embed,
             no_embeddings,
             model,
             reranker,
             defer_embeddings,
             wait,
-        } => cmd_init(
-            path,
-            also,
-            languages,
-            no_embeddings,
-            model,
-            reranker,
-            defer_embeddings,
-            wait,
-        ),
+        } => {
+            if no_embeddings {
+                eprintln!(
+                    "warning: --no-embeddings is a no-op in v0.33 (BM25+graph-only is now the default). \
+                     Pass --embed to build vector embeddings. --no-embeddings will be hard-removed in v0.34."
+                );
+            }
+            cmd_init(
+                path,
+                also,
+                languages,
+                embed,
+                model,
+                reranker,
+                defer_embeddings,
+                wait,
+            )
+        }
         Command::Search {
             query,
             limit,
@@ -662,8 +685,8 @@ fn cmd_init(
     path: PathBuf,
     also: Vec<PathBuf>,
     languages: Vec<String>,
-    no_embeddings: bool,
-    model: Option<String>,
+    embed: bool,
+    model: String,
     reranker: bool,
     defer_embeddings: bool,
     wait: bool,
@@ -685,22 +708,26 @@ fn cmd_init(
     for lang in &languages {
         config.languages.insert(lang.to_lowercase());
     }
-    if no_embeddings {
-        config.embedding.enabled = false;
-    }
-    if let Some(m) = model {
-        config.embedding.model = parse_embedding_model(&m)?;
-        // Specifying a model implies embeddings should be enabled.
-        if !no_embeddings {
-            config.embedding.enabled = true;
+
+    // v0.33: BM25+graph is the default. Embeddings only fire with --embed.
+    config.embedding.enabled = embed;
+
+    if embed {
+        config.embedding.model = parse_embedding_model(&model)?;
+        if reranker {
+            config.embedding.reranker_enabled = true;
         }
-    }
-    if reranker {
-        config.embedding.reranker_enabled = true;
-    }
-    if defer_embeddings {
-        config.embedding.enabled = false;
-        eprintln!("Deferring embeddings — BM25 index only. Run `codixing embed` to add vectors.");
+        if defer_embeddings {
+            config.embedding.enabled = false;
+            eprintln!(
+                "Deferring embeddings — BM25+graph available immediately. Run `codixing embed` to add vectors."
+            );
+        }
+    } else if reranker || defer_embeddings {
+        eprintln!(
+            "note: --reranker and --defer-embeddings are no-ops without --embed. \
+             Pass --embed to build vector embeddings."
+        );
     }
 
     if config.extra_roots.is_empty() {
@@ -723,7 +750,7 @@ fn cmd_init(
     // Engine::init() persists config.json early, and defer_embeddings set
     // enabled=false. Without this fix, `codixing embed` would fail because
     // Engine::open() reads the saved config and skips loading the embedder.
-    if defer_embeddings {
+    if embed && defer_embeddings {
         let config_path = root.join(".codixing").join("config.json");
         if let Ok(text) = std::fs::read_to_string(&config_path) {
             if let Ok(mut saved) = serde_json::from_str::<serde_json::Value>(&text) {
@@ -750,10 +777,10 @@ fn cmd_init(
         elapsed.as_secs_f64(),
     );
 
-    if !engine.embeddings_ready() {
+    if embed && !engine.embeddings_ready() {
         let (done, total) = engine.embedding_progress();
         eprintln!("Embedding {total} chunks in background ({done}/{total} complete)...");
-        eprintln!("Search is available now (BM25-only until embeddings complete).");
+        eprintln!("Search is available now (BM25+graph ready; vector hits phase in).");
 
         if wait {
             eprintln!("Waiting for embeddings to complete (--wait)...");
