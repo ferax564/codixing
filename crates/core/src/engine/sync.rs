@@ -3,12 +3,12 @@ use std::fs;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
-use crate::chunker::Chunker;
 use crate::chunker::cast::CastChunker;
+use crate::chunker::Chunker;
 use crate::error::{CodixingError, Result};
 use crate::graph::extract::{extract_definitions, extract_references};
 use crate::graph::types::{ReferenceKind, SymbolKind};
-use crate::graph::{CallExtractor, ImportExtractor, ImportResolver, compute_pagerank};
+use crate::graph::{compute_pagerank, CallExtractor, ImportExtractor, ImportResolver};
 use crate::language::detect_language;
 use crate::persistence::{FileHashEntry, IndexMeta};
 use crate::retriever::ChunkMeta;
@@ -19,7 +19,7 @@ use super::indexing::{
     make_embed_text, normalize_path, serialize_chunk_meta_compact, symbol_from_entity,
     unix_timestamp_string,
 };
-use super::{Engine, GitSyncStats, SyncStats, git_diff_since, git_head_commit};
+use super::{git_diff_since, git_head_commit, Engine, GitSyncStats, SyncStats};
 
 /// Options that modify how [`Engine::sync_with_options`] runs.
 #[derive(Debug, Clone, Copy, Default)]
@@ -970,15 +970,13 @@ impl Engine {
         // Replace the in-memory graph.
         self.graph = Some(new_graph);
 
-        // Persist the updated graph.
+        // Persist the updated graph. The caller explicitly requested a fresh
+        // on-disk graph — if persistence fails, surface the error so next process
+        // start doesn't silently load the stale graph.
         if let Some(ref g) = self.graph {
             let flat = g.to_flat();
-            if let Err(e) = self.store.save_graph(&flat) {
-                warn!(error = %e, "failed to persist graph after rebuild");
-            }
-            if let Err(e) = self.store.save_symbol_graph(g) {
-                warn!(error = %e, "failed to persist symbol graph after rebuild");
-            }
+            self.store.save_graph(&flat)?;
+            self.store.save_symbol_graph(g)?;
         }
 
         info!("graph rebuild complete");

@@ -20,6 +20,9 @@ set -uo pipefail
 # Require binary.
 command -v codixing >/dev/null 2>&1 || exit 0
 
+# Require jq (used to parse the hook stdin JSON).
+command -v jq >/dev/null 2>&1 || exit 0
+
 INPUT=$(cat)
 
 # Extract the file path from the tool_input JSON.

@@ -765,6 +765,19 @@ fn check_write_lock_error(err: &anyhow::Error) -> bool {
     }
 }
 
+/// Wrap a core engine error with context, exiting the process on write-lock
+/// conflicts (so callers get a friendly message rather than a raw panic trace).
+fn handle_engine_err<E: std::fmt::Display>(
+    e: E,
+    ctx: impl FnOnce() -> String,
+) -> anyhow::Error {
+    let err = anyhow::anyhow!("{e}");
+    if check_write_lock_error(&err) {
+        std::process::exit(1);
+    }
+    err.context(ctx())
+}
+
 /// Print a newline-separated list of file paths, or an empty-message when the
 /// list is empty. The count summary is written to stderr so it doesn't pollute
 /// pipeline-friendly stdout.
@@ -1584,18 +1597,14 @@ fn cmd_update(path: PathBuf, dry_run: bool, file: Option<String>) -> Result<()> 
         if !root.join(".codixing").is_dir() {
             return Ok(());
         }
+        if std::path::Path::new(rel).is_absolute() {
+            anyhow::bail!("--file must be a relative path (e.g. src/main.rs), got: {rel}");
+        }
         if dry_run {
             eprintln!("(dry run) would reindex: {rel}");
             return Ok(());
         }
-        if std::path::Path::new(rel).is_absolute() {
-            anyhow::bail!("--file must be a relative path (e.g. src/main.rs), got: {rel}");
-        }
         let abs = root.join(rel);
-        if !abs.exists() {
-            eprintln!("warning: --file target does not exist, skipping: {rel}");
-            return Ok(());
-        }
         let mut engine = Engine::open(&root).with_context(|| {
             format!(
                 "no index found at {} — run `codixing init` first",
@@ -1603,26 +1612,12 @@ fn cmd_update(path: PathBuf, dry_run: bool, file: Option<String>) -> Result<()> 
             )
         })?;
         let start = Instant::now();
-        match engine.reindex_file(&abs) {
-            Ok(()) => {}
-            Err(e) => {
-                let anyhow_err = anyhow::anyhow!("{e}");
-                if check_write_lock_error(&anyhow_err) {
-                    std::process::exit(1);
-                }
-                return Err(anyhow_err).with_context(|| format!("failed to reindex {rel}"));
-            }
-        }
-        match engine.save() {
-            Ok(()) => {}
-            Err(e) => {
-                let anyhow_err = anyhow::anyhow!("{e}");
-                if check_write_lock_error(&anyhow_err) {
-                    std::process::exit(1);
-                }
-                return Err(anyhow_err).context("failed to save index after --file update");
-            }
-        }
+        engine
+            .reindex_file(&abs)
+            .map_err(|e| handle_engine_err(e, || format!("failed to reindex {rel}")))?;
+        engine
+            .save()
+            .map_err(|e| handle_engine_err(e, || "failed to save index after --file update".into()))?;
         eprintln!("reindexed {} in {:.2}s", rel, start.elapsed().as_secs_f64());
         return Ok(());
     }

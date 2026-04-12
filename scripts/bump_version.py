@@ -20,18 +20,23 @@ from pathlib import Path
 def bump(new_version: str) -> None:
     root = Path(__file__).parent.parent
 
-    # 1. Cargo.toml — use regex to target only workspace.package.version
+    # 1. Cargo.toml — use regex to target only workspace.package.version.
+    # The (?:(?!\n\[)[\s\S])*? pattern allows [ inside string values while
+    # stopping at the next section header, avoiding the [^\[]*? trap.
     cargo = root / "Cargo.toml"
     text = cargo.read_text()
-    # Match: [workspace.package] ... version = "X.Y.Z", stopping at the next
-    # section header (\n[).  Using (?:(?!\n\[)[\s\S])*? allows [ inside string
-    # values (e.g. description = "foo [bar]") while correctly stopping at \n[.
-    text = re.sub(
+    text, n = re.subn(
         r'(\[workspace\.package\](?:(?!\n\[)[\s\S])*?version\s*=\s*)"[^"]*"',
         rf'\g<1>"{new_version}"',
         text,
         count=1,
     )
+    if n != 1:
+        print(
+            f"Error: could not locate [workspace.package] version in {cargo}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     cargo.write_text(text)
     print(f"  Cargo.toml            → {new_version}")
 
@@ -45,12 +50,15 @@ def bump(new_version: str) -> None:
     # 3. docs/install.sh — preserve optional quoting style (VERSION=X or VERSION="X")
     install = root / "docs" / "install.sh"
     text = install.read_text()
-    text = re.sub(
+    text, n = re.subn(
         r'^VERSION="?[^"\n]*"?$',
         f'VERSION="{new_version}"',
         text,
         flags=re.MULTILINE,
     )
+    if n < 1:
+        print(f"Error: could not locate VERSION= line in {install}", file=sys.stderr)
+        sys.exit(1)
     install.write_text(text)
     print(f"  docs/install.sh       → {new_version}")
 
@@ -64,6 +72,9 @@ def bump(new_version: str) -> None:
     # 5. .claude-plugin/marketplace.json — load/dump (two fields)
     market = root / ".claude-plugin" / "marketplace.json"
     data = json.loads(market.read_text())
+    if "metadata" not in data or not isinstance(data["metadata"], dict):
+        print("Error: marketplace.json missing 'metadata' object", file=sys.stderr)
+        sys.exit(1)
     data["metadata"]["version"] = new_version
     plugins = data.get("plugins", [])
     if not plugins:
