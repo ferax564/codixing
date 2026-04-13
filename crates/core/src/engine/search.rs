@@ -82,7 +82,7 @@ impl Engine {
                 if word_count >= 3 {
                     let reformulations = generate_reformulations_with_synonyms(
                         &query.query,
-                        self.reformulations.as_ref(),
+                        self.get_reformulations(),
                     );
                     if reformulations.len() >= 2 {
                         let mut fused = self.search_multi(&reformulations, &query)?;
@@ -116,7 +116,7 @@ impl Engine {
                 if word_count >= 3 {
                     let reformulations = generate_reformulations_with_synonyms(
                         &query.query,
-                        self.reformulations.as_ref(),
+                        self.get_reformulations(),
                     );
                     if reformulations.len() >= 2 {
                         let mut fused = self.search_multi(&reformulations, &query)?;
@@ -240,7 +240,7 @@ impl Engine {
             graph_boost_weight: self.config.graph.boost_weight,
             recency_map: Some(self.get_recency_map()),
             chunk_meta: Some(&self.chunk_meta),
-            concepts: self.concept_index.as_ref(),
+            concepts: self.get_concept_index(),
         }
     }
 
@@ -768,7 +768,7 @@ impl Engine {
         }
 
         // Append learned reformulations from project-specific vocabulary.
-        if let Some(ref learned) = self.reformulations {
+        if let Some(learned) = self.get_reformulations() {
             let mut learned_terms: Vec<String> = Vec::new();
             for word in query.query.split_whitespace() {
                 let expansions = learned.expand(&word.to_lowercase());

@@ -322,9 +322,13 @@ pub struct Engine {
     /// Optional code dependency graph with PageRank scores.
     pub(super) graph: Option<CodeGraph>,
     /// Semantic concept index mapping domain concepts to symbol clusters.
-    pub(super) concept_index: Option<concepts::ConceptIndex>,
+    /// Lazy-loaded from disk on first use via OnceLock — saves ~2.1 GB of
+    /// bitcode decode on cold start for large repos.
+    pub(super) concept_index: std::sync::OnceLock<Option<concepts::ConceptIndex>>,
     /// Learned query reformulations — project-specific vocabulary mapping.
-    pub(super) reformulations: Option<reformulation::LearnedReformulations>,
+    /// Lazy-loaded from disk on first use via OnceLock — saves ~528 MB of
+    /// bitcode decode on cold start for large repos.
+    pub(super) reformulations: std::sync::OnceLock<Option<reformulation::LearnedReformulations>>,
     /// Optional cross-encoder reranker (BGE-Reranker-Base) for the `deep` strategy.
     pub(super) reranker: Option<Arc<Reranker>>,
     /// Trigram index for sub-millisecond exact substring search (Strategy::Exact).
@@ -445,6 +449,92 @@ impl Engine {
                 build_file_trigram_from_tantivy(&self.tantivy)
             }
         })
+    }
+
+    /// Get or lazily load the semantic concept index from disk.
+    ///
+    /// Returns `None` if the file is missing or fails to deserialize. The
+    /// negative result is cached so subsequent calls don't retry the I/O.
+    /// Saves ~2.1 GB of bitcode decode on cold start for large repos —
+    /// only paid the first time `search` walks the concept-aware path.
+    pub(super) fn get_concept_index(&self) -> Option<&concepts::ConceptIndex> {
+        let opt = self.concept_index.get_or_init(|| {
+            if !self.store.concepts_path().exists() {
+                return None;
+            }
+            match std::fs::read(self.store.concepts_path()) {
+                Ok(bytes) => match bitcode::deserialize::<concepts::ConceptIndex>(&bytes) {
+                    Ok(idx) => Some(idx),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to deserialize concept index (lazy)");
+                        None
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to read concept index (lazy)");
+                    None
+                }
+            }
+        });
+        opt.as_ref()
+    }
+
+    /// Get or lazily load the learned query reformulations from disk.
+    ///
+    /// Returns `None` if the file is missing or fails to deserialize. The
+    /// negative result is cached so subsequent calls don't retry the I/O.
+    /// Saves ~528 MB of bitcode decode on cold start for large repos.
+    pub(super) fn get_reformulations(&self) -> Option<&reformulation::LearnedReformulations> {
+        let opt = self.reformulations.get_or_init(|| {
+            if !self.store.reformulations_path().exists() {
+                return None;
+            }
+            match std::fs::read(self.store.reformulations_path()) {
+                Ok(bytes) => {
+                    match bitcode::deserialize::<reformulation::LearnedReformulations>(&bytes) {
+                        Ok(reform) => Some(reform),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "failed to deserialize reformulations (lazy)");
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to read reformulations (lazy)");
+                    None
+                }
+            }
+        });
+        opt.as_ref()
+    }
+
+    /// Test-only: returns `true` if the lazy concept index OnceLock has been
+    /// initialized (regardless of whether the underlying value is `Some` or
+    /// `None`). Used to verify lazy-load behavior in `lazy_load_test.rs`.
+    #[doc(hidden)]
+    pub fn __test_concept_loaded(&self) -> bool {
+        self.concept_index.get().is_some()
+    }
+
+    /// Test-only: returns `true` if the lazy reformulations OnceLock has been
+    /// initialized. See `__test_concept_loaded`.
+    #[doc(hidden)]
+    pub fn __test_reformulations_loaded(&self) -> bool {
+        self.reformulations.get().is_some()
+    }
+
+    /// Test-only: triggers the lazy load of the concept index. Returns `true`
+    /// if a concept index is present, `false` if absent or deserialize failed.
+    #[doc(hidden)]
+    pub fn __test_force_load_concept(&self) -> bool {
+        self.get_concept_index().is_some()
+    }
+
+    /// Test-only: triggers the lazy load of the reformulations. Returns `true`
+    /// if reformulations are present, `false` if absent or deserialize failed.
+    #[doc(hidden)]
+    pub fn __test_force_load_reformulations(&self) -> bool {
+        self.get_reformulations().is_some()
     }
 
     /// Return summary statistics about the current index.

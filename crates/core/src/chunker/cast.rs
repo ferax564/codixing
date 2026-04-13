@@ -402,7 +402,8 @@ fn extract_entity_names_from_content(content: &str, language: Language) -> Vec<S
         Language::Bash => &["function "],
         Language::Matlab => &["function ", "classdef "],
         // Config and doc languages: no keyword-based entity extraction in chunker.
-        Language::Yaml
+        Language::Assembly
+        | Language::Yaml
         | Language::Toml
         | Language::Dockerfile
         | Language::Makefile
@@ -457,7 +458,8 @@ fn extract_signatures_from_content(content: &str, language: Language) -> Vec<Str
         Language::Bash => &["function "],
         Language::Matlab => &["function "],
         // Config and doc languages: no signature extraction in chunker.
-        Language::Yaml
+        Language::Assembly
+        | Language::Yaml
         | Language::Toml
         | Language::Dockerfile
         | Language::Makefile

@@ -347,3 +347,180 @@ fn grep_finds_pattern_near_chunk_boundary() {
         results[0].file_path
     );
 }
+
+// ── v0.37 trigram v2 format tests ────────────────────────────────────────────
+
+mod trigram_v2_tests {
+    use codixing_core::index::trigram::{PostingCodec, TrigramIndex};
+    use tempfile::tempdir;
+
+    /// Tiny deterministic LCG so we don't pull in `rand` for tests.
+    struct Lcg(u64);
+    impl Lcg {
+        fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+            self.0
+        }
+    }
+
+    /// Build a trigram index with `chunk_count` synthetic chunks and inject a
+    /// known literal into roughly half of them so we have something to search.
+    fn build_index_with_literal(chunk_count: usize, literal: &str, seed: u64) -> TrigramIndex {
+        let mut lcg = Lcg::new(seed);
+        let mut idx = TrigramIndex::new();
+        for chunk_id in 0..chunk_count as u64 {
+            // ~140 bytes of pseudo-code per chunk.
+            let mut content = String::with_capacity(160);
+            for _ in 0..20 {
+                let word_id = lcg.next() % 50;
+                content.push_str(&format!("ident_{word_id} "));
+            }
+            if (lcg.next() % 2) == 0 {
+                content.push_str(literal);
+                content.push(' ');
+            }
+            idx.add(chunk_id, &content);
+        }
+        idx
+    }
+
+    /// Reference candidate set straight from the in-memory index.
+    fn reference_candidates(idx: &TrigramIndex, query: &str) -> std::collections::BTreeSet<u64> {
+        idx.search(query).into_iter().collect()
+    }
+
+    #[test]
+    fn v2_delta_varint_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chunk_trigram_v2_dv.bin");
+
+        let original = build_index_with_literal(500, "needle_marker_xyz", 0xDEADBEEF);
+        let expected = reference_candidates(&original, "needle_marker_xyz");
+        assert!(
+            !expected.is_empty(),
+            "test setup bug: literal should appear in some chunks"
+        );
+
+        original
+            .save_mmap_binary_v2(&path, PostingCodec::DeltaVarint)
+            .unwrap();
+
+        let loaded = TrigramIndex::load_binary(&path).unwrap();
+        let got: std::collections::BTreeSet<u64> =
+            loaded.search("needle_marker_xyz").into_iter().collect();
+
+        assert_eq!(got, expected, "v2 delta+varint round-trip lost candidates");
+    }
+
+    #[test]
+    fn v2_roaring_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chunk_trigram_v2_roar.bin");
+
+        let original = build_index_with_literal(500, "needle_marker_xyz", 0xCAFEBABE);
+        let expected = reference_candidates(&original, "needle_marker_xyz");
+        assert!(
+            !expected.is_empty(),
+            "test setup bug: literal should appear in some chunks"
+        );
+
+        original
+            .save_mmap_binary_v2(&path, PostingCodec::Roaring)
+            .unwrap();
+
+        let loaded = TrigramIndex::load_binary(&path).unwrap();
+        let got: std::collections::BTreeSet<u64> =
+            loaded.search("needle_marker_xyz").into_iter().collect();
+
+        assert_eq!(got, expected, "v2 roaring round-trip lost candidates");
+    }
+
+    #[test]
+    fn v2_delta_varint_smaller_than_v1() {
+        let dir = tempdir().unwrap();
+        let v1_path = dir.path().join("chunk_trigram_v1.bin");
+        let v2_path = dir.path().join("chunk_trigram_v2_dv.bin");
+
+        // 200 realistic-looking chunks with repeated identifiers — produces
+        // long, dense posting lists, which is what delta+varint compresses.
+        let mut idx = TrigramIndex::new();
+        let mut lcg = Lcg::new(0x1234_5678_9ABC_DEF0);
+        for chunk_id in 0..200u64 {
+            let mut content = String::new();
+            for _ in 0..30 {
+                let word = lcg.next() % 40;
+                content.push_str(&format!(
+                    "fn helper_{word}() {{ helper_{word}_inner(); }}\n"
+                ));
+            }
+            idx.add(chunk_id, &content);
+        }
+
+        idx.save_mmap_binary(&v1_path).unwrap();
+        idx.save_mmap_binary_v2(&v2_path, PostingCodec::DeltaVarint)
+            .unwrap();
+
+        let v1_size = std::fs::metadata(&v1_path).unwrap().len();
+        let v2_size = std::fs::metadata(&v2_path).unwrap().len();
+
+        assert!(
+            v2_size < v1_size,
+            "v2 ({v2_size} bytes) should be smaller than v1 ({v1_size} bytes)"
+        );
+        let ratio = (v2_size as f64) / (v1_size as f64);
+        assert!(
+            ratio <= 0.70,
+            "v2 should be at least 30% smaller than v1, got ratio {ratio:.3} (v1={v1_size}, v2={v2_size})"
+        );
+        eprintln!(
+            "v1={v1_size} v2={v2_size} ratio={ratio:.3} ({:.1}% smaller)",
+            (1.0 - ratio) * 100.0
+        );
+    }
+
+    #[test]
+    fn v1_backwards_compat_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chunk_trigram_v1_compat.bin");
+
+        let original = build_index_with_literal(300, "legacy_marker_abc", 0xFEEDFACE);
+        let expected = reference_candidates(&original, "legacy_marker_abc");
+        assert!(!expected.is_empty(), "test setup bug");
+
+        // Save with the legacy v1 writer.
+        original.save_mmap_binary(&path).unwrap();
+
+        let loaded = TrigramIndex::load_binary(&path).unwrap();
+        let got: std::collections::BTreeSet<u64> =
+            loaded.search("legacy_marker_abc").into_iter().collect();
+
+        assert_eq!(got, expected, "v1 backwards-compat search drifted");
+    }
+
+    #[test]
+    fn v2_unknown_version_returns_serialization_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chunk_trigram_v2_corrupt.bin");
+
+        let idx = build_index_with_literal(50, "any_marker", 0x9999);
+        idx.save_mmap_binary_v2(&path, PostingCodec::DeltaVarint)
+            .unwrap();
+
+        // Bump version field (offset 4..8) to 99.
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[4..8].copy_from_slice(&99u32.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+
+        let err = TrigramIndex::load_binary(&path)
+            .err()
+            .expect("expected load_binary to fail on bumped version");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("Serialization") || msg.to_lowercase().contains("version"),
+            "expected serialization/version error, got: {msg}"
+        );
+    }
+}

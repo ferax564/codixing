@@ -75,10 +75,10 @@ impl Engine {
             warn!(error = %e, "failed to persist file trigram index");
         }
         // chunk trigram also updated incrementally; persist to disk.
-        if let Err(e) = self
-            .get_trigram()
-            .save_mmap_binary(&self.store.chunk_trigram_path())
-        {
+        if let Err(e) = self.get_trigram().save_mmap_binary_v2(
+            &self.store.chunk_trigram_path(),
+            crate::index::trigram::PostingCodec::DeltaVarint,
+        ) {
             warn!(error = %e, "failed to persist chunk trigram index");
         }
         Ok(())
@@ -429,10 +429,10 @@ impl Engine {
         {
             warn!(error = %e, "failed to persist file trigram index");
         }
-        if let Err(e) = self
-            .get_trigram()
-            .save_mmap_binary(&self.store.chunk_trigram_path())
-        {
+        if let Err(e) = self.get_trigram().save_mmap_binary_v2(
+            &self.store.chunk_trigram_path(),
+            crate::index::trigram::PostingCodec::DeltaVarint,
+        ) {
             warn!(error = %e, "failed to persist chunk trigram index");
         }
 
@@ -549,10 +549,10 @@ impl Engine {
         {
             warn!(error = %e, "failed to persist file trigram index");
         }
-        if let Err(e) = self
-            .get_trigram()
-            .save_mmap_binary(&self.store.chunk_trigram_path())
-        {
+        if let Err(e) = self.get_trigram().save_mmap_binary_v2(
+            &self.store.chunk_trigram_path(),
+            crate::index::trigram::PostingCodec::DeltaVarint,
+        ) {
             warn!(error = %e, "failed to persist chunk trigram index");
         }
 

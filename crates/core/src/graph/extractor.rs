@@ -39,8 +39,9 @@ impl ImportExtractor {
             Language::Php => extract_php(tree, source),
             Language::Bash => extract_bash(tree, source),
             Language::Matlab => extract_matlab(tree, source),
-            // Config and doc languages use line-based/structured parsing; no tree-sitter imports.
-            Language::Yaml
+            // Config, doc, and assembly use line-based/structured parsing; no tree-sitter imports.
+            Language::Assembly
+            | Language::Yaml
             | Language::Toml
             | Language::Dockerfile
             | Language::Makefile

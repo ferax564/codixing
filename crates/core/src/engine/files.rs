@@ -103,6 +103,19 @@ impl Engine {
     pub fn grep_code_opts(&self, opts: &GrepOptions) -> Result<Vec<GrepMatch>> {
         use regex::RegexBuilder;
 
+        // Guard against pre-v0.33 indexes whose file_chunk_counts / file_trigram
+        // are empty because they were built before the content-side trigram
+        // index existed. Before v0.37 this silently returned "0 matches across
+        // 0 files" with no hint — surface it as an actionable error instead.
+        if self.file_chunk_counts.is_empty() {
+            return Err(CodixingError::Index(
+                "grep requires an indexed file set but the index is empty — \
+                 this is likely a pre-v0.33 index built before the content \
+                 trigram was added. Run `codixing init <root>` to rebuild."
+                    .to_string(),
+            ));
+        }
+
         let before_context = opts.before_context.min(5);
         let after_context = opts.after_context.min(5);
         let limit = if opts.limit == 0 { 50 } else { opts.limit };

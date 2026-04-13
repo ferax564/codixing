@@ -259,7 +259,10 @@ impl Engine {
         };
 
         // Persist trigram indexes.
-        if let Err(e) = trigram_idx.save_mmap_binary(&store.chunk_trigram_path()) {
+        if let Err(e) = trigram_idx.save_mmap_binary_v2(
+            &store.chunk_trigram_path(),
+            crate::index::trigram::PostingCodec::DeltaVarint,
+        ) {
             warn!(error = %e, "failed to persist chunk trigram index");
         }
         if let Err(e) = ft_idx.save_binary(&store.file_trigram_path()) {
@@ -466,8 +469,18 @@ impl Engine {
             vector: vector_arc,
             chunk_meta: chunk_meta_arc,
             graph,
-            concept_index,
-            reformulations,
+            // Seed the lazy OnceLocks with the freshly-built values so the
+            // first query after init() doesn't re-read from disk.
+            concept_index: {
+                let cell = std::sync::OnceLock::new();
+                let _ = cell.set(concept_index);
+                cell
+            },
+            reformulations: {
+                let cell = std::sync::OnceLock::new();
+                let _ = cell.set(reformulations);
+                cell
+            },
             reranker,
             trigram,
             session,
@@ -697,47 +710,11 @@ impl Engine {
             }
         };
 
-        // Restore concept index.
-        let concept_index = if store.concepts_path().exists() {
-            match std::fs::read(store.concepts_path()) {
-                Ok(bytes) => match bitcode::deserialize::<super::concepts::ConceptIndex>(&bytes) {
-                    Ok(idx) => Some(idx),
-                    Err(e) => {
-                        warn!(error = %e, "failed to deserialize concept index");
-                        None
-                    }
-                },
-                Err(e) => {
-                    warn!(error = %e, "failed to read concept index");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        // Restore learned reformulations.
-        let reformulations = if store.reformulations_path().exists() {
-            match std::fs::read(store.reformulations_path()) {
-                Ok(bytes) => {
-                    match bitcode::deserialize::<super::reformulation::LearnedReformulations>(
-                        &bytes,
-                    ) {
-                        Ok(reform) => Some(reform),
-                        Err(e) => {
-                            warn!(error = %e, "failed to deserialize reformulations");
-                            None
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(error = %e, "failed to read reformulations");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        // concept_index and reformulations are lazy-loaded via OnceLock on first use.
+        // See Engine::get_concept_index / get_reformulations. Saves ~2.6 GB of bitcode
+        // decode on cold start for large repos.
+        let concept_index = std::sync::OnceLock::new();
+        let reformulations = std::sync::OnceLock::new();
 
         let (graph_nodes, graph_edges) = graph
             .as_ref()
@@ -967,47 +944,10 @@ impl Engine {
             }
         };
 
-        // Restore concept index.
-        let concept_index = if store.concepts_path().exists() {
-            match std::fs::read(store.concepts_path()) {
-                Ok(bytes) => match bitcode::deserialize::<super::concepts::ConceptIndex>(&bytes) {
-                    Ok(idx) => Some(idx),
-                    Err(e) => {
-                        warn!(error = %e, "failed to deserialize concept index (read-only)");
-                        None
-                    }
-                },
-                Err(e) => {
-                    warn!(error = %e, "failed to read concept index (read-only)");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        // Restore learned reformulations.
-        let reformulations = if store.reformulations_path().exists() {
-            match std::fs::read(store.reformulations_path()) {
-                Ok(bytes) => {
-                    match bitcode::deserialize::<super::reformulation::LearnedReformulations>(
-                        &bytes,
-                    ) {
-                        Ok(reform) => Some(reform),
-                        Err(e) => {
-                            warn!(error = %e, "failed to deserialize reformulations (read-only)");
-                            None
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(error = %e, "failed to read reformulations (read-only)");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        // concept_index and reformulations are lazy-loaded via OnceLock on first use.
+        // See Engine::get_concept_index / get_reformulations.
+        let concept_index = std::sync::OnceLock::new();
+        let reformulations = std::sync::OnceLock::new();
 
         let (graph_nodes, graph_edges) = graph
             .as_ref()

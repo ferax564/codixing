@@ -51,8 +51,9 @@ impl ImportResolver {
             Language::Php => self.resolve_php(&raw.path, source_file, raw.is_relative),
             Language::Bash => self.resolve_bash(&raw.path, source_file),
             Language::Matlab => self.resolve_matlab(&raw.path, source_file),
-            // Config and doc languages have no import resolution.
-            Language::Yaml
+            // Config, doc, and assembly have no import resolution.
+            Language::Assembly
+            | Language::Yaml
             | Language::Toml
             | Language::Dockerfile
             | Language::Makefile

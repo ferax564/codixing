@@ -291,9 +291,11 @@ enum Command {
         #[arg(long)]
         json: bool,
 
-        /// Maximum matches to return (default: 50).
-        #[arg(long, default_value = "50")]
-        limit: usize,
+        /// Maximum matches to return. Default is 50 for per-line output. When
+        /// `--count` or `--files-with-matches` is set and no explicit limit is
+        /// passed, the cap is dropped so totals reflect the real match set.
+        #[arg(long)]
+        limit: Option<usize>,
     },
 
     /// Find all code locations that reference a symbol (call sites, imports, usages).
@@ -1213,7 +1215,7 @@ struct GrepArgs {
     count: bool,
     files_with_matches: bool,
     json: bool,
-    limit: usize,
+    limit: Option<usize>,
 }
 
 fn cmd_grep(args: GrepArgs) -> Result<()> {
@@ -1222,6 +1224,14 @@ fn cmd_grep(args: GrepArgs) -> Result<()> {
     let sym = args.context.unwrap_or(0);
     let before_context = args.before.unwrap_or(sym).min(5);
     let after_context = args.after.unwrap_or(sym).min(5);
+
+    // Count / files-with-matches need the true total, not a 50-hit cap.
+    // When the user explicitly passes --limit we still honour it.
+    let effective_limit = match args.limit {
+        Some(n) => n,
+        None if args.count || args.files_with_matches => usize::MAX,
+        None => 50,
+    };
 
     // `--file` targets a single file — glob it directly and skip the trigram
     // prefilter so we see every match even in files outside the indexed set.
@@ -1246,7 +1256,7 @@ fn cmd_grep(args: GrepArgs) -> Result<()> {
             after_context,
             args.count,
             args.files_with_matches,
-            args.limit,
+            effective_limit,
         ) {
             print!("{text}");
             if !text.ends_with('\n') {
@@ -1271,7 +1281,7 @@ fn cmd_grep(args: GrepArgs) -> Result<()> {
         file_glob: effective_glob,
         before_context,
         after_context,
-        limit: args.limit,
+        limit: effective_limit,
     };
 
     let matches = engine

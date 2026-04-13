@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.37.0] — 2026-04-13
+
+v0.37 is a performance and coverage release driven by dogfooding `codixing grep` on the Linux kernel. Three big wins: a compact v2 trigram format (~86% smaller on-disk), lazy-loading of concept+reformulation blobs (~2.6 GB of cold-start bitcode decode deferred), and assembly file coverage for kernel/embedded repos. Plus several grep UX fixes surfaced by the same dogfooding run.
+
+### Added
+- **Trigram index v2 on-disk format** — `chunk_trigram.bin` gains an `encoding_flags` header and two pluggable codecs: **delta + varint + u32 IDs** (default; Russ Cox codesearch scheme) and **roaring bitmaps** (alternative, production-grade via the `roaring` crate). On a representative test corpus v2 is **86% smaller than v1** (181 KB → 25 KB). Projected Linux kernel impact: 3.0 GB → ~400 MB. Readers dispatch on the version field (v1 still supported for backward compatibility) and use the compact mmap entry layout (16-byte trigram entries with `posting_byte_off` / `posting_count` / `posting_byte_size`). 5 new round-trip tests in `grep_trigram_test.rs`.
+- **Lazy-loaded `concept_index` and `reformulations`** — `Engine::open` no longer eagerly deserializes `concepts.bin` (2.1 GB on the kernel) and `reformulations.bin` (528 MB on the kernel) via bitcode. Both are now wrapped in `OnceLock<Option<T>>` and only touched when `search` actually walks the concept-aware or reformulation code paths. `codixing grep` on the kernel no longer pays that ~2.6 GB decode tax on cold start. `Engine::init` pre-seeds the OnceLocks so the freshly built index works without re-reading disk. `reload.rs` just resets the OnceLocks after sync.
+- **`Language::Assembly`** — GAS/Intel assembly files (`.S`, `.s`, `.asm`) are now indexed. Line-based label + `.globl` directive extraction, with preceding `#`/`//`/`;` comments captured as doc comments. Local labels (`.L*`, numeric) are skipped to avoid noise. Closes the kernel coverage gap where `codixing grep "schedule_tail"` missed 19 `arch/*/kernel/entry.S` files that `grep -rF` saw. 2 new tests.
+- **`AssemblyLanguage` config support** — new `ConfigLanguageSupport` implementation in `crates/core/src/language/assembly.rs`, registered in the language registry alongside YAML/TOML/Dockerfile/Makefile. No tree-sitter grammar, pure line-based entity extraction.
+
+### Changed
+- **`codixing grep --count` and `--files-with-matches` ignore the default `--limit`** — previously both modes were clamped by the 50-hit cap, producing e.g. "50 matches across 2 files" when the real total was 390/57. `--limit` is now `Option<usize>`; when unset and `--count` or `--files-with-matches` is passed, the cap is dropped so totals reflect the real match set. Explicit `--limit` is still honoured for backward compat.
+- **`codixing grep` now errors clearly on pre-v0.33 indexes** — previously returned `0 matches across 0 files` silently when the index had no `file_chunk_counts` (pre-content-trigram era), giving no hint to the user. Now surfaces `"grep requires an indexed file set but the index is empty — this is likely a pre-v0.33 index built before the content trigram was added. Run codixing init <root> to rebuild."` as an error.
+- **`Engine::open` cold start floor cut by ~2.6 GB** — see the lazy-load bullet above. Biggest single win for `codixing grep` on large repos.
+
+### Fixed
+- **Silent zero-match on indexes without a content trigram** — see the Changed entry above.
+- **`--count` undercounting due to default `--limit`** — see the Changed entry above.
+
 ## [0.36.0] — 2026-04-12
 
 v0.36 closes the last grep-fallback gap and collapses the CI→release pipeline so tagging no longer spends ~25 min rebuilding what CI has already cached. 2 PRs: #80 (`codixing grep`), #81 (CI binary reuse). Skipping the v0.35.x patch series — v0.35.0 shipped clean.
