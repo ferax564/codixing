@@ -583,13 +583,9 @@ impl TrigramIndex {
         // the file wasn't mutated, not its format. The previous v1 fast-path
         // assumed the file matched the writer; for the v2 transition we always
         // re-write so a v1 file on disk gets upgraded.
-        let mut owner: Option<TrigramIndex>;
-        let entries: Vec<([u8; 3], Vec<u32>)> = if self.mmap.is_some() {
+        let entries: Vec<([u8; 3], Vec<u32>)> = if let Some(backing) = self.mmap.as_ref() {
             // Materialize without mutating self by cloning into a local index.
             let mut tmp = TrigramIndex::new();
-            // Reuse load_binary's mmap data via a fresh ensure_mutable on a clone:
-            // simpler — just walk the mmap directly here.
-            let backing = self.mmap.as_ref().unwrap();
             tmp.chunk_count = self.chunk_count;
             let data = &backing.mmap[..];
             for i in 0..backing.trigram_count as usize {
@@ -628,9 +624,7 @@ impl TrigramIndex {
                 };
                 tmp.index.insert(trigram, ids);
             }
-            owner = Some(tmp);
-            let owned = owner.as_ref().unwrap();
-            let mut entries: Vec<([u8; 3], Vec<u32>)> = owned
+            let mut entries: Vec<([u8; 3], Vec<u32>)> = tmp
                 .index
                 .iter()
                 .map(|(k, v)| (*k, v.iter().map(|&id| id as u32).collect()))
@@ -638,7 +632,6 @@ impl TrigramIndex {
             entries.sort_by_key(|(k, _)| *k);
             entries
         } else {
-            owner = None;
             let mut entries: Vec<([u8; 3], Vec<u32>)> = self
                 .index
                 .iter()
@@ -647,8 +640,6 @@ impl TrigramIndex {
             entries.sort_by_key(|(k, _)| *k);
             entries
         };
-        // Drop unused variable to silence warnings on the no-mmap path.
-        let _ = owner.take();
 
         // Encode each posting list according to the chosen codec.
         let mut blobs: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
@@ -1099,7 +1090,11 @@ impl FileTrigramIndex {
                 .iter()
                 .filter_map(|&i| {
                     let p = self.files[i as usize].as_str();
-                    if p.is_empty() { None } else { Some(p) }
+                    if p.is_empty() {
+                        None
+                    } else {
+                        Some(p)
+                    }
                 })
                 .collect(),
         )
@@ -1137,7 +1132,11 @@ impl FileTrigramIndex {
                 .iter()
                 .filter_map(|&i| {
                     let p = self.files[i as usize].as_str();
-                    if p.is_empty() { None } else { Some(p) }
+                    if p.is_empty() {
+                        None
+                    } else {
+                        Some(p)
+                    }
                 })
                 .collect(),
         )
@@ -1256,8 +1255,8 @@ impl FileTrigramIndex {
 ///
 /// Use with [`FileTrigramIndex::execute_plan`].
 pub fn build_query_plan(pattern: &str) -> QueryPlan {
-    use regex_syntax::Parser;
     use regex_syntax::hir::{Hir, HirKind};
+    use regex_syntax::Parser;
 
     let hir = match Parser::new().parse(pattern) {
         Ok(h) => h,
