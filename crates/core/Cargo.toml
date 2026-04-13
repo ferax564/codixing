@@ -102,7 +102,11 @@ scraper = "0.22"
 [dev-dependencies]
 # Enable the test-only `Engine::__test_*` probes for the lazy_load_test
 # integration suite without widening the crate's public semver surface.
-codixing-core = { path = ".", features = ["internal-testing"] }
+# `default-features = false` is critical: without it, cargo re-enables the
+# `usearch` default feature even when the test run passes
+# `--no-default-features` (Windows CI breaks because usearch 2.24 won't
+# compile on MSVC).
+codixing-core = { path = ".", default-features = false, features = ["internal-testing"] }
 tempfile.workspace = true
 criterion.workspace = true
 serial_test.workspace = true
