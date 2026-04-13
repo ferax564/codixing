@@ -734,6 +734,23 @@ mod tests {
     }
 
     #[test]
+    fn assembly_import_returns_none() {
+        // Assembly has no import resolution — v0.37 added it to the line-based
+        // language set. This test pins that behavior so regressions trip CI.
+        let resolver = make_resolver(&["arch/arm64/kernel/entry.S"]);
+        let raw = RawImport {
+            path: "foo".to_string(),
+            language: Language::Assembly,
+            is_relative: false,
+        };
+        assert_eq!(
+            resolver.resolve(&raw, "arch/arm64/kernel/entry.S"),
+            None,
+            "assembly imports should always resolve to None"
+        );
+    }
+
+    #[test]
     fn rust_crate_import_resolves_to_src_file() {
         let resolver = make_resolver(&["src/parser.rs", "src/engine.rs"]);
         let raw = RawImport {

@@ -1282,6 +1282,7 @@ fn cmd_grep(args: GrepArgs) -> Result<()> {
         before_context,
         after_context,
         limit: effective_limit,
+        count_mode: args.count || args.files_with_matches,
     };
 
     let matches = engine

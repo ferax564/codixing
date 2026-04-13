@@ -27,16 +27,49 @@ impl ConfigLanguageSupport for AssemblyLanguage {
 }
 
 fn extract_assembly_entities(text: &str) -> Vec<SemanticEntity> {
-    let lines: Vec<&str> = text.lines().collect();
+    // Walk the raw source bytes so `byte_range` lines up with the real
+    // content regardless of line ending flavour (LF, CRLF, or mixed).
+    // `str::lines()` strips trailing `\r\n` or `\n`, so computing offsets
+    // from `line.len() + 1` would undercount on CRLF input.
+    let mut lines: Vec<&str> = Vec::new();
+    let mut line_starts: Vec<usize> = Vec::new();
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    line_starts.push(0);
+    while i < bytes.len() {
+        if bytes[i] == b'\n' {
+            let line_end = if i > 0 && bytes[i - 1] == b'\r' {
+                i - 1
+            } else {
+                i
+            };
+            let start = *line_starts.last().unwrap();
+            lines.push(&text[start..line_end]);
+            line_starts.push(i + 1);
+        }
+        i += 1;
+    }
+    // Final line (no trailing newline).
+    let start = *line_starts.last().unwrap();
+    if start <= bytes.len() {
+        lines.push(&text[start..bytes.len()]);
+    }
     let mut entities = Vec::new();
 
-    // First pass: collect names marked `.globl` / `.global` for visibility.
+    // First pass: collect names marked `.globl` / `.global` (space or tab).
     let mut global_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line in &lines {
         let trimmed = line.trim();
-        let rest = trimmed
-            .strip_prefix(".globl ")
-            .or_else(|| trimmed.strip_prefix(".global "));
+        let rest = [".global", ".globl"].iter().find_map(|dir| {
+            let stripped = trimmed.strip_prefix(dir)?;
+            // Must be followed by whitespace to avoid matching `.globalize`,
+            // `.globlike`, etc. GAS accepts space OR tab.
+            match stripped.chars().next() {
+                Some(c) if c == ' ' || c == '\t' => Some(stripped.trim_start()),
+                None => Some(""),
+                _ => None,
+            }
+        });
         if let Some(rest) = rest {
             for name in rest.split(|c: char| c == ',' || c.is_whitespace()) {
                 let name = name.trim();
@@ -62,7 +95,10 @@ fn extract_assembly_entities(text: &str) -> Vec<SemanticEntity> {
                     continue;
                 }
 
-                let byte_start: usize = lines[..i].iter().map(|l| l.len() + 1).sum();
+                // `line_starts[i]` points at this line's first byte in the
+                // original source. `line.len()` excludes the line terminator,
+                // so `start + len` lands on the LF / CR without including it.
+                let byte_start = line_starts[i];
                 let byte_end = byte_start + line.len();
 
                 let visibility = if global_names.contains(label_name) {
@@ -186,6 +222,36 @@ main:
 
         let main = entities.iter().find(|e| e.name == "main").unwrap();
         assert_eq!(main.visibility, Visibility::Public);
+    }
+
+    #[test]
+    fn globl_directive_with_tab_separator() {
+        // GAS accepts tabs after `.globl` / `.global`. Earlier code only
+        // stripped the literal-space form and missed tab-separated forms,
+        // causing the label to be extracted as Private instead of Public.
+        let src = "\t.globl\tentry_tab\nentry_tab:\n\tret\n";
+        let entities = extract_assembly_entities(src);
+        let entry = entities
+            .iter()
+            .find(|e| e.name == "entry_tab")
+            .expect("entry_tab label should be extracted");
+        assert_eq!(
+            entry.visibility,
+            Visibility::Public,
+            "tab-separated .globl should mark symbol Public"
+        );
+    }
+
+    #[test]
+    fn byte_range_handles_crlf_line_endings() {
+        // v0.37: use source byte offsets (not `line.len() + 1`) so CRLF
+        // doesn't offset by one per line.
+        let src = "# header\r\nfoo:\r\n\tret\r\n";
+        let entities = extract_assembly_entities(src);
+        let foo = entities.iter().find(|e| e.name == "foo").unwrap();
+        // Expected: "# header\r\n" = 10 bytes, then "foo:" starts at byte 10.
+        assert_eq!(foo.byte_range.start, 10);
+        assert_eq!(foo.byte_range.end, 14); // "foo:" is 4 bytes
     }
 
     #[test]

@@ -112,7 +112,7 @@ rustqueue = { git = "https://github.com/ferax564/rustqueue", tag = "v0.2.0", def
 memmap2 = "0.9"
 
 # Roaring bitmaps for compressed posting lists (v0.37 trigram index codec)
-roaring = "0.10"
+roaring = "0.11"
 
 # Testing
 tempfile = "3"

@@ -144,6 +144,12 @@ impl Engine {
             }
         }
 
+        // Refresh the Tantivy reader FIRST so the trigram rebuild below reads
+        // the newest committed segments. Previously this was done after the
+        // rebuild, which meant the caches were populated from the old
+        // pre-sync segment view — stale for ~one reload cycle.
+        self.tantivy.refresh_reader()?;
+
         // Rebuild trigram index from Tantivy content (chunk_meta may have empty content).
         let t = rebuild_trigram_from_tantivy(&self.tantivy);
         self.trigram = std::sync::OnceLock::new();
@@ -152,9 +158,6 @@ impl Engine {
         // Reset lazy caches so the next access re-reads fresh data from disk.
         self.concept_index = std::sync::OnceLock::new();
         self.reformulations = std::sync::OnceLock::new();
-
-        // Refresh the Tantivy reader so it picks up new segments.
-        self.tantivy.refresh_reader()?;
 
         info!("read-only engine reloaded from disk");
         Ok(())

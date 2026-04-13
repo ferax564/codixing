@@ -583,6 +583,21 @@ impl TrigramIndex {
         // the file wasn't mutated, not its format. The previous v1 fast-path
         // assumed the file matched the writer; for the v2 transition we always
         // re-write so a v1 file on disk gets upgraded.
+        // Fallible narrowing helper. v2 stores u32 IDs; reject any index whose
+        // logical chunk ID space overflows u32 instead of silently truncating.
+        fn narrow_ids(ids: &[u64]) -> Result<Vec<u32>> {
+            ids.iter()
+                .map(|&id| {
+                    u32::try_from(id).map_err(|_| {
+                        CodixingError::Serialization(format!(
+                            "trigram v2 format cannot represent chunk ID {id} — exceeds u32::MAX; \
+                             this index has > 4B chunks and must stay on v1 or wait for a 64-bit codec"
+                        ))
+                    })
+                })
+                .collect()
+        }
+
         let entries: Vec<([u8; 3], Vec<u32>)> = if let Some(backing) = self.mmap.as_ref() {
             // Materialize without mutating self by cloning into a local index.
             let mut tmp = TrigramIndex::new();
@@ -627,16 +642,16 @@ impl TrigramIndex {
             let mut entries: Vec<([u8; 3], Vec<u32>)> = tmp
                 .index
                 .iter()
-                .map(|(k, v)| (*k, v.iter().map(|&id| id as u32).collect()))
-                .collect();
+                .map(|(k, v)| narrow_ids(v).map(|ids| (*k, ids)))
+                .collect::<Result<Vec<_>>>()?;
             entries.sort_by_key(|(k, _)| *k);
             entries
         } else {
             let mut entries: Vec<([u8; 3], Vec<u32>)> = self
                 .index
                 .iter()
-                .map(|(k, v)| (*k, v.iter().map(|&id| id as u32).collect()))
-                .collect();
+                .map(|(k, v)| narrow_ids(v).map(|ids| (*k, ids)))
+                .collect::<Result<Vec<_>>>()?;
             entries.sort_by_key(|(k, _)| *k);
             entries
         };
@@ -644,37 +659,53 @@ impl TrigramIndex {
         // Encode each posting list according to the chosen codec.
         let mut blobs: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
         let mut total_blob_bytes: usize = 0;
-        let mut total_postings: u32 = 0;
+        let mut total_postings_u64: u64 = 0;
         for (_tri, ids) in &entries {
             let blob = encode_posting_blob(ids, codec);
             total_blob_bytes += blob.len();
-            total_postings += ids.len() as u32;
+            total_postings_u64 += ids.len() as u64;
             blobs.push(blob);
         }
 
-        let trigram_count = entries.len() as u32;
+        let to_u32 = |what: &str, v: u64| -> Result<u32> {
+            u32::try_from(v).map_err(|_| {
+                CodixingError::Serialization(format!(
+                    "trigram v2 {what} {v} exceeds u32::MAX — index too large for v2 format"
+                ))
+            })
+        };
+
+        let trigram_count = to_u32("trigram_count", entries.len() as u64)?;
+        let chunk_count_u32 = to_u32("chunk_count", self.chunk_count as u64)?;
+        let total_postings = to_u32("total_postings", total_postings_u64)?;
         let total_size =
             MMAP_V2_HEADER_SIZE + (trigram_count as usize) * MMAP_V2_ENTRY_SIZE + total_blob_bytes;
+        // Validate the postings section fits in a u32 byte offset — the
+        // per-entry `posting_byte_off` is u32.
+        let _ = to_u32("postings section byte size", total_blob_bytes as u64)?;
         let mut buf = Vec::with_capacity(total_size);
 
         // Header.
         buf.extend_from_slice(&MMAP_MAGIC.to_le_bytes());
         buf.extend_from_slice(&MMAP_VERSION_V2.to_le_bytes());
         buf.extend_from_slice(&trigram_count.to_le_bytes());
-        buf.extend_from_slice(&(self.chunk_count as u32).to_le_bytes());
+        buf.extend_from_slice(&chunk_count_u32.to_le_bytes());
         buf.extend_from_slice(&total_postings.to_le_bytes());
         buf.extend_from_slice(&codec.to_flag_bits().to_le_bytes());
 
         // Trigram index entries — write fixed-stride entries with byte
         // offsets/sizes that point into the postings section that follows.
-        let mut byte_off: u32 = 0;
+        let mut byte_off: u64 = 0;
         for ((trigram, ids), blob) in entries.iter().zip(blobs.iter()) {
+            let off_u32 = to_u32("posting_byte_off", byte_off)?;
+            let count_u32 = to_u32("posting_count", ids.len() as u64)?;
+            let blob_len_u32 = to_u32("posting_byte_size", blob.len() as u64)?;
             buf.extend_from_slice(trigram);
             buf.push(0); // padding
-            buf.extend_from_slice(&byte_off.to_le_bytes());
-            buf.extend_from_slice(&(ids.len() as u32).to_le_bytes());
-            buf.extend_from_slice(&(blob.len() as u32).to_le_bytes());
-            byte_off += blob.len() as u32;
+            buf.extend_from_slice(&off_u32.to_le_bytes());
+            buf.extend_from_slice(&count_u32.to_le_bytes());
+            buf.extend_from_slice(&blob_len_u32.to_le_bytes());
+            byte_off += blob.len() as u64;
         }
 
         // Postings (codec blobs).
@@ -936,8 +967,13 @@ fn decode_varint_u32(data: &[u8]) -> Option<(u32, usize)> {
             return None;
         }
         let payload = (byte & 0x7F) as u32;
-        // Detect overflow: if we've already accumulated bits beyond the shift
-        // window, the value can't fit.
+        // Reject payloads that don't fit in the remaining `32 - shift` bits.
+        // `checked_shl` alone only validates the shift amount; a payload like
+        // 0x7F at shift=28 would silently drop bits because 0x7F << 28 > u32::MAX.
+        let bits_available = 32 - shift;
+        if bits_available < 7 && (payload >> bits_available) != 0 {
+            return None;
+        }
         let shifted = payload.checked_shl(shift)?;
         result |= shifted;
         if byte & 0x80 == 0 {
@@ -1090,11 +1126,7 @@ impl FileTrigramIndex {
                 .iter()
                 .filter_map(|&i| {
                     let p = self.files[i as usize].as_str();
-                    if p.is_empty() {
-                        None
-                    } else {
-                        Some(p)
-                    }
+                    if p.is_empty() { None } else { Some(p) }
                 })
                 .collect(),
         )
@@ -1132,11 +1164,7 @@ impl FileTrigramIndex {
                 .iter()
                 .filter_map(|&i| {
                     let p = self.files[i as usize].as_str();
-                    if p.is_empty() {
-                        None
-                    } else {
-                        Some(p)
-                    }
+                    if p.is_empty() { None } else { Some(p) }
                 })
                 .collect(),
         )
@@ -1255,8 +1283,8 @@ impl FileTrigramIndex {
 ///
 /// Use with [`FileTrigramIndex::execute_plan`].
 pub fn build_query_plan(pattern: &str) -> QueryPlan {
-    use regex_syntax::hir::{Hir, HirKind};
     use regex_syntax::Parser;
+    use regex_syntax::hir::{Hir, HirKind};
 
     let hir = match Parser::new().parse(pattern) {
         Ok(h) => h,

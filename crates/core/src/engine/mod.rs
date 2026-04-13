@@ -208,6 +208,13 @@ pub struct GrepOptions {
     pub after_context: usize,
     /// Maximum total matches to return. `0` is treated as the default (50).
     pub limit: usize,
+    /// When true, skip storing full line text / context / byte offsets for each
+    /// match. Used by `--count` and `--files-with-matches` paths that only need
+    /// `(file_path, line_number)` — keeps memory bounded when a common pattern
+    /// hits tens of thousands of lines. Does NOT affect `limit` (callers that
+    /// want the true total can additionally pass `usize::MAX`, but the per-match
+    /// cost is now ~40 bytes instead of a full `String` + context vec).
+    pub count_mode: bool,
 }
 
 impl GrepOptions {
@@ -229,6 +236,7 @@ impl GrepOptions {
             before_context: context_lines,
             after_context: context_lines,
             limit,
+            count_mode: false,
         }
     }
 }
@@ -511,28 +519,28 @@ impl Engine {
     /// Test-only: returns `true` if the lazy concept index OnceLock has been
     /// initialized (regardless of whether the underlying value is `Some` or
     /// `None`). Used to verify lazy-load behavior in `lazy_load_test.rs`.
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn __test_concept_loaded(&self) -> bool {
         self.concept_index.get().is_some()
     }
 
     /// Test-only: returns `true` if the lazy reformulations OnceLock has been
     /// initialized. See `__test_concept_loaded`.
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn __test_reformulations_loaded(&self) -> bool {
         self.reformulations.get().is_some()
     }
 
     /// Test-only: triggers the lazy load of the concept index. Returns `true`
     /// if a concept index is present, `false` if absent or deserialize failed.
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn __test_force_load_concept(&self) -> bool {
         self.get_concept_index().is_some()
     }
 
     /// Test-only: triggers the lazy load of the reformulations. Returns `true`
     /// if reformulations are present, `false` if absent or deserialize failed.
-    #[doc(hidden)]
+    #[cfg(any(test, feature = "internal-testing"))]
     pub fn __test_force_load_reformulations(&self) -> bool {
         self.get_reformulations().is_some()
     }

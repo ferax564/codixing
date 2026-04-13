@@ -37,8 +37,15 @@ fn concept_index_lazy_loaded_on_open() {
          got eager load, defeating the v0.37 lazy-load refactor"
     );
 
-    // First access lazy-loads it.
-    let _ = engine.__test_force_load_concept();
+    // First access lazy-loads it — and the loaded value must be present, not
+    // just a cached None from a failed deserialize. This catches the case
+    // where the OnceLock transitions to `Some(None)` silently on parse error.
+    assert!(
+        engine.__test_force_load_concept(),
+        "concept_index did not materialise on lazy load — concepts.bin missing \
+         or failed to deserialize. The multi-language test project should \
+         always produce a non-empty concept index."
+    );
     assert!(
         engine.__test_concept_loaded(),
         "concept_index OnceLock should be set after the first get_concept_index() call"
@@ -65,6 +72,9 @@ fn reformulations_lazy_loaded_on_open() {
          got eager load, defeating the v0.37 lazy-load refactor"
     );
 
+    // Reformulations may legitimately be `None` on tiny test projects (the
+    // builder skips empty outputs), so just verify the OnceLock transitioned
+    // from unset to set — that's the lazy-load invariant we care about.
     let _ = engine.__test_force_load_reformulations();
     assert!(
         engine.__test_reformulations_loaded(),

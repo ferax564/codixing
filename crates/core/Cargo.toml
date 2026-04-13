@@ -33,6 +33,11 @@ qwen3 = ["dep:ort-qwen3", "dep:tokenizers-qwen3", "dep:ndarray-qwen3"]
 ## crash recovery and retry. Falls back to the sync path on failure.
 rustqueue = ["dep:rustqueue", "dep:tokio"]
 
+## Exposes a handful of `__test_*` probe methods on `Engine` for integration
+## tests that live outside the crate (e.g. `crates/core/tests/*.rs`). Not part
+## of the public semver surface — gate is `cfg(any(test, feature = "internal-testing"))`.
+internal-testing = []
+
 [dependencies]
 # Optional Qdrant backend
 qdrant-client = { workspace = true, optional = true }
@@ -95,6 +100,9 @@ comrak = { version = "0.37", default-features = false }
 scraper = "0.22"
 
 [dev-dependencies]
+# Enable the test-only `Engine::__test_*` probes for the lazy_load_test
+# integration suite without widening the crate's public semver surface.
+codixing-core = { path = ".", features = ["internal-testing"] }
 tempfile.workspace = true
 criterion.workspace = true
 serial_test.workspace = true

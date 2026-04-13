@@ -60,7 +60,7 @@ impl Engine {
         if let Some(ref queries) = query.queries {
             if queries.len() >= 2 {
                 let mut fused = self.search_multi(queries, &query)?;
-                let ctx = self.search_context(&query_str);
+                let ctx = self.search_context(&query_str, strategy);
                 pipeline.run(&mut fused, &ctx)?;
                 apply_doc_filter(&mut fused, doc_filter);
                 return Ok(fused);
@@ -86,7 +86,7 @@ impl Engine {
                     );
                     if reformulations.len() >= 2 {
                         let mut fused = self.search_multi(&reformulations, &query)?;
-                        let ctx = self.search_context(&query_str);
+                        let ctx = self.search_context(&query_str, strategy);
                         pipeline.run(&mut fused, &ctx)?;
                         apply_doc_filter(&mut fused, doc_filter);
                         return Ok(fused);
@@ -120,7 +120,7 @@ impl Engine {
                     );
                     if reformulations.len() >= 2 {
                         let mut fused = self.search_multi(&reformulations, &query)?;
-                        let ctx = self.search_context(&query_str);
+                        let ctx = self.search_context(&query_str, strategy);
                         pipeline.run(&mut fused, &ctx)?;
                         apply_doc_filter(&mut fused, doc_filter);
                         return Ok(fused);
@@ -200,7 +200,7 @@ impl Engine {
         };
 
         // Apply the post-retrieval pipeline (boosts, demotions, dedup, truncation).
-        let ctx = self.search_context(&query_str);
+        let ctx = self.search_context(&query_str, strategy);
         pipeline.run(&mut results, &ctx)?;
 
         // Apply hard doc-type filter after pipeline.
@@ -232,7 +232,18 @@ impl Engine {
     }
 
     /// Build a [`SearchContext`] for pipeline stages.
-    fn search_context<'a>(&'a self, query: &'a str) -> SearchContext<'a> {
+    ///
+    /// Only loads the concept index for strategies whose pipeline includes
+    /// `ConceptBoostStage` (Fast, Thorough, Explore, Deep). Instant / Exact /
+    /// Semantic strategies skip the load entirely, preserving the v0.37
+    /// cold-start win for grep-adjacent paths that don't need concepts.
+    fn search_context<'a>(&'a self, query: &'a str, strategy: Strategy) -> SearchContext<'a> {
+        let concepts = match strategy {
+            Strategy::Fast | Strategy::Thorough | Strategy::Explore | Strategy::Deep => {
+                self.get_concept_index()
+            }
+            Strategy::Instant | Strategy::Exact | Strategy::Semantic => None,
+        };
         SearchContext {
             query,
             symbols: &self.symbols,
@@ -240,7 +251,7 @@ impl Engine {
             graph_boost_weight: self.config.graph.boost_weight,
             recency_map: Some(self.get_recency_map()),
             chunk_meta: Some(&self.chunk_meta),
-            concepts: self.get_concept_index(),
+            concepts,
         }
     }
 
