@@ -51,8 +51,9 @@ impl ImportResolver {
             Language::Php => self.resolve_php(&raw.path, source_file, raw.is_relative),
             Language::Bash => self.resolve_bash(&raw.path, source_file),
             Language::Matlab => self.resolve_matlab(&raw.path, source_file),
-            // Config and doc languages have no import resolution.
-            Language::Yaml
+            // Config, doc, and assembly have no import resolution.
+            Language::Assembly
+            | Language::Yaml
             | Language::Toml
             | Language::Dockerfile
             | Language::Makefile
@@ -730,6 +731,23 @@ mod tests {
             files.iter().map(|s| s.to_string()).collect(),
             PathBuf::from("/project"),
         )
+    }
+
+    #[test]
+    fn assembly_import_returns_none() {
+        // Assembly has no import resolution — v0.37 added it to the line-based
+        // language set. This test pins that behavior so regressions trip CI.
+        let resolver = make_resolver(&["arch/arm64/kernel/entry.S"]);
+        let raw = RawImport {
+            path: "foo".to_string(),
+            language: Language::Assembly,
+            is_relative: false,
+        };
+        assert_eq!(
+            resolver.resolve(&raw, "arch/arm64/kernel/entry.S"),
+            None,
+            "assembly imports should always resolve to None"
+        );
     }
 
     #[test]

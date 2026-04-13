@@ -1,3 +1,4 @@
+pub mod assembly;
 pub mod bash;
 pub mod c;
 pub mod cpp;
@@ -52,6 +53,8 @@ pub enum Language {
     Php,
     Bash,
     Matlab,
+    // Systems / low-level (line-based, no tree-sitter)
+    Assembly,
     // Config languages (line-based, no tree-sitter)
     Yaml,
     Toml,
@@ -87,6 +90,7 @@ impl Language {
             Self::Php => "PHP",
             Self::Bash => "Bash",
             Self::Matlab => "Matlab",
+            Self::Assembly => "Assembly",
             Self::Yaml => "YAML",
             Self::Toml => "TOML",
             Self::Dockerfile => "Dockerfile",
@@ -119,6 +123,7 @@ impl Language {
             Self::Php => &["php", "phtml", "php3", "php4", "php5", "phps"],
             Self::Bash => &["sh", "bash", "zsh", "bats"],
             Self::Matlab => &["m"],
+            Self::Assembly => &["S", "s", "asm"],
             Self::Yaml => &["yaml", "yml"],
             Self::Toml => &["toml"],
             Self::Dockerfile => &["dockerfile"],
@@ -137,7 +142,8 @@ impl Language {
     pub fn is_tree_sitter(self) -> bool {
         !matches!(
             self,
-            Self::Yaml
+            Self::Assembly
+                | Self::Yaml
                 | Self::Toml
                 | Self::Dockerfile
                 | Self::Makefile
@@ -174,6 +180,7 @@ pub const ALL_LANGUAGES: &[Language] = &[
     Language::Php,
     Language::Bash,
     Language::Matlab,
+    Language::Assembly,
     Language::Yaml,
     Language::Toml,
     Language::Dockerfile,
@@ -354,6 +361,7 @@ impl LanguageRegistry {
             Arc::new(matlab::MatlabLanguage),
         ];
         let config_impls: Vec<Arc<dyn ConfigLanguageSupport>> = vec![
+            Arc::new(assembly::AssemblyLanguage),
             Arc::new(yaml::YamlLanguage),
             Arc::new(toml_lang::TomlLanguage),
             Arc::new(dockerfile::DockerfileLanguage),

@@ -133,6 +133,7 @@ pub(crate) fn call_grep_code(engine: &Engine, args: &Value) -> (String, bool) {
         before_context,
         after_context,
         limit,
+        count_mode: count_only || files_only,
     };
 
     match engine.grep_code_opts(&opts) {

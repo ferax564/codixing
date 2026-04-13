@@ -622,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "codixing"
-version = "0.36.0"
+version = "0.37.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -638,9 +638,10 @@ dependencies = [
 
 [[package]]
 name = "codixing-core"
-version = "0.36.0"
+version = "0.37.0"
 dependencies = [
  "bitcode",
+ "codixing-core",
  "comrak",
  "criterion",
  "dashmap 6.1.0",
@@ -661,6 +662,7 @@ dependencies = [
  "rayon",
  "regex",
  "regex-syntax",
+ "roaring",
  "rustqueue",
  "safetensors 0.5.3",
  "scraper",
@@ -699,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "codixing-lsp"
-version = "0.36.0"
+version = "0.37.0"
 dependencies = [
  "codixing-core",
  "serde_json",
@@ -712,7 +714,7 @@ dependencies = [
 
 [[package]]
 name = "codixing-mcp"
-version = "0.36.0"
+version = "0.37.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -729,7 +731,7 @@ dependencies = [
 
 [[package]]
 name = "codixing-server"
-version = "0.36.0"
+version = "0.37.0"
 dependencies = [
  "anyhow",
  "axum 0.8.8",
@@ -3578,6 +3580,16 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "roaring"
+version = "0.11.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ba9ce64a8f45d7fc86358410bb1a82e8c987504c0d4900e9141d69a9f26c885"
+dependencies = [
+ "bytemuck",
+ "byteorder",
 ]
 
 [[package]]

@@ -423,7 +423,7 @@ impl Engine {
 
             // 3. Get concepts — from identifier decomposition + concept index
             let mut concepts = decompose_identifier(&sym.name);
-            if let Some(ref ci) = self.concept_index {
+            if let Some(ci) = self.get_concept_index() {
                 let concept_hits = ci.lookup_query(&sym.name);
                 for (cluster, _) in concept_hits.iter().take(5) {
                     concepts.push(cluster.name.clone());

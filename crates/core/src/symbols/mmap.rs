@@ -408,6 +408,7 @@ pub fn language_to_u8(lang: Language) -> u8 {
         Language::Xml => 23,
         Language::Markdown => 24,
         Language::Html => 25,
+        Language::Assembly => 26,
     }
 }
 
@@ -440,6 +441,7 @@ pub fn u8_to_language(v: u8) -> Language {
         23 => Language::Xml,
         24 => Language::Markdown,
         25 => Language::Html,
+        26 => Language::Assembly,
         _ => Language::Rust, // fallback
     }
 }

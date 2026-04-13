@@ -103,6 +103,24 @@ impl Engine {
     pub fn grep_code_opts(&self, opts: &GrepOptions) -> Result<Vec<GrepMatch>> {
         use regex::RegexBuilder;
 
+        // Guard against pre-v0.33 indexes whose file_chunk_counts / file_trigram
+        // are empty because they were built before the content-side trigram
+        // index existed. Before v0.37 this silently returned "0 matches across
+        // 0 files" with no hint — surface it as an actionable error instead.
+        //
+        // Require BOTH `file_chunk_counts` empty AND `chunk_meta` empty before
+        // erroring, so we don't false-positive on valid indexes whose mmap
+        // hydration transiently has not populated one of the two maps yet.
+        if self.file_chunk_counts.is_empty() && self.chunk_meta.is_empty() {
+            return Err(CodixingError::Index(
+                "grep requires an indexed file set but the index is empty — \
+                 either this is a pre-v0.33 index built before the content \
+                 trigram was added, or mmap hydration failed. \
+                 Run `codixing init <root>` to rebuild."
+                    .to_string(),
+            ));
+        }
+
         let before_context = opts.before_context.min(5);
         let after_context = opts.after_context.min(5);
         let limit = if opts.limit == 0 { 50 } else { opts.limit };
@@ -172,6 +190,7 @@ impl Engine {
         let results = Mutex::new(Vec::<GrepMatch>::new());
         let config = &self.config;
         let invert = opts.invert;
+        let count_mode = opts.count_mode;
 
         candidate_paths.par_iter().for_each(|rel_path| {
             if done.load(Ordering::Relaxed) {
@@ -197,6 +216,22 @@ impl Engine {
                 let m = re.find(line);
                 let hit = if invert { m.is_none() } else { m.is_some() };
                 if !hit {
+                    continue;
+                }
+
+                // Count mode: skip line text + context allocations entirely.
+                // A common kernel grep (e.g. GFP_KERNEL, 30K+ hits) would
+                // otherwise allocate ~30K String copies just for `--count`.
+                if count_mode {
+                    file_matches.push(GrepMatch {
+                        file_path: rel_path.to_string(),
+                        line_number: i as u64,
+                        line: String::new(),
+                        match_start: 0,
+                        match_end: 0,
+                        before: Vec::new(),
+                        after: Vec::new(),
+                    });
                     continue;
                 }
 

@@ -3,7 +3,7 @@ members = ["crates/core", "crates/cli", "crates/mcp", "crates/lsp", "crates/serv
 resolver = "3"
 
 [workspace.package]
-version = "0.36.0"
+version = "0.37.0"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.85"
@@ -110,6 +110,9 @@ rustqueue = { git = "https://github.com/ferax564/rustqueue", tag = "v0.2.0", def
 
 # Memory-mapped I/O
 memmap2 = "0.9"
+
+# Roaring bitmaps for compressed posting lists (v0.37 trigram index codec)
+roaring = "0.11"
 
 # Testing
 tempfile = "3"
