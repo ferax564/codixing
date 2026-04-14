@@ -4,7 +4,6 @@ description = "Assemble cross-file context for understanding a specific code loc
 handler = "context::call_assemble_location_context"
 calling_convention = "engine_args"
 read_only = true
-medium = true
 
 [tools.params.file]
 type = "string"

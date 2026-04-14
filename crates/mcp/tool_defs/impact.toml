@@ -4,7 +4,6 @@ description = "Analyze the blast radius of changing a file. Returns direct depen
 handler = "analysis::call_change_impact"
 calling_convention = "engine_args"
 read_only = true
-medium = true
 
 [tools.params.file]
 type = "string"
@@ -17,7 +16,6 @@ description = "List the public API surface of a file — exported functions, str
 handler = "analysis::call_api_surface"
 calling_convention = "engine_args"
 read_only = true
-medium = true
 
 [tools.params.file]
 type = "string"
@@ -30,7 +28,6 @@ description = "Show type relationships for a symbol — what it implements, exte
 handler = "analysis::call_type_relations"
 calling_convention = "engine_args"
 read_only = true
-medium = true
 
 [tools.params.symbol]
 type = "string"
@@ -43,7 +40,6 @@ description = "Find usage examples for a symbol — from tests, call sites, and 
 handler = "analysis::call_find_examples"
 calling_convention = "engine_args"
 read_only = true
-medium = true
 
 [tools.params.symbol]
 type = "string"

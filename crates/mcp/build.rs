@@ -27,7 +27,6 @@ struct ToolDef {
     handler: String,
     calling_convention: String,
     read_only: bool,
-    medium: bool,
     meta: bool,
     requires_federation: bool,
     params: Vec<ParamDef>,
@@ -87,7 +86,6 @@ fn parse_tool_section(section: &str) -> ToolDef {
     let mut handler = String::new();
     let mut calling_convention = String::new();
     let mut read_only = true;
-    let mut medium = false;
     let mut meta = false;
     let mut requires_federation = false;
     let mut params: BTreeMap<String, ParamDef> = BTreeMap::new();
@@ -152,7 +150,6 @@ fn parse_tool_section(section: &str) -> ToolDef {
                     "handler" => handler = value,
                     "calling_convention" => calling_convention = value,
                     "read_only" => read_only = value == "true",
-                    "medium" => medium = value == "true",
                     "meta" => meta = value == "true",
                     "requires_federation" => requires_federation = value == "true",
                     _ => {}
@@ -171,7 +168,6 @@ fn parse_tool_section(section: &str) -> ToolDef {
         handler,
         calling_convention,
         read_only,
-        medium,
         meta,
         requires_federation,
         params: ordered_params,
@@ -409,37 +405,6 @@ fn main() {
         code.push('\n');
         code.push_str("}\n\n");
     }
-
-    // MEDIUM_TOOLS constant
-    let medium_names: Vec<&str> = main_tools
-        .iter()
-        .filter(|t| t.medium)
-        .map(|t| t.name.as_str())
-        .collect();
-
-    code.push_str("/// Curated set of tool names exposed in `--medium` mode.\n");
-    code.push_str("pub const MEDIUM_TOOLS: &[&str] = &[\n");
-    for name in &medium_names {
-        code.push_str(&format!("    \"{}\",\n", name));
-    }
-    code.push_str("];\n\n");
-
-    // medium_tool_definitions() -> Value
-    code.push_str("/// Return the medium tool list for `--medium` mode.\n");
-    code.push_str("pub fn medium_tool_definitions() -> Value {\n");
-    code.push_str("    let defs = tool_definitions();\n");
-    code.push_str("    let empty = vec![];\n");
-    code.push_str("    let all_tools = defs.as_array().unwrap_or(&empty);\n");
-    code.push_str("    let subset: Vec<&Value> = all_tools\n");
-    code.push_str("        .iter()\n");
-    code.push_str("        .filter(|t| {\n");
-    code.push_str("            t.get(\"name\")\n");
-    code.push_str("                .and_then(|v| v.as_str())\n");
-    code.push_str("                .is_some_and(|name| MEDIUM_TOOLS.contains(&name))\n");
-    code.push_str("        })\n");
-    code.push_str("        .collect();\n");
-    code.push_str("    json!(subset)\n");
-    code.push_str("}\n\n");
 
     // is_read_only_tool()
     let all_tools_combined: Vec<&ToolDef> =

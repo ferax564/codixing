@@ -39,20 +39,15 @@ pub use common::ProgressReporter;
 /// Submodule containing build-time generated code from `tool_defs/*.toml`.
 ///
 /// Re-exported items: `tool_definitions`, `federation_tool_definitions`,
-/// `list_projects_tool_definition`, `medium_tool_definitions`, `MEDIUM_TOOLS`,
-/// `is_read_only_tool`, `is_meta_tool`.
+/// `list_projects_tool_definition`, `is_read_only_tool`, `is_meta_tool`.
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/tool_definitions_generated.rs"));
 }
 
 // Re-export generated public API so callers see the same interface as before.
 pub use generated::{
-    federation_tool_definitions, is_read_only_tool, list_projects_tool_definition,
-    medium_tool_definitions, tool_definitions,
+    federation_tool_definitions, is_read_only_tool, list_projects_tool_definition, tool_definitions,
 };
-// MEDIUM_TOOLS is used by tests but not the binary — suppress the unused-import warning.
-#[allow(unused_imports)]
-pub use generated::MEDIUM_TOOLS;
 
 // ---------------------------------------------------------------------------
 // Tool definitions with federation

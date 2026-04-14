@@ -12,7 +12,6 @@ use tracing::{debug, error, info, warn};
 
 use codixing_core::{Engine, FederatedEngine};
 
-use crate::ListingMode;
 use crate::progress;
 use crate::protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use crate::tools;
@@ -25,7 +24,6 @@ pub(crate) async fn run_jsonrpc_loop<R, W>(
     engine: Arc<RwLock<Engine>>,
     mut reader: tokio::io::Lines<BufReader<R>>,
     mut writer: BufWriter<W>,
-    listing_mode: ListingMode,
     federation: Option<Arc<FederatedEngine>>,
 ) -> Result<()>
 where
@@ -63,7 +61,6 @@ where
             id,
             &req.method,
             req.params,
-            listing_mode,
             &federation,
             &mut writer,
         )
@@ -90,7 +87,6 @@ async fn dispatch<W>(
     id: Value,
     method: &str,
     params: Option<Value>,
-    listing_mode: ListingMode,
     federation: &Option<Arc<FederatedEngine>>,
     writer: &mut BufWriter<W>,
 ) -> Value
@@ -100,7 +96,7 @@ where
     match method {
         "initialize" => handle_initialize(id, params),
         "initialized" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
-        "tools/list" => handle_tools_list(id, listing_mode, federation.is_some()),
+        "tools/list" => handle_tools_list(id, federation.is_some()),
         "tools/call" => handle_tools_call(engine, id, params, federation, writer).await,
         _ => {
             let err = JsonRpcError::method_not_found(id, method);
@@ -118,20 +114,8 @@ fn handle_initialize(id: Value, _params: Option<Value>) -> Value {
     serde_json::to_value(JsonRpcResponse::new(id, result)).unwrap_or(Value::Null)
 }
 
-fn handle_tools_list(id: Value, listing_mode: ListingMode, has_federation: bool) -> Value {
-    let tool_defs = match listing_mode {
-        ListingMode::Medium => {
-            let mut defs = tools::medium_tool_definitions();
-            // When federation is active, include the list_projects tool.
-            if has_federation {
-                if let Some(arr) = defs.as_array_mut() {
-                    arr.push(tools::list_projects_tool_definition());
-                }
-            }
-            defs
-        }
-        ListingMode::Full => tools::tool_definitions_with_federation(has_federation),
-    };
+fn handle_tools_list(id: Value, has_federation: bool) -> Value {
+    let tool_defs = tools::tool_definitions_with_federation(has_federation);
     let result = json!({ "tools": tool_defs });
     serde_json::to_value(JsonRpcResponse::new(id, result)).unwrap_or(Value::Null)
 }
@@ -330,7 +314,6 @@ mod tests {
                 engine,
                 BufReader::new(server_read).lines(),
                 BufWriter::new(server_write),
-                ListingMode::Full,
                 None,
             )
             .await
@@ -595,7 +578,7 @@ mod tests {
         let daemon_handle = tokio::spawn(async move {
             // Accept exactly one connection.
             let (stream, _) = listener.accept().await.unwrap();
-            crate::daemon::handle_socket_connection(stream, engine_clone, ListingMode::Full, None)
+            crate::daemon::handle_socket_connection(stream, engine_clone, None)
                 .await
                 .unwrap();
         });
@@ -669,7 +652,6 @@ mod tests {
                 engine,
                 BufReader::new(server_read).lines(),
                 BufWriter::new(server_write),
-                ListingMode::Full,
                 None,
             )
             .await
@@ -810,99 +792,6 @@ mod tests {
             responses.len(),
             2,
             "expected 2 responses (init + tool call)"
-        );
-    }
-
-    // -----------------------------------------------------------------------
-    // Compact mode notification tests
-    // -----------------------------------------------------------------------
-
-    /// Helper: run requests with a specific listing mode and collect ALL output
-    /// lines (both responses and notifications).
-    async fn run_requests_with_mode(
-        engine: Engine,
-        requests: &[Value],
-        listing_mode: ListingMode,
-    ) -> Vec<Value> {
-        let mut input = Vec::new();
-        for req in requests {
-            serde_json::to_writer(&mut input, req).unwrap();
-            input.push(b'\n');
-        }
-
-        let engine = Arc::new(RwLock::new(engine));
-
-        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
-        let (server_read, server_write) = tokio::io::split(server_stream);
-        let (mut client_read, mut client_write) = tokio::io::split(client_stream);
-
-        tokio::spawn(async move {
-            client_write.write_all(&input).await.unwrap();
-            client_write.shutdown().await.unwrap();
-        });
-
-        let loop_handle = tokio::spawn(async move {
-            run_jsonrpc_loop(
-                engine,
-                BufReader::new(server_read).lines(),
-                BufWriter::new(server_write),
-                listing_mode,
-                None,
-            )
-            .await
-            .unwrap();
-        });
-
-        let mut output = Vec::new();
-        client_read.read_to_end(&mut output).await.unwrap();
-        loop_handle.await.unwrap();
-
-        output
-            .split(|&b| b == b'\n')
-            .filter(|line| !line.is_empty())
-            .map(|line| serde_json::from_slice(line).expect("output should be valid JSON"))
-            .collect()
-    }
-
-    #[tokio::test]
-    async fn full_mode_no_list_changed_notification() {
-        let dir = tempfile::tempdir().unwrap();
-        let engine = make_test_engine(dir.path());
-
-        // In Full mode, no notification should ever be sent.
-        let all_output = run_requests_with_mode(
-            engine,
-            &[
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "initialize",
-                    "params": { "capabilities": {} }
-                }),
-                json!({
-                    "jsonrpc": "2.0",
-                    "id": 2,
-                    "method": "tools/call",
-                    "params": {
-                        "name": "code_search",
-                        "arguments": { "query": "hello", "limit": 3 }
-                    }
-                }),
-            ],
-            ListingMode::Full,
-        )
-        .await;
-
-        let list_changed: Vec<&Value> = all_output
-            .iter()
-            .filter(|v| {
-                v.get("method").and_then(|m| m.as_str()) == Some("notifications/tools/list_changed")
-            })
-            .collect();
-
-        assert!(
-            list_changed.is_empty(),
-            "expected no list_changed notification in Full mode, got: {list_changed:?}"
         );
     }
 }

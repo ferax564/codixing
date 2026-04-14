@@ -4,7 +4,6 @@ description = "Audit files for freshness by combining git recency, orphan detect
 handler = "freshness::call_audit_freshness"
 calling_convention = "engine_args"
 read_only = true
-medium = true
 
 [tools.params.threshold_days]
 type = "integer"

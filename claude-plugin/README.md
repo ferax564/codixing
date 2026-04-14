@@ -45,16 +45,11 @@ The plugin ships a **PreToolUse hook** that intercepts Grep calls targeting code
 | `/codixing-preflight` | Duplicate detection — searches for existing implementations before new features |
 | `/codixing-release` | Automated release pipeline — version bump, tests, docs, CI, blog, X post |
 
-### MCP server (57 tools)
+### MCP server (67 tools)
 
 The plugin bundles the Codixing MCP server via `npx`. On first use, it downloads the `codixing-mcp` binary (~45MB) which then runs locally — no external APIs, no cloud dependencies.
 
-| Mode | Flag | Tools in `tools/list` | Tokens | Best for |
-|------|------|-----------------------|--------|----------|
-| **Medium** | `--medium` | 17 core tools | ~2,600 | **Clients without dynamic tool discovery (e.g. Codex CLI)** |
-| Full | *(none)* | All 56 tools | ~6,600 | Claude Code and clients that handle large tool lists |
-
-All 56 tools remain callable regardless of mode via `tools/call`. The previous `--compact` mode was removed in v0.33 — see issue #67 for the background on why a daemon-proxy race condition made it silently sticky.
+All 67 tools are always advertised on `tools/list`. The previous `--medium` and `--compact` curation flags were both removed — the April 2026 agent benchmark found that `--medium` was silently hiding `get_complexity`, `review_context`, and other high-leverage tools, erasing the tool-call / token savings on the exact tasks Codixing is designed for. Full tool load restored the reproducible "66% fewer tokens, 66% fewer calls" headline.
 
 ### CLI commands (26)
 

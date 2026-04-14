@@ -564,7 +564,7 @@ pub fn handle_auth_request(req: Request) -&gt; Result&lt;Token&gt;</span>
 
         <h3>OpenAI Codex CLI</h3>
 
-        <p>Install the binary first, then register the MCP server. Codex requires the local binary &mdash; <code>npx</code> is not supported. Use <code>--medium</code> for Codex since it cannot do dynamic tool discovery.</p>
+        <p>Install the binary first, then register the MCP server. Codex requires the local binary &mdash; <code>npx</code> is not supported. All 67 tools are advertised on <code>tools/list</code> regardless of client.</p>
         <div class="pre-label">shell</div>
         <pre><code><span class="tok-cmd">curl -fsSL</span> https://codixing.com/install.sh | sh
 <span class="tok-cmd">codex mcp add</span> codixing -- codixing-mcp --root .</code></pre>

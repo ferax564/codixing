@@ -4,7 +4,6 @@ description = "One-call feature exploration: finds core files, dependencies, dep
 handler = "feature_hub::call_feature_hub"
 calling_convention = "engine_args"
 read_only = true
-medium = true
 
 [tools.params.query]
 type = "string"

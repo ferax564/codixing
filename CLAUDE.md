@@ -62,7 +62,7 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 
 - `crates/core/` — engine: AST parsing, BM25, graph, embeddings, PageRank, test mapping, shared sessions, queue-based embedding (optional `rustqueue` feature), doc indexing (Markdown + HTML with section-aware chunking and doc-to-code graph edges), change impact analysis, semantic concept graph, API surface analysis, type relations, usage example mining, cross-file context assembly, behavioral signatures, query-personalized PageRank, learned query reformulation, output filter pipeline (TOML-based, tee recovery)
 - `crates/cli/` — `codixing` CLI binary
-- `crates/mcp/` — MCP server (`codixing-mcp`), 67 tools in `src/tools/` (use `--medium` to curate the list for clients without dynamic tool discovery)
+- `crates/mcp/` — MCP server (`codixing-mcp`), 67 tools in `src/tools/` (always shipped in full — the `--medium` curation was removed in v0.38 after the agent benchmark showed it hid high-leverage tools like `get_complexity`)
 - `crates/server/` — HTTP API server (`codixing-server`), REST endpoints with SSE streaming for sync
 - `crates/core/src/federation/` — cross-repo federated search (`--federation config.json`)
 - `crates/lsp/` — LSP server (`codixing-lsp`), hover/go-to-def/refs/symbols/call hierarchy/complexity diagnostics/rename/semantic tokens
@@ -249,8 +249,13 @@ When adding a new crate that depends on `codixing-core`, ALWAYS:
 
 The `.mcp.json` configures the Codixing MCP server for Claude Code. **Required flags:**
 
-- `--medium` — exposes 27 core tools directly. Useful for MCP clients that cannot do dynamic tool discovery (e.g. Codex CLI).
 - `--no-daemon-fork` — prevents stale daemon socket issues that silently kill the MCP connection
+
+The `--medium` flag was removed in v0.38. `codixing-mcp` now always advertises
+the full 67-tool set on `tools/list`. The April 2026 agent benchmark found
+`--medium` was hiding `get_complexity`, `review_context`, and other showcase
+tools — fixing the curation restored the March "66% fewer tokens / 66% fewer
+calls" headline. See `docs/research-recall-stickiness-2026-04-13.md` §4.19–4.24.
 
 Example `.mcp.json`:
 ```json
@@ -259,7 +264,7 @@ Example `.mcp.json`:
     "codixing": {
       "type": "stdio",
       "command": "./target/release/codixing-mcp",
-      "args": ["--root", ".", "--medium", "--no-daemon-fork"]
+      "args": ["--root", ".", "--no-daemon-fork"]
     }
   }
 }

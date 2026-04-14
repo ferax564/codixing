@@ -40,21 +40,6 @@ use codixing_core::{
 };
 
 // ---------------------------------------------------------------------------
-// Tool listing mode
-// ---------------------------------------------------------------------------
-
-/// Controls which tools are returned by `tools/list`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ListingMode {
-    /// Return all tools (~48 definitions, ~6600 tokens).
-    Full,
-    /// Return a curated subset of ~15 most-used tools.
-    /// All tools remain callable via `tools/call`.
-    /// Useful for MCP clients that cannot do dynamic tool discovery (e.g. Codex CLI).
-    Medium,
-}
-
-// ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
@@ -84,13 +69,6 @@ struct Args {
     /// recorded and no session-based search boosting is applied.
     #[arg(long)]
     no_session: bool,
-
-    /// Enable medium tool listing: `tools/list` returns a curated set of ~15
-    /// most-used tools instead of all tools. All tools remain callable via
-    /// `tools/call`. Useful for MCP clients that cannot do dynamic tool
-    /// discovery (e.g. Codex CLI).
-    #[arg(long)]
-    medium: bool,
 
     /// Path to a `codixing-federation.json` config file for cross-repo
     /// federation.  When provided, a `FederatedEngine` is created alongside
@@ -131,12 +109,6 @@ async fn main() -> Result<()> {
         .socket
         .unwrap_or_else(|| root.join(".codixing/daemon.sock"));
 
-    let listing_mode = if args.medium {
-        ListingMode::Medium
-    } else {
-        ListingMode::Full
-    };
-
     // Optionally load a federated engine for cross-repo search.
     let federation: Option<Arc<FederatedEngine>> = match &args.federation {
         Some(config_path) => {
@@ -167,12 +139,12 @@ async fn main() -> Result<()> {
 
         #[cfg(unix)]
         {
-            daemon::run_daemon(engine, &socket_path, listing_mode, federation).await
+            daemon::run_daemon(engine, &socket_path, federation).await
         }
         #[cfg(windows)]
         {
             let pipe_name = daemon_windows::pipe_name_for_root(&root);
-            daemon_windows::run_daemon(engine, &pipe_name, listing_mode, federation).await
+            daemon_windows::run_daemon(engine, &pipe_name, federation).await
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -196,9 +168,6 @@ async fn main() -> Result<()> {
                 "--socket".to_string(),
                 socket_path.to_str().unwrap().to_string(),
             ];
-            if args.medium {
-                daemon_args.push("--medium".to_string());
-            }
             if args.no_session {
                 daemon_args.push("--no-session".to_string());
             }
@@ -235,9 +204,6 @@ async fn main() -> Result<()> {
                 root.to_str().unwrap().to_string(),
                 "--daemon".to_string(),
             ];
-            if args.medium {
-                daemon_args.push("--medium".to_string());
-            }
             if args.no_session {
                 daemon_args.push("--no-session".to_string());
             }
@@ -265,12 +231,6 @@ async fn main() -> Result<()> {
         // Try to proxy through an existing daemon (Unix).
         #[cfg(unix)]
         if daemon::socket_alive(&socket_path).await {
-            if args.medium {
-                tracing::warn!(
-                    "proxying through existing daemon — the daemon may have been started \
-                     with different --medium setting; restart the daemon to change the mode"
-                );
-            }
             info!(socket = %socket_path.display(), "daemon detected — proxying through socket");
             return daemon::run_proxy(&socket_path).await;
         }
@@ -278,12 +238,6 @@ async fn main() -> Result<()> {
         // Try to proxy through an existing daemon (Windows).
         #[cfg(windows)]
         if daemon_windows::pipe_alive(&pipe_name).await {
-            if args.medium {
-                tracing::warn!(
-                    "proxying through existing daemon — the daemon may have been started \
-                     with different --medium setting; restart the daemon to change the mode"
-                );
-            }
             info!(pipe = %pipe_name, "daemon detected — proxying through named pipe");
             return daemon_windows::run_proxy(&pipe_name).await;
         }
@@ -302,7 +256,6 @@ async fn main() -> Result<()> {
                 engine,
                 BufReader::new(stdin).lines(),
                 BufWriter::new(stdout),
-                listing_mode,
                 federation,
             )
             .await

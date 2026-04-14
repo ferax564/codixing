@@ -20,7 +20,6 @@ use tracing::{info, warn};
 
 use codixing_core::{Engine, FederatedEngine};
 
-use crate::ListingMode;
 use crate::jsonrpc::run_jsonrpc_loop;
 
 // ---------------------------------------------------------------------------
@@ -66,7 +65,6 @@ pub(crate) fn touch_activity() {
 pub(crate) async fn run_daemon(
     engine: Arc<RwLock<Engine>>,
     pipe_name: &str,
-    listing_mode: ListingMode,
     federation: Option<Arc<FederatedEngine>>,
 ) -> Result<()> {
     // Create the first pipe instance with `first_pipe_instance(true)` to
@@ -187,9 +185,7 @@ pub(crate) async fn run_daemon(
         let engine_clone = Arc::clone(&engine);
         let fed_clone = federation.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                handle_pipe_connection(connected, engine_clone, listing_mode, fed_clone).await
-            {
+            if let Err(e) = handle_pipe_connection(connected, engine_clone, fed_clone).await {
                 warn!(error = %e, "daemon: pipe connection error");
             }
         });
@@ -204,7 +200,6 @@ pub(crate) async fn run_daemon(
 async fn handle_pipe_connection(
     pipe: NamedPipeServer,
     engine: Arc<RwLock<Engine>>,
-    listing_mode: ListingMode,
     federation: Option<Arc<FederatedEngine>>,
 ) -> Result<()> {
     let (read_half, write_half) = tokio::io::split(pipe);
@@ -212,7 +207,6 @@ async fn handle_pipe_connection(
         engine,
         BufReader::new(read_half).lines(),
         BufWriter::new(write_half),
-        listing_mode,
         federation,
     )
     .await

@@ -559,9 +559,9 @@
 <span class="cmd">claude plugin marketplace add ferax564/codixing</span>
 
 <span class="cmt"># MCP only</span>
-<span class="cmd">claude mcp add codixing -- npx -y codixing-mcp --root . --medium --no-daemon-fork</span></pre>
+<span class="cmd">claude mcp add codixing -- npx -y codixing-mcp --root . --no-daemon-fork</span></pre>
 
-    <p>Use <code>--medium</code> to expose 17 core tools directly (no discovery overhead) and <code>--no-daemon-fork</code> to prevent stale socket issues. All 54 tools remain callable.</p>
+    <p><strong>Update April 2026:</strong> The <code>--medium</code> flag referenced in this post was removed in v0.38. The April agent benchmark found that curation was silently hiding high-leverage tools like <code>get_complexity</code>, erasing the token savings on exactly the tasks Codixing is designed for. The MCP server now always advertises the full 67-tool set.</p>
 
     <h2>Methodology</h2>
 
