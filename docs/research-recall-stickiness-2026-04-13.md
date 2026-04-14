@@ -775,13 +775,16 @@ entirely a harness + curation artifact:
 3. The agent fell back to Read + manual work exactly like vanilla
 4. Token ratios collapsed
 
-Remove `--medium` and the March-era numbers reproduce cleanly. The
+Removing `--medium` made the March-era numbers reproduce cleanly. The
 recall story is also good: 90% sticky vs 85% vanilla on the replay,
 with one of the two misses attributable to ground-truth drift on
 `march-transitive` (target-parsing.ts has changed since March).
 
-**The only remaining code change to make the shipped plugin match this
-benchmark**: drop `--medium` from the manifest. That's a one-line PR.
+**Shipped in v0.38.0**: `--medium` removed entirely from
+`codixing-mcp`, from the shipped plugin manifest, and from all
+documentation. `codixing-mcp` now rejects the flag at argument parsing
+(guarded by the `e2e_medium_flag_is_rejected` tripwire test) so the
+bug cannot silently re-appear.
 
 ### 4.22 Hard-task rerun with full MCP (v3 + `hard-oc-complexity`)
 

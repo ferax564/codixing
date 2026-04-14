@@ -191,7 +191,13 @@ def score_recall(result_text: str, ground_truth: list[str]) -> tuple[int, int, l
     hits = 0
     missed: list[str] = []
     for item in ground_truth:
-        if item.lower() in text:
+        needle = item.lower()
+        # Word-boundary match for identifier-shaped needles so a shorter
+        # name can't falsely hit inside a longer one — e.g. `do_sys_open`
+        # must not score against `do_sys_openat2`. Paths and numbers still
+        # use substring semantics (word boundaries handle those too since
+        # `/` and digits are non-word characters on the outside).
+        if re.search(rf"(?<![A-Za-z0-9_]){re.escape(needle)}(?![A-Za-z0-9_])", text):
             hits += 1
         else:
             missed.append(item)
@@ -332,9 +338,9 @@ MODES_ORDER = ("vanilla", "codixing", "codixing-sticky")
 
 
 def render_report(results: list[RunResult], model: str, runs: int) -> str:
-    # Exclude infra-failed sessions (result.error set) from all aggregates.
-    # Keep them in `results` so the caller's raw JSON still has the full
-    # record, but do not let them pollute the means.
+    # Split infra-failed sessions (result.error set) out of aggregates but
+    # keep them in `results` so the caller's raw JSON still has the full
+    # record. Failed sessions appear in a separate section of the report.
     ok_results = [r for r in results if not r.error]
     failed = [r for r in results if r.error]
 
@@ -345,24 +351,65 @@ def render_report(results: list[RunResult], model: str, runs: int) -> str:
 
     def mean(xs): return sum(xs) / len(xs) if xs else 0.0
 
+    # Paired comparison: the summary and delta tables below average each
+    # mode over the intersection of (task, run) keys where EVERY present
+    # mode succeeded. Otherwise, if vanilla infra-fails task X and
+    # codixing-sticky succeeds, the means would compare different task
+    # populations and the headline deltas would be apples-to-oranges.
+    present_modes = [m for m in MODES_ORDER if any(by_task[t].get(m) for t in by_task)]
+    present_modes = list(dict.fromkeys(present_modes))  # preserve order
+    paired_keys: list[tuple[str, int]] = []
+    for tid, modes in by_task.items():
+        # Collect the set of run_numbers that succeeded in ALL present modes.
+        common_runs: set[int] | None = None
+        for m in present_modes:
+            runs_for_m = {r.run_number for r in modes.get(m, [])}
+            if not runs_for_m:
+                common_runs = set()
+                break
+            common_runs = runs_for_m if common_runs is None else (common_runs & runs_for_m)
+        for run_n in sorted(common_runs or set()):
+            paired_keys.append((tid, run_n))
+
+    dropped_tasks = sorted(
+        {tid for tid in by_task if not any(
+            (tid, rn) in paired_keys
+            for rn in range(1, runs + 1)
+        )}
+    )
+
     lines: list[str] = []
     lines.append("# Codixing Large-Repo Agent Benchmark\n")
     lines.append(f"**Date:** {time.strftime('%Y-%m-%d %H:%M')}")
     lines.append(f"**Model:** {model}")
     lines.append(f"**Runs per task per mode:** {runs}")
+    lines.append(
+        f"**Paired comparison coverage:** {len(paired_keys)} "
+        f"(task,run) pair(s) across {len(present_modes)} mode(s)"
+    )
     if failed:
         lines.append(
             f"**Infra-failed sessions excluded from means:** {len(failed)} "
-            f"(see `error` field in JSON)"
+            f"(see `Infra-failed sessions` section + `error` field in JSON)"
+        )
+    if dropped_tasks:
+        lines.append(
+            f"**Tasks dropped from paired means** (not every mode succeeded): "
+            f"{', '.join(dropped_tasks)}"
         )
     lines.append("")
 
+    # Bucket only sessions that sit on a paired (task, run) key. This
+    # guarantees every mode's mean is computed over the same denominator.
+    paired_set = set(paired_keys)
     buckets: dict[str, dict[str, list[float]]] = {
         m: {"calls": [], "tok": [], "time": [], "rec": []} for m in MODES_ORDER
     }
     for tid, modes in by_task.items():
         for m in MODES_ORDER:
             for r in modes.get(m, []):
+                if (tid, r.run_number) not in paired_set:
+                    continue
                 buckets[m]["calls"].append(r.tool_calls)
                 buckets[m]["tok"].append(r.total_tokens)
                 buckets[m]["time"].append(r.wall_time_seconds)
@@ -456,14 +503,18 @@ def render_report(results: list[RunResult], model: str, runs: int) -> str:
                 if r.missed:
                     lines.append(f"- **{tid}** [{m}] missed: {', '.join(r.missed)}")
 
-    total_cost = sum(r.cost_usd for r in results if r.cost_usd)
-    if total_cost:
-        ok_n = len(ok_results)
-        fail_n = len(failed)
+    ok_cost = sum(r.cost_usd for r in ok_results if r.cost_usd)
+    fail_cost = sum(r.cost_usd for r in failed if r.cost_usd)
+    if ok_cost or fail_cost:
         lines.append(
-            f"\n**Total cost:** ${total_cost:.2f}  "
-            f"({ok_n} successful + {fail_n} infra-failed sessions)"
+            f"\n**Cost:** ${ok_cost:.2f} across {len(ok_results)} successful "
+            f"session(s)"
         )
+        if fail_cost or failed:
+            lines.append(
+                f"**Wasted on infra failures:** ${fail_cost:.2f} across "
+                f"{len(failed)} failed session(s)"
+            )
     if failed:
         lines.append("\n## Infra-failed sessions\n")
         for r in failed:

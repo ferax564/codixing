@@ -49,11 +49,13 @@ ground_truth = [
 repo = "linux"
 id = "hard-lx-syscall-openat"
 category = "macro_symbol"
-prompt = """Where is the Linux system call `openat` actually implemented? Give the `.c` file, the syscall macro line, and the function the syscall body dispatches into. Be careful: the syscall is defined via a macro (SYSCALL_DEFINE4) so a naive grep for `openat(` won't land on the definition."""
+prompt = """Where is the Linux system call `openat(2)` actually implemented? Name (a) the .c file, (b) the `SYSCALL_DEFINE4(openat, ...)` macro that declares the syscall, and (c) the internal function the macro body dispatches into. Be careful: this is NOT the `openat2(2)` syscall — that one is separate. Also be careful that the symbol is defined via a macro so a naive grep for `openat(` won't land on the definition."""
 # SYSCALL_DEFINE4(openat, ...) at fs/open.c:1383 dispatches to do_sys_open.
-# do_sys_openat2 is a distinct entry point for the openat2 syscall (#437) —
-# previous ground truth conflated the two.
-ground_truth = ["fs/open.c", "do_sys_open", "SYSCALL_DEFINE4"]
+# do_sys_openat2 is a distinct entry point for the openat2(2) syscall (#437).
+# Word-boundary scoring in score_recall() ensures `do_sys_open` cannot
+# falsely substring-match `do_sys_openat2`, so these anchors are collision
+# proof for substring + boundary scoring.
+ground_truth = ["fs/open.c", "do_sys_open", "SYSCALL_DEFINE4(openat"]
 
 [[agent_task]]
 repo = "linux"
