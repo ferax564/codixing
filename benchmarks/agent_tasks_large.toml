@@ -67,8 +67,18 @@ ground_truth = ["mm/memory.c", "copy"]
 repo = "linux"
 id = "lx-callers-1"
 category = "caller_completeness"
-prompt = """Find where kmalloc_node is called across the mm/ subsystem. List the file paths (at least 5 distinct files)."""
-ground_truth = ["mm/"]
+prompt = """Which of these five specific mm/ files call `kmalloc_node` directly (not via a wrapper)? Include each file you find in the answer: mm/slub.c, mm/vmalloc.c, mm/mempool.c, mm/dmapool.c, mm/util.c."""
+# Prompt names the exact files we measure against, so an answer that
+# lists 5 OTHER valid mm/ call sites (mempolicy.c, zsmalloc.c, etc.) is
+# no longer falsely penalized. Verified with
+#   codixing grep "kmalloc_node" --glob "mm/**" --files-with-matches
+ground_truth = [
+  "mm/slub.c",
+  "mm/vmalloc.c",
+  "mm/mempool.c",
+  "mm/dmapool.c",
+  "mm/util.c",
+]
 
 [[agent_task]]
 repo = "linux"

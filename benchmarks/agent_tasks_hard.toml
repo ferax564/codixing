@@ -49,8 +49,13 @@ ground_truth = [
 repo = "linux"
 id = "hard-lx-syscall-openat"
 category = "macro_symbol"
-prompt = """Where is the Linux system call `openat` actually implemented? I want the `.c` file and the function name. Be careful: the symbol is defined via a macro (SYSCALL_DEFINE4) so a naive grep for `openat(` won't land on the definition."""
-ground_truth = ["fs/open.c", "do_sys_openat2", "SYSCALL_DEFINE4"]
+prompt = """Where is the Linux system call `openat(2)` actually implemented? Name (a) the .c file, (b) the `SYSCALL_DEFINE4(openat, ...)` macro that declares the syscall, and (c) the internal function the macro body dispatches into. Be careful: this is NOT the `openat2(2)` syscall — that one is separate. Also be careful that the symbol is defined via a macro so a naive grep for `openat(` won't land on the definition."""
+# SYSCALL_DEFINE4(openat, ...) at fs/open.c:1383 dispatches to do_sys_open.
+# do_sys_openat2 is a distinct entry point for the openat2(2) syscall (#437).
+# Word-boundary scoring in score_recall() ensures `do_sys_open` cannot
+# falsely substring-match `do_sys_openat2`, so these anchors are collision
+# proof for substring + boundary scoring.
+ground_truth = ["fs/open.c", "do_sys_open", "SYSCALL_DEFINE4(openat"]
 
 [[agent_task]]
 repo = "linux"
@@ -125,9 +130,14 @@ ground_truth = [
 repo = "openclaw"
 id = "hard-oc-exec-approval-flow"
 category = "concept_cross_file"
-prompt = """In openclaw, commands executed on behalf of the agent go through an approval surface before they actually run. Trace the data flow: from the function that *triggers* an approval prompt, to the function that *runs* the approved command. Include the file paths for both ends of the flow and name the functions."""
+prompt = """In openclaw, commands executed on behalf of the agent go through an approval surface before they actually run. Trace the data flow: from the function that *triggers* an approval prompt (the gateway handler), to the function that *runs* the approved command (the forwarder). Name BOTH functions and give both file paths."""
+# Both endpoints anchored to concrete symbol names so a partial answer that
+# only names one end can't score 100%. Verified with `codixing symbols`:
+#   trigger:  src/gateway/server-methods/exec-approval.ts::createExecApprovalHandlers
+#   forwarder: src/infra/exec-approval-forwarder.ts::createExecApprovalForwarder
 ground_truth = [
-  "src/infra/exec-approval",
-  "src/infra/exec",
-  "approval",
+  "src/gateway/server-methods/exec-approval.ts",
+  "createExecApprovalHandlers",
+  "src/infra/exec-approval-forwarder.ts",
+  "createExecApprovalForwarder",
 ]

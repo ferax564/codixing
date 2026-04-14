@@ -1,6 +1,6 @@
 # Codixing Plugin for Claude Code
 
-Code retrieval engine plugin that saves your agent 73% of its token budget — AST-aware search, dependency graph intelligence, and 57 MCP tools.
+Code retrieval engine plugin that saves your agent tool calls and tokens on hard structural tasks — AST-aware search, dependency graph intelligence, and 67 MCP tools (all always advertised on `tools/list`).
 
 ## Install
 

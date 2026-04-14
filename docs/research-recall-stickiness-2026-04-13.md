@@ -739,41 +739,28 @@ Every sticky-mode session stayed in MCP. No Grep/Bash fallbacks
 triggered by the hook because the agent never reached for them — the
 right tool was in the advertised list.
 
-### 4.20 What this means for the shipped plugin
+### 4.20 What this meant for the shipped plugin — RESOLVED in v0.38.0
 
-The shipped plugin manifest
-(`claude-plugin/.claude-plugin/plugin.json`) launches `codixing-mcp`
-with `--medium --no-daemon-fork`. The `--medium` flag is advertised in
+Before v0.38.0, the shipped plugin manifest
+(`claude-plugin/.claude-plugin/plugin.json`) launched `codixing-mcp`
+with `--medium --no-daemon-fork`. The `--medium` flag was advertised in
 `CLAUDE.md` as *"Useful for MCP clients that cannot do dynamic tool
-discovery (e.g. Codex CLI)"* — so the intent was to help clients with
-static tool loading.
+discovery (e.g. Codex CLI)"* — intended to help clients with static
+tool loading.
 
-But the data above shows that **in Claude Code specifically**, where
-tool discovery is dynamic, `--medium` is a net negative: it hides the
-exact tools that turn a 25-call grep-adjacent slog into a 4-call
-purpose-built answer. The `--medium` curation should be either:
+The data above showed that **in Claude Code specifically**, where tool
+discovery is dynamic, `--medium` was a net negative: it hid the exact
+tools that turn a 25-call grep-adjacent slog into a 4-call purpose-
+built answer.
 
-1. **Client-detected** — only apply when the client hasn't done dynamic
-   discovery by the first tool-list request. Claude Code should get
-   the full surface by default.
-2. **Re-curated** — if we keep `--medium` as a default, mark these
-   tools `medium = true`:
-   - `get_complexity` (analysis.toml:46)
-   - `review_context` (analysis.toml:63)
-   - `generate_onboarding` (analysis.toml)
-   - `predict_impact` (impact.toml, if present)
-   - `search_usages` (already present? verify)
-   The audit is ~30 minutes of tagging + running
-   `cargo test medium_mode_returns_subset` to verify.
-3. **Removed** — drop `--medium` from the shipped plugin config. Agent
-   SDK and Claude Code both do dynamic discovery, so the curation only
-   exists for Codex CLI, which is a small share of users. The config
-   can live in a separate `codex.json` for that one client.
-
-**Recommendation**: ship option 3. Drop `--medium` from
-`claude-plugin/.claude-plugin/plugin.json` and `.mcp.json`. Replace
-with a single-line README note: *"If using Codex CLI or another static-
-discovery client, add `--medium` to the args list."*
+**Resolution shipped in v0.38.0**: `--medium` was removed entirely.
+`codixing-mcp` no longer accepts the flag (clap rejects it with
+`unexpected argument`, verified by the `e2e_medium_flag_is_rejected`
+tripwire test). All 67 tools are always advertised on `tools/list`.
+See `CHANGELOG.md` for the full removal scope and `crates/mcp/src/main.rs`
+for the current argument surface. Codex CLI was a small share of users
+and gains dynamic discovery on newer builds; no separate curation flag
+is needed.
 
 ### 4.21 Final answer — is Codixing saving tokens?
 
@@ -788,13 +775,16 @@ entirely a harness + curation artifact:
 3. The agent fell back to Read + manual work exactly like vanilla
 4. Token ratios collapsed
 
-Remove `--medium` and the March-era numbers reproduce cleanly. The
+Removing `--medium` made the March-era numbers reproduce cleanly. The
 recall story is also good: 90% sticky vs 85% vanilla on the replay,
 with one of the two misses attributable to ground-truth drift on
 `march-transitive` (target-parsing.ts has changed since March).
 
-**The only remaining code change to make the shipped plugin match this
-benchmark**: drop `--medium` from the manifest. That's a one-line PR.
+**Shipped in v0.38.0**: `--medium` removed entirely from
+`codixing-mcp`, from the shipped plugin manifest, and from all
+documentation. `codixing-mcp` now rejects the flag at argument parsing
+(guarded by the `e2e_medium_flag_is_rejected` tripwire test) so the
+bug cannot silently re-appear.
 
 ### 4.22 Hard-task rerun with full MCP (v3 + `hard-oc-complexity`)
 
@@ -879,10 +869,12 @@ grep-impossible (complexity, transitive, types-blast) and grep-expensive
    (no API cost). Catches retrieval-quality regressions that would
    invalidate the "get_complexity is fast" claim before it hits the
    agent.
-4. **Audit which tools are `medium = true`** even though we're
-   dropping `--medium` from the plugin, so Codex CLI users still get
-   a sensible curated set. `get_complexity`, `review_context`,
-   `predict_impact`, `search_usages` should all be marked.
+4. **Tool-advertisement hygiene**: now that `--medium` is gone in
+   v0.38.0 (flag hard-rejected, curation codegen removed), any future
+   client-specific trimming of the advertised tool list must be
+   opt-in per client — never default — and must be guarded by a
+   release-gate benchmark that catches the `hard-oc-complexity` drop
+   before shipping.
 
 ---
 

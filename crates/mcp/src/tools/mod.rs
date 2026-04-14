@@ -1,7 +1,7 @@
 //! MCP tool definitions and engine dispatch helpers.
 //!
-//! Tool schemas, `is_read_only_tool`, `is_meta_tool`, `MEDIUM_TOOLS`, and the
-//! dispatch match arms are **generated at build time** from TOML files in
+//! Tool schemas, `is_read_only_tool`, `is_meta_tool`, and the dispatch match
+//! arms are **generated at build time** from TOML files in
 //! `crates/mcp/tool_defs/`.  See `build.rs` for the codegen logic.
 //!
 //! To add a new tool:
