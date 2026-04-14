@@ -67,8 +67,18 @@ ground_truth = ["mm/memory.c", "copy"]
 repo = "linux"
 id = "lx-callers-1"
 category = "caller_completeness"
-prompt = """Find where kmalloc_node is called across the mm/ subsystem. List the file paths (at least 5 distinct files)."""
-ground_truth = ["mm/"]
+prompt = """Find where `kmalloc_node` is actually called inside the mm/ subsystem (not just declared in a header). List at least 5 distinct .c files under mm/ that invoke it."""
+# Concrete call sites verified with
+#   codixing grep "kmalloc_node" --glob "mm/**" --files-with-matches
+# on the linux kernel index. Keeping 5 to match the "at least 5" prompt
+# and to give substring scoring something real to measure.
+ground_truth = [
+  "mm/slub.c",
+  "mm/vmalloc.c",
+  "mm/mempool.c",
+  "mm/dmapool.c",
+  "mm/util.c",
+]
 
 [[agent_task]]
 repo = "linux"

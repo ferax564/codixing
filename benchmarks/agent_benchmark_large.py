@@ -6,14 +6,17 @@ openclaw (~2K TS files) and linux (~63K C/H files).
 Extends agent_benchmark.py with:
   * ground_truth recall scoring (substring match in result_text)
   * external repo paths (linux lives at ~/code/linux, not in benchmarks/repos/)
-  * optional --wire-hooks: attach the same PreToolUse dogfooding hooks used in
-    .claude/settings.json so the codixing-mode agent is steered off Grep/Bash
-    at decision time, not just by tool availability.
+  * codixing-sticky mode: attaches the same PreToolUse dogfooding hooks used
+    in .claude/settings.json as Python async callables + a system-prompt
+    nudge, so the codixing-mode agent is steered off Grep/Bash at decision
+    time, not just by tool availability. Enabled by default (run with
+    --no-sticky to skip, or --only-sticky to drop the bare codixing mode).
 
 Usage:
     .venv/bin/python3 benchmarks/agent_benchmark_large.py --runs 1
     .venv/bin/python3 benchmarks/agent_benchmark_large.py --repos openclaw --runs 2
-    .venv/bin/python3 benchmarks/agent_benchmark_large.py --wire-hooks
+    .venv/bin/python3 benchmarks/agent_benchmark_large.py --only-sticky \\
+        --tasks-file benchmarks/agent_tasks_hard.toml --output-suffix _hard
 """
 
 import argparse
@@ -268,6 +271,7 @@ async def run_one(task: dict, repo_path: Path, mode: str, run_number: int,
         )
 
     start = time.monotonic()
+    got_result_message = False
     try:
         opts = ClaudeAgentOptions(
             cwd=str(repo_path),
@@ -286,6 +290,7 @@ async def run_one(task: dict, repo_path: Path, mode: str, run_number: int,
                     if isinstance(block, ToolUseBlock):
                         tool_log.append(block.name)
             if isinstance(message, ResultMessage):
+                got_result_message = True
                 result.result_text = message.result or ""
                 result.num_turns = message.num_turns
                 if message.usage:
@@ -297,10 +302,22 @@ async def run_one(task: dict, repo_path: Path, mode: str, run_number: int,
     except Exception as e:
         result.error = str(e)[:500]
 
+    # Missing ResultMessage OR raised exception = infrastructure failure
+    # (SDK / auth / cwd / network). Do NOT let these pollute the means;
+    # flag with `error` so the caller can exclude them from aggregates.
+    if not got_result_message and not result.error:
+        result.error = "no ResultMessage emitted (SDK truncation or subprocess crash)"
+
     result.wall_time_seconds = time.monotonic() - start
     result.tool_calls = len(tool_log)
     for n in tool_log:
         result.tool_call_breakdown[n] = result.tool_call_breakdown.get(n, 0) + 1
+
+    if result.error:
+        # Leave recall at 0 but mark via error so the report separates these
+        # from real sessions. Means computed over `error == ""` only.
+        result.ground_truth_total = len(task.get("ground_truth", []))
+        return result
 
     hits, total, missed = score_recall(result.result_text, task.get("ground_truth", []))
     result.ground_truth_hits = hits
@@ -315,8 +332,14 @@ MODES_ORDER = ("vanilla", "codixing", "codixing-sticky")
 
 
 def render_report(results: list[RunResult], model: str, runs: int) -> str:
+    # Exclude infra-failed sessions (result.error set) from all aggregates.
+    # Keep them in `results` so the caller's raw JSON still has the full
+    # record, but do not let them pollute the means.
+    ok_results = [r for r in results if not r.error]
+    failed = [r for r in results if r.error]
+
     by_task: dict[str, dict[str, list[RunResult]]] = {}
-    for r in results:
+    for r in ok_results:
         by_task.setdefault(r.task_id, {m: [] for m in MODES_ORDER})
         by_task[r.task_id].setdefault(r.mode, []).append(r)
 
@@ -326,7 +349,13 @@ def render_report(results: list[RunResult], model: str, runs: int) -> str:
     lines.append("# Codixing Large-Repo Agent Benchmark\n")
     lines.append(f"**Date:** {time.strftime('%Y-%m-%d %H:%M')}")
     lines.append(f"**Model:** {model}")
-    lines.append(f"**Runs per task per mode:** {runs}\n")
+    lines.append(f"**Runs per task per mode:** {runs}")
+    if failed:
+        lines.append(
+            f"**Infra-failed sessions excluded from means:** {len(failed)} "
+            f"(see `error` field in JSON)"
+        )
+    lines.append("")
 
     buckets: dict[str, dict[str, list[float]]] = {
         m: {"calls": [], "tok": [], "time": [], "rec": []} for m in MODES_ORDER
@@ -339,8 +368,12 @@ def render_report(results: list[RunResult], model: str, runs: int) -> str:
                 buckets[m]["time"].append(r.wall_time_seconds)
                 buckets[m]["rec"].append(r.recall)
 
-    def red(base, other):
-        return ((base - other) / base * 100) if base else 0.0
+    # Negative pct reads as "fewer than vanilla" (i.e. a codixing win).
+    # Positive pct reads as "more than vanilla". This matches the natural
+    # direction of the metric names (Tool calls, Tokens, Time) so the sign
+    # no longer contradicts the label.
+    def delta_pct(base, other):
+        return ((other - base) / base * 100) if base else 0.0
 
     lines.append("## Summary\n")
     header = "| Metric | " + " | ".join(m for m in MODES_ORDER if buckets[m]["calls"]) + " |"
@@ -357,10 +390,13 @@ def render_report(results: list[RunResult], model: str, runs: int) -> str:
     lines.append(row("Recall (mean)", "rec", lambda x: f"{x*100:.0f}%"))
     lines.append("")
 
-    # Deltas vs vanilla
+    # Deltas vs vanilla. For calls/tokens/time, negative = codixing lower
+    # = codixing win. Recall is absolute percentage points where positive
+    # is always a codixing win. Both directions are explicit in the
+    # column headers so the signs can't be misread.
     if "vanilla" in present and len(present) > 1:
-        lines.append("### Deltas vs vanilla\n")
-        lines.append("| Mode | Calls | Tokens | Time | Recall |")
+        lines.append("### Deltas vs vanilla (negative = codixing lower)\n")
+        lines.append("| Mode | Calls | Tokens | Time | Recall (pp) |")
         lines.append("|---|---|---|---|---|")
         v_calls = mean(buckets["vanilla"]["calls"])
         v_tok = mean(buckets["vanilla"]["tok"])
@@ -374,8 +410,10 @@ def render_report(results: list[RunResult], model: str, runs: int) -> str:
             tm = mean(buckets[m]["time"])
             rc = mean(buckets[m]["rec"])
             lines.append(
-                f"| {m} | {red(v_calls,c):+.0f}% | {red(v_tok,t):+.0f}% | "
-                f"{red(v_time,tm):+.0f}% | {(rc-v_rec)*100:+.0f}pp |"
+                f"| {m} | {delta_pct(v_calls,c):+.0f}% | "
+                f"{delta_pct(v_tok,t):+.0f}% | "
+                f"{delta_pct(v_time,tm):+.0f}% | "
+                f"{(rc-v_rec)*100:+.0f}pp |"
             )
         lines.append("")
 
@@ -420,7 +458,16 @@ def render_report(results: list[RunResult], model: str, runs: int) -> str:
 
     total_cost = sum(r.cost_usd for r in results if r.cost_usd)
     if total_cost:
-        lines.append(f"\n**Total cost:** ${total_cost:.2f}  ({len(results)} sessions)")
+        ok_n = len(ok_results)
+        fail_n = len(failed)
+        lines.append(
+            f"\n**Total cost:** ${total_cost:.2f}  "
+            f"({ok_n} successful + {fail_n} infra-failed sessions)"
+        )
+    if failed:
+        lines.append("\n## Infra-failed sessions\n")
+        for r in failed:
+            lines.append(f"- `{r.task_id}` [{r.mode}] run {r.run_number}: {r.error}")
 
     return "\n".join(lines)
 
@@ -461,14 +508,31 @@ async def main():
 
     out = Path(args.output); out.mkdir(parents=True, exist_ok=True)
 
-    # Ensure each needed repo has an index
-    for repo in set(t["repo"] for t in tasks):
+    # Skip tasks whose repo is unknown or whose clone is missing so they
+    # don't later crash with KeyError or pollute the averages with failed
+    # sessions. Build missing indexes up-front and fail the whole run if
+    # any build fails — a silently partial index is worse than a crash.
+    usable_repos: set[str] = set()
+    for repo in sorted(set(t["repo"] for t in tasks)):
         rp = REPO_PATHS.get(repo)
-        if not rp or not rp.exists():
-            print(f"WARNING: repo path missing for {repo}: {rp}")
+        if rp is None:
+            print(f"SKIP: unknown repo '{repo}' — not in REPO_PATHS")
+            continue
+        if not rp.exists():
+            print(f"SKIP: repo '{repo}' clone missing at {rp}")
             continue
         if not ensure_index(rp):
-            print(f"ERROR: could not build index for {repo}"); sys.exit(1)
+            print(f"ERROR: could not build index for {repo} at {rp}")
+            sys.exit(1)
+        usable_repos.add(repo)
+
+    dropped = [t["id"] for t in tasks if t["repo"] not in usable_repos]
+    if dropped:
+        print(f"SKIP: {len(dropped)} task(s) dropped due to missing repo: {dropped}")
+    tasks = [t for t in tasks if t["repo"] in usable_repos]
+    if not tasks:
+        print("ERROR: no tasks left after missing-repo filter")
+        sys.exit(1)
 
     mode_specs = [
         ("vanilla", False),
