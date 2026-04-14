@@ -4,7 +4,8 @@ agent_benchmark_large.py — Run vanilla vs codixing agent sessions on
 openclaw (~2K TS files) and linux (~63K C/H files).
 
 Extends agent_benchmark.py with:
-  * ground_truth recall scoring (substring match in result_text)
+  * ground_truth recall scoring: word-boundary identifier match against
+    result_text (so `do_sys_open` cannot falsely hit `do_sys_openat2`)
   * external repo paths (linux lives at ~/code/linux, not in benchmarks/repos/)
   * codixing-sticky mode: attaches the same PreToolUse dogfooding hooks used
     in .claude/settings.json as Python async callables + a system-prompt
@@ -344,8 +345,13 @@ def render_report(results: list[RunResult], model: str, runs: int) -> str:
     ok_results = [r for r in results if not r.error]
     failed = [r for r in results if r.error]
 
+    # `by_task` holds EVERY session (ok + failed) so the per-task table
+    # can render a row for each task, including ones where a mode infra-
+    # failed. Aggregate means below use a `paired_set` filter, so they
+    # only count sessions where all present modes succeeded — but the
+    # per-task view stays complete and shows "FAIL" cells where needed.
     by_task: dict[str, dict[str, list[RunResult]]] = {}
-    for r in ok_results:
+    for r in results:
         by_task.setdefault(r.task_id, {m: [] for m in MODES_ORDER})
         by_task[r.task_id].setdefault(r.mode, []).append(r)
 
@@ -353,13 +359,19 @@ def render_report(results: list[RunResult], model: str, runs: int) -> str:
 
     # Paired comparison: the summary and delta tables below average each
     # mode over the intersection of (task, run) keys where EVERY present
-    # mode succeeded. Otherwise, if vanilla infra-fails task X and
-    # codixing-sticky succeeds, the means would compare different task
-    # populations and the headline deltas would be apples-to-oranges.
-    present_modes = [m for m in MODES_ORDER if any(by_task[t].get(m) for t in by_task)]
+    # mode produced a successful (error-free) session. Otherwise, if
+    # vanilla infra-fails task X and codixing-sticky succeeds, the means
+    # would compare different task populations and the headline deltas
+    # would be apples-to-oranges.
+    ok_by_task: dict[str, dict[str, list[RunResult]]] = {}
+    for r in ok_results:
+        ok_by_task.setdefault(r.task_id, {m: [] for m in MODES_ORDER})
+        ok_by_task[r.task_id].setdefault(r.mode, []).append(r)
+
+    present_modes = [m for m in MODES_ORDER if any(ok_by_task[t].get(m) for t in ok_by_task)]
     present_modes = list(dict.fromkeys(present_modes))  # preserve order
     paired_keys: list[tuple[str, int]] = []
-    for tid, modes in by_task.items():
+    for tid, modes in ok_by_task.items():
         # Collect the set of run_numbers that succeeded in ALL present modes.
         common_runs: set[int] | None = None
         for m in present_modes:
@@ -465,34 +477,52 @@ def render_report(results: list[RunResult], model: str, runs: int) -> str:
         lines.append("")
 
     lines.append("## Per-Task Results\n")
+    lines.append(
+        "Cells show `calls / tokens / recall`. `FAIL` = infra-failed "
+        "session (no aggregate cost) — see the Infra-failed section."
+    )
+    lines.append("")
     per_task_header = "| Task | Repo | Cat |"
     per_task_sep = "|---|---|---|"
     for m in present:
-        per_task_header += f" {m} calls | {m} tok | {m} rec |"
-        per_task_sep += "---|---|---|"
+        per_task_header += f" {m} |"
+        per_task_sep += "---|"
     lines.append(per_task_header)
     lines.append(per_task_sep)
     for tid, modes in sorted(by_task.items()):
-        if not modes.get("vanilla"):
+        # Prefer any available mode for the row label — a task where
+        # vanilla infra-failed but codixing succeeded still deserves a
+        # visible row so the reader can see the asymmetry.
+        any_sessions = [r for m in MODES_ORDER for r in modes.get(m, [])]
+        if not any_sessions:
             continue
-        repo = modes["vanilla"][0].repo
-        cat = modes["vanilla"][0].category
+        repo = any_sessions[0].repo
+        cat = any_sessions[0].category
         row = f"| {tid} | {repo} | {cat} |"
         for m in present:
             rs = modes.get(m, [])
             if not rs:
-                row += " - | - | - |"
+                row += " — |"
                 continue
-            c = mean([r.tool_calls for r in rs])
-            t = mean([r.total_tokens for r in rs])
-            rc = mean([r.recall for r in rs]) * 100
-            row += f" {c:.1f} | {t:,.0f} | {rc:.0f}% |"
+            ok_rs = [r for r in rs if not r.error]
+            if not ok_rs:
+                row += " FAIL |"
+                continue
+            c = mean([r.tool_calls for r in ok_rs])
+            t = mean([r.total_tokens for r in ok_rs])
+            rc = mean([r.recall for r in ok_rs]) * 100
+            cell = f" {c:.1f} / {t:,.0f} / {rc:.0f}%"
+            if len(ok_rs) < len(rs):
+                cell += f" *({len(rs)-len(ok_rs)} fail)*"
+            row += f"{cell} |"
         lines.append(row)
 
     lines.append("")
     lines.append("## Tool Breakdown (codixing-sticky)\n")
     for tid, modes in sorted(by_task.items()):
         for r in modes.get("codixing-sticky", []):
+            if r.error:
+                continue
             lines.append(f"- **{tid}** → `{r.tool_call_breakdown}`")
     lines.append("")
 
@@ -500,20 +530,29 @@ def render_report(results: list[RunResult], model: str, runs: int) -> str:
     for tid, modes in sorted(by_task.items()):
         for m in present:
             for r in modes.get(m, []):
-                if r.missed:
-                    lines.append(f"- **{tid}** [{m}] missed: {', '.join(r.missed)}")
+                if r.error or not r.missed:
+                    continue
+                lines.append(f"- **{tid}** [{m}] missed: {', '.join(r.missed)}")
 
     ok_cost = sum(r.cost_usd for r in ok_results if r.cost_usd)
     fail_cost = sum(r.cost_usd for r in failed if r.cost_usd)
-    if ok_cost or fail_cost:
+    if ok_cost or fail_cost or failed:
         lines.append(
             f"\n**Cost:** ${ok_cost:.2f} across {len(ok_results)} successful "
             f"session(s)"
         )
-        if fail_cost or failed:
+        if failed:
+            # cost_usd is only populated when ResultMessage fires. A
+            # crash/truncation before ResultMessage gives cost_usd=0, so
+            # this line is a LOWER BOUND on real wasted API spend —
+            # label it explicitly so the reader doesn't read $0.00 as
+            # "nothing wasted".
             lines.append(
-                f"**Wasted on infra failures:** ${fail_cost:.2f} across "
-                f"{len(failed)} failed session(s)"
+                f"**Wasted on infra failures (≥):** ${fail_cost:.2f} "
+                f"across {len(failed)} failed session(s). Sessions that "
+                f"crashed before emitting a ResultMessage report "
+                f"`cost_usd=0` even when real API spend occurred — "
+                f"the actual waste is typically higher."
             )
     if failed:
         lines.append("\n## Infra-failed sessions\n")
