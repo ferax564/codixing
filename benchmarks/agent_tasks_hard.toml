@@ -1,0 +1,133 @@
+# Hard agent-bench tasks: designed to stress what grep can't do easily.
+# Ground truth is verified up-front via the codixing CLI.
+#
+# Target mix:
+#   - multi-hop transitive impact
+#   - macro-defined symbols (linux SYSCALL_DEFINE, DEFINE_PER_CPU)
+#   - per-architecture / per-filesystem duplication
+#   - ranked-list completeness pressure (requires exhaustive answers)
+#   - NL concept queries with no obvious identifier anchor
+
+# ============================================================
+# LINUX — 63K C/H files. This is where grep breaks down.
+# ============================================================
+
+[[agent_task]]
+repo = "linux"
+id = "hard-lx-write-iter-fs"
+category = "interface_implementers"
+prompt = """List every filesystem inside fs/ that implements its own `.write_iter` file operation (i.e. defines a function assigned to `write_iter` in a `struct file_operations`). I want the filesystem directory names — at least 15 of them. Exclude generic helpers in include/ and lib/. Do not list the functions, just the fs/<name>/ directories."""
+ground_truth = [
+  "fs/ext4/", "fs/btrfs/", "fs/ceph/", "fs/ubifs/", "fs/exfat/",
+  "fs/f2fs/", "fs/fuse/", "fs/gfs2/", "fs/ocfs2/", "fs/ntfs3/",
+  "fs/9p/", "fs/smb/", "fs/overlayfs/", "fs/ext2/", "fs/orangefs/",
+]
+
+[[agent_task]]
+repo = "linux"
+id = "hard-lx-page-fault-archs"
+category = "arch_sweep"
+prompt = """List every CPU architecture in arch/ that provides its own `do_page_fault` implementation. I want a path like `arch/<name>/mm/fault.c` (or the arch-specific equivalent) for each. Give me at least 8 architectures."""
+ground_truth = [
+  "arch/x86/", "arch/arm/", "arch/arm64/", "arch/powerpc/",
+  "arch/mips/", "arch/loongarch/", "arch/m68k/", "arch/sh/",
+  "arch/riscv/", "arch/s390/",
+]
+
+[[agent_task]]
+repo = "linux"
+id = "hard-lx-mm-blast"
+category = "blast_radius"
+prompt = """I am about to change the public API of `include/linux/mm.h` (rename a function, say `get_user_pages`). Give me the *approximate count* of directly-dependent source files (files that #include mm.h or transitively depend on a symbol declared there) — I need an order-of-magnitude answer. Also list 10 representative high-importance files that would need immediate attention. Do not try to enumerate all of them."""
+ground_truth = [
+  "mm/gup.c", "mm/memory.c", "mm/vmscan.c",
+  "kernel/fork.c", "fs/proc/task_mmu.c",
+  "788", "700",
+]
+
+[[agent_task]]
+repo = "linux"
+id = "hard-lx-syscall-openat"
+category = "macro_symbol"
+prompt = """Where is the Linux system call `openat` actually implemented? I want the `.c` file and the function name. Be careful: the symbol is defined via a macro (SYSCALL_DEFINE4) so a naive grep for `openat(` won't land on the definition."""
+ground_truth = ["fs/open.c", "do_sys_openat2", "SYSCALL_DEFINE4"]
+
+[[agent_task]]
+repo = "linux"
+id = "hard-lx-rcu-gp"
+category = "concept_search"
+prompt = """In the Linux RCU subsystem, a kernel thread drives the detection of "grace period" completion — the moment when all CPUs have passed through a quiescent state. Which file and which function? The word "grace" may not appear; you'll need to reason about RCU semantics."""
+ground_truth = ["kernel/rcu/tree.c", "rcu_gp_kthread"]
+
+# ============================================================
+# OPENCLAW — ~2K TS files, dense intra-project dependencies.
+# ============================================================
+
+[[agent_task]]
+repo = "openclaw"
+id = "hard-oc-types-blast"
+category = "blast_radius"
+prompt = """I want to refactor `src/channels/plugins/types.ts` — specifically the `ChannelPlugin` type. Give me the *count* of files in the project that directly depend on this file (i.e. they import from it), and list AT LEAST 15 representative files across both `src/` and `extensions/`. Exclude test files (`*.test.ts`, `*.spec.ts`)."""
+ground_truth = [
+  "src/channels/registry.ts",
+  "src/channels/plugins/registry.ts",
+  "src/channels/plugins/bundled.ts",
+  "src/channels/plugins/catalog.ts",
+  "src/channels/plugins/setup-wizard.ts",
+  "src/channels/plugins/load.ts",
+  "src/channels/plugins/helpers.ts",
+  "src/channels/plugins/binding-types.ts",
+  "src/channels/plugins/outbound/load.ts",
+  "src/channels/plugins/message-action-dispatch.ts",
+  "src/channels/plugins/config-writes.ts",
+  "src/channels/plugins/pairing.ts",
+  "src/channels/plugins/whatsapp-shared.ts",
+  "src/channels/plugins/bluebubbles-actions.ts",
+  "src/channels/plugins/status-issues/shared.ts",
+  "160",
+]
+
+[[agent_task]]
+repo = "openclaw"
+id = "hard-oc-2hop-transitive"
+category = "transitive_impact"
+prompt = """I want to change `src/channels/plugins/target-parsing.ts`. Give me the FULL two-hop transitive blast radius: (1) every file that imports target-parsing.ts directly, and (2) every file that imports those hop-1 files. Exclude test files. Group the answer by hop-1 vs hop-2 and list at least 10 hop-2 files."""
+ground_truth = [
+  "src/channels/plugins/target-parsing",
+  "src/channels/plugins/registry.ts",
+  "src/channels/plugins/bundled.ts",
+  "src/auto-reply/",
+  "src/agents/",
+  "src/commands/",
+]
+
+[[agent_task]]
+repo = "openclaw"
+id = "hard-oc-complexity"
+category = "complexity"
+prompt = """I'm reviewing these 3 files for refactoring priority. Rank them by cyclomatic complexity (highest first) and name the most complex function in each file:
+1. src/config/io.ts
+2. src/gateway/server-methods/chat.ts
+3. src/cron/service/jobs.ts
+Give the complexity score for the most complex function in each file."""
+# This is the March 2026-03-29 `grep-impossible-complexity-1` task. It's the
+# canonical "grep-impossible" case: vanilla has to Read each file and count
+# branches manually (21K tokens, 23 calls in March). Codixing's complexity
+# MCP tool returns pre-computed scores in 1 call (880 tokens in March).
+# Retained as a permanent fixture to measure the grep-hostile ceiling.
+ground_truth = [
+  "src/config/io.ts",
+  "src/gateway/server-methods/chat.ts",
+  "src/cron/service/jobs.ts",
+]
+
+[[agent_task]]
+repo = "openclaw"
+id = "hard-oc-exec-approval-flow"
+category = "concept_cross_file"
+prompt = """In openclaw, commands executed on behalf of the agent go through an approval surface before they actually run. Trace the data flow: from the function that *triggers* an approval prompt, to the function that *runs* the approved command. Include the file paths for both ends of the flow and name the functions."""
+ground_truth = [
+  "src/infra/exec-approval",
+  "src/infra/exec",
+  "approval",
+]

@@ -4,7 +4,6 @@ description = "Return diagnostic information about the Codixing index: file coun
 handler = "analysis::call_index_status"
 calling_convention = "engine_only"
 read_only = true
-medium = true
 
 [[tools]]
 name = "rename_symbol"
@@ -33,7 +32,6 @@ description = "Discover test functions across the indexed codebase by naming con
 handler = "analysis::call_find_tests"
 calling_convention = "engine_args"
 read_only = true
-medium = true
 
 [tools.params.pattern]
 type = "string"

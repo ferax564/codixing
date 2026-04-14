@@ -4,7 +4,6 @@ description = "Read the raw source of a file in the indexed project, optionally 
 handler = "files::call_read_file"
 calling_convention = "engine_args"
 read_only = true
-medium = true
 
 [tools.params.file]
 type = "string"
@@ -29,7 +28,6 @@ description = "Fast regex or literal text search across all source files in the 
 handler = "files::call_grep_code"
 calling_convention = "engine_args"
 read_only = true
-medium = true
 
 [tools.params.pattern]
 type = "string"
@@ -161,7 +159,6 @@ description = "List all files currently indexed by Codixing with their chunk cou
 handler = "files::call_list_files"
 calling_convention = "engine_args"
 read_only = true
-medium = true
 
 [tools.params.pattern]
 type = "string"
@@ -177,7 +174,6 @@ description = "Return a token-efficient symbol outline for a file: all symbols (
 handler = "files::call_outline_file"
 calling_convention = "engine_args"
 read_only = true
-medium = true
 
 [tools.params.file]
 type = "string"

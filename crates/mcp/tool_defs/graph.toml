@@ -4,7 +4,6 @@ description = "Find files in one directory that import from another directory, r
 handler = "graph::call_cross_imports"
 calling_convention = "engine_args"
 read_only = true
-medium = true
 
 [tools.params.from]
 type = "string"
@@ -26,7 +25,6 @@ description = "Get the dependency relationships for a file: which files import i
 handler = "graph::call_get_references"
 calling_convention = "engine_args"
 read_only = true
-medium = true
 
 [tools.params.file]
 type = "string"
@@ -39,7 +37,6 @@ description = "Generate a token-budgeted repository map showing the file structu
 handler = "graph::call_get_repo_map"
 calling_convention = "engine_args"
 read_only = true
-medium = true
 
 [tools.params.token_budget]
 type = "integer"
@@ -67,7 +64,6 @@ description = "Return all functions in the codebase that directly call the given
 handler = "graph::call_symbol_callers"
 calling_convention = "engine_args"
 read_only = true
-medium = true
 
 [tools.params.symbol]
 type = "string"
@@ -84,7 +80,6 @@ description = "Return all functions that the given symbol directly calls. Uses t
 handler = "graph::call_symbol_callees"
 calling_convention = "engine_args"
 read_only = true
-medium = true
 
 [tools.params.symbol]
 type = "string"
@@ -125,7 +120,6 @@ description = "Given a unified diff, rank the files most likely to need changes 
 handler = "graph::call_predict_impact"
 calling_convention = "engine_args_progress"
 read_only = true
-medium = true
 
 [tools.params.patch]
 type = "string"

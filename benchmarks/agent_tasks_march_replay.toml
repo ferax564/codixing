@@ -1,0 +1,55 @@
+# Replay of March 2026-03-29 agent benchmark tasks with today's Sonnet 4.6.
+# Isolates "model shift" from "task mix shift": same 4 prompts, same repo,
+# different-era model + current codixing.
+#
+# Ground truth lists are intentionally relaxed to match what March called
+# recall — this is about reproducing the March headline, not stress-testing.
+
+[[agent_task]]
+repo = "openclaw"
+id = "march-complexity"
+category = "complexity"
+prompt = """I'm reviewing these 3 files for refactoring priority. Rank them by cyclomatic complexity (highest first) and name the most complex function in each file:
+1. src/config/io.ts
+2. src/gateway/server-methods/chat.ts
+3. src/cron/service/jobs.ts
+Give the complexity score for the most complex function in each file."""
+ground_truth = ["src/config/io.ts", "src/gateway/server-methods/chat.ts", "src/cron/service/jobs.ts"]
+
+[[agent_task]]
+repo = "openclaw"
+id = "march-transitive"
+category = "transitive_impact"
+prompt = """I want to refactor src/channels/plugins/target-parsing.ts. Tell me the FULL blast radius: not just the files that directly import target-parsing.ts, but also the files that import THOSE files (2 hops deep). I need the complete transitive dependency chain. Exclude test files. List all affected files grouped by hop depth."""
+ground_truth = [
+  "src/channels/plugins/target-parsing",
+  "src/channels/plugins/registry",
+  "src/channels/plugins/bundled",
+  "src/auto-reply/",
+  "src/agents/",
+]
+
+[[agent_task]]
+repo = "openclaw"
+id = "march-blast-radius"
+category = "blast_radius"
+prompt = """If I changed the ChannelPlugin type definition (in src/channels/plugins/types.ts), what source files would break? List EVERY file that imports or directly uses the ChannelPlugin type. Include files in both src/ and extensions/. Exclude test files."""
+ground_truth = [
+  "src/channels/plugins/types",
+  "src/channels/plugins/registry",
+  "src/channels/plugins/bundled",
+  "extensions/",
+  "src/plugin-sdk/",
+]
+
+[[agent_task]]
+repo = "openclaw"
+id = "march-callers"
+category = "caller_completeness"
+prompt = """Find ALL production source files that reference the getChannelPlugin function — every file that imports it, calls it, or re-exports it. I need a comprehensive list, not just the most relevant matches. Exclude test files. List all file paths."""
+ground_truth = [
+  "src/infra/exec-approval-surface.ts",
+  "src/agents/channel-tools.ts",
+  "src/commands/configure.channels.ts",
+  "src/channels/plugins/",
+]

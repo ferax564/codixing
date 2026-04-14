@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.38.0] — 2026-04-14
+
+v0.38 removes the `--medium` MCP tool curation flag. The April 2026 agent benchmark ([`docs/research-recall-stickiness-2026-04-13.md`](docs/research-recall-stickiness-2026-04-13.md)) found that `--medium` was silently hiding `get_complexity`, `review_context`, `predict_impact` and other showcase tools — erasing Codixing's tool-call and token savings on exactly the tasks it's designed for. Removing the flag restored the reproducible **"66% fewer tokens, 66% fewer calls, +5 pp recall"** headline on the March 4-task prompt set. Full benchmark infrastructure (runner, task files, 4 runs of results, research doc) lands alongside the removal so the result is reproducible.
+
+### Removed
+- **`codixing-mcp --medium` flag** — hard-removed. v0.37 and earlier advertised a curated 27-tool subset on `tools/list`; v0.38 always advertises all 67 tools. Users with `--medium` in `.mcp.json` must remove the flag (clap will reject it as an unknown argument). The `e2e_medium_flag_is_rejected` test is a tripwire against accidental re-introduction, mirroring `e2e_compact_flag_is_rejected`.
+- **`ListingMode` enum** (`crates/mcp/src/main.rs`) — collapsed to the single "always full" code path. `run_daemon`, `handle_socket_connection`, `handle_pipe_connection`, and `run_jsonrpc_loop` lose their `listing_mode` parameter. `handle_tools_list` signature simplified.
+- **`MEDIUM_TOOLS` constant + `medium_tool_definitions()`** (`crates/mcp/build.rs`) — code generation for the curated list deleted. `ToolDef.medium` field dropped.
+- **`medium = true` tags** stripped from `crates/mcp/tool_defs/*.toml` (12 lines across 11 files). They're no longer meaningful.
+
+### Added
+- **`benchmarks/agent_benchmark_large.py`** — agent benchmark runner using the Claude Agent SDK to compare vanilla Grep/Glob/Read vs. codixing-MCP-sticky-mode on openclaw (~2K TS files) and the Linux kernel (~63K C/H files). Scores ground-truth recall (substring match), reports tool-call breakdowns, supports three modes (`vanilla`, `codixing`, `codixing-sticky` with PreToolUse deny hooks + prompt nudge for production parity). Incremental JSON checkpoint after every session; `--tasks-file`, `--output-suffix`, `--only-sticky`, `--no-sticky` flags for flexible reruns. Reproduces the "66% fewer tokens" headline on `agent_tasks_march_replay.toml` in one command.
+- **`benchmarks/agent_tasks_large.toml`** — 8 balanced easy/medium tasks across openclaw and linux. Baseline sanity bench.
+- **`benchmarks/agent_tasks_hard.toml`** — 9 grep-hostile tasks including the permanent `hard-oc-complexity` fixture (reproduces March's `grep-impossible-complexity-1`), multi-hop transitive impact, macro-resolved symbols (`SYSCALL_DEFINE4`), per-architecture sweeps (`do_page_fault` across 10+ archs), and NL concept queries (RCU grace period, copy-on-write handling). Ground truth verified upfront with `codixing symbols`/`codixing impact`/`codixing search` so "missed" means genuinely missed.
+- **`benchmarks/agent_tasks_march_replay.toml`** — the exact 4 March 2026-03-29 prompts, archived for release-gate isolation of model shift from task-mix shift.
+- **`benchmarks/results/agent_benchmark_large*.{md,json}`** — 4 full runs with per-session breakdowns: `_large` (v2 easy), `_hard`/`_hard_full` (v3 hard with/without `--medium`), `_march_replay_medium`/`_march_replay_full` (March prompts with/without `--medium`). The `_medium` runs are kept as negative evidence — every future benchmark PR can diff against them to catch regressions.
+- **`docs/research-recall-stickiness-2026-04-13.md`** — full writeup of the 4 runs, §4.15–4.24 documenting the `--medium` curation trap, per-task reading of why sticky mode wins where it wins and loses where it loses, and the reproduction of the March headline once the flag is gone.
+- **`e2e_medium_flag_is_rejected`** test in `crates/mcp/tests/e2e_protocol_test.rs` — clap must reject `--medium` with "unexpected argument". Pair of this + `e2e_compact_flag_is_rejected` covers both historical curation flags.
+
+### Changed
+- **Shipped configs drop `--medium`** — `.mcp.json`, `claude-plugin/.claude-plugin/plugin.json`, `README.md`, `CLAUDE.md`, `npm/README.md`, `claude-plugin/README.md`, `docs/index.html`, `docs/docs.html`, and `docs/blog-mcp-adoption-fix.html` all updated. The blog post gained an "Update April 2026" banner pointing at the research doc; its historical prose stays intact.
+- **Feature-list talking point flipped** — old copy said "Curated tool listing via `--medium` for clients without dynamic tool discovery". New copy says "All 67 tools always advertised on `tools/list` — no curation, no hidden tools."
+
+### Benchmark headline (reproduced on Sonnet 4.6, 4 March prompts, `_march_replay_full`)
+
+| Metric | vanilla | codixing-sticky (full MCP) | delta |
+|---|---|---|---|
+| Tool calls (mean) | 13.2 | **4.5** | **66% fewer** |
+| Tokens (mean) | 11,318 | **3,836** | **66% fewer** |
+| Wall time (mean) | 143.8s | **52.2s** | **64% faster** |
+| Recall (mean) | 85% | **90%** | **+5 pp** |
+
+The `hard-oc-complexity` task alone goes from **20 calls / 11,792 tokens** (vanilla) to **4 calls / 1,015 tokens** (sticky, full MCP) at 100% recall — 91% fewer tokens from one advertised tool (`mcp__codixing__get_complexity`).
+
 ## [0.37.0] — 2026-04-13
 
 v0.37 is a performance and coverage release driven by dogfooding `codixing grep` on the Linux kernel. Three big wins: a compact v2 trigram format (~86% smaller on-disk), lazy-loading of concept+reformulation blobs (~2.6 GB of cold-start bitcode decode deferred), and assembly file coverage for kernel/embedded repos. Plus several grep UX fixes surfaced by the same dogfooding run.

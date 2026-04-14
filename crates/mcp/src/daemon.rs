@@ -15,7 +15,6 @@ use tracing::{info, warn};
 
 use codixing_core::{Engine, FederatedEngine};
 
-use crate::ListingMode;
 use crate::jsonrpc::run_jsonrpc_loop;
 
 // ---------------------------------------------------------------------------
@@ -43,7 +42,6 @@ pub(crate) fn touch_activity() {
 pub(crate) async fn run_daemon(
     engine: Arc<RwLock<Engine>>,
     socket_path: &Path,
-    listing_mode: ListingMode,
     federation: Option<Arc<FederatedEngine>>,
 ) -> Result<()> {
     // Remove stale socket file if it exists.
@@ -165,9 +163,7 @@ pub(crate) async fn run_daemon(
         let engine_clone = Arc::clone(&engine);
         let fed_clone = federation.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                handle_socket_connection(stream, engine_clone, listing_mode, fed_clone).await
-            {
+            if let Err(e) = handle_socket_connection(stream, engine_clone, fed_clone).await {
                 warn!(error = %e, "daemon: connection error");
             }
         });
@@ -178,7 +174,6 @@ pub(crate) async fn run_daemon(
 pub(crate) async fn handle_socket_connection(
     stream: UnixStream,
     engine: Arc<RwLock<Engine>>,
-    listing_mode: ListingMode,
     federation: Option<Arc<FederatedEngine>>,
 ) -> Result<()> {
     let (read_half, write_half) = stream.into_split();
@@ -186,7 +181,6 @@ pub(crate) async fn handle_socket_connection(
         engine,
         BufReader::new(read_half).lines(),
         BufWriter::new(write_half),
-        listing_mode,
         federation,
     )
     .await

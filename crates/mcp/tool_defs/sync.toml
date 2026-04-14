@@ -4,7 +4,6 @@ description = "Re-index files changed since the last sync using content hash com
 handler = "files::call_sync_index"
 calling_convention = "engine_mut_only"
 read_only = false
-medium = true
 
 [[tools]]
 name = "git_sync_index"
@@ -12,4 +11,3 @@ description = "Fast git-aware sync: re-indexes only files changed since the last
 handler = "files::call_git_sync_index"
 calling_convention = "engine_mut_only"
 read_only = false
-medium = true

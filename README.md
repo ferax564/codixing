@@ -33,7 +33,7 @@ Add to your project's `.mcp.json`:
   "mcpServers": {
     "codixing": {
       "command": "npx",
-      "args": ["-y", "codixing-mcp", "--root", ".", "--medium", "--no-daemon-fork"]
+      "args": ["-y", "codixing-mcp", "--root", ".", "--no-daemon-fork"]
     }
   }
 }
@@ -293,7 +293,6 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Incremental embedding** — `sync` skips re-embedding unchanged chunks (content hash comparison)
 - **Progress notifications** — Long-running MCP tools emit `notifications/progress` with streaming partial results so agents see live status
 - **Windows support** — Named pipe daemon, brute-force vector fallback when usearch (POSIX-only) is unavailable
-- **Curated tool listing** — `--medium` exposes a 27-tool subset via `tools/list` for MCP clients that cannot do dynamic tool discovery (e.g. Codex CLI). All 67 tools remain callable via `tools/call`.
 - **GitHub Action** — Automated code review with impact analysis on PRs
 - **Token budgets** — All output respects token limits; adaptive truncation at score cliffs
 - **Cross-repo federation** — Unified search across multiple indexed projects with CLI management and workspace auto-discovery (`codixing federation init/add/remove/list/search/discover`)

@@ -4,7 +4,6 @@ description = "Given a task description, automatically assembles the most releva
 handler = "context::call_get_context_for_task"
 calling_convention = "engine_args_progress"
 read_only = true
-medium = true
 
 [tools.params.task]
 type = "string"

@@ -4,7 +4,6 @@ description = "Search for relevant code chunks across the indexed codebase. Uses
 handler = "search::call_code_search"
 calling_convention = "engine_args_progress"
 read_only = true
-medium = true
 
 [tools.params.query]
 type = "string"
@@ -40,7 +39,6 @@ description = "Look up symbols (functions, structs, classes, traits, methods, et
 handler = "search::call_find_symbol"
 calling_convention = "engine_args"
 read_only = true
-medium = true
 
 [tools.params.name]
 type = "string"
@@ -89,7 +87,6 @@ description = "Assemble a complete understanding package for a named symbol: its
 handler = "search::call_explain"
 calling_convention = "engine_args_progress"
 read_only = true
-medium = true
 
 [tools.params.symbol]
 type = "string"

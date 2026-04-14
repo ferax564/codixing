@@ -1,0 +1,78 @@
+# Large-scale agent benchmark: openclaw (~2K TS files) + linux (~63K C/H files)
+# Tasks are recall-focused: ground_truth is a list of path substrings the agent
+# is expected to surface. Scorer counts hits (substring anywhere in result_text).
+
+# ============================================================
+# OPENCLAW — TypeScript, ~2K source files
+# ============================================================
+
+[[agent_task]]
+repo = "openclaw"
+id = "oc-callers-1"
+category = "caller_completeness"
+prompt = """Find ALL production source files that reference the getChannelPlugin function — every file that imports it, calls it, or re-exports it. I need a comprehensive list, not just the top results. Exclude test files. List all file paths."""
+ground_truth = [
+  "src/infra/exec-approval-surface.ts",
+  "src/agents/channel-tools.ts",
+  "src/commands/configure.channels.ts",
+  "src/channels/plugins/index.ts",
+]
+
+[[agent_task]]
+repo = "openclaw"
+id = "oc-blast-1"
+category = "blast_radius"
+prompt = """If I changed the ChannelPlugin type definition in src/channels/plugins/types.ts, what source files would break? List EVERY file in src/ and extensions/ that imports or directly uses the ChannelPlugin type. Exclude test files."""
+ground_truth = [
+  "src/channels/plugins/types.ts",
+  "src/channels/plugins/registry.ts",
+  "src/channels/plugins/bundled.ts",
+  "src/auto-reply/commands-registry.data.ts",
+  "src/auto-reply/command-auth.ts",
+]
+
+[[agent_task]]
+repo = "openclaw"
+id = "oc-symbol-1"
+category = "symbol_lookup"
+prompt = """Where is the SubagentController class defined and what are its public methods?"""
+ground_truth = ["src/agents/subagent-control.ts", "SubagentController"]
+
+[[agent_task]]
+repo = "openclaw"
+id = "oc-concept-1"
+category = "concept_search"
+prompt = """Find the code that handles exec approval — where the user is prompted to approve a shell command before it runs. Include file paths."""
+ground_truth = ["src/infra/exec-approval", "approval"]
+
+# ============================================================
+# LINUX KERNEL — C, ~63K files
+# ============================================================
+
+[[agent_task]]
+repo = "linux"
+id = "lx-symbol-1"
+category = "symbol_lookup"
+prompt = """Where is the schedule() function implemented in the Linux kernel core scheduler? Give the file path and a brief summary of what it does."""
+ground_truth = ["kernel/sched/core.c", "schedule"]
+
+[[agent_task]]
+repo = "linux"
+id = "lx-concept-1"
+category = "concept_search"
+prompt = """Find where the kernel implements copy-on-write page handling for fork. Give the file path and function name."""
+ground_truth = ["mm/memory.c", "copy"]
+
+[[agent_task]]
+repo = "linux"
+id = "lx-callers-1"
+category = "caller_completeness"
+prompt = """Find where kmalloc_node is called across the mm/ subsystem. List the file paths (at least 5 distinct files)."""
+ground_truth = ["mm/"]
+
+[[agent_task]]
+repo = "linux"
+id = "lx-arch-1"
+category = "architecture"
+prompt = """Give an overview of the Linux kernel directory layout. What are the top-level source directories and what does each contain?"""
+ground_truth = ["kernel/", "mm/", "fs/", "net/", "drivers/"]

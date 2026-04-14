@@ -223,40 +223,28 @@ fn e2e_compact_flag_is_rejected() {
 }
 
 #[test]
-fn e2e_medium_mode_lists_curated_tools() {
+fn e2e_medium_flag_is_rejected() {
+    // --medium was removed in favor of always shipping the full tool set.
+    // clap should reject it at argument parsing.
     let project = setup_indexed_project();
     let root = project.path().to_str().unwrap();
 
-    let responses = run_mcp(
-        &["--root", root, "--medium"],
-        &[initialize_request(1), tools_list_request(2)],
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_codixing-mcp"))
+        .args(["--root", root, "--medium", "--no-daemon-fork"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("failed to spawn codixing-mcp");
+
+    assert!(
+        !output.status.success(),
+        "codixing-mcp should reject --medium; got exit code {:?}",
+        output.status.code()
     );
 
-    let list_resp = responses
-        .iter()
-        .find(|r| r["id"] == 2)
-        .expect("missing tools/list response");
-    let tools = list_resp["result"]["tools"]
-        .as_array()
-        .expect("tools should be an array");
-
-    // Medium mode returns a curated subset: more than compact (2), fewer than full (40+).
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        tools.len() >= 10,
-        "medium mode should list at least 10 tools, got {}",
-        tools.len()
-    );
-    assert!(
-        tools.len() <= 27,
-        "medium mode should list at most 27 tools, got {}",
-        tools.len()
-    );
-
-    // The curated set should include the most commonly used tools.
-    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-    assert!(
-        names.contains(&"code_search"),
-        "medium mode should include code_search"
+        stderr.contains("--medium") || stderr.contains("unexpected argument"),
+        "stderr should mention the unrecognized --medium flag, got: {stderr}"
     );
 }
 
