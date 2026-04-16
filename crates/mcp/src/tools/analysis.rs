@@ -598,7 +598,7 @@ pub(crate) fn call_get_complexity(engine: &Engine, args: &Value) -> (String, boo
         .filter(|(_, cc, _, _, _)| *cc >= min_cc)
         .collect();
 
-    rows.sort_by(|a, b| b.1.cmp(&a.1));
+    rows.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     if rows.is_empty() {
         return (
@@ -697,7 +697,7 @@ pub(crate) fn call_review_context(engine: &Engine, args: &Value) -> (String, boo
         impact.remove(f);
     }
     let mut ranked_impact: Vec<(String, usize)> = impact.into_iter().collect();
-    ranked_impact.sort_by(|a, b| b.1.cmp(&a.1));
+    ranked_impact.sort_by_key(|b| std::cmp::Reverse(b.1));
     ranked_impact.truncate(10);
 
     // 4. Cross-file context for top symbols.
@@ -759,7 +759,7 @@ pub(crate) fn call_generate_onboarding(engine: &mut Engine) -> (String, bool) {
         *lang_counts.entry(ext).or_insert(0) += 1;
     }
     let mut lang_list: Vec<(String, usize)> = lang_counts.into_iter().collect();
-    lang_list.sort_by(|a, b| b.1.cmp(&a.1));
+    lang_list.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     // Top files by PageRank.
     let repo_map = engine

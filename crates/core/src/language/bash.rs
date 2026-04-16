@@ -60,9 +60,9 @@ fn collect_entities(node: &Node, source: &[u8], entities: &mut Vec<SemanticEntit
                 type_relations: Vec::new(),
             });
         }
-        "variable_assignment" => {
+        "variable_assignment"
             // Only extract top-level variable assignments (depth 0 or 1 from root).
-            if is_top_level(node) {
+            if is_top_level(node) => {
                 if let Some(name) = node.child_by_field_name("name") {
                     let var_name = node_text(&name, source).to_string();
                     entities.push(SemanticEntity {
@@ -78,7 +78,6 @@ fn collect_entities(node: &Node, source: &[u8], entities: &mut Vec<SemanticEntit
                     });
                 }
             }
-        }
         _ => {}
     }
 

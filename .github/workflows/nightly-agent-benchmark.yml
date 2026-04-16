@@ -1,0 +1,81 @@
+name: Nightly Agent Benchmark
+
+on:
+  # TODO: restore `schedule: - cron: '0 7 * * *'` once the
+  # ANTHROPIC_API_KEY repo secret exists. Running now would fail every morning
+  # silently (continue-on-error swallows the failure).
+  workflow_dispatch:
+
+jobs:
+  agent-benchmark:
+    name: agent-benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain (from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "stable"
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-agent-benchmark
+
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+
+      - name: Build release
+        run: cargo build --release --workspace
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install benchmark dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install "claude-agent-sdk" "tomli; python_version < '3.11'"
+
+      - name: Prepare benchmark fixture (index codixing repo)
+        run: |
+          ./target/release/codixing init . --model none || true
+
+      - name: Run agent benchmark (codixing repo subset, ~8 sessions)
+        id: bench
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          mkdir -p benchmarks/results
+          python3 benchmarks/agent_benchmark.py \
+            --repos codixing \
+            --runs 1 \
+            --output benchmarks/results
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-agent-benchmark-${{ github.run_id }}
+          path: |
+            benchmarks/results/agent_benchmark.json
+            benchmarks/results/agent_benchmark.md
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Report benchmark step status
+        if: always()
+        env:
+          BENCH_OUTCOME: ${{ steps.bench.outcome }}
+        run: |
+          if [ "$BENCH_OUTCOME" = "failure" ]; then
+            echo "::warning::Agent benchmark step failed (continue-on-error). Check artifacts and logs."
+          else
+            echo "Agent benchmark step outcome: $BENCH_OUTCOME"
+          fi

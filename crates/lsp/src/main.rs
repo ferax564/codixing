@@ -1344,12 +1344,11 @@ fn extract_parameters(signature: &str) -> Vec<String> {
         match ch {
             '(' | '<' | '[' | '{' => depth += 1,
             ')' | ']' | '}' => depth -= 1,
-            '>' => {
+            '>'
                 // Only decrement for '>' if not preceded by '-' (i.e. skip '->')
-                if i == 0 || bytes[i - 1] != b'-' {
+                if (i == 0 || bytes[i - 1] != b'-') => {
                     depth -= 1;
                 }
-            }
             ',' if depth == 0 => {
                 let p = inside[start..i].trim();
                 if !p.is_empty() {
@@ -1382,10 +1381,8 @@ fn find_unmatched_open_paren(text: &str) -> Option<usize> {
                 }
                 depth -= 1;
             }
-            '[' | '{' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
+            '[' | '{' if depth > 0 => {
+                depth -= 1;
             }
             _ => {}
         }
