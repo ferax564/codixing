@@ -705,11 +705,13 @@ version = "0.38.1"
 dependencies = [
  "codixing-core",
  "serde_json",
+ "tempfile",
  "tokio",
  "tower-lsp",
  "tracing",
  "tracing-subscriber",
  "tree-sitter",
+ "url",
 ]
 
 [[package]]
