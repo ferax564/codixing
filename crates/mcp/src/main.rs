@@ -163,17 +163,27 @@ async fn main() -> Result<()> {
             let exe = std::env::current_exe()?;
             let mut daemon_args = vec![
                 "--root".to_string(),
-                root.to_str().unwrap().to_string(),
+                root.to_str()
+                    .ok_or_else(|| anyhow::anyhow!("root path is not valid UTF-8"))?
+                    .to_string(),
                 "--daemon".to_string(),
                 "--socket".to_string(),
-                socket_path.to_str().unwrap().to_string(),
+                socket_path
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("socket path is not valid UTF-8"))?
+                    .to_string(),
             ];
             if args.no_session {
                 daemon_args.push("--no-session".to_string());
             }
             if let Some(ref fed_path) = args.federation {
                 daemon_args.push("--federation".to_string());
-                daemon_args.push(fed_path.to_str().unwrap().to_string());
+                daemon_args.push(
+                    fed_path
+                        .to_str()
+                        .ok_or_else(|| anyhow::anyhow!("federation path is not valid UTF-8"))?
+                        .to_string(),
+                );
             }
             std::process::Command::new(&exe)
                 .args(&daemon_args)
@@ -201,7 +211,9 @@ async fn main() -> Result<()> {
             let exe = std::env::current_exe()?;
             let mut daemon_args = vec![
                 "--root".to_string(),
-                root.to_str().unwrap().to_string(),
+                root.to_str()
+                    .ok_or_else(|| anyhow::anyhow!("root path is not valid UTF-8"))?
+                    .to_string(),
                 "--daemon".to_string(),
             ];
             if args.no_session {
@@ -209,7 +221,12 @@ async fn main() -> Result<()> {
             }
             if let Some(ref fed_path) = args.federation {
                 daemon_args.push("--federation".to_string());
-                daemon_args.push(fed_path.to_str().unwrap().to_string());
+                daemon_args.push(
+                    fed_path
+                        .to_str()
+                        .ok_or_else(|| anyhow::anyhow!("federation path is not valid UTF-8"))?
+                        .to_string(),
+                );
             }
             std::process::Command::new(&exe)
                 .args(&daemon_args)
