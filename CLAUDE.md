@@ -73,7 +73,7 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 
 ```bash
 cargo build --release --workspace          # build all binaries
-cargo test --workspace                      # run all tests (1107)
+cargo test --workspace                      # run all tests (1115)
 cargo clippy --workspace -- -D warnings     # lint (must pass)
 cargo fmt --check                           # format check (must pass)
 
@@ -123,6 +123,14 @@ When bumping the version, update ALL of these files:
 4. `claude-plugin/.claude-plugin/plugin.json` — `version`
 5. `.claude-plugin/marketplace.json` — `metadata.version` AND `plugins[0].version`
 
+### Dual plugin manifest
+
+The plugin lives in two files that must stay version-synced:
+- `.claude-plugin/marketplace.json` — registry entry for the Claude Code marketplace (what `claude plugin marketplace add` reads).
+- `claude-plugin/.claude-plugin/plugin.json` — the actual plugin bundle that ships with hooks + skills.
+
+Both are covered by `scripts/bump_version.py`; edit by hand only if you know why.
+
 ## Development Workflow — Quality Rules
 
 ### Mandatory verification before every commit
@@ -130,7 +138,7 @@ When bumping the version, update ALL of these files:
 Every commit MUST pass all 3 checks. No exceptions:
 
 ```bash
-cargo test --workspace                      # ALL tests must pass (1107)
+cargo test --workspace                      # ALL tests must pass (1115)
 cargo clippy --workspace -- -D warnings     # zero warnings
 cargo fmt --check                           # zero diffs
 ```

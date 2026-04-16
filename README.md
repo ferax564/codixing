@@ -234,6 +234,8 @@ code --install-extension codixing.vsix
 
 **Retrieval accuracy** (OpenClaw, 9.4K files): Codixing R@10 = **0.763** vs grep R@10 = 0.345 — **2× better retrieval** (MRR = 0.706).
 
+> *Last measured on v0.26.0 / OpenClaw 9.4K (2026-02). Re-measurement on v0.38.1 pending — see [issue tracker](https://github.com/ferax564/codixing/issues).*
+
 **Large codebase** (368K LoC, 7,607 files): Init 7.9s, search 94ms, 99% token reduction vs grep.
 
 **Linux kernel** (63K C/H files, 30M+ lines, 84K-node dependency graph): 1.57s cold-start search, 0.79s warm via the MCP daemon path. Zero-deserialization mmap for instant startup. Note: fresh-process CLI invocations on a 2GB+ hybrid index pay startup cost on every call — prefer the MCP daemon or `--no-embeddings` for the CLI path.
@@ -341,7 +343,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 1107 tests
+cargo test --workspace        # 1115 tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```

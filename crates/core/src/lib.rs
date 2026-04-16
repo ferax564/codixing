@@ -1,3 +1,24 @@
+//! Codixing core — an AST-aware code-search engine for Rust, Python, JavaScript,
+//! TypeScript, Go, Java, C, C++, C#, Ruby, Swift, Kotlin, Scala, Zig, PHP,
+//! Matlab, and Bash. The top-level handle is [`engine::Engine`]; see its
+//! `init` / `open` / `search` / `sync` methods for the primary entry points.
+//!
+//! The retrieval stack is hybrid: tree-sitter produces AST-aware chunks
+//! (see [`chunker`]), Tantivy provides BM25F text ranking (see [`index`]),
+//! a file-level trigram inverted index powers literal/regex exact-match
+//! (see [`Engine::grep_code`] and [`GrepOptions`]), and an optional 384-dim
+//! vector index backed by BgeSmallEn via ONNX Runtime (see [`vector`] and
+//! [`embedder`]) rounds out the hybrid ranker. Results from these retrievers
+//! are fused with Reciprocal Rank Fusion and passed through composable
+//! [`retriever`] pipeline stages.
+//!
+//! Beyond text search, the crate maintains a typed dependency graph of
+//! import and call edges with PageRank scoring (see [`graph`] and
+//! [`graph::CodeGraph`]), including doc-to-code edges from the Markdown and
+//! HTML doc indexer. Cross-repo queries are served by the
+//! [`federation`] module, which exposes [`federation::FederatedEngine`] for
+//! unified search over multiple indexed projects.
+
 pub mod chunker;
 pub mod complexity;
 pub mod config;
