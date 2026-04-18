@@ -63,7 +63,8 @@ impl ImportResolver {
             | Language::Html
             | Language::Rst
             | Language::AsciiDoc
-            | Language::PlainText => None,
+            | Language::PlainText
+            | Language::Jupyter => None,
         }
     }
 

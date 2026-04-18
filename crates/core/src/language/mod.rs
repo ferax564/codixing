@@ -72,6 +72,8 @@ pub enum Language {
     Rst,
     AsciiDoc,
     PlainText,
+    // Meta-format: notebooks dispatch per-cell to code + doc chunkers
+    Jupyter,
 }
 
 impl Language {
@@ -108,6 +110,7 @@ impl Language {
             Self::Rst => "reStructuredText",
             Self::AsciiDoc => "AsciiDoc",
             Self::PlainText => "Plain text",
+            Self::Jupyter => "Jupyter",
         }
     }
 
@@ -144,6 +147,7 @@ impl Language {
             Self::Rst => &["rst"],
             Self::AsciiDoc => &["adoc", "asciidoc"],
             Self::PlainText => &["txt"],
+            Self::Jupyter => &["ipynb"],
         }
     }
 
@@ -166,6 +170,7 @@ impl Language {
                 | Self::Rst
                 | Self::AsciiDoc
                 | Self::PlainText
+                | Self::Jupyter
         )
     }
 
@@ -176,6 +181,19 @@ impl Language {
             self,
             Self::Markdown | Self::Html | Self::Rst | Self::AsciiDoc | Self::PlainText
         )
+    }
+
+    /// Whether this language is a meta-format whose contents dispatch
+    /// per-cell (or per-section) to other language implementations.
+    ///
+    /// Jupyter `.ipynb` notebooks are JSON containers holding both code
+    /// cells (routed to tree-sitter per `metadata.kernelspec.language`)
+    /// and Markdown cells (routed to `markdown.rs`). They are neither
+    /// `is_tree_sitter()` nor `is_doc()` — the dispatcher in
+    /// `engine::indexing::process_jupyter_file` handles them before
+    /// those paths run.
+    pub fn is_notebook(self) -> bool {
+        matches!(self, Self::Jupyter)
     }
 }
 
@@ -211,6 +229,7 @@ pub const ALL_LANGUAGES: &[Language] = &[
     Language::Rst,
     Language::AsciiDoc,
     Language::PlainText,
+    Language::Jupyter,
 ];
 
 /// The kind of semantic entity extracted from an AST.
@@ -653,8 +672,13 @@ mod tests {
     fn registry_has_all_languages() {
         let registry = LanguageRegistry::new();
         let langs = registry.languages();
-        assert_eq!(langs.len(), ALL_LANGUAGES.len());
+        let expected_len = ALL_LANGUAGES.iter().filter(|l| !l.is_notebook()).count();
+        assert_eq!(langs.len(), expected_len);
         for lang in ALL_LANGUAGES {
+            if lang.is_notebook() {
+                // Notebooks have no direct impl — dispatched per-cell upstream.
+                continue;
+            }
             if lang.is_doc() {
                 assert!(registry.get_doc(*lang).is_some(), "Missing doc {:?}", lang);
             } else if lang.is_tree_sitter() {
@@ -700,6 +724,28 @@ mod tests {
             detect_language(Path::new("Documentation/index.rst")),
             Some(Language::Rst)
         );
+    }
+
+    #[test]
+    fn detect_jupyter_language() {
+        assert_eq!(
+            detect_language(Path::new("analysis.ipynb")),
+            Some(Language::Jupyter)
+        );
+        assert_eq!(
+            detect_language(Path::new("notebooks/explore.ipynb")),
+            Some(Language::Jupyter)
+        );
+    }
+
+    #[test]
+    fn jupyter_is_notebook_not_doc_not_tree_sitter() {
+        assert!(Language::Jupyter.is_notebook());
+        assert!(!Language::Jupyter.is_doc());
+        assert!(!Language::Jupyter.is_tree_sitter());
+        // Other languages are not notebooks.
+        assert!(!Language::Rust.is_notebook());
+        assert!(!Language::Markdown.is_notebook());
     }
 
     #[test]

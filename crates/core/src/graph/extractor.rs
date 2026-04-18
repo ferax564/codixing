@@ -51,7 +51,8 @@ impl ImportExtractor {
             | Language::Html
             | Language::Rst
             | Language::AsciiDoc
-            | Language::PlainText => Vec::new(),
+            | Language::PlainText
+            | Language::Jupyter => Vec::new(),
         }
     }
 }
