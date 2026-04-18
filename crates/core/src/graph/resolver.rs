@@ -60,7 +60,8 @@ impl ImportResolver {
             | Language::Mermaid
             | Language::Xml
             | Language::Markdown
-            | Language::Html => None,
+            | Language::Html
+            | Language::Rst => None,
         }
     }
 

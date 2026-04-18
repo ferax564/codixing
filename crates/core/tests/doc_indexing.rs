@@ -83,7 +83,86 @@ fn doc_type_filter_works() {
 
     for r in &results {
         assert!(
-            r.language == "Markdown" || r.language == "HTML",
+            r.language == "Markdown" || r.language == "HTML" || r.language == "reStructuredText",
+            "Expected only doc results, got language={}",
+            r.language
+        );
+    }
+}
+
+#[test]
+fn index_and_search_rst_doc() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(
+        root.join("src/engine.rs"),
+        "/// Initialize the engine.\npub fn init() { todo!() }\n",
+    )
+    .unwrap();
+
+    fs::write(
+        root.join("guide.rst"),
+        "Project Guide\n=============\n\nIntro paragraph describing the project.\n\nGetting Started\n---------------\n\nCall ``init()`` to start the engine. See ``add_chunk`` for details.\n\nInstallation\n------------\n\nRun ``cargo install`` to build.\n",
+    )
+    .unwrap();
+
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
+
+    let results = engine
+        .search(
+            SearchQuery::new("getting started")
+                .with_limit(5)
+                .with_strategy(Strategy::Instant),
+        )
+        .unwrap();
+
+    assert!(
+        results.iter().any(|r| r.file_path.contains("guide.rst")),
+        "Expected guide.rst in results, got: {:?}",
+        results.iter().map(|r| &r.file_path).collect::<Vec<_>>()
+    );
+
+    let doc_result = results
+        .iter()
+        .find(|r| r.file_path.contains("guide.rst"))
+        .unwrap();
+    assert!(
+        !doc_result.scope_chain.is_empty(),
+        "Expected non-empty scope_chain for RST doc result"
+    );
+    assert_eq!(doc_result.language, "reStructuredText");
+}
+
+#[test]
+fn rst_docs_only_filter() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::write(root.join("src/lib.rs"), "pub fn search() {}\n").unwrap();
+    fs::write(
+        root.join("docs.rst"),
+        "Search\n======\n\nHow to search the index.\n",
+    )
+    .unwrap();
+
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
+
+    let sq = SearchQuery::new("search")
+        .with_limit(10)
+        .with_strategy(Strategy::Instant)
+        .with_doc_filter(DocFilter::DocsOnly);
+    let results = engine.search(sq).unwrap();
+
+    assert!(
+        results.iter().any(|r| r.file_path.contains("docs.rst")),
+        "Expected docs.rst in docs-only filtered results"
+    );
+    for r in &results {
+        assert!(
+            r.language == "Markdown" || r.language == "HTML" || r.language == "reStructuredText",
             "Expected only doc results, got language={}",
             r.language
         );

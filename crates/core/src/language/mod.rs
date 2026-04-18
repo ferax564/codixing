@@ -15,6 +15,7 @@ pub mod matlab;
 pub mod mermaid;
 pub mod php;
 pub mod python;
+pub mod rst;
 pub mod ruby;
 pub mod rust;
 pub mod scala;
@@ -66,6 +67,7 @@ pub enum Language {
     // Doc languages (structured parsing, no tree-sitter)
     Markdown,
     Html,
+    Rst,
 }
 
 impl Language {
@@ -99,6 +101,7 @@ impl Language {
             Self::Xml => "XML",
             Self::Markdown => "Markdown",
             Self::Html => "HTML",
+            Self::Rst => "reStructuredText",
         }
     }
 
@@ -132,6 +135,7 @@ impl Language {
             Self::Xml => &["xml", "drawio"],
             Self::Markdown => &["md", "mdx"],
             Self::Html => &["html", "htm"],
+            Self::Rst => &["rst"],
         }
     }
 
@@ -151,12 +155,13 @@ impl Language {
                 | Self::Xml
                 | Self::Markdown
                 | Self::Html
+                | Self::Rst
         )
     }
 
-    /// Whether this language represents a documentation format (Markdown, HTML).
+    /// Whether this language represents a documentation format (Markdown, HTML, reStructuredText).
     pub fn is_doc(self) -> bool {
-        matches!(self, Self::Markdown | Self::Html)
+        matches!(self, Self::Markdown | Self::Html | Self::Rst)
     }
 }
 
@@ -189,6 +194,7 @@ pub const ALL_LANGUAGES: &[Language] = &[
     Language::Xml,
     Language::Markdown,
     Language::Html,
+    Language::Rst,
 ];
 
 /// The kind of semantic entity extracted from an AST.
@@ -372,6 +378,7 @@ impl LanguageRegistry {
         let doc_impls: Vec<Arc<dyn doc::DocLanguageSupport>> = vec![
             Arc::new(markdown::MarkdownLanguage),
             Arc::new(html::HtmlLanguage),
+            Arc::new(rst::RstLanguage),
         ];
         Self {
             impls,
@@ -648,9 +655,18 @@ mod tests {
     }
 
     #[test]
+    fn detect_rst_language() {
+        assert_eq!(
+            detect_language(Path::new("Documentation/index.rst")),
+            Some(Language::Rst)
+        );
+    }
+
+    #[test]
     fn markdown_is_doc() {
         assert!(Language::Markdown.is_doc());
         assert!(Language::Html.is_doc());
+        assert!(Language::Rst.is_doc());
         assert!(!Language::Rust.is_doc());
         assert!(!Language::Yaml.is_doc());
     }
@@ -659,5 +675,6 @@ mod tests {
     fn doc_languages_are_not_tree_sitter() {
         assert!(!Language::Markdown.is_tree_sitter());
         assert!(!Language::Html.is_tree_sitter());
+        assert!(!Language::Rst.is_tree_sitter());
     }
 }
