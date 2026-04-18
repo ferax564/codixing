@@ -260,7 +260,7 @@ pub async fn complexity_handler(
         .filter(|item| item.cyclomatic_complexity >= params.min_complexity)
         .collect();
 
-    functions.sort_by(|a, b| b.cyclomatic_complexity.cmp(&a.cyclomatic_complexity));
+    functions.sort_by_key(|b| std::cmp::Reverse(b.cyclomatic_complexity));
 
     let total = functions.len();
     Ok(Json(ComplexityResponse {

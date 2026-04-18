@@ -297,17 +297,13 @@ impl SessionState {
                 let decay = linear_decay(age_secs);
 
                 match &event.kind {
-                    SessionEventKind::FileRead(p) if p == file_path => {
-                        if age_secs <= 300.0 {
-                            boost += FILE_READ_BOOST * decay;
-                        }
+                    SessionEventKind::FileRead(p) if p == file_path && age_secs <= 300.0 => {
+                        boost += FILE_READ_BOOST * decay;
                     }
                     SessionEventKind::FileEdit(p) | SessionEventKind::FileWrite(p)
-                        if p == file_path =>
+                        if p == file_path && age_secs <= 300.0 =>
                     {
-                        if age_secs <= 300.0 {
-                            boost += FILE_EDIT_BOOST * decay;
-                        }
+                        boost += FILE_EDIT_BOOST * decay;
                     }
                     SessionEventKind::SymbolLookup { file: Some(f), .. } if f == file_path => {
                         boost += SYMBOL_LOOKUP_BOOST * decay;
@@ -485,7 +481,7 @@ impl SessionState {
 
         // Sort directories by event count (most active first).
         let mut dirs: Vec<(String, DirSummary)> = dir_events.into_iter().collect();
-        dirs.sort_by(|a, b| b.1.event_count.cmp(&a.1.event_count));
+        dirs.sort_by_key(|b| std::cmp::Reverse(b.1.event_count));
 
         // Build output.
         let mut out = format!("## Session Summary ({total} events, {elapsed} min)\n\n");

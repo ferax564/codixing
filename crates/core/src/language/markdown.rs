@@ -187,10 +187,8 @@ fn detect_elements<'a>(
             continue;
         }
         match &data.value {
-            NodeValue::Paragraph => {
-                if !elements.contains(&DocElement::Paragraph) {
-                    elements.push(DocElement::Paragraph);
-                }
+            NodeValue::Paragraph if !elements.contains(&DocElement::Paragraph) => {
+                elements.push(DocElement::Paragraph);
             }
             NodeValue::CodeBlock(cb) => {
                 let lang = if cb.info.is_empty() {
@@ -203,20 +201,14 @@ fn detect_elements<'a>(
                     elements.push(el);
                 }
             }
-            NodeValue::Table(_) => {
-                if !elements.contains(&DocElement::Table) {
-                    elements.push(DocElement::Table);
-                }
+            NodeValue::Table(_) if !elements.contains(&DocElement::Table) => {
+                elements.push(DocElement::Table);
             }
-            NodeValue::List(_) => {
-                if !elements.contains(&DocElement::List) {
-                    elements.push(DocElement::List);
-                }
+            NodeValue::List(_) if !elements.contains(&DocElement::List) => {
+                elements.push(DocElement::List);
             }
-            NodeValue::BlockQuote => {
-                if !elements.contains(&DocElement::BlockQuote) {
-                    elements.push(DocElement::BlockQuote);
-                }
+            NodeValue::BlockQuote if !elements.contains(&DocElement::BlockQuote) => {
+                elements.push(DocElement::BlockQuote);
             }
             NodeValue::Image(link) => {
                 let alt = collect_text(node);

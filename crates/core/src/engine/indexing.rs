@@ -394,7 +394,7 @@ fn embed_single_file_inner(
             if all_found {
                 match embedder.embed_file_late_chunking(&file_text, &byte_ranges) {
                     Ok(Some(embeddings)) => {
-                        for ((id, _, _), embedding) in ordered.iter().zip(embeddings.into_iter()) {
+                        for ((id, _, _), embedding) in ordered.iter().zip(embeddings) {
                             sink(*id, embedding, file_path);
                             embedded += 1;
                         }
@@ -425,7 +425,7 @@ fn embed_single_file_inner(
 
         let embeddings = embedder.embed(texts)?;
 
-        for (chunk_id, embedding) in window.iter().zip(embeddings.into_iter()) {
+        for (chunk_id, embedding) in window.iter().zip(embeddings) {
             let fp = chunk_meta
                 .get(chunk_id)
                 .map(|m| m.file_path.clone())
