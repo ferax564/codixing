@@ -1,6 +1,6 @@
 [[tools]]
 name = "get_context_for_task"
-description = "Given a task description, automatically assembles the most relevant code context. Uses hybrid search + dependency-aware ordering so definitions appear before usages. Perfect for understanding a feature or preparing for an edit."
+description = "Given a task description, automatically assembles the most relevant code context. Uses hybrid search + dependency-aware ordering so definitions appear before usages. Use when you want one call that replaces 3–5 separate `code_search` + `read_symbol` + `get_callers` invocations — ideal for understanding a feature or preparing for an edit."
 handler = "context::call_get_context_for_task"
 calling_convention = "engine_args_progress"
 read_only = true

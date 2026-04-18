@@ -127,7 +127,7 @@ required = true
 
 [[tools]]
 name = "apply_patch"
-description = "Apply a unified git diff (patch) to one or more files and immediately reindex all affected files. The patch must be in standard unified diff format as produced by 'git diff'."
+description = "Apply a unified git diff (patch) to one or more files and immediately reindex all affected files. The patch must be in standard unified diff format as produced by 'git diff'. Use when you already have a diff you trust and want to mutate multiple files atomically with a single round-trip instead of many `edit_file` calls."
 handler = "files::call_apply_patch"
 calling_convention = "engine_mut_args"
 read_only = false
@@ -139,7 +139,7 @@ required = true
 
 [[tools]]
 name = "run_tests"
-description = "Execute a test command in the project root and return the combined stdout + stderr output along with the exit code. Use to verify changes or check test status."
+description = "Execute a test command in the project root and return the combined stdout + stderr output along with the exit code. Use when verifying changes you just made, reproducing a failure before debugging, or confirming CI-relevant tests pass before handing off."
 handler = "files::call_run_tests"
 calling_convention = "engine_mut_args"
 read_only = false
@@ -155,7 +155,7 @@ description = "Maximum seconds to wait before killing the process (default: 120)
 
 [[tools]]
 name = "list_files"
-description = "List all files currently indexed by Codixing with their chunk counts. Supports optional glob pattern filtering."
+description = "List all files currently indexed by Codixing with their chunk counts. Supports optional glob pattern filtering. Use when you need an inventory of what's in the index (e.g. to confirm the right subdirectory is covered) before running narrower searches."
 handler = "files::call_list_files"
 calling_convention = "engine_args"
 read_only = true
@@ -170,7 +170,7 @@ description = "Maximum number of files to return (default: 200)"
 
 [[tools]]
 name = "outline_file"
-description = "Return a token-efficient symbol outline for a file: all symbols (functions, structs, classes, etc.) sorted by line number with their kind and line range. Useful as a quick map before diving into read_file."
+description = "Return a token-efficient symbol outline for a file: all symbols (functions, structs, classes, etc.) sorted by line number with their kind and line range. Use when you want to understand a file's structure before spending tokens on `read_file` — outline first, then read only the interesting range."
 handler = "files::call_outline_file"
 calling_convention = "engine_args"
 read_only = true

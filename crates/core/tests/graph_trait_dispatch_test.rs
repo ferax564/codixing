@@ -2,8 +2,9 @@
 //!   1. Rust trait method dispatch through impl blocks
 //!   2. Python super().method() call resolution
 //!   3. TypeScript interface implementation linking
+//!   4. ReferenceOptions::complete — deterministic blast-radius mode
 
-use codixing_core::{Engine, IndexConfig};
+use codixing_core::{Engine, IndexConfig, ReferenceOptions};
 use std::fs;
 use tempfile::tempdir;
 
@@ -501,5 +502,104 @@ class ConsoleLogger implements Logger {
         class_names.contains(&"ConsoleLogger"),
         "expected ConsoleLogger class, got: {:?}",
         class_names
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 4. ReferenceOptions::complete — deterministic blast-radius mode
+// ---------------------------------------------------------------------------
+
+#[test]
+fn symbol_references_complete_returns_all_callers() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let src = root.join("src");
+    fs::create_dir_all(&src).unwrap();
+
+    // Define a target function and N callers across several files.
+    fs::write(src.join("target.rs"), "pub fn target_fn() -> i32 { 42 }\n").unwrap();
+    for i in 0..12 {
+        fs::write(
+            src.join(format!("caller{i}.rs")),
+            format!(
+                "use crate::target::target_fn;\npub fn caller_{i}() {{ let _ = target_fn(); }}\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
+
+    // Ranked mode with a small cap — may truncate to < 12.
+    let ranked = engine.symbol_callers_precise("target_fn", 3);
+    assert!(
+        ranked.len() <= 3,
+        "ranked mode must respect limit, got {}",
+        ranked.len()
+    );
+
+    // Complete mode — no cap, returns all 12 callers.
+    let complete = engine.symbol_references(
+        "target_fn",
+        ReferenceOptions {
+            complete: true,
+            max_results: None,
+        },
+    );
+    assert!(
+        complete.len() >= 12,
+        "complete mode should return all 12 callers (BM25/AST fallback may add trivial dupes); got {}",
+        complete.len()
+    );
+
+    // Complete mode is deterministic: sorted by (file_path, line).
+    let mut sorted = complete.clone();
+    sorted.sort_by(|a, b| a.file_path.cmp(&b.file_path).then(a.line.cmp(&b.line)));
+    assert_eq!(
+        complete
+            .iter()
+            .map(|r| (r.file_path.clone(), r.line))
+            .collect::<Vec<_>>(),
+        sorted
+            .iter()
+            .map(|r| (r.file_path.clone(), r.line))
+            .collect::<Vec<_>>(),
+        "complete mode must return results sorted by (file, line)"
+    );
+}
+
+#[test]
+fn symbol_references_ranked_default_matches_symbol_callers_precise() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let src = root.join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("lib.rs"), "pub fn widget() {}\n").unwrap();
+    fs::write(
+        src.join("main.rs"),
+        "use crate::lib::widget;\nfn main() { widget(); }\n",
+    )
+    .unwrap();
+
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
+
+    let ranked = engine.symbol_callers_precise("widget", 20);
+    let via_opts = engine.symbol_references(
+        "widget",
+        ReferenceOptions {
+            complete: false,
+            max_results: Some(20),
+        },
+    );
+    assert_eq!(
+        ranked
+            .iter()
+            .map(|r| (r.file_path.clone(), r.line))
+            .collect::<Vec<_>>(),
+        via_opts
+            .iter()
+            .map(|r| (r.file_path.clone(), r.line))
+            .collect::<Vec<_>>(),
+        "ranked path via ReferenceOptions should match symbol_callers_precise"
     );
 }

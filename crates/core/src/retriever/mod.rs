@@ -139,9 +139,13 @@ pub struct SearchResult {
 }
 
 impl SearchResult {
-    /// Whether this result comes from a documentation file (Markdown or HTML).
+    /// Whether this result comes from a documentation file
+    /// (Markdown, HTML, reStructuredText, AsciiDoc, plain text).
     pub fn is_doc(&self) -> bool {
-        self.language == "Markdown" || self.language == "HTML"
+        matches!(
+            self.language.as_str(),
+            "Markdown" | "HTML" | "reStructuredText" | "AsciiDoc" | "Plain text"
+        )
     }
 }
 

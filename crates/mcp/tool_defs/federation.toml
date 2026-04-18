@@ -17,7 +17,7 @@ required = true
 
 [[tools]]
 name = "federation_add_project"
-description = "Add a project to an existing federation config file. The project root must contain a .codixing/ index."
+description = "Add a project to an existing federation config file. The project root must contain a .codixing/ index. Use when growing a multi-repo federated search surface."
 handler = "federation::call_federation_add_project"
 calling_convention = "args_only"
 read_only = true
@@ -38,7 +38,7 @@ description = "Per-project weight for RRF fusion (default: 1.0). Higher values r
 
 [[tools]]
 name = "federation_remove_project"
-description = "Remove a project from a federation config file by its directory name."
+description = "Remove a project from a federation config file by its directory name. Use when a subproject has been archived or moved out of the federation."
 handler = "federation::call_federation_remove_project"
 calling_convention = "args_only"
 read_only = true
@@ -55,7 +55,7 @@ required = true
 
 [[tools]]
 name = "federation_list"
-description = "List all projects in the federation. If a live FederatedEngine is available (--federation), shows load status and file counts. Otherwise reads from the config file."
+description = "List all projects in the federation. If a live FederatedEngine is available (--federation), shows load status and file counts. Otherwise reads from the config file. Use when inventorying what a federation currently covers."
 handler = "federation::call_federation_list"
 calling_convention = "args_federation"
 read_only = true
@@ -66,7 +66,7 @@ description = "Path to federation config file (only needed when no FederatedEngi
 
 [[tools]]
 name = "federation_search"
-description = "Search across all federated projects using RRF fusion. Requires an active FederatedEngine (--federation flag)."
+description = "Search across all federated projects using RRF fusion. Requires an active FederatedEngine (--federation flag). Use when you need results that span multiple repos — prefer plain `code_search` for single-repo work."
 handler = "federation::call_federation_search"
 calling_convention = "args_federation"
 read_only = true
@@ -82,7 +82,7 @@ description = "Maximum number of results to return (default: 10)"
 
 [[tools]]
 name = "federation_discover"
-description = "Auto-discover workspace projects under a root directory. Detects Cargo workspaces, npm/pnpm workspaces, Go workspaces, git submodules, and nested projects. Optionally writes a federation config file."
+description = "Auto-discover workspace projects under a root directory. Detects Cargo workspaces, npm/pnpm workspaces, Go workspaces, git submodules, and nested projects. Optionally writes a federation config file. Use when bootstrapping a federation from a polyrepo — saves manually enumerating every subproject."
 handler = "federation::call_federation_discover"
 calling_convention = "args_only"
 read_only = true

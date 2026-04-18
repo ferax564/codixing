@@ -17,15 +17,144 @@ impl DocLanguageSupport for MarkdownLanguage {
         Language::Markdown
     }
 
-    fn parse_sections(&self, source: &[u8]) -> Vec<DocSection> {
+    fn parse_sections(&self, source: &[u8], file_name: Option<&str>) -> Vec<DocSection> {
         let text = String::from_utf8_lossy(source);
-        parse_markdown_sections(&text)
+        if is_changelog_filename(file_name) {
+            parse_changelog_sections(&text)
+        } else {
+            parse_markdown_sections(&text)
+        }
     }
 
     fn extract_symbol_refs(&self, source: &[u8]) -> Vec<SymbolRef> {
         let text = String::from_utf8_lossy(source);
         extract_backtick_refs(&text)
     }
+}
+
+/// True if `file_name` looks like a CHANGELOG (case-insensitive `CHANGELOG`,
+/// `HISTORY`, or `RELEASES` base — ignores extension).
+pub(crate) fn is_changelog_filename(file_name: Option<&str>) -> bool {
+    let Some(name) = file_name else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    let stem = lower
+        .rsplit_once('.')
+        .map(|(stem, _ext)| stem)
+        .unwrap_or(lower.as_str());
+    stem == "changelog" || stem == "history" || stem == "releases"
+}
+
+/// Parse a markdown CHANGELOG: one section per release heading.
+///
+/// Release headings are level-2 headings whose text starts with a digit,
+/// a `v` + digit, or a bracketed `[v?<digit>…]` (matching Keep a Changelog).
+/// Anything above the first release heading (including the `# Changelog`
+/// title and preamble) collapses into a single level-0 section, so the
+/// index has one chunk per release version.
+///
+/// Sub-headings (`### Added`, `### Fixed`, …) stay **inside** their parent
+/// release section. A search for `"v0.39 features"` then matches the one
+/// section containing every subheading's content rather than being split
+/// across them.
+pub fn parse_changelog_sections(text: &str) -> Vec<DocSection> {
+    let arena = Arena::new();
+    let options = Options::default();
+    let root = parse_document(&arena, text, &options);
+
+    struct ReleaseInfo {
+        heading_text: String,
+        start_line: usize,
+    }
+
+    let mut releases: Vec<ReleaseInfo> = Vec::new();
+    for node in root.descendants() {
+        let data = node.data.borrow();
+        if let NodeValue::Heading(ref h) = data.value
+            && h.level == 2
+        {
+            let heading_text = collect_text(node);
+            if is_release_heading(&heading_text) {
+                releases.push(ReleaseInfo {
+                    heading_text,
+                    start_line: data.sourcepos.start.line,
+                });
+            }
+        }
+    }
+
+    let lines: Vec<&str> = text.lines().collect();
+    let total_lines = lines.len();
+
+    // No release headings → fall back to the general markdown parser.
+    if releases.is_empty() {
+        return parse_markdown_sections(text);
+    }
+
+    let mut sections: Vec<DocSection> = Vec::new();
+    let num_releases = releases.len();
+
+    // Preamble (title `# Changelog` + intro text) → single level-0 section.
+    let first_release_line = releases[0].start_line;
+    if first_release_line > 1 {
+        let preamble_end = first_release_line - 1;
+        let content = lines[0..preamble_end.min(total_lines)].join("\n");
+        let byte_end = line_to_byte_offset(text, preamble_end.min(total_lines));
+        sections.push(DocSection {
+            heading: String::new(),
+            level: 0,
+            section_path: vec![],
+            content: content.clone(),
+            byte_range: 0..byte_end,
+            line_range: 0..preamble_end,
+            element_types: detect_elements_in_text(&content),
+        });
+    }
+
+    for (i, release) in releases.iter().enumerate() {
+        let section_start_line = release.start_line - 1; // 0-indexed
+        let section_end_line = if i + 1 < num_releases {
+            releases[i + 1].start_line - 1
+        } else {
+            total_lines
+        };
+
+        let content = lines[section_start_line..section_end_line.min(total_lines)].join("\n");
+        let byte_start = line_to_byte_offset(text, section_start_line);
+        let byte_end = line_to_byte_offset(text, section_end_line.min(total_lines));
+        let element_types = detect_elements_in_text(&content);
+
+        sections.push(DocSection {
+            heading: release.heading_text.clone(),
+            level: 2,
+            section_path: vec![release.heading_text.clone()],
+            content,
+            byte_range: byte_start..byte_end,
+            line_range: section_start_line..section_end_line,
+            element_types,
+        });
+    }
+
+    sections
+}
+
+/// Does this heading text look like a release marker — `1.2.0`, `v1.2.0`,
+/// `[1.2.0]`, `[v1.2.0] — 2026-04-18`, `Unreleased`?
+fn is_release_heading(text: &str) -> bool {
+    let t = text.trim();
+    if t.eq_ignore_ascii_case("unreleased") || t.eq_ignore_ascii_case("[unreleased]") {
+        return true;
+    }
+    // Strip a single leading `[`.
+    let after_bracket = t.strip_prefix('[').unwrap_or(t);
+    // Strip a leading `v` / `V`.
+    let after_v = after_bracket
+        .strip_prefix('v')
+        .or_else(|| after_bracket.strip_prefix('V'))
+        .unwrap_or(after_bracket);
+    // First non-whitespace char must be a digit.
+    after_v.chars().next().is_some_and(|c| c.is_ascii_digit())
 }
 
 /// Parse markdown text into a flat list of `DocSection`s.
@@ -482,5 +611,60 @@ mod tests {
         assert!(!is_likely_symbol("true"));
         assert!(!is_likely_symbol(""));
         assert!(!is_likely_symbol("a"));
+    }
+
+    #[test]
+    fn changelog_filename_detector() {
+        assert!(is_changelog_filename(Some("CHANGELOG.md")));
+        assert!(is_changelog_filename(Some("changelog.md")));
+        assert!(is_changelog_filename(Some("CHANGELOG")));
+        assert!(is_changelog_filename(Some("HISTORY.md")));
+        assert!(is_changelog_filename(Some("RELEASES.md")));
+        assert!(!is_changelog_filename(Some("README.md")));
+        assert!(!is_changelog_filename(Some("CHANGELOGS.md")));
+        assert!(!is_changelog_filename(None));
+    }
+
+    #[test]
+    fn is_release_heading_accepts_common_formats() {
+        assert!(is_release_heading("1.2.0"));
+        assert!(is_release_heading("v1.2.0"));
+        assert!(is_release_heading("[1.2.0]"));
+        assert!(is_release_heading("[v1.2.0]"));
+        assert!(is_release_heading("[0.39.0] — 2026-04-18"));
+        assert!(is_release_heading("Unreleased"));
+        assert!(is_release_heading("[Unreleased]"));
+        assert!(!is_release_heading("Added"));
+        assert!(!is_release_heading("Bug fixes"));
+    }
+
+    #[test]
+    fn changelog_mode_groups_subheadings_under_release() {
+        let changelog = "# Changelog\n\nIntro line.\n\n## [0.39.0] — 2026-04-18\n\n### Added\n\n- Feature X\n\n### Fixed\n\n- Bug Y\n\n## [0.38.0] — 2026-04-01\n\n### Added\n\n- Feature Z\n";
+        let sections = parse_changelog_sections(changelog);
+        // Preamble + 2 releases = 3 sections.
+        assert_eq!(sections.len(), 3);
+        assert_eq!(sections[0].level, 0);
+        assert!(sections[0].content.contains("# Changelog"));
+        assert_eq!(sections[1].heading, "[0.39.0] — 2026-04-18");
+        assert_eq!(sections[1].level, 2);
+        // Subheadings stay INSIDE the release section.
+        assert!(sections[1].content.contains("### Added"));
+        assert!(sections[1].content.contains("Feature X"));
+        assert!(sections[1].content.contains("### Fixed"));
+        assert!(sections[1].content.contains("Bug Y"));
+        // And NOT leak into the next release.
+        assert!(!sections[1].content.contains("0.38.0"));
+        assert_eq!(sections[2].heading, "[0.38.0] — 2026-04-01");
+    }
+
+    #[test]
+    fn changelog_mode_falls_back_when_no_release_headings() {
+        let md = "# Not a changelog\n\n## Section A\n\nContent.\n";
+        let sections = parse_changelog_sections(md);
+        // Falls back to the normal markdown parser.
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].heading, "Not a changelog");
+        assert_eq!(sections[1].heading, "Section A");
     }
 }

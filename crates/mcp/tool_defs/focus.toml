@@ -1,6 +1,6 @@
 [[tools]]
 name = "focus_map"
-description = "Generate a focus-aware repository map using Personalized PageRank seeded by recently edited/viewed files. Surfaces the files most relevant to your current working context \u2014 direct dependencies, transitive imports, and co-dependent modules. If no seed files are given, auto-detects from git (unstaged changes, staged changes, recent commits)."
+description = "Generate a focus-aware repository map using Personalized PageRank seeded by recently edited/viewed files. Surfaces the files most relevant to your current working context \u2014 direct dependencies, transitive imports, and co-dependent modules. If no seed files are given, auto-detects from git (unstaged changes, staged changes, recent commits). Use when you want a repo map biased toward the work-in-progress area rather than a global PageRank view."
 handler = "focus::call_focus_map"
 calling_convention = "engine_args"
 read_only = true

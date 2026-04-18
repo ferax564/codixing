@@ -1,6 +1,6 @@
 [[tools]]
 name = "feature_hub"
-description = "One-call feature exploration: finds core files, dependencies, dependents, and tests for a feature query. Combines search + callers + callees + tests into a single structured response. Reduces agent tool calls from 4-5 to 1 for feature exploration."
+description = "One-call feature exploration: finds core files, dependencies, dependents, and tests for a feature query. Combines search + callers + callees + tests into a single structured response. Use when you're asked to explain or change a whole feature — reduces tool calls from 4–5 to 1."
 handler = "feature_hub::call_feature_hub"
 calling_convention = "engine_args"
 read_only = true

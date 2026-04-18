@@ -1,6 +1,6 @@
 [[tools]]
 name = "code_search"
-description = "Search for relevant code chunks across the indexed codebase. Uses BM25, vector, or hybrid retrieval depending on the strategy. Returns formatted source excerpts with file paths and line numbers."
+description = "Search for relevant code chunks across the indexed codebase. Uses BM25, vector, or hybrid retrieval depending on the strategy. Returns formatted source excerpts with file paths and line numbers. Use when you're starting from a natural-language concept (\u201cwhere is rate limiting?\u201d) rather than a known symbol name \u2014 prefer `find_symbol` for exact identifiers and `grep_code` for literal strings."
 handler = "search::call_code_search"
 calling_convention = "engine_args_progress"
 read_only = true
@@ -35,7 +35,7 @@ description = "Optional list of query reformulations for multi-query RRF fusion.
 
 [[tools]]
 name = "find_symbol"
-description = "Look up symbols (functions, structs, classes, traits, methods, etc.) in the indexed codebase by name. Performs case-insensitive substring matching."
+description = "Look up symbols (functions, structs, classes, traits, methods, etc.) in the indexed codebase by name. Performs case-insensitive substring matching. Use when you already know the symbol name and need its definition file/line \u2014 prefer `code_search` for concept queries, `read_symbol` to read the full source."
 handler = "search::call_find_symbol"
 calling_convention = "engine_args"
 read_only = true
@@ -51,7 +51,7 @@ description = "Optional file path substring to restrict results to a specific fi
 
 [[tools]]
 name = "search_usages"
-description = "Find all code locations where a symbol (function, struct, variable, etc.) is referenced or called. Unlike find_symbol which finds definitions, this finds usages \u2014 call sites, imports, and references. Essential for impact analysis before refactoring. Tip: For graph-based caller discovery, use symbol_callers instead \u2014 it uses the dependency graph for more precise results."
+description = "Find all code locations where a symbol (function, struct, variable, etc.) is referenced or called. Unlike find_symbol which finds definitions, this finds usages \u2014 call sites, imports, and references. Essential for impact analysis before refactoring. Use `complete=true` for deterministic blast-radius queries (\u201call callers of X\u201d) where the top-K ranked view hides the long tail; otherwise stays on the ranked path. Tip: For graph-based caller discovery, use symbol_callers instead \u2014 it uses the dependency graph for more precise results."
 handler = "search::call_search_usages"
 calling_convention = "engine_args"
 read_only = true
@@ -63,7 +63,11 @@ required = true
 
 [tools.params.limit]
 type = "integer"
-description = "Maximum number of usage locations to return (default: 20)"
+description = "Maximum number of usage locations to return (default: 20). Ignored when `complete=true`."
+
+[tools.params.complete]
+type = "boolean"
+description = "If true, returns every known call site / import for the symbol with no ranking and no cap, sorted deterministically by (file, line). Use for blast-radius queries where you need the full set. Default: false."
 
 [[tools]]
 name = "read_symbol"
@@ -83,7 +87,7 @@ description = "Optional file path substring to disambiguate when multiple symbol
 
 [[tools]]
 name = "explain"
-description = "Assemble a complete understanding package for a named symbol: its definition source, the top usage sites found via BM25 search (callers), and functions it calls (callees extracted from source). Ideal first step before modifying any significant function or class."
+description = "Assemble a complete understanding package for a named symbol: its definition source, the top usage sites found via BM25 search (callers), and functions it calls (callees extracted from source). Use when approaching a significant function or class for the first time \u2014 one call beats the `read_symbol` + `search_usages` + `symbol_callees` trio."
 handler = "search::call_explain"
 calling_convention = "engine_args_progress"
 read_only = true
@@ -99,7 +103,7 @@ description = "Optional file path to disambiguate"
 
 [[tools]]
 name = "stitch_context"
-description = "Deprecated: use assemble_context instead. Search for code and automatically attach callee definitions."
+description = "Deprecated: use `assemble_context` instead of this tool. Kept for backwards compatibility \u2014 searches for code and automatically attaches callee definitions."
 handler = "search::call_stitch_context"
 calling_convention = "engine_args"
 read_only = true
@@ -119,7 +123,7 @@ description = "How many levels of callee definitions to attach (default: 1)"
 
 [[tools]]
 name = "assemble_context"
-description = "Assemble cross-file context by gathering related code from multiple files based on a query. Searches for code and automatically attaches the full source of callee definitions referenced in the top results."
+description = "Assemble cross-file context by gathering related code from multiple files based on a query. Searches for code and automatically attaches the full source of callee definitions referenced in the top results. Use when you need to understand a feature end-to-end \u2014 prefer `code_search` for a ranked result list without the attached callee sources."
 handler = "search::call_assemble_context"
 calling_convention = "engine_args"
 read_only = true

@@ -48,7 +48,10 @@ impl ImportExtractor {
             | Language::Mermaid
             | Language::Xml
             | Language::Markdown
-            | Language::Html => Vec::new(),
+            | Language::Html
+            | Language::Rst
+            | Language::AsciiDoc
+            | Language::PlainText => Vec::new(),
         }
     }
 }

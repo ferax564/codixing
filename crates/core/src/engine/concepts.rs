@@ -124,12 +124,35 @@ struct SymbolRecord {
     doc_words: Vec<String>,
 }
 
+/// Phase-4 embedding-cluster merge parameters.
+///
+/// Tuned on the openclaw repo during the v0.40 concept-graph work:
+/// τ = 0.82 keeps merges tight enough that false-positive cluster unions are
+/// rare while still catching synonym pairs like `login / authenticate`.
+/// Cap = 32 prevents runaway single-link chains.
+#[derive(Debug, Clone, Copy)]
+pub struct EmbedClusterConfig {
+    pub threshold: f32,
+    pub cap: usize,
+}
+
+impl Default for EmbedClusterConfig {
+    fn default() -> Self {
+        Self {
+            threshold: 0.82,
+            cap: 32,
+        }
+    }
+}
+
 /// Builds a [`ConceptIndex`] from symbol data and co-occurrence information.
 #[derive(Debug, Default)]
 pub struct ConceptIndexBuilder {
     symbols: Vec<SymbolRecord>,
     /// Pairs of files that import each other / co-occur.
     cooccurrences: Vec<(String, String)>,
+    /// Phase-4 state. `None` = merge disabled (Phase 4 is a no-op).
+    embed_cluster: Option<(HashMap<String, Vec<f32>>, EmbedClusterConfig)>,
 }
 
 impl ConceptIndexBuilder {
@@ -152,6 +175,30 @@ impl ConceptIndexBuilder {
     pub fn add_cooccurrence(&mut self, file_a: &str, file_b: &str) {
         self.cooccurrences
             .push((file_a.to_string(), file_b.to_string()));
+    }
+
+    /// Enable Phase 4 cluster merging with the supplied symbol embeddings
+    /// and default [`EmbedClusterConfig`] (τ = 0.82, cap = 32).
+    ///
+    /// If this method is not called (or an empty map is passed), Phase 4 is
+    /// a no-op and the output is identical to the pre-v0.40 three-phase
+    /// build — the `embedding.enabled = false` code path is unchanged.
+    pub fn with_symbol_embeddings(self, embeddings: HashMap<String, Vec<f32>>) -> Self {
+        self.with_embed_cluster(embeddings, EmbedClusterConfig::default())
+    }
+
+    /// Enable Phase 4 cluster merging with explicit configuration.
+    pub fn with_embed_cluster(
+        mut self,
+        embeddings: HashMap<String, Vec<f32>>,
+        config: EmbedClusterConfig,
+    ) -> Self {
+        if embeddings.is_empty() {
+            self.embed_cluster = None;
+        } else {
+            self.embed_cluster = Some((embeddings, config));
+        }
+        self
     }
 
     /// Consume the builder and produce a [`ConceptIndex`].
@@ -330,10 +377,64 @@ impl ConceptIndexBuilder {
         }
 
         // -----------------------------------------------------------------
-        // Phase 4: Build term → cluster index
+        // Phase 4: Embedding-based cluster merge (v0.40)
         // -----------------------------------------------------------------
+        //
+        // Single-link agglomerative merge at centroid-cosine >= threshold,
+        // cap = max combined symbol count. O(C^2) — on linux-kernel scale
+        // a HNSW top-K probe is the documented follow-up.
+        if let Some((embeddings, config)) = self.embed_cluster.as_ref() {
+            merge_clusters_by_embedding(&mut clusters, embeddings, config.threshold, config.cap);
+        }
+
+        // -----------------------------------------------------------------
+        // Phase 5: Build term → cluster index
+        // -----------------------------------------------------------------
+        //
+        // Phase 4 may have removed or renumbered clusters, so the
+        // pre-merge `seen_term_sets` (dedup_key → cluster_idx) is no longer
+        // a reliable lookup. Build a fresh `symbol_name → Vec<cluster_idx>`
+        // map from the final clusters and drive Phase 5 off of it; the
+        // dedup_key path becomes a fallback for the pre-merge (no Phase 4)
+        // case when a symbol belongs to a single cluster only.
 
         let mut term_to_clusters: HashMap<String, Vec<usize>> = HashMap::new();
+
+        // Post-merge symbol → cluster lookup, used to translate pre-merge
+        // symbol-index-sets into the current cluster numbering.
+        let mut name_to_clusters: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (idx, cluster) in clusters.iter().enumerate() {
+            for name in &cluster.symbols {
+                name_to_clusters.entry(name.as_str()).or_default().push(idx);
+            }
+        }
+
+        // Return only clusters that contain EVERY name in `sym_indices` —
+        // matches the pre-merge `seen_term_sets` dedup-key semantics so
+        // lookups land on the one cluster that actually groups these
+        // symbols, not every cluster that contains any single member.
+        let resolve_clusters = |sym_indices: &[usize]| -> Vec<usize> {
+            let target_count = sym_indices.len();
+            if target_count == 0 {
+                return Vec::new();
+            }
+            let mut cluster_counts: HashMap<usize, usize> = HashMap::new();
+            for &sym_idx in sym_indices {
+                if let Some(name) = self.symbols.get(sym_idx).map(|s| s.name.as_str())
+                    && let Some(cluster_indices) = name_to_clusters.get(name)
+                {
+                    for &c_idx in cluster_indices {
+                        *cluster_counts.entry(c_idx).or_insert(0) += 1;
+                    }
+                }
+            }
+            let mut out: Vec<usize> = cluster_counts
+                .into_iter()
+                .filter_map(|(c_idx, count)| (count == target_count).then_some(c_idx))
+                .collect();
+            out.sort_unstable();
+            out
+        };
 
         for (idx, cluster) in clusters.iter().enumerate() {
             // Index by cluster name
@@ -350,13 +451,9 @@ impl ConceptIndexBuilder {
             }
         }
 
-        // Also index doc terms → their clusters
+        // Also index doc terms → their (possibly merged) clusters.
         for (doc_term, sym_indices) in &doc_term_to_symbols {
-            let mut sorted_indices = sym_indices.clone();
-            sorted_indices.sort_unstable();
-            sorted_indices.dedup();
-            let dedup_key = format!("{sorted_indices:?}");
-            if let Some(&cluster_idx) = seen_term_sets.get(&dedup_key) {
+            for cluster_idx in resolve_clusters(sym_indices) {
                 term_to_clusters
                     .entry(doc_term.clone())
                     .or_default()
@@ -364,22 +461,21 @@ impl ConceptIndexBuilder {
             }
         }
 
-        // Index all identifier-decomposition terms → their clusters
+        // Index all identifier-decomposition terms → their clusters.
         for (term, sym_indices) in &term_to_symbol_indices {
             if sym_indices.len() < 2 {
                 continue;
             }
-            let mut sorted_indices = sym_indices.clone();
-            sorted_indices.sort_unstable();
-            sorted_indices.dedup();
-            let dedup_key = format!("{sorted_indices:?}");
-            if let Some(&cluster_idx) = seen_term_sets.get(&dedup_key) {
+            for cluster_idx in resolve_clusters(sym_indices) {
                 term_to_clusters
                     .entry(term.clone())
                     .or_default()
                     .push(cluster_idx);
             }
         }
+
+        // `seen_term_sets` is no longer read after Phase 4; silence unused warning.
+        let _ = seen_term_sets;
 
         // Dedup the cluster index lists
         for indices in term_to_clusters.values_mut() {
@@ -395,6 +491,130 @@ impl ConceptIndexBuilder {
             term_to_clusters,
         }
     }
+}
+
+/// Single-link agglomerative merge on concept clusters using chunk embeddings.
+///
+/// For each pair of clusters, compute the cosine similarity of their
+/// centroid vectors (mean of member-symbol embeddings). If the similarity
+/// exceeds `threshold` AND the combined member count fits under `cap`,
+/// merge the smaller into the larger and re-centroid. Iterate until no
+/// merge fires in a full pass.
+///
+/// Symbols without an embedding vector in `embeddings` are skipped — their
+/// cluster still participates but contributes no centroid information.
+fn merge_clusters_by_embedding(
+    clusters: &mut Vec<ConceptCluster>,
+    embeddings: &HashMap<String, Vec<f32>>,
+    threshold: f32,
+    cap: usize,
+) {
+    if clusters.len() < 2 {
+        return;
+    }
+
+    // Precompute centroid for every cluster up front.
+    let mut centroids: Vec<Option<Vec<f32>>> = clusters
+        .iter()
+        .map(|c| cluster_centroid(c, embeddings))
+        .collect();
+
+    loop {
+        let mut merged_this_pass = false;
+
+        'outer: for i in 0..clusters.len() {
+            let Some(c_i) = centroids[i].as_ref() else {
+                continue;
+            };
+            for j in (i + 1)..clusters.len() {
+                let Some(c_j) = centroids[j].as_ref() else {
+                    continue;
+                };
+                if clusters[i].symbols.len() + clusters[j].symbols.len() > cap {
+                    continue;
+                }
+                let sim = cosine_similarity(c_i, c_j);
+                if sim < threshold {
+                    continue;
+                }
+
+                // Merge j into i. Prefer keeping the larger cluster's name.
+                let (keep, drop_idx) = if clusters[i].symbols.len() >= clusters[j].symbols.len() {
+                    (i, j)
+                } else {
+                    (j, i)
+                };
+
+                // Take (not clone) the dropped cluster's vecs — it's about to be
+                // removed anyway. Dedup once after the append, not per push.
+                let mut drop_cluster = clusters.remove(drop_idx);
+                centroids.remove(drop_idx);
+                let keep = if drop_idx < keep { keep - 1 } else { keep };
+
+                let keep_cluster = &mut clusters[keep];
+                keep_cluster.symbols.append(&mut drop_cluster.symbols);
+                keep_cluster.symbols.sort();
+                keep_cluster.symbols.dedup();
+                keep_cluster.files.append(&mut drop_cluster.files);
+                keep_cluster.files.sort();
+                keep_cluster.files.dedup();
+                keep_cluster.score = keep_cluster.score.max(drop_cluster.score);
+
+                centroids[keep] = cluster_centroid(keep_cluster, embeddings);
+                merged_this_pass = true;
+                break 'outer;
+            }
+        }
+
+        if !merged_this_pass {
+            break;
+        }
+    }
+}
+
+/// Compute the centroid (element-wise mean) of the embedding vectors for
+/// every symbol in `cluster` that appears in `embeddings`. Returns `None`
+/// when no cluster symbol has an embedding.
+///
+/// Seeds a zero vector from the first matching embedding's length, then
+/// accumulates in place by reference — no per-symbol cloning.
+fn cluster_centroid(
+    cluster: &ConceptCluster,
+    embeddings: &HashMap<String, Vec<f32>>,
+) -> Option<Vec<f32>> {
+    let mut centroid: Option<Vec<f32>> = None;
+    let mut count: usize = 0;
+    for sym in &cluster.symbols {
+        let Some(vec) = embeddings.get(sym) else {
+            continue;
+        };
+        let acc = centroid.get_or_insert_with(|| vec![0.0; vec.len()]);
+        if acc.len() != vec.len() {
+            continue;
+        }
+        for (a, b) in acc.iter_mut().zip(vec.iter()) {
+            *a += *b;
+        }
+        count += 1;
+    }
+    let mut centroid = centroid?;
+    // `centroid?` returning `Some` implies the accumulation branch ran at
+    // least once, so `count >= 1` here — no zero-divisor risk.
+    let inv = 1.0 / count as f32;
+    for v in centroid.iter_mut() {
+        *v *= inv;
+    }
+    Some(centroid)
+}
+
+/// Cosine similarity wrapper that guards the length-mismatch case (the
+/// shared [`crate::index::simd_distance::cosine_similarity`] panics on
+/// mismatch; concept-graph inputs are untrusted vs. this crate's invariants).
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    crate::index::simd_distance::cosine_similarity(a, b)
 }
 
 // ---------------------------------------------------------------------------
@@ -749,5 +969,195 @@ mod tests {
                 "first result should have >= hit count than second"
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // v0.40 Phase 4: embedding-cluster merge
+    // -----------------------------------------------------------------
+
+    fn vec_of(v: &[f32]) -> Vec<f32> {
+        v.to_vec()
+    }
+
+    #[test]
+    fn cosine_similarity_basic() {
+        // Identical vectors
+        let sim = cosine_similarity(&[1.0, 0.0, 0.0], &[1.0, 0.0, 0.0]);
+        assert!((sim - 1.0).abs() < 1e-6);
+        // Orthogonal
+        let sim = cosine_similarity(&[1.0, 0.0], &[0.0, 1.0]);
+        assert!(sim.abs() < 1e-6);
+        // Mismatched dim → 0
+        let sim = cosine_similarity(&[1.0, 0.0], &[1.0, 0.0, 0.0]);
+        assert_eq!(sim, 0.0);
+    }
+
+    #[test]
+    fn phase_4_merges_highly_similar_clusters() {
+        // Three clusters: A and B have near-identical centroids; C is
+        // orthogonal. After phase 4, A and B collapse into one.
+        let mut builder = ConceptIndexBuilder::new();
+        // Cluster "login / authenticate" (will share decomposed parts).
+        builder.add_symbol("login_user", "src/auth.rs", None);
+        builder.add_symbol("login_session", "src/auth.rs", None);
+        // A second two-symbol cluster that by itself is unrelated.
+        builder.add_symbol("authenticate_user", "src/auth.rs", None);
+        builder.add_symbol("authenticate_session", "src/auth.rs", None);
+        // Plus an orthogonal cluster.
+        builder.add_symbol("render_page", "src/view.rs", None);
+        builder.add_symbol("render_layout", "src/view.rs", None);
+
+        // Embeddings: login_* and authenticate_* share the same vector
+        // (synthetic 'synonym'). render_* points the other way.
+        let mut emb: HashMap<String, Vec<f32>> = HashMap::new();
+        emb.insert("login_user".into(), vec_of(&[1.0, 0.0]));
+        emb.insert("login_session".into(), vec_of(&[1.0, 0.0]));
+        emb.insert("authenticate_user".into(), vec_of(&[1.0, 0.0]));
+        emb.insert("authenticate_session".into(), vec_of(&[1.0, 0.0]));
+        emb.insert("render_page".into(), vec_of(&[0.0, 1.0]));
+        emb.insert("render_layout".into(), vec_of(&[0.0, 1.0]));
+
+        let index_with = builder.with_symbol_embeddings(emb.clone()).build();
+
+        // Control: same build with no embeddings — clusters remain separate.
+        let mut control = ConceptIndexBuilder::new();
+        control.add_symbol("login_user", "src/auth.rs", None);
+        control.add_symbol("login_session", "src/auth.rs", None);
+        control.add_symbol("authenticate_user", "src/auth.rs", None);
+        control.add_symbol("authenticate_session", "src/auth.rs", None);
+        control.add_symbol("render_page", "src/view.rs", None);
+        control.add_symbol("render_layout", "src/view.rs", None);
+        let index_control = control.build();
+
+        // Phase 4 should reduce cluster count because login↔authenticate
+        // get merged, but render stays orthogonal.
+        assert!(
+            index_with.clusters.len() < index_control.clusters.len(),
+            "phase 4 should merge at least one cluster pair \
+             (with={} clusters, control={} clusters)",
+            index_with.clusters.len(),
+            index_control.clusters.len()
+        );
+
+        // At least one cluster after phase 4 should contain a login_*
+        // symbol AND an authenticate_* symbol (proof of merge).
+        let merged = index_with.clusters.iter().any(|c| {
+            c.symbols.iter().any(|s| s.starts_with("login_"))
+                && c.symbols.iter().any(|s| s.starts_with("authenticate_"))
+        });
+        assert!(
+            merged,
+            "expected a cluster containing both login_* and authenticate_* after merge"
+        );
+    }
+
+    #[test]
+    fn phase_4_respects_cluster_cap() {
+        // Two clusters with NO shared identifier parts (so Phase 1 doesn't
+        // pre-merge them). Each has 4 symbols. With cap = 6, Phase 4 must
+        // NOT merge them even though their centroids are identical.
+        let mut builder = ConceptIndexBuilder::new();
+        let alpha_names = ["alpha_foo", "alpha_bar", "alpha_baz", "alpha_qux"];
+        let zeta_names = ["zeta_wombat", "zeta_kiwi", "zeta_plum", "zeta_fig"];
+        for name in alpha_names.iter() {
+            builder.add_symbol(name, "src/a.rs", None);
+        }
+        for name in zeta_names.iter() {
+            builder.add_symbol(name, "src/b.rs", None);
+        }
+
+        let mut emb: HashMap<String, Vec<f32>> = HashMap::new();
+        for name in alpha_names.iter().chain(zeta_names.iter()) {
+            emb.insert((*name).to_string(), vec_of(&[1.0, 0.0]));
+        }
+
+        let index = builder
+            .with_embed_cluster(
+                emb,
+                EmbedClusterConfig {
+                    threshold: 0.5,
+                    cap: 6, // too small for 4+4 merge
+                },
+            )
+            .build();
+
+        // No cluster should contain both an alpha_* and a zeta_*.
+        let merged = index.clusters.iter().any(|c| {
+            c.symbols.iter().any(|s| s.starts_with("alpha_"))
+                && c.symbols.iter().any(|s| s.starts_with("zeta_"))
+        });
+        assert!(!merged, "cap=6 must prevent 4+4 merge");
+    }
+
+    #[test]
+    fn phase_4_preserves_doc_term_lookups_after_merge() {
+        // Regression test for the Phase 4 → Phase 5 index-invalidation bug:
+        // doc-only concept terms must still resolve to their cluster after
+        // embedding merge collapses the original cluster indices.
+        let mut builder = ConceptIndexBuilder::new();
+        builder.add_symbol(
+            "login_user",
+            "src/auth.rs",
+            Some("Verify a telemetry user session"),
+        );
+        builder.add_symbol(
+            "login_session",
+            "src/auth.rs",
+            Some("Verify a telemetry user session"),
+        );
+        builder.add_symbol(
+            "authenticate_user",
+            "src/auth.rs",
+            Some("Verify a telemetry user session"),
+        );
+        builder.add_symbol(
+            "authenticate_session",
+            "src/auth.rs",
+            Some("Verify a telemetry user session"),
+        );
+
+        // Embeddings that cause Phase 4 to merge login_* and authenticate_*.
+        let mut emb: HashMap<String, Vec<f32>> = HashMap::new();
+        for name in [
+            "login_user",
+            "login_session",
+            "authenticate_user",
+            "authenticate_session",
+        ] {
+            emb.insert(name.to_string(), vec_of(&[1.0, 0.0]));
+        }
+
+        let index = builder.with_symbol_embeddings(emb).build();
+
+        // After merge, the doc term "telemetry" must still land on the
+        // surviving cluster — the bug made `seen_term_sets` point at an
+        // already-removed cluster, losing the lookup entirely.
+        let hits = index.lookup("telemetry");
+        assert!(
+            !hits.is_empty(),
+            "doc-only concept term should still resolve post-merge"
+        );
+    }
+
+    #[test]
+    fn phase_4_no_op_when_embeddings_absent() {
+        // Calling build() without `with_symbol_embeddings` should produce
+        // the exact same cluster count as before v0.40 — backwards compat.
+        let mut b1 = ConceptIndexBuilder::new();
+        b1.add_symbol("login_user", "src/auth.rs", None);
+        b1.add_symbol("login_session", "src/auth.rs", None);
+        b1.add_symbol("render_page", "src/view.rs", None);
+        b1.add_symbol("render_layout", "src/view.rs", None);
+        let without = b1.build();
+
+        let mut b2 = ConceptIndexBuilder::new();
+        b2.add_symbol("login_user", "src/auth.rs", None);
+        b2.add_symbol("login_session", "src/auth.rs", None);
+        b2.add_symbol("render_page", "src/view.rs", None);
+        b2.add_symbol("render_layout", "src/view.rs", None);
+        // Empty embeddings map → no-op.
+        let with_empty = b2.with_symbol_embeddings(HashMap::new()).build();
+
+        assert_eq!(without.clusters.len(), with_empty.clusters.len());
     }
 }

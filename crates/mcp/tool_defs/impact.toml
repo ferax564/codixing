@@ -12,7 +12,7 @@ required = true
 
 [[tools]]
 name = "api_surface"
-description = "List the public API surface of a file — exported functions, structs, traits, and other public symbols. Use to understand a file's public interface before making changes."
+description = "List the public API surface of a file — exported functions, structs, traits, and other public symbols. Use when auditing what a module exposes externally before making backwards-incompatible changes or writing release notes."
 handler = "analysis::call_api_surface"
 calling_convention = "engine_args"
 read_only = true
@@ -24,7 +24,7 @@ required = true
 
 [[tools]]
 name = "type_relations"
-description = "Show type relationships for a symbol — what it implements, extends, returns, and contains. Use to understand type hierarchies and interfaces."
+description = "Show type relationships for a symbol — what it implements, extends, returns, and contains. Use when navigating a type hierarchy: finding all implementors of a trait, all subclasses, or everything a struct touches by type."
 handler = "analysis::call_type_relations"
 calling_convention = "engine_args"
 read_only = true

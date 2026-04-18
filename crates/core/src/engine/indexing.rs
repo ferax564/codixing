@@ -206,7 +206,10 @@ fn process_doc_file(
         }
     })?;
 
-    let sections = doc_support.parse_sections(source);
+    let file_name = std::path::Path::new(rel_str)
+        .file_name()
+        .and_then(|n| n.to_str());
+    let sections = doc_support.parse_sections(source, file_name);
     let symbol_refs = doc_support.extract_symbol_refs(source);
 
     if !symbol_refs.is_empty() {

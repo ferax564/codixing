@@ -410,7 +410,10 @@ fn extract_entity_names_from_content(content: &str, language: Language) -> Vec<S
         | Language::Mermaid
         | Language::Xml
         | Language::Markdown
-        | Language::Html => &[],
+        | Language::Html
+        | Language::Rst
+        | Language::AsciiDoc
+        | Language::PlainText => &[],
     };
 
     for line in content.lines() {
@@ -466,7 +469,10 @@ fn extract_signatures_from_content(content: &str, language: Language) -> Vec<Str
         | Language::Mermaid
         | Language::Xml
         | Language::Markdown
-        | Language::Html => &[],
+        | Language::Html
+        | Language::Rst
+        | Language::AsciiDoc
+        | Language::PlainText => &[],
     };
 
     let mut sigs = Vec::new();
