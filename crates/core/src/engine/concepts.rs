@@ -390,8 +390,51 @@ impl ConceptIndexBuilder {
         // -----------------------------------------------------------------
         // Phase 5: Build term → cluster index
         // -----------------------------------------------------------------
+        //
+        // Phase 4 may have removed or renumbered clusters, so the
+        // pre-merge `seen_term_sets` (dedup_key → cluster_idx) is no longer
+        // a reliable lookup. Build a fresh `symbol_name → Vec<cluster_idx>`
+        // map from the final clusters and drive Phase 5 off of it; the
+        // dedup_key path becomes a fallback for the pre-merge (no Phase 4)
+        // case when a symbol belongs to a single cluster only.
 
         let mut term_to_clusters: HashMap<String, Vec<usize>> = HashMap::new();
+
+        // Post-merge symbol → cluster lookup, used to translate pre-merge
+        // symbol-index-sets into the current cluster numbering.
+        let mut name_to_clusters: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (idx, cluster) in clusters.iter().enumerate() {
+            for name in &cluster.symbols {
+                name_to_clusters.entry(name.as_str()).or_default().push(idx);
+            }
+        }
+
+        // Return only clusters that contain EVERY name in `sym_indices` —
+        // matches the pre-merge `seen_term_sets` dedup-key semantics so
+        // lookups land on the one cluster that actually groups these
+        // symbols, not every cluster that contains any single member.
+        let resolve_clusters = |sym_indices: &[usize]| -> Vec<usize> {
+            let target_count = sym_indices.len();
+            if target_count == 0 {
+                return Vec::new();
+            }
+            let mut cluster_counts: HashMap<usize, usize> = HashMap::new();
+            for &sym_idx in sym_indices {
+                if let Some(name) = self.symbols.get(sym_idx).map(|s| s.name.as_str())
+                    && let Some(cluster_indices) = name_to_clusters.get(name)
+                {
+                    for &c_idx in cluster_indices {
+                        *cluster_counts.entry(c_idx).or_insert(0) += 1;
+                    }
+                }
+            }
+            let mut out: Vec<usize> = cluster_counts
+                .into_iter()
+                .filter_map(|(c_idx, count)| (count == target_count).then_some(c_idx))
+                .collect();
+            out.sort_unstable();
+            out
+        };
 
         for (idx, cluster) in clusters.iter().enumerate() {
             // Index by cluster name
@@ -408,13 +451,9 @@ impl ConceptIndexBuilder {
             }
         }
 
-        // Also index doc terms → their clusters
+        // Also index doc terms → their (possibly merged) clusters.
         for (doc_term, sym_indices) in &doc_term_to_symbols {
-            let mut sorted_indices = sym_indices.clone();
-            sorted_indices.sort_unstable();
-            sorted_indices.dedup();
-            let dedup_key = format!("{sorted_indices:?}");
-            if let Some(&cluster_idx) = seen_term_sets.get(&dedup_key) {
+            for cluster_idx in resolve_clusters(sym_indices) {
                 term_to_clusters
                     .entry(doc_term.clone())
                     .or_default()
@@ -422,22 +461,21 @@ impl ConceptIndexBuilder {
             }
         }
 
-        // Index all identifier-decomposition terms → their clusters
+        // Index all identifier-decomposition terms → their clusters.
         for (term, sym_indices) in &term_to_symbol_indices {
             if sym_indices.len() < 2 {
                 continue;
             }
-            let mut sorted_indices = sym_indices.clone();
-            sorted_indices.sort_unstable();
-            sorted_indices.dedup();
-            let dedup_key = format!("{sorted_indices:?}");
-            if let Some(&cluster_idx) = seen_term_sets.get(&dedup_key) {
+            for cluster_idx in resolve_clusters(sym_indices) {
                 term_to_clusters
                     .entry(term.clone())
                     .or_default()
                     .push(cluster_idx);
             }
         }
+
+        // `seen_term_sets` is no longer read after Phase 4; silence unused warning.
+        let _ = seen_term_sets;
 
         // Dedup the cluster index lists
         for indices in term_to_clusters.values_mut() {
@@ -1049,6 +1087,56 @@ mod tests {
                 && c.symbols.iter().any(|s| s.starts_with("zeta_"))
         });
         assert!(!merged, "cap=6 must prevent 4+4 merge");
+    }
+
+    #[test]
+    fn phase_4_preserves_doc_term_lookups_after_merge() {
+        // Regression test for the Phase 4 → Phase 5 index-invalidation bug:
+        // doc-only concept terms must still resolve to their cluster after
+        // embedding merge collapses the original cluster indices.
+        let mut builder = ConceptIndexBuilder::new();
+        builder.add_symbol(
+            "login_user",
+            "src/auth.rs",
+            Some("Verify a telemetry user session"),
+        );
+        builder.add_symbol(
+            "login_session",
+            "src/auth.rs",
+            Some("Verify a telemetry user session"),
+        );
+        builder.add_symbol(
+            "authenticate_user",
+            "src/auth.rs",
+            Some("Verify a telemetry user session"),
+        );
+        builder.add_symbol(
+            "authenticate_session",
+            "src/auth.rs",
+            Some("Verify a telemetry user session"),
+        );
+
+        // Embeddings that cause Phase 4 to merge login_* and authenticate_*.
+        let mut emb: HashMap<String, Vec<f32>> = HashMap::new();
+        for name in [
+            "login_user",
+            "login_session",
+            "authenticate_user",
+            "authenticate_session",
+        ] {
+            emb.insert(name.to_string(), vec_of(&[1.0, 0.0]));
+        }
+
+        let index = builder.with_symbol_embeddings(emb).build();
+
+        // After merge, the doc term "telemetry" must still land on the
+        // surviving cluster — the bug made `seen_term_sets` point at an
+        // already-removed cluster, losing the lookup entirely.
+        let hits = index.lookup("telemetry");
+        assert!(
+            !hits.is_empty(),
+            "doc-only concept term should still resolve post-merge"
+        );
     }
 
     #[test]
