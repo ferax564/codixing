@@ -13,7 +13,7 @@ required = true
 
 [[tools]]
 name = "get_tool_schema"
-description = "Get the full input schema for one or more tools by name. Call this after search_tools to get the parameters you need."
+description = "Get the full input schema for one or more tools by name. Use this after search_tools when you've identified a candidate tool and need its parameter signature before calling it."
 handler = "self::call_get_tool_schema"
 calling_convention = "args_only"
 read_only = true

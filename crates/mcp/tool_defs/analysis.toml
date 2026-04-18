@@ -1,13 +1,13 @@
 [[tools]]
 name = "index_status"
-description = "Return diagnostic information about the Codixing index: file count, chunk count, symbol count, vector count, graph statistics, available search strategies, and whether semantic search is active. Call this first when starting work on an unfamiliar codebase."
+description = "Return diagnostic information about the Codixing index: file count, chunk count, symbol count, vector count, graph statistics, available search strategies, and whether semantic search is active. Use when you need to confirm the index is alive and scoped to the right project before running further queries, or when starting work on an unfamiliar codebase."
 handler = "analysis::call_index_status"
 calling_convention = "engine_only"
 read_only = true
 
 [[tools]]
 name = "rename_symbol"
-description = "Rename an identifier across all indexed files in the project. Performs exact-string replacement (not semantic rename) and immediately reindexes every modified file."
+description = "Rename an identifier across all indexed files in the project. Performs exact-string replacement (not semantic rename) and immediately reindexes every modified file. Use when you need a fast codebase-wide rename for identifiers that aren't ambiguous; prefer your editor's LSP-backed rename for overloaded names or shadowed locals."
 handler = "analysis::call_rename_symbol"
 calling_convention = "engine_mut_args"
 read_only = false
@@ -28,7 +28,7 @@ description = "Optional file path substring \u2014 restrict the rename to matchi
 
 [[tools]]
 name = "find_tests"
-description = "Discover test functions across the indexed codebase by naming conventions (test_*, *_test, TestXxx) and annotations (#[test], @Test, @pytest.mark.*). When 'file' points to a source file, first tries test-to-code mapping; falls back to name/convention-based discovery if no mapping found."
+description = "Discover test functions across the indexed codebase by naming conventions (test_*, *_test, TestXxx) and annotations (#[test], @Test, @pytest.mark.*). When 'file' points to a source file, first tries test-to-code mapping; falls back to name/convention-based discovery if no mapping found. Use when you need to know which tests cover a file or symbol before editing it."
 handler = "analysis::call_find_tests"
 calling_convention = "engine_args"
 read_only = true
@@ -59,7 +59,7 @@ description = "Only show functions with CC >= this threshold (default: 1)"
 
 [[tools]]
 name = "review_context"
-description = "Given a git diff, return: (1) changed files, (2) symbols whose definitions overlap the diff hunks, (3) impact prediction (which other files may need changes), and (4) cross-file context for the most-changed symbols. Call at the start of a code review."
+description = "Given a git diff, return: (1) changed files, (2) symbols whose definitions overlap the diff hunks, (3) impact prediction (which other files may need changes), and (4) cross-file context for the most-changed symbols. Use when reviewing a PR: call once at the start to line up everything you need for the review in one shot."
 handler = "analysis::call_review_context"
 calling_convention = "engine_args"
 read_only = true
@@ -71,7 +71,7 @@ required = true
 
 [[tools]]
 name = "generate_onboarding"
-description = "Assemble index statistics, language breakdown, top files by PageRank, and a token-budgeted repository map, then write the result to .codixing/ONBOARDING.md. Run once after indexing a new project."
+description = "Assemble index statistics, language breakdown, top files by PageRank, and a token-budgeted repository map, then write the result to .codixing/ONBOARDING.md. Use when you (or a teammate) are starting on an unfamiliar codebase; run once per project or after a major restructuring."
 handler = "analysis::call_generate_onboarding"
 calling_convention = "engine_mut_only"
 read_only = false
@@ -90,7 +90,7 @@ required = true
 
 [[tools]]
 name = "check_staleness"
-description = "Check whether the Codixing index is out of date relative to the current filesystem. Uses fast stat() checks (mtime + size) without reading file content. Reports modified, new, and deleted file counts with a sync suggestion."
+description = "Check whether the Codixing index is out of date relative to the current filesystem. Uses fast stat() checks (mtime + size) without reading file content. Reports modified, new, and deleted file counts with a sync suggestion. Use when search results feel stale or after a large rebase / branch switch, before trusting retrieval to match the current tree."
 handler = "analysis::call_check_staleness"
 calling_convention = "engine_only"
 read_only = true

@@ -38,7 +38,7 @@ items_type = "string"
 
 [[tools]]
 name = "recall"
-description = "Retrieve stored memory entries. Searches by keyword substring (matched against key + value) and/or filters by tags. Call with no arguments to list everything."
+description = "Retrieve stored memory entries. Searches by keyword substring (matched against key + value) and/or filters by tags. Call with no arguments to list everything. Use when you suspect prior sessions captured relevant context (architectural decisions, conventions) before redoing that exploration from scratch."
 handler = "memory::call_recall"
 calling_convention = "engine_args"
 read_only = true
@@ -54,7 +54,7 @@ items_type = "string"
 
 [[tools]]
 name = "forget"
-description = "Remove a memory entry from .codixing/memory.json by key."
+description = "Remove a memory entry from .codixing/memory.json by key. Use when a stored note becomes stale or wrong — e.g. a decision was reversed, a module was renamed, or an assumption no longer holds."
 handler = "memory::call_forget"
 calling_convention = "engine_mut_args"
 read_only = false

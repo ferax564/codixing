@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `DocLanguageSupport::parse_sections` now takes an `Option<&str>` file-name hint so impls can branch on filename; existing impls pass through unchanged for non-hint-sensitive cases.
 - `SearchResult::is_doc()` covers `reStructuredText`, `AsciiDoc`, and `Plain text` in addition to Markdown and HTML, so `--docs-only` / `--code-only` filters now cover the full doc-format matrix.
 - **`codixing usages --complete` (+ matching `search_usages` MCP `complete=true` parameter)** — deterministic blast-radius mode. Disables ranking and the result cap, returns every known call site / import for the symbol sorted by `(file, line)`. Counters the sticky-mode failure mode where agents trust the top-K ranked view and miss the long tail (see `docs/research-recall-stickiness-2026-04-13.md` §4.8, §4.10 #2). New `ReferenceOptions { complete, max_results }` struct + `Engine::symbol_references` entry-point exposed from `codixing_core`.
+- **MCP tool-description audit** — every one of the 67 MCP tool descriptions now contains an activation trigger phrase (`Use when …` / `Prefer this …` / contrast-vs-neighbour clauses). Motivated by arXiv 2602.14878 (+5.85 pp task success, +15.12 % evaluator score from disciplined descriptions). New `crates/mcp/TOOL_DESCRIPTION_RUBRIC.md` encodes the rubric; new test `crates/mcp/tests/tool_description_rubric.rs` fails fast if a future tool omits a trigger phrase.
 
 ## [0.39.0] — 2026-04-18
 

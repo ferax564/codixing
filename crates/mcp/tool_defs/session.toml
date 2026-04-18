@@ -11,7 +11,7 @@ description = "Maximum tokens for the summary output (default: 1500)"
 
 [[tools]]
 name = "session_reset_focus"
-description = "Clear progressive focus narrowing. After 5+ interactions in the same directory, search results are automatically narrowed to that directory. Call this when switching to a different area of the codebase."
+description = "Clear progressive focus narrowing. After 5+ interactions in the same directory, search results are automatically narrowed to that directory. Use this when switching to a different area of the codebase so the implicit focus boost doesn't bias results toward the old area."
 handler = "self::call_session_reset_focus"
 calling_convention = "engine_mut_only"
 read_only = false
