@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.39.0] — 2026-04-18
+
+Maintenance release hardening the external surfaces and the contributor on-ramp. No breaking changes; the shipped binaries are fully backward-compatible with v0.38.1.
+
+### Added
+
+- **LSP integration tests** (`crates/lsp/tests/protocol_test.rs`) — 5 subprocess-harness tests covering the initialize → hover → go-to-definition → references → rename flow. Harness drains stderr to prevent pipe-buffer deadlocks and propagates assertion panics out of the budgeted test thread. URIs are built via `url::Url::from_file_path` so Windows drive letters and backslashes serialize correctly.
+- **Server SSE integration tests** (`crates/server/tests/api_test.rs`) — 3 tests covering `POST /index/sync` Content-Type, progress frames, and strict terminal frame semantics (asserts on `frames.last()`, not "any result frame somewhere in the stream").
+- **Crate-level `//!` doc** for `codixing-core` summarizing the AST parsing, hybrid retrieval stack, and graph/federation layers — links resolve cleanly on docs.rs.
+- **Nightly agent-benchmark workflow** (`.github/workflows/nightly-agent-benchmark.yml`) — scaffold for catching retrieval-quality regressions before release. `workflow_dispatch`-only until the `ANTHROPIC_API_KEY` repo secret lands; cron restoration is a one-line follow-up.
+- **`rust-toolchain.toml`** pinning `channel = "stable"` so new contributors to an edition-2024 workspace get a recent enough toolchain automatically.
+- **`benchmarks/results/README.md`** freshness index — dates every result file from the last commit touching it and flags anything older than 14 days as a re-run candidate.
+
+### Fixed
+
+- **Panic-prone `.unwrap()` on LSP + MCP handler boundaries** — 27 conversions across `crates/lsp/src/main.rs` and `crates/mcp/src/main.rs`. The most meaningful change: `self.engine.write().unwrap()` in `did_save` no longer crashes the LSP process when the engine RwLock has been poisoned by a prior reindex panic. The handler logs a warning and skips the reindex, keeping the editor session alive. Inner helpers with true structural invariants keep their `.unwrap()` calls.
+- **Rust 1.95 clippy compliance** — `collapsible_match`, `collapsible_if`, and `unnecessary_sort_by` lints that landed with rust 1.95.0 resolved across `crates/core`, `crates/lsp`, `crates/mcp`, `crates/server`. No behavioural change; the sort-by rewrites use `sort_by_key(|x| std::cmp::Reverse(x.field))`.
+- **`benchmarks/results` date-stamping of retrieval numbers** — README and CLAUDE.md now qualify the 0.763 R@10 / 0.706 MRR figures with "last measured on v0.26.0 (2026-02)" so readers don't assume they reflect v0.39.0.
+
+### Changed
+
+- **Test count**: 1107 → 1115 (+8 LSP + SSE integration tests).
+- **Dual plugin manifest** documented explicitly in CLAUDE.md: `.claude-plugin/marketplace.json` is the registry entry, `claude-plugin/.claude-plugin/plugin.json` is the shipping bundle, `scripts/bump_version.py` keeps them version-synced.
+- **`audit.toml`** ignores `RUSTSEC-2026-0098` and `RUSTSEC-2026-0099` (rustls-webpki name-constraints advisories, transitive via `reqwest → rustls`) pending a fastembed bump with `rustls-webpki >= 0.103.12`. `ci.yml` passes the two new ignore IDs to `cargo audit`.
+
 ## [0.38.1] — 2026-04-14
 
 Patch release bundling the PR #85 review feedback from codex and coderabbit on the v0.38.0 landing. No behavioural change in the shipped `codixing-mcp` binary — all fixes target the benchmark harness (`benchmarks/agent_benchmark_large.py`), ground-truth lists, and documentation that shipped alongside v0.38.0. If you're just consuming the MCP server, v0.38.0 and v0.38.1 are identical at runtime. If you're running the agent benchmark against your own project, v0.38.1 is the one you want.

@@ -16,9 +16,8 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Rust toolchain (from rust-toolchain.toml)
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: "stable"
           components: rustfmt, clippy
 
       - name: Cache cargo
@@ -44,7 +43,7 @@ jobs:
 
       - name: Prepare benchmark fixture (index codixing repo)
         run: |
-          ./target/release/codixing init . --model none || true
+          ./target/release/codixing init . --model none
 
       - name: Run agent benchmark (codixing repo subset, ~8 sessions)
         id: bench

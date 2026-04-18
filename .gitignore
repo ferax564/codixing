@@ -63,6 +63,7 @@ benchmarks/models/
 benchmarks/reranker_data/
 benchmarks/__pycache__/
 .claude/worktrees/
+.claude/scheduled_tasks.lock
 .worktrees/
 
 # Internal plans, specs, and strategy documents (local only)
