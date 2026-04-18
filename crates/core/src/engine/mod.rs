@@ -29,7 +29,7 @@ mod validation;
 pub use embed_stats::EmbedTimingStats;
 pub use focus_map::{FocusMapEntry, FocusMapOptions};
 pub use impact::{ChangeImpact, compute_change_impact};
-pub use symbol_graph::SymbolReference;
+pub use symbol_graph::{ReferenceOptions, SymbolReference};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

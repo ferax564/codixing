@@ -429,6 +429,39 @@ pub(crate) fn call_search_usages(engine: &Engine, args: &Value) -> (String, bool
         None => return ("Missing required argument: symbol".to_string(), true),
     };
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+    let complete = args
+        .get("complete")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // Complete mode: deterministic, unranked, no cap.
+    if complete {
+        use codixing_core::ReferenceOptions;
+        let refs = engine.symbol_references(
+            &symbol,
+            ReferenceOptions {
+                complete: true,
+                max_results: None,
+            },
+        );
+        if refs.is_empty() {
+            return (
+                format!("No usages found for '{symbol}' (complete mode)."),
+                false,
+            );
+        }
+        let mut out = format!(
+            "Found {} location(s) referencing `{symbol}` (complete, deterministic, no ranking):\n\n",
+            refs.len()
+        );
+        for r in &refs {
+            out.push_str(&format!("  {} L{} [{}]\n", r.file_path, r.line + 1, r.kind));
+            if !r.context.is_empty() {
+                out.push_str(&format!("    {}\n", r.context));
+            }
+        }
+        return (out, false);
+    }
 
     match engine.search_usages(&symbol, limit) {
         Ok(results) if results.is_empty() => (format!("No usages found for '{symbol}'."), false),

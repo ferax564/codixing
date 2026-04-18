@@ -314,6 +314,13 @@ enum Command {
         /// Print only the result count, not the full results.
         #[arg(long)]
         count: bool,
+
+        /// Deterministic "all callers" mode: disables ranking and the result
+        /// cap, returns every known call site / import sorted by
+        /// `(file, line)`. Use for blast-radius queries where the top-K
+        /// ranked view hides the long tail.
+        #[arg(long)]
+        complete: bool,
     },
 
     /// Re-index files changed since the last git commit (git-diff aware incremental update).
@@ -807,7 +814,8 @@ async fn main() -> Result<()> {
             limit,
             file,
             count,
-        } => cmd_usages(symbol, limit, file, count),
+            complete,
+        } => cmd_usages(symbol, limit, file, count, complete),
         Command::Update {
             path,
             dry_run,
@@ -1758,13 +1766,20 @@ fn cmd_cross_imports(from: String, to: String) -> Result<()> {
     Ok(())
 }
 
-fn cmd_usages(symbol: String, limit: usize, file: Option<String>, count: bool) -> Result<()> {
+fn cmd_usages(
+    symbol: String,
+    limit: usize,
+    file: Option<String>,
+    count: bool,
+    complete: bool,
+) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
 
     // Fast path: proxy through the daemon when no file filter (the MCP
     // search_usages tool doesn't expose a file filter parameter).
-    // Skip daemon proxy for --count: we need the raw result list to count accurately.
-    if file.is_none() && !count {
+    // Skip daemon proxy for --count / --complete: both need the raw result
+    // list (count for accuracy, complete for the full deterministic set).
+    if file.is_none() && !count && !complete {
         let _ = limit; // MCP tool uses its own limit; CLI limit is approximated
         if let Some(text) = daemon_proxy::try_usages(&root, &symbol) {
             print!("{text}");
@@ -1778,6 +1793,39 @@ fn cmd_usages(symbol: String, limit: usize, file: Option<String>, count: bool) -
             root.display()
         )
     })?;
+
+    if complete {
+        use codixing_core::ReferenceOptions;
+        let mut refs = engine.symbol_references(
+            &symbol,
+            ReferenceOptions {
+                complete: true,
+                max_results: None,
+            },
+        );
+        if let Some(ref f) = file {
+            refs.retain(|r| r.file_path.contains(f.as_str()));
+        }
+        if count {
+            println!("{} usage(s) found", refs.len());
+            return Ok(());
+        }
+        if refs.is_empty() {
+            eprintln!("No usages found for \"{}\" (complete mode)", symbol);
+            return Ok(());
+        }
+        println!("{:<60} {:<8} CONTEXT", "FILE", "LINE");
+        println!("{}", "-".repeat(90));
+        for r in &refs {
+            let preview: String = r.context.chars().take(40).collect();
+            println!("{:<60} {:<8} {}", r.file_path, r.line + 1, preview);
+        }
+        eprintln!(
+            "\n{} usage location(s) found (complete, deterministic, no ranking).",
+            refs.len()
+        );
+        return Ok(());
+    }
 
     let mut results = engine
         .search_usages(&symbol, limit)

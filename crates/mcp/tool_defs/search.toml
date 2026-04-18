@@ -51,7 +51,7 @@ description = "Optional file path substring to restrict results to a specific fi
 
 [[tools]]
 name = "search_usages"
-description = "Find all code locations where a symbol (function, struct, variable, etc.) is referenced or called. Unlike find_symbol which finds definitions, this finds usages \u2014 call sites, imports, and references. Essential for impact analysis before refactoring. Tip: For graph-based caller discovery, use symbol_callers instead \u2014 it uses the dependency graph for more precise results."
+description = "Find all code locations where a symbol (function, struct, variable, etc.) is referenced or called. Unlike find_symbol which finds definitions, this finds usages \u2014 call sites, imports, and references. Essential for impact analysis before refactoring. Use `complete=true` for deterministic blast-radius queries (\u201call callers of X\u201d) where the top-K ranked view hides the long tail; otherwise stays on the ranked path. Tip: For graph-based caller discovery, use symbol_callers instead \u2014 it uses the dependency graph for more precise results."
 handler = "search::call_search_usages"
 calling_convention = "engine_args"
 read_only = true
@@ -63,7 +63,11 @@ required = true
 
 [tools.params.limit]
 type = "integer"
-description = "Maximum number of usage locations to return (default: 20)"
+description = "Maximum number of usage locations to return (default: 20). Ignored when `complete=true`."
+
+[tools.params.complete]
+type = "boolean"
+description = "If true, returns every known call site / import for the symbol with no ranking and no cap, sorted deterministically by (file, line). Use for blast-radius queries where you need the full set. Default: false."
 
 [[tools]]
 name = "read_symbol"
