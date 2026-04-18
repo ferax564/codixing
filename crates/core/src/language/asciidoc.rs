@@ -53,7 +53,19 @@ pub fn parse_asciidoc_sections(text: &str) -> Vec<DocSection> {
     }
 
     let mut headings: Vec<HeadingInfo> = Vec::new();
+    // Skip heading detection inside listing/source blocks — `== Example`
+    // appearing inside a `---- code ----` block is part of the sample, not a
+    // section break.
+    let mut in_block = false;
     for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_end();
+        if trimmed == "----" || trimmed == "...." {
+            in_block = !in_block;
+            continue;
+        }
+        if in_block {
+            continue;
+        }
         if let Some((level, title)) = parse_asciidoc_heading(line) {
             headings.push(HeadingInfo {
                 level,
@@ -176,18 +188,28 @@ fn detect_elements_in_text(text: &str) -> Vec<DocElement> {
     for line in text.lines() {
         let trimmed = line.trim_start();
 
-        // `[source,python]` or `[source, python]` → next `----` opens a code block.
+        // `[source,python]` / `[source, python]` / `[source,rust,linenums]`
+        // / `[source%nowrap,rust]` → keep only the language token (first
+        // comma-separated field after `[source`, stripping `%attr` suffixes).
         if !seen_code && trimmed.starts_with("[source") {
-            source_lang = trimmed
+            let inner = trimmed
                 .trim_start_matches("[source")
-                .trim_start_matches(',')
                 .trim_end_matches(']')
-                .trim()
-                .to_string()
-                .into();
-            if source_lang.as_ref().is_some_and(|s| s.is_empty()) {
-                source_lang = None;
-            }
+                .trim();
+            let first_field = inner
+                .trim_start_matches(|c: char| !c.is_alphanumeric())
+                .split(',')
+                .next()
+                .unwrap_or("")
+                .split('%')
+                .next()
+                .unwrap_or("")
+                .trim();
+            source_lang = if first_field.is_empty() {
+                None
+            } else {
+                Some(first_field.to_string())
+            };
             continue;
         }
 

@@ -127,7 +127,12 @@ fn emit_paragraph(
     // Long paragraph → split on sentence boundaries.
     let mut cursor = 0usize;
     while cursor < content.len() {
-        let slice_end = (cursor + MAX_PARA_BYTES).min(content.len());
+        // Walk back to a UTF-8 char boundary before slicing — otherwise a
+        // multibyte character straddling MAX_PARA_BYTES would panic here.
+        let mut slice_end = (cursor + MAX_PARA_BYTES).min(content.len());
+        while slice_end > cursor && !content.is_char_boundary(slice_end) {
+            slice_end -= 1;
+        }
         let slice = &content[cursor..slice_end];
         // Try to end at a sentence boundary near the end of the slice.
         let break_at = slice
@@ -135,18 +140,8 @@ fn emit_paragraph(
             .or_else(|| slice.rfind("! "))
             .or_else(|| slice.rfind("? "))
             .map(|i| i + 2) // include the `. ` delimiter
-            .unwrap_or_else(|| {
-                if slice_end == content.len() {
-                    slice.len()
-                } else {
-                    // No boundary found → fall back to a byte-safe split.
-                    let mut i = slice.len();
-                    while i > 0 && !content.is_char_boundary(cursor + i) {
-                        i -= 1;
-                    }
-                    i.max(1)
-                }
-            });
+            .unwrap_or(slice.len())
+            .max(1);
         let piece = &content[cursor..cursor + break_at];
         let piece_byte_start = byte_start + cursor;
         let piece_byte_end = byte_start + cursor + break_at;

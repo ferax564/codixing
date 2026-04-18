@@ -149,32 +149,11 @@ impl Engine {
             return self.symbol_callers_precise(symbol, limit);
         }
 
-        // Complete mode: graph-first, then fall back to AST scan.
-        if let Some(ref graph) = self.graph {
-            let callers = graph.get_symbol_callers(symbol);
-            if !callers.is_empty() {
-                let mut refs: Vec<SymbolReference> = callers
-                    .into_iter()
-                    .map(|(file, caller_name)| {
-                        let context = self.read_line_at_symbol(&file, &caller_name);
-                        let line = self.symbol_line(&file, &caller_name);
-                        SymbolReference {
-                            file_path: file,
-                            line,
-                            kind: "call".to_string(),
-                            context,
-                        }
-                    })
-                    .collect();
-                refs.sort_by(|a, b| a.file_path.cmp(&b.file_path).then(a.line.cmp(&b.line)));
-                refs.dedup_by(|a, b| a.file_path == b.file_path && a.line == b.line);
-                return refs;
-            }
-        }
-
-        // Graph absent or empty for this symbol — enumerate via AST scan
-        // with a large cap. 100K is intentionally bigger than any realistic
-        // in-repo reference count and effectively "all" for practical repos.
+        // Complete mode skips the symbol-graph fast path: the graph stores
+        // one edge per (caller_symbol → callee_symbol) pair, so five call
+        // sites inside one function collapse to a single row and non-call
+        // references never appear. The AST scan below visits every reference
+        // site individually — slower but actually complete.
         const COMPLETE_CAP: usize = 100_000;
         let candidates = match self.search_usages(symbol, COMPLETE_CAP) {
             Ok(r) => r,

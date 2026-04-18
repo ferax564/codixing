@@ -560,9 +560,8 @@ fn cluster_centroid(
         count += 1;
     }
     let mut centroid = centroid?;
-    if count == 0 {
-        return None;
-    }
+    // `centroid?` returning `Some` implies the accumulation branch ran at
+    // least once, so `count >= 1` here — no zero-divisor risk.
     let inv = 1.0 / count as f32;
     for v in centroid.iter_mut() {
         *v *= inv;

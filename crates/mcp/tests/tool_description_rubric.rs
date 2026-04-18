@@ -170,11 +170,24 @@ fn every_tool_description_includes_trigger_phrase() {
 }
 
 #[test]
-fn parser_sanity_check_all_67_tools_visible() {
+fn parser_sanity_check_sees_every_tool_block() {
     let descs = collect_tool_descriptions();
-    assert!(
-        descs.len() >= 65,
-        "expected ~67 tools, parser found only {}; did the TOML layout change?",
-        descs.len()
+    // Cross-check: count `[[tools]]` headers on disk and require a 1:1 match.
+    // A looser `>= N` bar can silently regress if two blocks stop parsing.
+    let mut on_disk = 0usize;
+    for entry in std::fs::read_dir(tool_defs_dir()).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        on_disk += text.lines().filter(|l| l.trim() == "[[tools]]").count();
+    }
+    assert_eq!(
+        descs.len(),
+        on_disk,
+        "parser saw {} tools but disk has {} [[tools]] blocks",
+        descs.len(),
+        on_disk
     );
 }
