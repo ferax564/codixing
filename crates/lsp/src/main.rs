@@ -122,14 +122,27 @@ impl LanguageServer for CodixingBackend {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri.clone();
         let text = params.text_document.text;
-        self.open_docs.lock().unwrap().insert(uri.clone(), text);
+        match self.open_docs.lock() {
+            Ok(mut docs) => {
+                docs.insert(uri.clone(), text);
+            }
+            Err(_) => {
+                warn!("open_docs mutex poisoned; dropping did_open");
+                return;
+            }
+        }
         self.publish_complexity_diagnostics(&uri).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
         if let Some(change) = params.content_changes.into_iter().last() {
-            self.open_docs.lock().unwrap().insert(uri, change.text);
+            match self.open_docs.lock() {
+                Ok(mut docs) => {
+                    docs.insert(uri, change.text);
+                }
+                Err(_) => warn!("open_docs mutex poisoned; dropping did_change"),
+            }
         }
     }
 
@@ -138,14 +151,22 @@ impl LanguageServer for CodixingBackend {
 
         // Update tracked content if provided.
         if let Some(text) = params.text {
-            self.open_docs.lock().unwrap().insert(uri.clone(), text);
+            match self.open_docs.lock() {
+                Ok(mut docs) => {
+                    docs.insert(uri.clone(), text);
+                }
+                Err(_) => warn!("open_docs mutex poisoned; skipping did_save text update"),
+            }
         }
 
         // Live reindex the saved file.
         if let Ok(path) = uri.to_file_path() {
-            let reindexed = {
-                let mut engine = self.engine.write().unwrap();
-                engine.reindex_file(&path).is_ok()
+            let reindexed = match self.engine.write() {
+                Ok(mut engine) => engine.reindex_file(&path).is_ok(),
+                Err(_) => {
+                    warn!("engine rwlock poisoned; skipping reindex on save");
+                    false
+                }
             };
             if reindexed {
                 info!(?path, "reindexed on save");
@@ -158,7 +179,12 @@ impl LanguageServer for CodixingBackend {
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri;
-        self.open_docs.lock().unwrap().remove(&uri);
+        match self.open_docs.lock() {
+            Ok(mut docs) => {
+                docs.remove(&uri);
+            }
+            Err(_) => warn!("open_docs mutex poisoned; did_close removal skipped"),
+        }
         // Clear diagnostics for closed files.
         self.client.publish_diagnostics(uri, vec![], None).await;
     }
@@ -173,7 +199,10 @@ impl LanguageServer for CodixingBackend {
             None => return Ok(None),
         };
 
-        let engine = self.engine.read().unwrap();
+        let engine = self
+            .engine
+            .read()
+            .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
         let sym = match self.best_symbol(&engine, &word, &pos.text_document.uri) {
             Some(s) => s,
             None => return Ok(None),
@@ -207,7 +236,10 @@ impl LanguageServer for CodixingBackend {
             None => return Ok(None),
         };
 
-        let engine = self.engine.read().unwrap();
+        let engine = self
+            .engine
+            .read()
+            .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
         let sym = match self.best_symbol(&engine, &word, &pos.text_document.uri) {
             Some(s) => s,
             None => return Ok(None),
@@ -242,7 +274,10 @@ impl LanguageServer for CodixingBackend {
             None => return Ok(None),
         };
 
-        let engine = self.engine.read().unwrap();
+        let engine = self
+            .engine
+            .read()
+            .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
         let usages = engine.search_usages(&word, 40).unwrap_or_default();
 
         let locations: Vec<Location> = usages
@@ -271,7 +306,10 @@ impl LanguageServer for CodixingBackend {
         params: WorkspaceSymbolParams,
     ) -> Result<Option<Vec<SymbolInformation>>> {
         let query = &params.query;
-        let engine = self.engine.read().unwrap();
+        let engine = self
+            .engine
+            .read()
+            .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
         let symbols = engine.symbols(query, None).unwrap_or_default();
 
         #[allow(deprecated)]
@@ -314,7 +352,10 @@ impl LanguageServer for CodixingBackend {
             Err(_) => return Ok(None),
         };
 
-        let engine = self.engine.read().unwrap();
+        let engine = self
+            .engine
+            .read()
+            .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
         let rel = match engine.config().normalize_path(&abs) {
             Some(r) => r,
             None => return Ok(None),
@@ -367,7 +408,10 @@ impl LanguageServer for CodixingBackend {
 
             // Read the indentation of the function line.
             let indent = {
-                let docs = self.open_docs.lock().unwrap();
+                let docs = self
+                    .open_docs
+                    .lock()
+                    .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
                 docs.get(uri)
                     .and_then(|text| {
                         text.lines()
@@ -434,13 +478,19 @@ impl LanguageServer for CodixingBackend {
         };
 
         let (source, rel) = {
-            let engine = self.engine.read().unwrap();
+            let engine = self
+                .engine
+                .read()
+                .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
             let rel = match engine.config().normalize_path(&abs) {
                 Some(r) => r,
                 None => return Ok(None),
             };
             let src = {
-                let docs = self.open_docs.lock().unwrap();
+                let docs = self
+                    .open_docs
+                    .lock()
+                    .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
                 docs.get(uri).cloned()
             }
             .or_else(|| std::fs::read_to_string(&abs).ok());
@@ -451,7 +501,10 @@ impl LanguageServer for CodixingBackend {
         };
 
         let syms = {
-            let engine = self.engine.read().unwrap();
+            let engine = self
+                .engine
+                .read()
+                .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
             engine.symbols("", Some(&rel)).unwrap_or_default()
         };
 
@@ -508,7 +561,10 @@ impl LanguageServer for CodixingBackend {
             _ => return Ok(None),
         };
 
-        let engine = self.engine.read().unwrap();
+        let engine = self
+            .engine
+            .read()
+            .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
         let current_file = params
             .text_document_position
             .text_document
@@ -563,7 +619,10 @@ impl LanguageServer for CodixingBackend {
             None => return Ok(None),
         };
 
-        let engine = self.engine.read().unwrap();
+        let engine = self
+            .engine
+            .read()
+            .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
         let sym = match self.best_symbol(
             &engine,
             &fn_name,
@@ -625,7 +684,10 @@ impl LanguageServer for CodixingBackend {
             Err(_) => return Ok(None),
         };
 
-        let engine = self.engine.read().unwrap();
+        let engine = self
+            .engine
+            .read()
+            .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
         let rel = match engine.config().normalize_path(&abs) {
             Some(r) => r,
             None => return Ok(None),
@@ -672,7 +734,10 @@ impl LanguageServer for CodixingBackend {
         params: CallHierarchyIncomingCallsParams,
     ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
         let item = &params.item;
-        let engine = self.engine.read().unwrap();
+        let engine = self
+            .engine
+            .read()
+            .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
         let callers = engine.symbol_callers_precise(&item.name, 50);
 
         if callers.is_empty() {
@@ -741,7 +806,10 @@ impl LanguageServer for CodixingBackend {
         params: CallHierarchyOutgoingCallsParams,
     ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
         let item = &params.item;
-        let engine = self.engine.read().unwrap();
+        let engine = self
+            .engine
+            .read()
+            .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
         let callees = engine.symbol_callees_precise(&item.name, item.detail.as_deref());
 
         if callees.is_empty() {
@@ -803,7 +871,10 @@ impl LanguageServer for CodixingBackend {
             None => return Ok(None),
         };
 
-        let engine = self.engine.read().unwrap();
+        let engine = self
+            .engine
+            .read()
+            .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
         // Only allow renaming if the word is a known symbol.
         if self
             .best_symbol(&engine, &word, &params.text_document.uri)
@@ -845,7 +916,10 @@ impl LanguageServer for CodixingBackend {
             });
         }
 
-        let engine = self.engine.read().unwrap();
+        let engine = self
+            .engine
+            .read()
+            .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
 
         // Use engine's validate_rename for conflict detection.
         let validation = engine.validate_rename(&old_name, new_name, None);
@@ -937,7 +1011,10 @@ impl LanguageServer for CodixingBackend {
         };
 
         let content = {
-            let docs = self.open_docs.lock().unwrap();
+            let docs = self
+                .open_docs
+                .lock()
+                .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
             docs.get(uri).cloned()
         }
         .or_else(|| std::fs::read_to_string(&abs).ok());
