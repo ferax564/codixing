@@ -8,6 +8,7 @@ pub mod doc;
 pub mod dockerfile;
 pub mod go;
 pub mod html;
+pub mod ipynb;
 pub mod java;
 pub mod kotlin;
 pub mod makefile;
