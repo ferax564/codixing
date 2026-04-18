@@ -1,3 +1,4 @@
+pub mod asciidoc;
 pub mod assembly;
 pub mod bash;
 pub mod c;
@@ -14,6 +15,7 @@ pub mod markdown;
 pub mod matlab;
 pub mod mermaid;
 pub mod php;
+pub mod plain;
 pub mod python;
 pub mod rst;
 pub mod ruby;
@@ -68,6 +70,8 @@ pub enum Language {
     Markdown,
     Html,
     Rst,
+    AsciiDoc,
+    PlainText,
 }
 
 impl Language {
@@ -102,6 +106,8 @@ impl Language {
             Self::Markdown => "Markdown",
             Self::Html => "HTML",
             Self::Rst => "reStructuredText",
+            Self::AsciiDoc => "AsciiDoc",
+            Self::PlainText => "Plain text",
         }
     }
 
@@ -136,6 +142,8 @@ impl Language {
             Self::Markdown => &["md", "mdx"],
             Self::Html => &["html", "htm"],
             Self::Rst => &["rst"],
+            Self::AsciiDoc => &["adoc", "asciidoc"],
+            Self::PlainText => &["txt"],
         }
     }
 
@@ -156,12 +164,18 @@ impl Language {
                 | Self::Markdown
                 | Self::Html
                 | Self::Rst
+                | Self::AsciiDoc
+                | Self::PlainText
         )
     }
 
-    /// Whether this language represents a documentation format (Markdown, HTML, reStructuredText).
+    /// Whether this language represents a documentation format
+    /// (Markdown, HTML, reStructuredText, AsciiDoc, plain text).
     pub fn is_doc(self) -> bool {
-        matches!(self, Self::Markdown | Self::Html | Self::Rst)
+        matches!(
+            self,
+            Self::Markdown | Self::Html | Self::Rst | Self::AsciiDoc | Self::PlainText
+        )
     }
 }
 
@@ -195,6 +209,8 @@ pub const ALL_LANGUAGES: &[Language] = &[
     Language::Markdown,
     Language::Html,
     Language::Rst,
+    Language::AsciiDoc,
+    Language::PlainText,
 ];
 
 /// The kind of semantic entity extracted from an AST.
@@ -379,6 +395,8 @@ impl LanguageRegistry {
             Arc::new(markdown::MarkdownLanguage),
             Arc::new(html::HtmlLanguage),
             Arc::new(rst::RstLanguage),
+            Arc::new(asciidoc::AsciiDocLanguage),
+            Arc::new(plain::PlainTextLanguage),
         ];
         Self {
             impls,
@@ -440,6 +458,28 @@ pub fn detect_language(path: &Path) -> Option<Language> {
         // Makefile, makefile, GNUmakefile
         if lower == "makefile" || lower == "gnumakefile" {
             return Some(Language::Makefile);
+        }
+        // Plain-text project metadata files that conventionally have no
+        // extension (README, AUTHORS, LICENSE, NOTICE, CONTRIBUTORS,
+        // CHANGELOG, HISTORY). When the file does have an extension like
+        // `.md`, extension-based detection below wins.
+        if path.extension().is_none()
+            && matches!(
+                lower.as_str(),
+                "readme"
+                    | "authors"
+                    | "license"
+                    | "licence"
+                    | "notice"
+                    | "contributors"
+                    | "changelog"
+                    | "history"
+                    | "releases"
+                    | "copying"
+                    | "install"
+            )
+        {
+            return Some(Language::PlainText);
         }
     }
 

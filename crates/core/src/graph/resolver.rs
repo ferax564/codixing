@@ -61,7 +61,9 @@ impl ImportResolver {
             | Language::Xml
             | Language::Markdown
             | Language::Html
-            | Language::Rst => None,
+            | Language::Rst
+            | Language::AsciiDoc
+            | Language::PlainText => None,
         }
     }
 

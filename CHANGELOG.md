@@ -9,7 +9,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - **reStructuredText (`.rst`) indexing** — new `RstLanguage` `DocLanguageSupport` impl with section-hierarchy tracking following RST's dynamic-level rule (first-seen adornment char = level 1, next distinct = level 2, …). Supports both single-underline and overline+underline title forms, detects `.. code-block::` directives, and extracts `` ``symbol`` `` references via the shared backtick heuristic. Unlocks the Linux kernel `Documentation/` tree (3,909 `.rst` files indexed in 0.48 s on an M4) and every Sphinx-based Python project. Out of scope for this pass: directive expansion, cross-file `:ref:` resolution, Sphinx extensions.
-- `SearchResult::is_doc()` now recognises `reStructuredText`, so `--docs-only` / `--code-only` filters cover `.rst` files alongside Markdown and HTML.
+- **AsciiDoc (`.adoc`, `.asciidoc`) indexing** — new `AsciiDocLanguage` impl. Line-based section detector using the `=` prefix count (1–6 → level), code-block detection for `[source,<lang>]` blocks bounded by `----`, backtick symbol refs. Covers Ruby and Java doc estates.
+- **Plain-text indexing** (`.txt` + bare `README` / `AUTHORS` / `LICENSE` / `NOTICE` / `CONTRIBUTORS` / `CHANGELOG` / `HISTORY` / `RELEASES` / `COPYING` / `INSTALL` — all extension-less). Paragraph-based sections (blank-line separated) with a 2 KB soft cap; long paragraphs split on sentence boundaries so chunks stay retrieval-friendly.
+- **CHANGELOG-aware Markdown mode** — Markdown impl now detects `CHANGELOG*` / `HISTORY*` / `RELEASES*` filenames and splits strictly on level-2 release headings (`## [0.40.0]`, `## v1.2.3`, `## Unreleased`). Sub-headings like `### Added` / `### Fixed` stay **inside** the parent release section, so `codixing search "v0.40 features" --docs-only` lands on the single v0.40 block instead of being scattered across each `###` subsection.
+- `DocLanguageSupport::parse_sections` now takes an `Option<&str>` file-name hint so impls can branch on filename; existing impls pass through unchanged for non-hint-sensitive cases.
+- `SearchResult::is_doc()` covers `reStructuredText`, `AsciiDoc`, and `Plain text` in addition to Markdown and HTML, so `--docs-only` / `--code-only` filters now cover the full doc-format matrix.
 
 ## [0.39.0] — 2026-04-18
 

@@ -54,7 +54,12 @@ pub trait DocLanguageSupport: Send + Sync {
     fn language(&self) -> Language;
 
     /// Parse source into a flat list of sections with heading hierarchy metadata.
-    fn parse_sections(&self, source: &[u8]) -> Vec<DocSection>;
+    ///
+    /// `file_name` is the basename of the file (e.g. `"CHANGELOG.md"`,
+    /// `"README"`). Impls may use it for filename-driven heuristics —
+    /// currently Markdown enters a changelog-aware mode when the file
+    /// name matches `CHANGELOG*` / `HISTORY*` / `RELEASES*`.
+    fn parse_sections(&self, source: &[u8], file_name: Option<&str>) -> Vec<DocSection>;
 
     /// Extract code symbol references (backticked identifiers, fenced code blocks).
     fn extract_symbol_refs(&self, source: &[u8]) -> Vec<SymbolRef>;

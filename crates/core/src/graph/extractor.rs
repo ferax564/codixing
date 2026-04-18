@@ -49,7 +49,9 @@ impl ImportExtractor {
             | Language::Xml
             | Language::Markdown
             | Language::Html
-            | Language::Rst => Vec::new(),
+            | Language::Rst
+            | Language::AsciiDoc
+            | Language::PlainText => Vec::new(),
         }
     }
 }

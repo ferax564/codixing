@@ -248,8 +248,8 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ## Key Features
 
-- **27 languages** — Full AST parsing via tree-sitter (Rust, Python, TypeScript, Go, Java, C, C++, C#, Ruby, Swift, Kotlin, Scala, Zig, PHP, Bash, Matlab + config/diagram formats + Markdown, HTML, and reStructuredText doc indexing)
-- **Documentation indexing** — indexes Markdown, HTML, and reStructuredText (`.rst`) docs alongside code with section-aware chunking, breadcrumb metadata, and doc-to-code graph linking; use `--docs-only` to restrict results to docs or `--code-only` to exclude them
+- **29 languages** — Full AST parsing via tree-sitter (Rust, Python, TypeScript, Go, Java, C, C++, C#, Ruby, Swift, Kotlin, Scala, Zig, PHP, Bash, Matlab + config/diagram formats + Markdown, HTML, reStructuredText, AsciiDoc, and plain-text doc indexing)
+- **Documentation indexing** — indexes Markdown, HTML, reStructuredText (`.rst`), AsciiDoc (`.adoc`), and plain text (`.txt` + bare `README`/`LICENSE`/`AUTHORS`/`CHANGELOG`) alongside code with section-aware chunking, CHANGELOG-aware version-section splitting, breadcrumb metadata, and doc-to-code graph linking; use `--docs-only` to restrict results to docs or `--code-only` to exclude them
 - **Hybrid search** — BM25 + optional vector embeddings, fused with Reciprocal Rank Fusion
 - **Symbol-level call graph** — Function-to-function call edges extracted from AST, including Rust trait dispatch, Python class inheritance, and TypeScript interface implementations
 - **Dependency graph** — Import + call extraction, PageRank scoring, Personalized PageRank for focus-aware maps, Louvain community detection, shortest path queries, surprise/anomaly edge scoring
@@ -313,7 +313,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 | **Tier 3** (full AST + graph) | Zig, PHP, Bash, Matlab |
 | **Config** (symbol extraction) | YAML, TOML, Dockerfile, Makefile |
 | **Diagram / Markup** (symbol extraction) | Mermaid, XML/Draw.io |
-| **Docs** (section-aware chunking) | Markdown, HTML, reStructuredText (`.rst`) |
+| **Docs** (section-aware chunking) | Markdown, HTML, reStructuredText (`.rst`), AsciiDoc (`.adoc`, `.asciidoc`), plain text (`.txt` + bare `README`/`LICENSE`/`AUTHORS`/`CHANGELOG`) |
 
 ---
 

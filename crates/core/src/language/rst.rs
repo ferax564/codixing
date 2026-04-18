@@ -20,7 +20,7 @@ impl DocLanguageSupport for RstLanguage {
         Language::Rst
     }
 
-    fn parse_sections(&self, source: &[u8]) -> Vec<DocSection> {
+    fn parse_sections(&self, source: &[u8], _file_name: Option<&str>) -> Vec<DocSection> {
         let text = String::from_utf8_lossy(source);
         parse_rst_sections(&text)
     }
