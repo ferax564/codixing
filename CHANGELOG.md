@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.40.0] — 2026-04-18
+
+Doc-parsing expansion + structural retrieval + agent stickiness. Ships the
+five Tier 1 items from `plans/2026-04-18-codixing-improvements.md`:
+reStructuredText / AsciiDoc / plain-text indexing, CHANGELOG-aware Markdown,
+`search_usages --complete` deterministic blast-radius mode, the Phase 4
+embedding-clustered concept graph algorithm, and a full MCP tool-description
+audit against the arXiv 2602.14878 rubric. See PR #92 for the full roll-up.
+
 ### Added
 
 - **reStructuredText (`.rst`) indexing** — new `RstLanguage` `DocLanguageSupport` impl with section-hierarchy tracking following RST's dynamic-level rule (first-seen adornment char = level 1, next distinct = level 2, …). Supports both single-underline and overline+underline title forms, detects `.. code-block::` directives, and extracts `` ``symbol`` `` references via the shared backtick heuristic. Unlocks the Linux kernel `Documentation/` tree (3,909 `.rst` files indexed in 0.48 s on an M4) and every Sphinx-based Python project. Out of scope for this pass: directive expansion, cross-file `:ref:` resolution, Sphinx extensions.
