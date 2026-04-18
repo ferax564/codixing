@@ -124,33 +124,36 @@ struct SymbolRecord {
     doc_words: Vec<String>,
 }
 
+/// Phase-4 embedding-cluster merge parameters.
+///
+/// Tuned on the openclaw repo during the v0.40 concept-graph work:
+/// τ = 0.82 keeps merges tight enough that false-positive cluster unions are
+/// rare while still catching synonym pairs like `login / authenticate`.
+/// Cap = 32 prevents runaway single-link chains.
+#[derive(Debug, Clone, Copy)]
+pub struct EmbedClusterConfig {
+    pub threshold: f32,
+    pub cap: usize,
+}
+
+impl Default for EmbedClusterConfig {
+    fn default() -> Self {
+        Self {
+            threshold: 0.82,
+            cap: 32,
+        }
+    }
+}
+
 /// Builds a [`ConceptIndex`] from symbol data and co-occurrence information.
 #[derive(Debug, Default)]
 pub struct ConceptIndexBuilder {
     symbols: Vec<SymbolRecord>,
     /// Pairs of files that import each other / co-occur.
     cooccurrences: Vec<(String, String)>,
-    /// Optional `symbol_name -> embedding vector` map, set by
-    /// [`Self::with_symbol_embeddings`]. When present, Phase 4 runs a
-    /// single-link agglomerative merge on the identifier/doc/import clusters
-    /// and widens the term→cluster index with a merged group's member names.
-    symbol_embeddings: HashMap<String, Vec<f32>>,
-    /// Cosine similarity threshold for Phase 4 cluster merging.
-    embed_cluster_threshold: f32,
-    /// Maximum number of symbols a merged cluster may contain. Prevents
-    /// pathological merges that would swallow the entire graph. Matches the
-    /// v0.40 plan (`cluster cap = 32`).
-    embed_cluster_cap: usize,
+    /// Phase-4 state. `None` = merge disabled (Phase 4 is a no-op).
+    embed_cluster: Option<(HashMap<String, Vec<f32>>, EmbedClusterConfig)>,
 }
-
-/// Configuration constants for Phase 4 embedding-cluster merge.
-///
-/// Tuned on the openclaw repo during the v0.40 concept-graph work:
-/// τ = 0.82 keeps merges tight enough that false-positive cluster unions are
-/// rare, while still catching synonym pairs like `login / authenticate`.
-/// Cluster cap = 32 prevents runaway single-link chains.
-pub const DEFAULT_EMBED_CLUSTER_THRESHOLD: f32 = 0.82;
-pub const DEFAULT_EMBED_CLUSTER_CAP: usize = 32;
 
 impl ConceptIndexBuilder {
     /// Create a new empty builder.
@@ -174,28 +177,27 @@ impl ConceptIndexBuilder {
             .push((file_a.to_string(), file_b.to_string()));
     }
 
-    /// Supply per-symbol embedding vectors for Phase 4 cluster merging.
+    /// Enable Phase 4 cluster merging with the supplied symbol embeddings
+    /// and default [`EmbedClusterConfig`] (τ = 0.82, cap = 32).
     ///
-    /// If this method is not called (or the map is empty), Phase 4 is a no-op
-    /// and the output is identical to the pre-v0.40 three-phase build — the
-    /// `embedding.enabled = false` code path is unchanged.
-    ///
-    /// When called with the defaults, τ = 0.82 and cap = 32.
-    pub fn with_symbol_embeddings(mut self, embeddings: HashMap<String, Vec<f32>>) -> Self {
-        self.symbol_embeddings = embeddings;
-        if self.embed_cluster_threshold == 0.0 {
-            self.embed_cluster_threshold = DEFAULT_EMBED_CLUSTER_THRESHOLD;
-        }
-        if self.embed_cluster_cap == 0 {
-            self.embed_cluster_cap = DEFAULT_EMBED_CLUSTER_CAP;
-        }
-        self
+    /// If this method is not called (or an empty map is passed), Phase 4 is
+    /// a no-op and the output is identical to the pre-v0.40 three-phase
+    /// build — the `embedding.enabled = false` code path is unchanged.
+    pub fn with_symbol_embeddings(self, embeddings: HashMap<String, Vec<f32>>) -> Self {
+        self.with_embed_cluster(embeddings, EmbedClusterConfig::default())
     }
 
-    /// Override the embedding-cluster threshold and cap (test hook).
-    pub fn with_embed_cluster_params(mut self, threshold: f32, cap: usize) -> Self {
-        self.embed_cluster_threshold = threshold;
-        self.embed_cluster_cap = cap;
+    /// Enable Phase 4 cluster merging with explicit configuration.
+    pub fn with_embed_cluster(
+        mut self,
+        embeddings: HashMap<String, Vec<f32>>,
+        config: EmbedClusterConfig,
+    ) -> Self {
+        if embeddings.is_empty() {
+            self.embed_cluster = None;
+        } else {
+            self.embed_cluster = Some((embeddings, config));
+        }
         self
     }
 
@@ -378,27 +380,11 @@ impl ConceptIndexBuilder {
         // Phase 4: Embedding-based cluster merge (v0.40)
         // -----------------------------------------------------------------
         //
-        // When the caller supplied per-symbol embeddings via
-        // `with_symbol_embeddings`, merge clusters whose centroid cosine
-        // similarity exceeds `embed_cluster_threshold`. Single-link
-        // agglomerative: iterate until no merge fires.
-        //
-        // O(C^2) in cluster count. On openclaw (~150 clusters) this is
-        // trivially fast. On linux-kernel scale, a HNSW top-K probe is
-        // the documented follow-up (plan's risk register).
-
-        if !self.symbol_embeddings.is_empty() {
-            let threshold = if self.embed_cluster_threshold == 0.0 {
-                DEFAULT_EMBED_CLUSTER_THRESHOLD
-            } else {
-                self.embed_cluster_threshold
-            };
-            let cap = if self.embed_cluster_cap == 0 {
-                DEFAULT_EMBED_CLUSTER_CAP
-            } else {
-                self.embed_cluster_cap
-            };
-            merge_clusters_by_embedding(&mut clusters, &self.symbol_embeddings, threshold, cap);
+        // Single-link agglomerative merge at centroid-cosine >= threshold,
+        // cap = max combined symbol count. O(C^2) — on linux-kernel scale
+        // a HNSW top-K probe is the documented follow-up.
+        if let Some((embeddings, config)) = self.embed_cluster.as_ref() {
+            merge_clusters_by_embedding(&mut clusters, embeddings, config.threshold, config.cap);
         }
 
         // -----------------------------------------------------------------
@@ -521,31 +507,22 @@ fn merge_clusters_by_embedding(
                     (j, i)
                 };
 
-                // Snapshot the dropped cluster before mutating `keep`.
-                let drop_symbols = clusters[drop_idx].symbols.clone();
-                let drop_files = clusters[drop_idx].files.clone();
-                let drop_score = clusters[drop_idx].score;
-
-                {
-                    let keep_cluster = &mut clusters[keep];
-                    for sym in drop_symbols {
-                        if !keep_cluster.symbols.contains(&sym) {
-                            keep_cluster.symbols.push(sym);
-                        }
-                    }
-                    for file in drop_files {
-                        if !keep_cluster.files.contains(&file) {
-                            keep_cluster.files.push(file);
-                        }
-                    }
-                    keep_cluster.score = keep_cluster.score.max(drop_score);
-                }
-
-                // Recompute centroid for the kept cluster.
-                centroids[keep] = cluster_centroid(&clusters[keep], embeddings);
-
-                clusters.remove(drop_idx);
+                // Take (not clone) the dropped cluster's vecs — it's about to be
+                // removed anyway. Dedup once after the append, not per push.
+                let mut drop_cluster = clusters.remove(drop_idx);
                 centroids.remove(drop_idx);
+                let keep = if drop_idx < keep { keep - 1 } else { keep };
+
+                let keep_cluster = &mut clusters[keep];
+                keep_cluster.symbols.append(&mut drop_cluster.symbols);
+                keep_cluster.symbols.sort();
+                keep_cluster.symbols.dedup();
+                keep_cluster.files.append(&mut drop_cluster.files);
+                keep_cluster.files.sort();
+                keep_cluster.files.dedup();
+                keep_cluster.score = keep_cluster.score.max(drop_cluster.score);
+
+                centroids[keep] = cluster_centroid(keep_cluster, embeddings);
                 merged_this_pass = true;
                 break 'outer;
             }
@@ -560,32 +537,29 @@ fn merge_clusters_by_embedding(
 /// Compute the centroid (element-wise mean) of the embedding vectors for
 /// every symbol in `cluster` that appears in `embeddings`. Returns `None`
 /// when no cluster symbol has an embedding.
+///
+/// Seeds a zero vector from the first matching embedding's length, then
+/// accumulates in place by reference — no per-symbol cloning.
 fn cluster_centroid(
     cluster: &ConceptCluster,
     embeddings: &HashMap<String, Vec<f32>>,
 ) -> Option<Vec<f32>> {
-    let mut sum: Option<Vec<f32>> = None;
+    let mut centroid: Option<Vec<f32>> = None;
     let mut count: usize = 0;
     for sym in &cluster.symbols {
         let Some(vec) = embeddings.get(sym) else {
             continue;
         };
-        match sum.as_mut() {
-            None => {
-                sum = Some(vec.clone());
-            }
-            Some(acc) => {
-                if acc.len() != vec.len() {
-                    continue;
-                }
-                for (a, b) in acc.iter_mut().zip(vec.iter()) {
-                    *a += *b;
-                }
-            }
+        let acc = centroid.get_or_insert_with(|| vec![0.0; vec.len()]);
+        if acc.len() != vec.len() {
+            continue;
+        }
+        for (a, b) in acc.iter_mut().zip(vec.iter()) {
+            *a += *b;
         }
         count += 1;
     }
-    let mut centroid = sum?;
+    let mut centroid = centroid?;
     if count == 0 {
         return None;
     }
@@ -596,26 +570,14 @@ fn cluster_centroid(
     Some(centroid)
 }
 
-/// Cosine similarity of two equal-length embedding vectors. Returns 0 for
-/// zero vectors or dimension mismatches.
+/// Cosine similarity wrapper that guards the length-mismatch case (the
+/// shared [`crate::index::simd_distance::cosine_similarity`] panics on
+/// mismatch; concept-graph inputs are untrusted vs. this crate's invariants).
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
-    let mut dot = 0.0f32;
-    let mut na = 0.0f32;
-    let mut nb = 0.0f32;
-    for (x, y) in a.iter().zip(b.iter()) {
-        dot += x * y;
-        na += x * x;
-        nb += y * y;
-    }
-    let denom = na.sqrt() * nb.sqrt();
-    if denom <= f32::EPSILON {
-        0.0
-    } else {
-        dot / denom
-    }
+    crate::index::simd_distance::cosine_similarity(a, b)
 }
 
 // ---------------------------------------------------------------------------
@@ -1018,14 +980,7 @@ mod tests {
         emb.insert("render_page".into(), vec_of(&[0.0, 1.0]));
         emb.insert("render_layout".into(), vec_of(&[0.0, 1.0]));
 
-        let index_with = ConceptIndexBuilder {
-            symbols: builder.symbols,
-            cooccurrences: builder.cooccurrences,
-            symbol_embeddings: emb.clone(),
-            embed_cluster_threshold: 0.82,
-            embed_cluster_cap: 32,
-        }
-        .build();
+        let index_with = builder.with_symbol_embeddings(emb.clone()).build();
 
         // Control: same build with no embeddings — clusters remain separate.
         let mut control = ConceptIndexBuilder::new();
@@ -1079,14 +1034,15 @@ mod tests {
             emb.insert((*name).to_string(), vec_of(&[1.0, 0.0]));
         }
 
-        let index = ConceptIndexBuilder {
-            symbols: builder.symbols,
-            cooccurrences: builder.cooccurrences,
-            symbol_embeddings: emb,
-            embed_cluster_threshold: 0.5,
-            embed_cluster_cap: 6, // too small for 4+4 merge
-        }
-        .build();
+        let index = builder
+            .with_embed_cluster(
+                emb,
+                EmbedClusterConfig {
+                    threshold: 0.5,
+                    cap: 6, // too small for 4+4 merge
+                },
+            )
+            .build();
 
         // No cluster should contain both an alpha_* and a zeta_*.
         let merged = index.clusters.iter().any(|c| {

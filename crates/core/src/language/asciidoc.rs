@@ -13,7 +13,9 @@
 //! (`include::file.adoc[]`), attribute substitution, tables, callouts.
 
 use super::Language;
-use super::doc::{DocElement, DocLanguageSupport, DocSection, SymbolRef};
+use super::doc::{
+    DocElement, DocLanguageSupport, DocSection, SymbolRef, build_line_offsets, line_byte_offset,
+};
 use super::markdown::{clean_symbol_name, is_likely_symbol};
 
 /// AsciiDoc language support.
@@ -76,12 +78,13 @@ pub fn parse_asciidoc_sections(text: &str) -> Vec<DocSection> {
     }
 
     let mut sections: Vec<DocSection> = Vec::new();
+    let line_offsets = build_line_offsets(text);
 
     // Preamble before the first heading.
     let first_line = headings[0].line_idx;
     if first_line > 0 {
         let content = lines[0..first_line].join("\n");
-        let byte_end = line_to_byte_offset(text, first_line);
+        let byte_end = line_byte_offset(&line_offsets, first_line, text.len());
         sections.push(DocSection {
             heading: String::new(),
             level: 0,
@@ -110,8 +113,9 @@ pub fn parse_asciidoc_sections(text: &str) -> Vec<DocSection> {
         };
 
         let content = lines[section_start_line..section_end_line.min(total_lines)].join("\n");
-        let byte_start = line_to_byte_offset(text, section_start_line);
-        let byte_end = line_to_byte_offset(text, section_end_line.min(total_lines));
+        let byte_start = line_byte_offset(&line_offsets, section_start_line, text.len());
+        let byte_end =
+            line_byte_offset(&line_offsets, section_end_line.min(total_lines), text.len());
 
         sections.push(DocSection {
             heading: h.title.clone(),
@@ -217,23 +221,6 @@ fn detect_elements_in_text(text: &str) -> Vec<DocElement> {
     }
 
     elements
-}
-
-/// 0-indexed line → byte offset of the start of that line.
-fn line_to_byte_offset(text: &str, line: usize) -> usize {
-    if line == 0 {
-        return 0;
-    }
-    let mut current = 0usize;
-    for (i, ch) in text.char_indices() {
-        if ch == '\n' {
-            current += 1;
-            if current == line {
-                return i + 1;
-            }
-        }
-    }
-    text.len()
 }
 
 /// Extract `` `symbol` `` backtick references from AsciiDoc text.

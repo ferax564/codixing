@@ -7,7 +7,9 @@
 //! retrieval chunks stay focused.
 
 use super::Language;
-use super::doc::{DocElement, DocLanguageSupport, DocSection, SymbolRef};
+use super::doc::{
+    DocElement, DocLanguageSupport, DocSection, SymbolRef, build_line_offsets, line_byte_offset,
+};
 use super::markdown::{clean_symbol_name, is_likely_symbol};
 
 /// Soft cap for a plain-text section body.
@@ -53,20 +55,28 @@ pub fn parse_plain_sections(text: &str) -> Vec<DocSection> {
     }
 
     let mut sections: Vec<DocSection> = Vec::new();
+    let line_offsets = build_line_offsets(text);
 
     // Group consecutive non-blank lines into paragraphs.
     let mut para_start: Option<usize> = None;
     for (idx, line) in lines.iter().enumerate() {
         if line.trim().is_empty() {
             if let Some(start) = para_start.take() {
-                emit_paragraph(&lines, start, idx, text, &mut sections);
+                emit_paragraph(&lines, start, idx, text, &line_offsets, &mut sections);
             }
         } else if para_start.is_none() {
             para_start = Some(idx);
         }
     }
     if let Some(start) = para_start {
-        emit_paragraph(&lines, start, total_lines, text, &mut sections);
+        emit_paragraph(
+            &lines,
+            start,
+            total_lines,
+            text,
+            &line_offsets,
+            &mut sections,
+        );
     }
 
     if sections.is_empty() {
@@ -94,11 +104,12 @@ fn emit_paragraph(
     start_line: usize,
     end_line: usize,
     text: &str,
+    line_offsets: &[usize],
     out: &mut Vec<DocSection>,
 ) {
     let content = lines[start_line..end_line].join("\n");
-    let byte_start = line_to_byte_offset(text, start_line);
-    let byte_end = line_to_byte_offset(text, end_line);
+    let byte_start = line_byte_offset(line_offsets, start_line, text.len());
+    let byte_end = line_byte_offset(line_offsets, end_line, text.len());
 
     if content.len() <= MAX_PARA_BYTES {
         out.push(DocSection {
@@ -179,22 +190,6 @@ pub(crate) fn extract_plain_refs(text: &str) -> Vec<SymbolRef> {
         .into_iter()
         .filter(|r| is_likely_symbol(&r.name) || is_likely_symbol(&clean_symbol_name(&r.name)))
         .collect()
-}
-
-fn line_to_byte_offset(text: &str, line: usize) -> usize {
-    if line == 0 {
-        return 0;
-    }
-    let mut current = 0usize;
-    for (i, ch) in text.char_indices() {
-        if ch == '\n' {
-            current += 1;
-            if current == line {
-                return i + 1;
-            }
-        }
-    }
-    text.len()
 }
 
 #[cfg(test)]
