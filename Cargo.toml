@@ -96,6 +96,11 @@ glob = "0.3"
 # TOML parsing (federation workspace discovery)
 toml = "0.8"
 
+# Optional PDF text extraction (enable with --features pdf).
+# Pure-Rust backend — no C dependencies. Default build excludes it to
+# keep the workspace zero-C-dep by default.
+pdf-extract = "0.9"
+
 # XML parsing
 quick-xml = "0.37"
 

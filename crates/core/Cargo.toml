@@ -33,6 +33,17 @@ qwen3 = ["dep:ort-qwen3", "dep:tokenizers-qwen3", "dep:ndarray-qwen3"]
 ## crash recovery and retry. Falls back to the sync path on failure.
 rustqueue = ["dep:rustqueue", "dep:tokio"]
 
+## Enable PDF text extraction.
+##
+## Adds `Language::Pdf` to the language registry so `.pdf` files are
+## indexed with a `DocSection`-per-page layout. Uses the pure-Rust
+## `pdf-extract` backend — no C dependencies. Default build leaves
+## `.pdf` files unindexed so the default binary stays lean.
+##
+## Build with:
+##   cargo build --features codixing-core/pdf
+pdf = ["dep:pdf-extract"]
+
 ## Exposes a handful of `__test_*` probe methods on `Engine` for integration
 ## tests that live outside the crate (e.g. `crates/core/tests/*.rs`). Not part
 ## of the public semver surface — gate is `cfg(any(test, feature = "internal-testing"))`.
@@ -45,6 +56,8 @@ qdrant-client = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 # RustQueue job queue — pulled in when the rustqueue feature is enabled
 rustqueue = { workspace = true, optional = true }
+# PDF text extraction — pulled in when the pdf feature is enabled
+pdf-extract = { workspace = true, optional = true }
 # Qwen3 ONNX backend — only pulled in when the qwen3 feature is enabled
 ort-qwen3      = { package = "ort",        version = "=2.0.0-rc.11", optional = true, features = ["load-dynamic", "ndarray"] }
 tokenizers-qwen3 = { package = "tokenizers", version = "0.22",         optional = true, default-features = false, features = ["onig"] }

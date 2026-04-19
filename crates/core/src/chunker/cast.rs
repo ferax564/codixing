@@ -13,7 +13,7 @@ use tree_sitter::Node;
 use crate::config::ChunkConfig;
 use crate::language::Language;
 
-use super::{Chunk, Chunker, chunk_id, non_ws_chars};
+use super::{chunk_id, non_ws_chars, Chunk, Chunker};
 
 /// The cAST chunker: AST-aware, recursive split-then-merge.
 pub struct CastChunker;
@@ -415,7 +415,8 @@ fn extract_entity_names_from_content(content: &str, language: Language) -> Vec<S
         | Language::AsciiDoc
         | Language::PlainText
         | Language::OpenApi
-        | Language::Jupyter => &[],
+        | Language::Jupyter
+        | Language::Pdf => &[],
     };
 
     for line in content.lines() {
@@ -476,7 +477,8 @@ fn extract_signatures_from_content(content: &str, language: Language) -> Vec<Str
         | Language::AsciiDoc
         | Language::PlainText
         | Language::OpenApi
-        | Language::Jupyter => &[],
+        | Language::Jupyter
+        | Language::Pdf => &[],
     };
 
     let mut sigs = Vec::new();
