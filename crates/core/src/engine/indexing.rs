@@ -19,6 +19,7 @@ use crate::graph::types::{ReferenceKind, SymbolKind};
 use crate::graph::{CallExtractor, CodeGraph, ImportExtractor, ImportResolver};
 use crate::index::TantivyIndex;
 use crate::index::trigram::FileTrigramIndex;
+use crate::language::ipynb::{self, CellKind};
 use crate::language::{Language, SemanticEntity, detect_language};
 use crate::parser::Parser;
 use crate::retriever::{ChunkMeta, ChunkMetaCompact};
@@ -118,6 +119,11 @@ pub(super) fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
     // Doc language branch — uses DocLanguageSupport instead of tree-sitter/config.
     if result.language.is_doc() {
         return process_doc_file(&rel_str, &source, result.language, ctx);
+    }
+
+    // Jupyter branch — parse JSON and dispatch per-cell.
+    if result.language.is_notebook() {
+        return process_jupyter_file(&rel_str, &source, ctx);
     }
 
     let chunker = CastChunker;
@@ -261,6 +267,188 @@ fn process_doc_file(
         language = language.name(),
         chunks = chunks.len(),
         "indexed doc file"
+    );
+
+    Ok(())
+}
+
+/// Process a Jupyter `.ipynb` notebook: parse JSON → per-cell dispatch.
+///
+/// Each code cell routes through tree-sitter according to
+/// `metadata.kernelspec.language` (default: Python). Markdown cells route
+/// through `DocLanguageSupport::<Markdown>`. Raw and output cells are
+/// skipped. All resulting chunks and entities are attributed to the real
+/// notebook path (`rel_str`); the cell identifier is prepended onto
+/// `scope_chain` so search surfaces the cell of origin without creating
+/// synthetic file_path entries that would confuse filesystem consumers.
+///
+/// Known limitations:
+/// - Byte and line ranges are cell-local, not notebook-local. Maps to
+///   the chunk content but not back into the `.ipynb` JSON.
+/// - Cell imports do not participate in the cross-file import graph yet —
+///   pending_imports / pending_calls are not populated for notebook cells.
+fn process_jupyter_file(rel_str: &str, source: &[u8], ctx: &IndexContext<'_>) -> Result<()> {
+    let cells = match ipynb::parse_notebook(source) {
+        Ok(cells) => cells,
+        Err(e) => {
+            warn!(path = %rel_str, error = %e, "malformed notebook, skipping");
+            return Ok(());
+        }
+    };
+
+    let mut total_chunks = 0usize;
+    let mut total_entities = 0usize;
+
+    for cell in cells {
+        if matches!(cell.kind, CellKind::Raw) {
+            continue;
+        }
+        let cell_scope = format!("cell-{}", cell.id);
+        let cell_bytes = cell.source.as_bytes();
+
+        match cell.kind {
+            CellKind::Code => {
+                let ext = ipynb::kernel_language_extension(cell.kernel_language.as_deref())
+                    .unwrap_or("py");
+                // Detect target language off a synthetic extension — the
+                // real notebook path has `.ipynb` and would resolve back
+                // to Jupyter, so use a throwaway path for dispatch only.
+                let synthetic = PathBuf::from(format!("cell.{ext}"));
+                let Some(cell_lang) = detect_language(&synthetic) else {
+                    continue;
+                };
+                let Some(lang_support) = ctx.parser.registry().get(cell_lang) else {
+                    continue;
+                };
+
+                // Direct tree-sitter parse, bypassing the path-keyed cache
+                // so we don't thrash it with per-cell synthetic paths.
+                let mut ts_parser = tree_sitter::Parser::new();
+                if ts_parser
+                    .set_language(&lang_support.tree_sitter_language())
+                    .is_err()
+                {
+                    continue;
+                }
+                let Some(tree) = ts_parser.parse(cell_bytes, None) else {
+                    continue;
+                };
+                let entities = lang_support.extract_entities(&tree, cell_bytes);
+
+                let chunker = CastChunker;
+                let mut chunks = chunker.chunk(
+                    rel_str,
+                    cell_bytes,
+                    Some(&tree),
+                    cell_lang,
+                    &ctx.config.chunk,
+                );
+                for chunk in &mut chunks {
+                    let mut scope = vec![cell_scope.clone()];
+                    scope.append(&mut chunk.scope_chain);
+                    chunk.scope_chain = scope;
+                }
+
+                total_chunks += chunks.len();
+                for chunk in &chunks {
+                    ctx.tantivy.add_chunk(chunk)?;
+                    ctx.chunk_meta_map.insert(
+                        chunk.id,
+                        ChunkMeta {
+                            chunk_id: chunk.id,
+                            file_path: rel_str.to_string(),
+                            language: chunk.language.name().to_string(),
+                            line_start: chunk.line_start as u64,
+                            line_end: chunk.line_end as u64,
+                            signature: chunk.signatures.join("\n"),
+                            scope_chain: chunk.scope_chain.clone(),
+                            entity_names: chunk.entity_names.clone(),
+                            content_hash: xxhash_rust::xxh3::xxh3_64(chunk.content.as_bytes()),
+                            content: chunk.content.clone(),
+                        },
+                    );
+                    ctx.pending_embeds.insert(chunk.id, chunk.content.clone());
+                }
+
+                for entity in &entities {
+                    let mut sym = symbol_from_entity(entity, rel_str, cell_lang);
+                    let mut scope = vec![cell_scope.clone()];
+                    scope.append(&mut sym.scope);
+                    sym.scope = scope;
+                    ctx.symbols.insert(sym);
+                }
+                total_entities += entities.len();
+            }
+            CellKind::Markdown => {
+                let Some(doc_support) = ctx.parser.registry().get_doc(Language::Markdown) else {
+                    continue;
+                };
+                let file_name_hint = format!("{cell_scope}.md");
+                let sections =
+                    doc_support.parse_sections(cell_bytes, Some(file_name_hint.as_str()));
+                let symbol_refs = doc_support.extract_symbol_refs(cell_bytes);
+
+                let mut chunks = crate::chunker::doc::chunk_doc(
+                    rel_str,
+                    cell_bytes,
+                    &sections,
+                    Language::Markdown,
+                    &ctx.config.chunk,
+                );
+                for chunk in &mut chunks {
+                    let mut scope = vec![cell_scope.clone()];
+                    scope.append(&mut chunk.scope_chain);
+                    chunk.scope_chain = scope;
+                    chunk.entity_names = symbol_refs
+                        .iter()
+                        .filter(|r| {
+                            r.byte_range.start >= chunk.byte_start
+                                && r.byte_range.end <= chunk.byte_end
+                        })
+                        .map(|r| r.name.clone())
+                        .collect();
+                }
+
+                total_chunks += chunks.len();
+                for chunk in &chunks {
+                    ctx.tantivy.add_chunk(chunk)?;
+                    ctx.chunk_meta_map.insert(
+                        chunk.id,
+                        ChunkMeta {
+                            chunk_id: chunk.id,
+                            file_path: rel_str.to_string(),
+                            language: chunk.language.name().to_string(),
+                            line_start: chunk.line_start as u64,
+                            line_end: chunk.line_end as u64,
+                            signature: String::new(),
+                            scope_chain: chunk.scope_chain.clone(),
+                            entity_names: chunk.entity_names.clone(),
+                            content_hash: xxhash_rust::xxh3::xxh3_64(chunk.content.as_bytes()),
+                            content: chunk.content.clone(),
+                        },
+                    );
+                    ctx.pending_embeds.insert(chunk.id, chunk.content.clone());
+                }
+
+                if !symbol_refs.is_empty() {
+                    ctx.pending_doc_refs
+                        .entry(rel_str.to_string())
+                        .or_default()
+                        .extend(symbol_refs);
+                }
+            }
+            CellKind::Raw => unreachable!("raw cells filtered above"),
+        }
+    }
+
+    ctx.chunk_count.fetch_add(total_chunks, Ordering::Relaxed);
+    ctx.file_chunk_map.insert(rel_str.to_string(), total_chunks);
+
+    debug!(
+        path = %rel_str,
+        chunks = total_chunks,
+        entities = total_entities,
+        "indexed jupyter notebook"
     );
 
     Ok(())
