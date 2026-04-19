@@ -105,7 +105,95 @@ impl SearchStage for GraphBoostStage {
 ///
 /// Seeds the personalization vector from the top-5 BM25 results (weighted by
 /// their BM25 score), then re-scores all results using the personalized scores.
+/// An LRU cache on the computed PPR scores avoids recomputing the 20-iteration
+/// PPR loop when identical seed sets recur — common for agent sessions that
+/// hit the same query repeatedly while exploring a neighborhood.
 pub struct PersonalizedGraphBoostStage;
+
+/// One cached computation of personalized PageRank.
+struct PprCacheEntry {
+    scores: std::sync::Arc<std::collections::HashMap<String, f32>>,
+    inserted: std::time::Instant,
+}
+
+/// Cache TTL. Graph edits between queries aren't tracked precisely (the
+/// cache key incorporates node_count as a rough invalidation proxy);
+/// 5 minutes bounds staleness in the face of sync-driven graph changes.
+const PPR_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Max cached computations retained. Above this, the oldest entry is
+/// evicted on insert (rough LRU via insertion order). 64 matches the
+/// working-set size of a typical agent session — large enough to avoid
+/// thrashing, small enough to bound memory (each entry ~= repo-size × 8 B).
+const PPR_CACHE_CAP: usize = 64;
+
+fn ppr_cache() -> &'static std::sync::Mutex<Vec<(u64, PprCacheEntry)>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Vec<(u64, PprCacheEntry)>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// Derive a cache key from the seed set and the graph's node count.
+///
+/// Identical seeds (same files, same rounded scores, same order) on the
+/// same graph size produce the same key. Scores are rounded to 3 decimals
+/// so trivial floating-point noise below 10^-3 doesn't miss the cache.
+fn seed_cache_key(seeds: &[(&str, f32)], node_count: usize) -> u64 {
+    use xxhash_rust::xxh3::Xxh3;
+    let mut hasher = Xxh3::new();
+    hasher.update(&(node_count as u64).to_le_bytes());
+    for (file, score) in seeds {
+        hasher.update(file.as_bytes());
+        hasher.update(&[0]); // separator so "ab" + "" != "a" + "b"
+        let rounded = (score * 1000.0).round() as i64;
+        hasher.update(&rounded.to_le_bytes());
+    }
+    hasher.digest()
+}
+
+fn ppr_cache_get(key: u64) -> Option<std::sync::Arc<std::collections::HashMap<String, f32>>> {
+    let mut cache = ppr_cache().lock().ok()?;
+    let now = std::time::Instant::now();
+    cache.retain(|(_, e)| now.duration_since(e.inserted) < PPR_CACHE_TTL);
+    let pos = cache.iter().position(|(k, _)| *k == key)?;
+    let scores = cache[pos].1.scores.clone();
+    // Refresh to tail so LRU eviction favours older-untouched entries.
+    let entry = cache.remove(pos);
+    cache.push(entry);
+    Some(scores)
+}
+
+fn ppr_cache_put(key: u64, scores: std::sync::Arc<std::collections::HashMap<String, f32>>) {
+    let Ok(mut cache) = ppr_cache().lock() else {
+        return;
+    };
+    // If a stale entry for this key already exists, drop it before insert.
+    cache.retain(|(k, _)| *k != key);
+    if cache.len() >= PPR_CACHE_CAP {
+        cache.remove(0);
+    }
+    cache.push((
+        key,
+        PprCacheEntry {
+            scores,
+            inserted: std::time::Instant::now(),
+        },
+    ));
+}
+
+/// Test-only: wipe the cache so tests don't leak state between runs.
+#[cfg(test)]
+pub(crate) fn __test_ppr_cache_clear() {
+    if let Ok(mut cache) = ppr_cache().lock() {
+        cache.clear();
+    }
+}
+
+/// Test-only: current cache size, for assertion in cache-behavior tests.
+#[cfg(test)]
+pub(crate) fn __test_ppr_cache_len() -> usize {
+    ppr_cache().lock().map(|c| c.len()).unwrap_or(0)
+}
 
 impl SearchStage for PersonalizedGraphBoostStage {
     fn apply(&self, results: &mut Vec<SearchResult>, ctx: &SearchContext<'_>) -> Result<()> {
@@ -118,15 +206,25 @@ impl SearchStage for PersonalizedGraphBoostStage {
             return Ok(());
         }
 
-        // Extract top-5 results as weighted seeds
+        // Extract top-5 results as weighted seeds.
         let seed_count = results.len().min(5);
         let seeds: Vec<(&str, f32)> = results[..seed_count]
             .iter()
             .map(|r| (r.file_path.as_str(), r.score))
             .collect();
 
-        let ppr =
-            crate::graph::compute_weighted_personalized_pagerank(graph, 0.85, 20, 1e-6, &seeds);
+        // Cache hit: reuse the previously-computed PPR scores. Cache miss:
+        // run the 20-iteration PPR loop then insert.
+        let cache_key = seed_cache_key(&seeds, graph.node_count());
+        let ppr = if let Some(hit) = ppr_cache_get(cache_key) {
+            hit
+        } else {
+            let fresh = std::sync::Arc::new(crate::graph::compute_weighted_personalized_pagerank(
+                graph, 0.85, 20, 1e-6, &seeds,
+            ));
+            ppr_cache_put(cache_key, fresh.clone());
+            fresh
+        };
 
         let weight = ctx.graph_boost_weight;
         for r in results.iter_mut() {
@@ -1107,6 +1205,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(ppr_cache)]
     fn personalized_graph_boost_uses_seed_results() {
         use crate::graph::CodeGraph;
         use crate::language::Language;
@@ -1168,5 +1267,102 @@ mod tests {
             c_score > 5.0,
             "c.rs should be boosted above 5.0, got {c_score}"
         );
+    }
+
+    #[test]
+    #[serial_test::serial(ppr_cache)]
+    fn personalized_graph_boost_caches_identical_seed_sets() {
+        use crate::graph::CodeGraph;
+        use crate::language::Language;
+
+        __test_ppr_cache_clear();
+        let start_len = __test_ppr_cache_len();
+
+        let mut graph = CodeGraph::new();
+        graph.add_edge("src/a.rs", "src/b.rs", "b", Language::Rust, Language::Rust);
+        graph.add_edge("src/b.rs", "src/c.rs", "c", Language::Rust, Language::Rust);
+        let pr = crate::graph::compute_pagerank(&graph, 0.85, 20);
+        graph.apply_pagerank(&pr);
+
+        let stage = PersonalizedGraphBoostStage;
+        let symbols = crate::symbols::SymbolTable::new();
+        let ctx = SearchContext {
+            query: "test",
+            symbols: &symbols,
+            graph: Some(&graph),
+            graph_boost_weight: 0.5,
+            recency_map: None,
+            chunk_meta: None,
+            concepts: None,
+        };
+
+        // First call: cache miss → computes + inserts.
+        let mut results1 = vec![
+            make_result("a", 10.0, "src/a.rs"),
+            make_result("b", 5.0, "src/b.rs"),
+        ];
+        stage.apply(&mut results1, &ctx).unwrap();
+        assert_eq!(
+            __test_ppr_cache_len(),
+            start_len + 1,
+            "first call should insert a cache entry"
+        );
+
+        // Second call with identical seeds: cache hit, no new entry.
+        let mut results2 = vec![
+            make_result("a", 10.0, "src/a.rs"),
+            make_result("b", 5.0, "src/b.rs"),
+        ];
+        stage.apply(&mut results2, &ctx).unwrap();
+        assert_eq!(
+            __test_ppr_cache_len(),
+            start_len + 1,
+            "identical seeds should hit cache, not insert again"
+        );
+
+        // The two runs must produce the same scores to within float precision.
+        for (r1, r2) in results1.iter().zip(results2.iter()) {
+            assert_eq!(r1.file_path, r2.file_path);
+            assert!(
+                (r1.score - r2.score).abs() < 1e-6,
+                "cached run diverged: {} vs {}",
+                r1.score,
+                r2.score,
+            );
+        }
+
+        // Different seed set (different score rounding beyond 10^-3) →
+        // cache miss, new entry.
+        let mut results3 = vec![
+            make_result("a", 10.5, "src/a.rs"),
+            make_result("b", 5.0, "src/b.rs"),
+        ];
+        stage.apply(&mut results3, &ctx).unwrap();
+        assert_eq!(
+            __test_ppr_cache_len(),
+            start_len + 2,
+            "different seeds should produce a fresh cache entry"
+        );
+    }
+
+    #[test]
+    fn seed_cache_key_is_score_rounding_stable() {
+        // Scores differing below 10^-3 hash to the same key so trivial
+        // BM25 noise between calls doesn't miss the cache.
+        let a = [("src/a.rs", 10.0001), ("src/b.rs", 5.0)];
+        let b = [("src/a.rs", 10.0004), ("src/b.rs", 5.0)];
+        assert_eq!(seed_cache_key(&a, 10), seed_cache_key(&b, 10));
+
+        // But scores differing above 10^-3 do NOT collide.
+        let c = [("src/a.rs", 10.5), ("src/b.rs", 5.0)];
+        assert_ne!(seed_cache_key(&a, 10), seed_cache_key(&c, 10));
+
+        // Different node_count invalidates the key even with identical seeds.
+        assert_ne!(seed_cache_key(&a, 10), seed_cache_key(&a, 11));
+
+        // Order matters — swapping seeds yields a different key (different
+        // teleportation skew in the PPR computation).
+        let d = [("src/b.rs", 5.0), ("src/a.rs", 10.0001)];
+        assert_ne!(seed_cache_key(&a, 10), seed_cache_key(&d, 10));
     }
 }
