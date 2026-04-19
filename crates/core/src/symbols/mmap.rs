@@ -412,6 +412,8 @@ pub fn language_to_u8(lang: Language) -> u8 {
         Language::Rst => 27,
         Language::AsciiDoc => 28,
         Language::PlainText => 29,
+        Language::Jupyter => 30,
+        Language::OpenApi => 31,
     }
 }
 
@@ -448,6 +450,8 @@ pub fn u8_to_language(v: u8) -> Language {
         27 => Language::Rst,
         28 => Language::AsciiDoc,
         29 => Language::PlainText,
+        30 => Language::Jupyter,
+        31 => Language::OpenApi,
         _ => Language::Rust, // fallback
     }
 }

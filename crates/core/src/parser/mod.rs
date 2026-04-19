@@ -58,7 +58,11 @@ impl Parser {
         // Doc languages (Markdown, HTML) bypass both tree-sitter and config
         // parsing. Return a minimal ParseResult — actual parsing happens in
         // the indexing pipeline via DocLanguageSupport.
-        if language.is_doc() {
+        //
+        // Notebooks (Jupyter) are similar: a minimal ParseResult lets
+        // `process_file` detect the variant and dispatch per-cell through
+        // `process_jupyter_file` without the parser needing notebook smarts.
+        if language.is_doc() || language.is_notebook() {
             let content_hash = xxh3_64(source);
             return Ok(ParseResult {
                 language,
@@ -109,8 +113,8 @@ impl Parser {
             path: path.to_path_buf(),
         })?;
 
-        // Doc languages — minimal ParseResult, no tree-sitter or config parsing.
-        if language.is_doc() {
+        // Doc + notebook languages — minimal ParseResult (see parse_file).
+        if language.is_doc() || language.is_notebook() {
             let content_hash = xxh3_64(source);
             return Ok(ParseResult {
                 language,

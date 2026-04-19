@@ -8,12 +8,14 @@ pub mod doc;
 pub mod dockerfile;
 pub mod go;
 pub mod html;
+pub mod ipynb;
 pub mod java;
 pub mod kotlin;
 pub mod makefile;
 pub mod markdown;
 pub mod matlab;
 pub mod mermaid;
+pub mod openapi;
 pub mod php;
 pub mod plain;
 pub mod python;
@@ -72,6 +74,11 @@ pub enum Language {
     Rst,
     AsciiDoc,
     PlainText,
+    /// OpenAPI / Swagger specs — YAML or JSON, indexed per path × method
+    /// via `DocLanguageSupport` with endpoint-aware chunking.
+    OpenApi,
+    // Meta-format: notebooks dispatch per-cell to code + doc chunkers
+    Jupyter,
 }
 
 impl Language {
@@ -108,6 +115,8 @@ impl Language {
             Self::Rst => "reStructuredText",
             Self::AsciiDoc => "AsciiDoc",
             Self::PlainText => "Plain text",
+            Self::OpenApi => "OpenAPI",
+            Self::Jupyter => "Jupyter",
         }
     }
 
@@ -144,6 +153,11 @@ impl Language {
             Self::Rst => &["rst"],
             Self::AsciiDoc => &["adoc", "asciidoc"],
             Self::PlainText => &["txt"],
+            // OpenAPI uses .yaml/.yml/.json filenames — filename-based
+            // detection in `detect_language`, extension list empty so
+            // generic .yaml files still route to Language::Yaml.
+            Self::OpenApi => &[],
+            Self::Jupyter => &["ipynb"],
         }
     }
 
@@ -166,16 +180,36 @@ impl Language {
                 | Self::Rst
                 | Self::AsciiDoc
                 | Self::PlainText
+                | Self::OpenApi
+                | Self::Jupyter
         )
     }
 
     /// Whether this language represents a documentation format
-    /// (Markdown, HTML, reStructuredText, AsciiDoc, plain text).
+    /// (Markdown, HTML, reStructuredText, AsciiDoc, plain text, OpenAPI).
     pub fn is_doc(self) -> bool {
         matches!(
             self,
-            Self::Markdown | Self::Html | Self::Rst | Self::AsciiDoc | Self::PlainText
+            Self::Markdown
+                | Self::Html
+                | Self::Rst
+                | Self::AsciiDoc
+                | Self::PlainText
+                | Self::OpenApi
         )
+    }
+
+    /// Whether this language is a meta-format whose contents dispatch
+    /// per-cell (or per-section) to other language implementations.
+    ///
+    /// Jupyter `.ipynb` notebooks are JSON containers holding both code
+    /// cells (routed to tree-sitter per `metadata.kernelspec.language`)
+    /// and Markdown cells (routed to `markdown.rs`). They are neither
+    /// `is_tree_sitter()` nor `is_doc()` — the dispatcher in
+    /// `engine::indexing::process_jupyter_file` handles them before
+    /// those paths run.
+    pub fn is_notebook(self) -> bool {
+        matches!(self, Self::Jupyter)
     }
 }
 
@@ -211,6 +245,8 @@ pub const ALL_LANGUAGES: &[Language] = &[
     Language::Rst,
     Language::AsciiDoc,
     Language::PlainText,
+    Language::OpenApi,
+    Language::Jupyter,
 ];
 
 /// The kind of semantic entity extracted from an AST.
@@ -397,6 +433,7 @@ impl LanguageRegistry {
             Arc::new(rst::RstLanguage),
             Arc::new(asciidoc::AsciiDocLanguage),
             Arc::new(plain::PlainTextLanguage),
+            Arc::new(openapi::OpenApiLanguage),
         ];
         Self {
             impls,
@@ -458,6 +495,21 @@ pub fn detect_language(path: &Path) -> Option<Language> {
         // Makefile, makefile, GNUmakefile
         if lower == "makefile" || lower == "gnumakefile" {
             return Some(Language::Makefile);
+        }
+        // OpenAPI / Swagger specs live in YAML or JSON, but carry
+        // specific filename conventions that disambiguate them from
+        // generic YAML/JSON config. Match filename BEFORE the
+        // extension-based Yaml route below.
+        if matches!(
+            lower.as_str(),
+            "openapi.yaml"
+                | "openapi.yml"
+                | "openapi.json"
+                | "swagger.yaml"
+                | "swagger.yml"
+                | "swagger.json"
+        ) {
+            return Some(Language::OpenApi);
         }
         // Plain-text project metadata files that conventionally have no
         // extension (README, AUTHORS, LICENSE, NOTICE, CONTRIBUTORS,
@@ -653,8 +705,13 @@ mod tests {
     fn registry_has_all_languages() {
         let registry = LanguageRegistry::new();
         let langs = registry.languages();
-        assert_eq!(langs.len(), ALL_LANGUAGES.len());
+        let expected_len = ALL_LANGUAGES.iter().filter(|l| !l.is_notebook()).count();
+        assert_eq!(langs.len(), expected_len);
         for lang in ALL_LANGUAGES {
+            if lang.is_notebook() {
+                // Notebooks have no direct impl — dispatched per-cell upstream.
+                continue;
+            }
             if lang.is_doc() {
                 assert!(registry.get_doc(*lang).is_some(), "Missing doc {:?}", lang);
             } else if lang.is_tree_sitter() {
@@ -700,6 +757,64 @@ mod tests {
             detect_language(Path::new("Documentation/index.rst")),
             Some(Language::Rst)
         );
+    }
+
+    #[test]
+    fn detect_openapi_language() {
+        assert_eq!(
+            detect_language(Path::new("openapi.yaml")),
+            Some(Language::OpenApi)
+        );
+        assert_eq!(
+            detect_language(Path::new("openapi.yml")),
+            Some(Language::OpenApi)
+        );
+        assert_eq!(
+            detect_language(Path::new("openapi.json")),
+            Some(Language::OpenApi)
+        );
+        assert_eq!(
+            detect_language(Path::new("swagger.yaml")),
+            Some(Language::OpenApi)
+        );
+        assert_eq!(
+            detect_language(Path::new("api/v1/swagger.json")),
+            Some(Language::OpenApi)
+        );
+        // Generic YAML/JSON filenames still route to Yaml (or None for json).
+        assert_eq!(
+            detect_language(Path::new("config.yaml")),
+            Some(Language::Yaml)
+        );
+    }
+
+    #[test]
+    fn openapi_is_doc_and_not_tree_sitter() {
+        assert!(Language::OpenApi.is_doc());
+        assert!(!Language::OpenApi.is_tree_sitter());
+        assert!(!Language::OpenApi.is_notebook());
+    }
+
+    #[test]
+    fn detect_jupyter_language() {
+        assert_eq!(
+            detect_language(Path::new("analysis.ipynb")),
+            Some(Language::Jupyter)
+        );
+        assert_eq!(
+            detect_language(Path::new("notebooks/explore.ipynb")),
+            Some(Language::Jupyter)
+        );
+    }
+
+    #[test]
+    fn jupyter_is_notebook_not_doc_not_tree_sitter() {
+        assert!(Language::Jupyter.is_notebook());
+        assert!(!Language::Jupyter.is_doc());
+        assert!(!Language::Jupyter.is_tree_sitter());
+        // Other languages are not notebooks.
+        assert!(!Language::Rust.is_notebook());
+        assert!(!Language::Markdown.is_notebook());
     }
 
     #[test]

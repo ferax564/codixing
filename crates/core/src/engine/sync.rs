@@ -148,6 +148,19 @@ impl Engine {
         // Read and re-process.
         let source = fs::read(&abs_path)?;
         let result = self.parser.parse_file(&abs_path, &source)?;
+
+        // Jupyter notebooks need per-cell dispatch — the incremental sync
+        // path does not implement that yet. Old chunks have already been
+        // removed above; a subsequent `codixing init` or full reindex will
+        // repopulate the notebook via `process_jupyter_file`.
+        if result.language.is_notebook() {
+            warn!(
+                path = %rel_str,
+                "notebook incremental sync not supported — run `codixing init` to reindex"
+            );
+            return Ok(());
+        }
+
         let chunker = CastChunker;
         let chunks = chunker.chunk(
             &rel_str,
