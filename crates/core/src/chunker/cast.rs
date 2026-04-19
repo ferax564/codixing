@@ -13,7 +13,7 @@ use tree_sitter::Node;
 use crate::config::ChunkConfig;
 use crate::language::Language;
 
-use super::{chunk_id, non_ws_chars, Chunk, Chunker};
+use super::{Chunk, Chunker, chunk_id, non_ws_chars};
 
 /// The cAST chunker: AST-aware, recursive split-then-merge.
 pub struct CastChunker;
