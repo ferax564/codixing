@@ -415,7 +415,8 @@ fn extract_entity_names_from_content(content: &str, language: Language) -> Vec<S
         | Language::AsciiDoc
         | Language::PlainText
         | Language::OpenApi
-        | Language::Jupyter => &[],
+        | Language::Jupyter
+        | Language::Pdf => &[],
     };
 
     for line in content.lines() {
@@ -476,7 +477,8 @@ fn extract_signatures_from_content(content: &str, language: Language) -> Vec<Str
         | Language::AsciiDoc
         | Language::PlainText
         | Language::OpenApi
-        | Language::Jupyter => &[],
+        | Language::Jupyter
+        | Language::Pdf => &[],
     };
 
     let mut sigs = Vec::new();

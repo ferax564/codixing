@@ -16,6 +16,8 @@ pub mod markdown;
 pub mod matlab;
 pub mod mermaid;
 pub mod openapi;
+#[cfg(feature = "pdf")]
+pub mod pdf;
 pub mod php;
 pub mod plain;
 pub mod python;
@@ -79,6 +81,10 @@ pub enum Language {
     OpenApi,
     // Meta-format: notebooks dispatch per-cell to code + doc chunkers
     Jupyter,
+    /// PDF documents. Extension `.pdf` is only recognised when the crate
+    /// is built with `--features pdf`; the variant exists unconditionally
+    /// so match arms in peer modules stay exhaustive.
+    Pdf,
 }
 
 impl Language {
@@ -117,6 +123,7 @@ impl Language {
             Self::PlainText => "Plain text",
             Self::OpenApi => "OpenAPI",
             Self::Jupyter => "Jupyter",
+            Self::Pdf => "PDF",
         }
     }
 
@@ -158,6 +165,14 @@ impl Language {
             // generic .yaml files still route to Language::Yaml.
             Self::OpenApi => &[],
             Self::Jupyter => &["ipynb"],
+            // PDF indexing is gated on the `pdf` cargo feature so the
+            // default zero-C-dep binary stays lean. Without the feature,
+            // the extension list is empty and `detect_language` returns
+            // `None` for `.pdf`, so the indexer skips the file silently.
+            #[cfg(feature = "pdf")]
+            Self::Pdf => &["pdf"],
+            #[cfg(not(feature = "pdf"))]
+            Self::Pdf => &[],
         }
     }
 
@@ -182,11 +197,12 @@ impl Language {
                 | Self::PlainText
                 | Self::OpenApi
                 | Self::Jupyter
+                | Self::Pdf
         )
     }
 
     /// Whether this language represents a documentation format
-    /// (Markdown, HTML, reStructuredText, AsciiDoc, plain text, OpenAPI).
+    /// (Markdown, HTML, reStructuredText, AsciiDoc, plain text, OpenAPI, PDF).
     pub fn is_doc(self) -> bool {
         matches!(
             self,
@@ -196,6 +212,7 @@ impl Language {
                 | Self::AsciiDoc
                 | Self::PlainText
                 | Self::OpenApi
+                | Self::Pdf
         )
     }
 
@@ -247,6 +264,7 @@ pub const ALL_LANGUAGES: &[Language] = &[
     Language::PlainText,
     Language::OpenApi,
     Language::Jupyter,
+    Language::Pdf,
 ];
 
 /// The kind of semantic entity extracted from an AST.
@@ -427,7 +445,8 @@ impl LanguageRegistry {
             Arc::new(mermaid::MermaidLanguage),
             Arc::new(xml::XmlLanguage),
         ];
-        let doc_impls: Vec<Arc<dyn doc::DocLanguageSupport>> = vec![
+        #[allow(unused_mut)]
+        let mut doc_impls: Vec<Arc<dyn doc::DocLanguageSupport>> = vec![
             Arc::new(markdown::MarkdownLanguage),
             Arc::new(html::HtmlLanguage),
             Arc::new(rst::RstLanguage),
@@ -435,6 +454,10 @@ impl LanguageRegistry {
             Arc::new(plain::PlainTextLanguage),
             Arc::new(openapi::OpenApiLanguage),
         ];
+        // PDF support is feature-gated so the default binary stays
+        // zero-C-dep. When enabled, register the PDF impl here.
+        #[cfg(feature = "pdf")]
+        doc_impls.push(Arc::new(pdf::PdfLanguage));
         Self {
             impls,
             config_impls,
@@ -705,11 +728,30 @@ mod tests {
     fn registry_has_all_languages() {
         let registry = LanguageRegistry::new();
         let langs = registry.languages();
-        let expected_len = ALL_LANGUAGES.iter().filter(|l| !l.is_notebook()).count();
+        // Variants without a direct registry impl: notebooks (dispatched
+        // per-cell upstream) and Pdf without the `pdf` feature.
+        let expected_len = ALL_LANGUAGES
+            .iter()
+            .filter(|l| !l.is_notebook())
+            .filter(|l| {
+                #[cfg(not(feature = "pdf"))]
+                {
+                    !matches!(l, Language::Pdf)
+                }
+                #[cfg(feature = "pdf")]
+                {
+                    let _ = l;
+                    true
+                }
+            })
+            .count();
         assert_eq!(langs.len(), expected_len);
         for lang in ALL_LANGUAGES {
             if lang.is_notebook() {
-                // Notebooks have no direct impl — dispatched per-cell upstream.
+                continue;
+            }
+            #[cfg(not(feature = "pdf"))]
+            if matches!(lang, Language::Pdf) {
                 continue;
             }
             if lang.is_doc() {
@@ -749,6 +791,33 @@ mod tests {
             Some(Language::Html)
         );
         assert_eq!(detect_language(Path::new("api.htm")), Some(Language::Html));
+    }
+
+    #[test]
+    #[cfg(feature = "pdf")]
+    fn detect_pdf_language_with_feature() {
+        assert_eq!(
+            detect_language(Path::new("docs/spec.pdf")),
+            Some(Language::Pdf)
+        );
+        assert_eq!(
+            detect_language(Path::new("rfc-8126.pdf")),
+            Some(Language::Pdf)
+        );
+    }
+
+    #[test]
+    #[cfg(not(feature = "pdf"))]
+    fn detect_pdf_language_without_feature_skips() {
+        // Without the feature, `.pdf` is NOT recognized — the indexer
+        // silently skips these files instead of failing.
+        assert_eq!(detect_language(Path::new("docs/spec.pdf")), None);
+    }
+
+    #[test]
+    fn pdf_is_doc_not_tree_sitter() {
+        assert!(Language::Pdf.is_doc());
+        assert!(!Language::Pdf.is_tree_sitter());
     }
 
     #[test]

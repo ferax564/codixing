@@ -53,7 +53,8 @@ impl ImportExtractor {
             | Language::AsciiDoc
             | Language::PlainText
             | Language::OpenApi
-            | Language::Jupyter => Vec::new(),
+            | Language::Jupyter
+            | Language::Pdf => Vec::new(),
         }
     }
 }

@@ -65,7 +65,8 @@ impl ImportResolver {
             | Language::AsciiDoc
             | Language::PlainText
             | Language::OpenApi
-            | Language::Jupyter => None,
+            | Language::Jupyter
+            | Language::Pdf => None,
         }
     }
 
