@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.41.0] — 2026-04-19
+
+Doc-format expansion + structural retrieval hardening. Ships the five
+Tier 2 items from `plans/2026-04-18-codixing-improvements.md`: Jupyter
+notebook indexing, OpenAPI / Swagger structural chunking, a query-
+personalized PageRank LRU cache, the session-mining reformulation
+algorithm, and opt-in PDF text extraction. Merged as PR #94 (items
+6+7, doc-format), #95 (items 8+10, retrieval), and #96 (item 9, PDF).
+
 ### Added
 
 - **Jupyter notebook (`.ipynb`) indexing** — new `Language::Jupyter` variant and dispatcher in `engine::indexing::process_jupyter_file`. Notebooks are a meta-format (JSON containing both code and doc cells), so the dispatcher parses the JSON, then routes each cell through the appropriate pipeline: code cells → tree-sitter per `metadata.kernelspec.language` (default Python when kernel is unmapped), markdown cells → `DocLanguageSupport::<Markdown>`, raw cells + output cells → dropped. Cell identifiers are prepended onto `scope_chain` (`["cell-<id>", …]`) so search distinguishes the origin cell without creating synthetic file paths. Output cells are never indexed — they frequently carry secrets leaked by execution (auth tokens, API keys echoed by clients), and the test suite pins this behavior with an explicit `SECRET_TOKEN_abc123` leak-guard. Byte/line ranges are cell-local; notebook cell imports/calls do not yet participate in the cross-file graph; incremental sync defers to full `codixing init` rather than re-indexing a notebook per-edit. 10 new unit tests + 3 integration tests.

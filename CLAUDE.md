@@ -60,7 +60,7 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 
 ## Project Structure
 
-- `crates/core/` — engine: AST parsing, BM25, graph, embeddings, PageRank, test mapping, shared sessions, queue-based embedding (optional `rustqueue` feature), doc indexing (Markdown + HTML with section-aware chunking and doc-to-code graph edges), change impact analysis, semantic concept graph, API surface analysis, type relations, usage example mining, cross-file context assembly, behavioral signatures, query-personalized PageRank, learned query reformulation, output filter pipeline (TOML-based, tee recovery)
+- `crates/core/` — engine: AST parsing, BM25, graph, embeddings, PageRank, test mapping, shared sessions, queue-based embedding (optional `rustqueue` feature), doc indexing (Markdown + HTML + reStructuredText + AsciiDoc + plain-text + OpenAPI/Swagger + Jupyter notebook dispatcher + optional PDF via `--features pdf`), change impact analysis, semantic concept graph, API surface analysis, type relations, usage example mining, cross-file context assembly, behavioral signatures, query-personalized PageRank (with LRU cache for repeat-seed BM25 sets), learned query reformulation (identifier co-occurrence + doc-to-code + session mining algorithm), output filter pipeline (TOML-based, tee recovery)
 - `crates/cli/` — `codixing` CLI binary
 - `crates/mcp/` — MCP server (`codixing-mcp`), 67 tools in `src/tools/` (always shipped in full — the `--medium` curation was removed in v0.38 after the agent benchmark showed it hid high-leverage tools like `get_complexity`)
 - `crates/server/` — HTTP API server (`codixing-server`), REST endpoints with SSE streaming for sync
@@ -73,7 +73,7 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 
 ```bash
 cargo build --release --workspace          # build all binaries
-cargo test --workspace                      # run all tests (1192)
+cargo test --workspace                      # run all tests (1202)
 cargo clippy --workspace -- -D warnings     # lint (must pass)
 cargo fmt --check                           # format check (must pass)
 
@@ -138,7 +138,7 @@ Both are covered by `scripts/bump_version.py`; edit by hand only if you know why
 Every commit MUST pass all 3 checks. No exceptions:
 
 ```bash
-cargo test --workspace                      # ALL tests must pass (1192)
+cargo test --workspace                      # ALL tests must pass (1202)
 cargo clippy --workspace -- -D warnings     # zero warnings
 cargo fmt --check                           # zero diffs
 ```
