@@ -70,6 +70,9 @@ rayon = "1"
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# YAML parsing — used by the OpenAPI structural chunker in codixing-core.
+# serde_yml is the actively-maintained successor to the archived serde_yaml.
+serde_yml = "0.0.12"
 bitcode = { version = "0.6", features = ["serde"] }
 
 # Hashing

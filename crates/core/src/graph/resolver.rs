@@ -64,6 +64,7 @@ impl ImportResolver {
             | Language::Rst
             | Language::AsciiDoc
             | Language::PlainText
+            | Language::OpenApi
             | Language::Jupyter => None,
         }
     }

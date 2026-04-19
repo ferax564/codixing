@@ -15,6 +15,7 @@ pub mod makefile;
 pub mod markdown;
 pub mod matlab;
 pub mod mermaid;
+pub mod openapi;
 pub mod php;
 pub mod plain;
 pub mod python;
@@ -73,6 +74,9 @@ pub enum Language {
     Rst,
     AsciiDoc,
     PlainText,
+    /// OpenAPI / Swagger specs — YAML or JSON, indexed per path × method
+    /// via `DocLanguageSupport` with endpoint-aware chunking.
+    OpenApi,
     // Meta-format: notebooks dispatch per-cell to code + doc chunkers
     Jupyter,
 }
@@ -111,6 +115,7 @@ impl Language {
             Self::Rst => "reStructuredText",
             Self::AsciiDoc => "AsciiDoc",
             Self::PlainText => "Plain text",
+            Self::OpenApi => "OpenAPI",
             Self::Jupyter => "Jupyter",
         }
     }
@@ -148,6 +153,10 @@ impl Language {
             Self::Rst => &["rst"],
             Self::AsciiDoc => &["adoc", "asciidoc"],
             Self::PlainText => &["txt"],
+            // OpenAPI uses .yaml/.yml/.json filenames — filename-based
+            // detection in `detect_language`, extension list empty so
+            // generic .yaml files still route to Language::Yaml.
+            Self::OpenApi => &[],
             Self::Jupyter => &["ipynb"],
         }
     }
@@ -171,16 +180,22 @@ impl Language {
                 | Self::Rst
                 | Self::AsciiDoc
                 | Self::PlainText
+                | Self::OpenApi
                 | Self::Jupyter
         )
     }
 
     /// Whether this language represents a documentation format
-    /// (Markdown, HTML, reStructuredText, AsciiDoc, plain text).
+    /// (Markdown, HTML, reStructuredText, AsciiDoc, plain text, OpenAPI).
     pub fn is_doc(self) -> bool {
         matches!(
             self,
-            Self::Markdown | Self::Html | Self::Rst | Self::AsciiDoc | Self::PlainText
+            Self::Markdown
+                | Self::Html
+                | Self::Rst
+                | Self::AsciiDoc
+                | Self::PlainText
+                | Self::OpenApi
         )
     }
 
@@ -230,6 +245,7 @@ pub const ALL_LANGUAGES: &[Language] = &[
     Language::Rst,
     Language::AsciiDoc,
     Language::PlainText,
+    Language::OpenApi,
     Language::Jupyter,
 ];
 
@@ -417,6 +433,7 @@ impl LanguageRegistry {
             Arc::new(rst::RstLanguage),
             Arc::new(asciidoc::AsciiDocLanguage),
             Arc::new(plain::PlainTextLanguage),
+            Arc::new(openapi::OpenApiLanguage),
         ];
         Self {
             impls,
@@ -478,6 +495,21 @@ pub fn detect_language(path: &Path) -> Option<Language> {
         // Makefile, makefile, GNUmakefile
         if lower == "makefile" || lower == "gnumakefile" {
             return Some(Language::Makefile);
+        }
+        // OpenAPI / Swagger specs live in YAML or JSON, but carry
+        // specific filename conventions that disambiguate them from
+        // generic YAML/JSON config. Match filename BEFORE the
+        // extension-based Yaml route below.
+        if matches!(
+            lower.as_str(),
+            "openapi.yaml"
+                | "openapi.yml"
+                | "openapi.json"
+                | "swagger.yaml"
+                | "swagger.yml"
+                | "swagger.json"
+        ) {
+            return Some(Language::OpenApi);
         }
         // Plain-text project metadata files that conventionally have no
         // extension (README, AUTHORS, LICENSE, NOTICE, CONTRIBUTORS,
@@ -725,6 +757,42 @@ mod tests {
             detect_language(Path::new("Documentation/index.rst")),
             Some(Language::Rst)
         );
+    }
+
+    #[test]
+    fn detect_openapi_language() {
+        assert_eq!(
+            detect_language(Path::new("openapi.yaml")),
+            Some(Language::OpenApi)
+        );
+        assert_eq!(
+            detect_language(Path::new("openapi.yml")),
+            Some(Language::OpenApi)
+        );
+        assert_eq!(
+            detect_language(Path::new("openapi.json")),
+            Some(Language::OpenApi)
+        );
+        assert_eq!(
+            detect_language(Path::new("swagger.yaml")),
+            Some(Language::OpenApi)
+        );
+        assert_eq!(
+            detect_language(Path::new("api/v1/swagger.json")),
+            Some(Language::OpenApi)
+        );
+        // Generic YAML/JSON filenames still route to Yaml (or None for json).
+        assert_eq!(
+            detect_language(Path::new("config.yaml")),
+            Some(Language::Yaml)
+        );
+    }
+
+    #[test]
+    fn openapi_is_doc_and_not_tree_sitter() {
+        assert!(Language::OpenApi.is_doc());
+        assert!(!Language::OpenApi.is_tree_sitter());
+        assert!(!Language::OpenApi.is_notebook());
     }
 
     #[test]
