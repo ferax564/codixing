@@ -21,10 +21,28 @@ pub(crate) fn call_cross_imports(engine: &Engine, args: &Value) -> (String, bool
         .get("limit")
         .and_then(|v| v.as_u64())
         .map(|v| v as usize);
+    let pattern = args.get("pattern").and_then(|v| v.as_str());
 
-    let ranked = engine.cross_imports_ranked(&from, &to, limit);
+    let mut ranked = engine.cross_imports_ranked(&from, &to, None);
+    if let Some(pattern) = pattern {
+        match filter_ranked_files_by_pattern(engine, ranked, pattern) {
+            Ok(filtered) => ranked = filtered,
+            Err(err) => return (format!("Invalid pattern `{pattern}`: {err}"), true),
+        }
+    }
+    if let Some(limit) = limit {
+        ranked.truncate(limit);
+    }
 
     if ranked.is_empty() {
+        if let Some(pattern) = pattern {
+            return (
+                format!(
+                    "No files in \"{from}\" import from \"{to}\" and match pattern \"{pattern}\"."
+                ),
+                false,
+            );
+        }
         return (
             format!("No files in \"{from}\" import from \"{to}\"."),
             false,
@@ -36,13 +54,31 @@ pub(crate) fn call_cross_imports(engine: &Engine, args: &Value) -> (String, bool
         out.push_str(&format!("{file} (score: {score:.3})\n"));
     }
     out.push_str(&format!(
-        "\n{} file(s) in \"{}\" import from \"{}\".",
+        "\n{} file(s) in \"{}\" import from \"{}\"{}.",
         ranked.len(),
         from,
-        to
+        to,
+        pattern
+            .map(|p| format!(" and match pattern \"{p}\""))
+            .unwrap_or_default()
     ));
 
     (out, false)
+}
+
+fn filter_ranked_files_by_pattern(
+    engine: &Engine,
+    ranked: Vec<(String, f32)>,
+    pattern: &str,
+) -> codixing_core::Result<Vec<(String, f32)>> {
+    let mut filtered = Vec::new();
+    for (file, score) in ranked {
+        let matches = engine.grep_code(pattern, false, Some(&file), 0, 1)?;
+        if !matches.is_empty() {
+            filtered.push((file, score));
+        }
+    }
+    Ok(filtered)
 }
 
 pub(crate) fn call_get_references(engine: &Engine, args: &Value) -> (String, bool) {

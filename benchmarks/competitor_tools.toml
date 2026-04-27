@@ -1,0 +1,70 @@
+# External-tool benchmark configuration.
+#
+# The runner compares tools against the curated OpenClaw queries in
+# `benchmarks/queue_v2_queries.toml`. Each command is a shell template run from
+# the target repo root. Supported placeholders:
+#
+#   {repo}       absolute repo path
+#   {codixing}   absolute path to the Codixing release binary
+#   {query}      natural-language query text
+#   {pattern}    grep_pattern from the query file
+#   {pattern_regex} grep_pattern normalized for Rust/Python regex syntax
+#   {symbol}     symbol field, or grep_pattern when absent
+#   {from_dir}   cross-package source directory, when present
+#   {to_dir}     cross-package target directory, when present
+#   {cross_pattern_arg} optional --pattern arg when query cross_pattern=true
+#   {top_k}      requested result count
+#   {result_limit} expanded result count for chunk-level tools
+#   {codebase_memory} absolute/path or command name for codebase-memory-mcp
+#   {codebase_memory_project} indexed codebase-memory-mcp project name
+#   {cbm_cache}  optional codebase-memory-mcp cache dir
+#
+# `path_regex` should contain one capturing group that extracts a relative file
+# path from stdout. Keep external competitors disabled until installed locally;
+# this makes the default benchmark reproducible without network access.
+
+[[tool]]
+name = "codixing"
+enabled = true
+path_regex = '([A-Za-z0-9_./@+-]+\.(?:ts|tsx|js|jsx|rs|py|go|java|cpp|c|h|hpp|md|rst|adoc|yaml|yml|json))'
+
+[tool.commands]
+symbol = '{codixing} symbols "{pattern}"'
+usage = '{codixing} usages "{symbol}" --limit {result_limit}'
+concept = '{codixing} search "{query}" --strategy fast --limit {result_limit} --json'
+cross-package = '{codixing} cross-imports --from "{from_dir}" --to "{to_dir}" {cross_pattern_arg}'
+
+[[tool]]
+name = "grep"
+enabled = true
+path_regex = '^\.?/([^:\n]+):'
+
+[tool.commands]
+symbol = 'grep -RIn --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" "{pattern}" . | head -200'
+usage = 'grep -RIn --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" "{pattern}" . | head -200'
+concept = 'grep -RIn --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" "{pattern}" . | head -200'
+cross-package = 'grep -RIn --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" "{to_dir}" "{from_dir}" | head -200'
+
+[[tool]]
+name = "claude-context"
+enabled = false
+path_regex = '([A-Za-z0-9_./@+-]+\.(?:ts|tsx|js|jsx|rs|py|go|java|cpp|c|h|hpp|md|rst|adoc|yaml|yml|json))'
+notes = "Install and expose a CLI/MCP wrapper locally, then update these command templates to match your invocation."
+
+[tool.commands]
+symbol = 'claude-context search "{pattern}" --path "{repo}" --limit {top_k}'
+usage = 'claude-context search "{symbol}" --path "{repo}" --limit {top_k}'
+concept = 'claude-context search "{query}" --path "{repo}" --limit {top_k}'
+cross-package = 'claude-context search "files in {from_dir} importing {to_dir}" --path "{repo}" --limit {top_k}'
+
+[[tool]]
+name = "codebase-memory-mcp"
+enabled = false
+path_regex = '([A-Za-z0-9_./@+-]+\.(?:ts|tsx|js|jsx|rs|py|go|java|cpp|c|h|hpp|md|rst|adoc|yaml|yml|json))'
+notes = "Install/index locally, then run with --include-disabled --tool codebase-memory-mcp. Set CODEBASE_MEMORY_MCP, CODEBASE_MEMORY_PROJECT, and optionally CBM_CACHE_DIR."
+
+[tool.commands]
+symbol = "CBM_CACHE_DIR=\"{cbm_cache}\" \"{codebase_memory}\" cli search_graph '{\"project\":\"{codebase_memory_project}\",\"name_pattern\":\"{pattern}\",\"limit\":{top_k}}'"
+usage = "CBM_CACHE_DIR=\"{cbm_cache}\" \"{codebase_memory}\" cli search_code '{\"project\":\"{codebase_memory_project}\",\"pattern\":\"{symbol}\",\"limit\":{result_limit}}'"
+concept = "CBM_CACHE_DIR=\"{cbm_cache}\" \"{codebase_memory}\" cli search_code '{\"project\":\"{codebase_memory_project}\",\"pattern\":\"{pattern}\",\"limit\":{result_limit}}'"
+cross-package = "CBM_CACHE_DIR=\"{cbm_cache}\" \"{codebase_memory}\" cli search_code '{\"project\":\"{codebase_memory_project}\",\"pattern\":\"{pattern}\",\"limit\":{result_limit}}'"

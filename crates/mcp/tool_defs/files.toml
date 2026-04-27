@@ -155,7 +155,7 @@ description = "Maximum seconds to wait before killing the process (default: 120)
 
 [[tools]]
 name = "list_files"
-description = "List all files currently indexed by Codixing with their chunk counts. Supports optional glob pattern filtering. Use when you need an inventory of what's in the index (e.g. to confirm the right subdirectory is covered) before running narrower searches."
+description = "List all files currently indexed by Codixing with their chunk counts, including symbol-free docs and config files. Supports optional glob pattern filtering. Use when you need an inventory of what's in the index (e.g. to confirm the right subdirectory is covered) before running narrower searches."
 handler = "files::call_list_files"
 calling_convention = "engine_args"
 read_only = true

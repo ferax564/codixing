@@ -194,26 +194,24 @@ pub(crate) fn call_list_files(engine: &Engine, args: &Value) -> (String, bool) {
     let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
 
     let stats = engine.stats();
-    let all_files: Vec<String> = {
-        let syms = engine.symbols("", None).unwrap_or_default();
-        let mut seen = std::collections::BTreeSet::new();
-        for s in &syms {
-            seen.insert(s.file_path.clone());
-        }
-        seen.into_iter().collect()
-    };
+    let all_files = engine.indexed_files();
 
-    let mut filtered: Vec<String> = match pattern {
+    let mut filtered: Vec<(String, usize)> = match pattern {
         Some(pat) => {
             match glob::Pattern::new(pat) {
-                Ok(g) => all_files.into_iter().filter(|f| g.matches(f)).collect(),
+                Ok(g) => all_files
+                    .into_iter()
+                    .filter(|(file, _)| g.matches(file))
+                    .collect(),
                 Err(_) => {
                     // Invalid glob — fall back to substring match but warn the user.
                     let mut note = format!(
                         "**Note:** `{pat}` is not a valid glob pattern; using substring match instead.\n\n"
                     );
-                    let matched: Vec<String> =
-                        all_files.into_iter().filter(|f| f.contains(pat)).collect();
+                    let matched: Vec<(String, usize)> = all_files
+                        .into_iter()
+                        .filter(|(file, _)| file.contains(pat))
+                        .collect();
                     if matched.is_empty() {
                         note.push_str("No indexed files found matching the filter.");
                         return (note, false);
@@ -223,8 +221,8 @@ pub(crate) fn call_list_files(engine: &Engine, args: &Value) -> (String, bool) {
                         stats.file_count,
                         matched.len().min(limit)
                     );
-                    for f in matched.iter().take(limit) {
-                        out.push_str(&format!("  {f}\n"));
+                    for (file, chunks) in matched.iter().take(limit) {
+                        out.push_str(&format!("  {file} ({chunks} chunks)\n"));
                     }
                     return (out, false);
                 }
@@ -247,8 +245,8 @@ pub(crate) fn call_list_files(engine: &Engine, args: &Value) -> (String, bool) {
         stats.file_count,
         filtered.len()
     );
-    for f in &filtered {
-        out.push_str(&format!("  {f}\n"));
+    for (file, chunks) in &filtered {
+        out.push_str(&format!("  {file} ({chunks} chunks)\n"));
     }
     (out, false)
 }

@@ -153,6 +153,10 @@ pub(crate) fn call_rename_symbol(engine: &mut Engine, args: &Value) -> (String, 
         .get("file_filter")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let dry_run = args
+        .get("dry_run")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // Validate the rename before applying it.
     let validation = engine.validate_rename(&old_name, &new_name, file_filter.as_deref());
@@ -172,23 +176,19 @@ pub(crate) fn call_rename_symbol(engine: &mut Engine, args: &Value) -> (String, 
         validation_summary.push('\n');
     }
 
-    let root = engine.config().root.clone();
-
     // Find all indexed files.
     let files: Vec<std::path::PathBuf> = {
-        let syms = engine.symbols("", None).unwrap_or_default();
-        let mut seen = std::collections::BTreeSet::new();
-        for s in &syms {
-            seen.insert(s.file_path.clone());
-        }
-        seen.into_iter()
+        let indexed = engine.indexed_files();
+        indexed
+            .into_iter()
+            .map(|(file, _)| file)
             .filter(|f| {
                 file_filter
                     .as_ref()
                     .map(|ff| f.contains(ff.as_str()))
                     .unwrap_or(true)
             })
-            .map(|rel| root.join(rel))
+            .filter_map(|rel| engine.config().resolve_path(&rel))
             .collect()
     };
 
@@ -206,6 +206,11 @@ pub(crate) fn call_rename_symbol(engine: &mut Engine, args: &Value) -> (String, 
         }
         let updated = content.replace(old_name.as_str(), new_name.as_str());
         let count = content.matches(old_name.as_str()).count();
+        if dry_run {
+            replacements += count;
+            modified += 1;
+            continue;
+        }
         if let Err(e) = std::fs::write(path, &updated) {
             errors.push(format!("Write error for {}: {e}", path.display()));
             continue;
@@ -215,6 +220,18 @@ pub(crate) fn call_rename_symbol(engine: &mut Engine, args: &Value) -> (String, 
         if let Err(e) = engine.reindex_file(path) {
             errors.push(format!("Reindex error for {}: {e}", path.display()));
         }
+    }
+
+    if dry_run {
+        return (
+            format!(
+                "Dry run: exact-string rename '{old_name}' \u{2192} '{new_name}' would modify \
+                 {modified} file(s), {replacements} total replacement(s). No files changed.\
+                 {validation_summary}\n\
+                 Note: this is not a semantic rename; it replaces exact text matches only."
+            ),
+            false,
+        );
     }
 
     let _ = engine.persist_incremental();
@@ -231,8 +248,10 @@ pub(crate) fn call_rename_symbol(engine: &mut Engine, args: &Value) -> (String, 
 
     (
         format!(
-            "Renamed '{old_name}' \u{2192} '{new_name}' in {modified} file(s), \
-             {replacements} total replacement(s). All affected files reindexed.{validation_summary}"
+            "Exact-string rename '{old_name}' \u{2192} '{new_name}' completed in {modified} file(s), \
+             {replacements} total replacement(s). All affected files reindexed.\
+             {validation_summary}\n\
+             Note: this is not a semantic rename; it replaces exact text matches only."
         ),
         false,
     )

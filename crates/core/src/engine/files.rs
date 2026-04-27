@@ -15,6 +15,28 @@ impl Engine {
     // File and symbol reading
     // -------------------------------------------------------------------------
 
+    /// Return all files represented in the index with their chunk counts.
+    ///
+    /// This is backed by `file_chunk_counts`, which is populated for every
+    /// indexed file, including symbol-free docs/configs. If an older or
+    /// partially-loaded engine has an empty derived map but populated
+    /// `chunk_meta`, rebuild the view from chunk metadata as a fallback.
+    pub fn indexed_files(&self) -> Vec<(String, usize)> {
+        let mut files: std::collections::BTreeMap<String, usize> = self
+            .file_chunk_counts
+            .iter()
+            .map(|(path, count)| (path.clone(), *count))
+            .collect();
+
+        if files.is_empty() && !self.chunk_meta.is_empty() {
+            for entry in self.chunk_meta.iter() {
+                *files.entry(entry.value().file_path.clone()).or_insert(0) += 1;
+            }
+        }
+
+        files.into_iter().collect()
+    }
+
     /// Read raw source lines from a file in the indexed project.
     ///
     /// `path` must be relative to the project root (e.g. `"src/engine.rs"`).

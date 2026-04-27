@@ -224,12 +224,15 @@ grep_pattern = "import.*definePluginEntry.*from.*plugin-sdk"
 category = "cross-package"
 from_dir = "extensions"
 to_dir = "src/plugin-sdk"
+cross_pattern = true
 ground_truth = [
+  # GT refreshed 2026-04-26: current OpenClaw no longer has the old
+  # anthropic/discord definePluginEntry imports for this query.
+  "extensions/byteplus/index.ts",
   "extensions/volcengine/index.ts",
-  "extensions/openai/index.ts",
-  "extensions/groq/index.ts",
-  "extensions/anthropic/index.ts",
-  "extensions/discord/index.ts",
+  "extensions/chutes/index.ts",
+  "extensions/github-copilot/index.ts",
+  "extensions/opencode/index.ts",
 ]
 
 [[query]]

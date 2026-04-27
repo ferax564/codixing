@@ -1,6 +1,6 @@
 [[tools]]
 name = "cross_imports"
-description = "Find files in one directory that import from another directory, ranked by PageRank and git recency. Useful for cross-package dependency analysis (e.g. 'which gateway files import from the auth module?'). Returns results sorted by relevance score."
+description = "Find files in one directory that import from another directory, ranked by PageRank and git recency. Optionally filter the importing files with a regex pattern when the boundary query mentions a specific symbol/import shape. Useful for cross-package dependency analysis (e.g. 'which gateway files import from the auth module?' or 'which extensions import definePluginEntry from plugin-sdk?'). Returns results sorted by relevance score."
 handler = "graph::call_cross_imports"
 calling_convention = "engine_args"
 read_only = true
@@ -18,6 +18,10 @@ required = true
 [tools.params.limit]
 type = "integer"
 description = "Maximum number of results to return (default: no limit)"
+
+[tools.params.pattern]
+type = "string"
+description = "Optional regex that must match the importing source file (e.g. 'import.*definePluginEntry.*from.*plugin-sdk')"
 
 [[tools]]
 name = "get_references"
