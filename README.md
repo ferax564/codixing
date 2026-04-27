@@ -249,11 +249,11 @@ code --install-extension codixing.vsix
 | Search latency | 30-42ms | 36-40ms |
 | Top-1 accuracy | 7/10 | **10/10** |
 
-**Retrieval accuracy** (OpenClaw, 20 curated file-localization queries, 2026-04-26):
+**Retrieval accuracy** (OpenClaw, 20 curated file-localization queries, 2026-04-27):
 
 | Tool | Recall@10 | MRR | Notes |
 |------|----------:|----:|-------|
-| Codixing | **0.807** | **0.789** | `symbols`, `usages`, `search`, and `cross-imports` routed by query type |
+| Codixing | **0.783** | **0.827** | `symbols`, `usages`, `search`, and `cross-imports` routed by query type |
 | codebase-memory-mcp v0.6.0 | 0.374 | 0.243 | Local CLI benchmark; semantic tool was not exposed by the downloaded build |
 | grep | 0.191 | 0.168 | Baseline recursive text scan |
 

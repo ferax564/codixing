@@ -37,10 +37,10 @@ Methodology:
 - Cross-package queries may opt into `cross_pattern=true` when the query asks for a specific import shape inside a broad package boundary.
 - Indexing time is not mixed into per-query latency; use `run_external_competitors.sh` to record setup/index logs before query timing.
 
-Current local baseline from 2026-04-26:
+Current local baseline from 2026-04-27:
 
 ```text
-codixing: 20 queries, Recall@10 0.807, MRR 0.789
+codixing: 20 queries, Recall@10 0.783, MRR 0.827
 grep:     20 queries, Recall@10 0.191, MRR 0.168
 ```
 
@@ -57,10 +57,10 @@ CBM_CACHE_DIR=/tmp/cbm-benchmark/cache \
 benchmarks/run_external_competitors.sh
 ```
 
-Latest external local result from 2026-04-26:
+Latest external local result from 2026-04-27:
 
 ```text
-codixing:            20 queries, Recall@10 0.807, MRR 0.789
+codixing:            20 queries, Recall@10 0.783, MRR 0.827
 codebase-memory-mcp: 20 queries, Recall@10 0.374, MRR 0.243
 grep:                20 queries, Recall@10 0.191, MRR 0.168
 ```

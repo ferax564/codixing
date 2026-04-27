@@ -5,7 +5,7 @@
 
 mod common;
 
-use std::sync::Mutex;
+use std::{fs, sync::Mutex};
 
 use codixing_core::{Engine, IndexConfig, SearchQuery, Strategy};
 use tempfile::tempdir;
@@ -250,4 +250,88 @@ fn search_with_progress_no_results_still_reports_bm25() {
     );
     assert_eq!(phases[0].0, "bm25");
     assert_eq!(phases[0].1, 0, "no results expected for nonsense query");
+}
+
+#[test]
+fn search_usages_prioritizes_production_references() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let src = root.join("src");
+    let docs = root.join("docs");
+    fs::create_dir_all(src.join("logging")).unwrap();
+    fs::create_dir_all(src.join("media")).unwrap();
+    fs::create_dir_all(src.join("infra")).unwrap();
+    fs::create_dir_all(&docs).unwrap();
+
+    fs::write(
+        src.join("logging/redact.ts"),
+        r#"export function redactSensitiveText(input: string): string {
+  return input.replace(/token=.*/, "token=[redacted]");
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        src.join("logging/redact.test.ts"),
+        r#"import { redactSensitiveText } from "./redact";
+
+test("redactSensitiveText removes secrets", () => {
+  expect(redactSensitiveText("token=secret")).toBe("token=[redacted]");
+});
+"#,
+    )
+    .unwrap();
+    fs::write(
+        docs.join("redact.md"),
+        "Call redactSensitiveText before writing logs.",
+    )
+    .unwrap();
+    fs::write(
+        src.join("media/fetch.ts"),
+        r#"import { redactSensitiveText } from "../logging/redact";
+
+export function logMediaFetch(url: string) {
+  console.log(redactSensitiveText(url));
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        src.join("infra/errors.ts"),
+        r#"import { redactSensitiveText } from "../logging/redact";
+
+export function serializeError(error: Error) {
+  return redactSensitiveText(error.message);
+}
+"#,
+    )
+    .unwrap();
+    fs::write(
+        src.join("gateway.ts"),
+        r#"import { redactSensitiveText } from "./logging/redact";
+
+export function logGateway(message: string) {
+  return redactSensitiveText(message);
+}
+"#,
+    )
+    .unwrap();
+
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
+    let results = engine.search_usages("redactSensitiveText", 3).unwrap();
+    let files: Vec<_> = results.iter().map(|r| r.file_path.as_str()).collect();
+
+    assert_eq!(
+        results.len(),
+        3,
+        "expected three top usage results: {files:?}"
+    );
+    assert!(
+        files.iter().all(|path| {
+            path.contains("src/media/fetch.ts")
+                || path.contains("src/infra/errors.ts")
+                || path.contains("src/gateway.ts")
+        }),
+        "expected production usage files before definitions/tests/docs, got: {files:?}"
+    );
 }

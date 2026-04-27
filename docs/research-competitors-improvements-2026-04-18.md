@@ -1,6 +1,6 @@
 # Research — Project Review, Competitor Landscape & Improvement Backlog
 
-> Updated: 2026-04-26.
+> Updated: 2026-04-27.
 > Scope: full local review of the current repository plus refreshed competitor analysis.
 > This supersedes the original 2026-04-18 snapshot in-place because much of
 > that backlog has now shipped.
@@ -162,8 +162,8 @@ Local single-binary structural context
 ```
 
 The last line is improving but still incomplete. A direct OpenClaw harness now
-captures Codixing vs grep and codebase-memory-mcp locally: on 2026-04-26
-Codixing scored Recall@10 0.807 / MRR 0.789 across 20 queries,
+captures Codixing vs grep and codebase-memory-mcp locally: on 2026-04-27
+Codixing scored Recall@10 0.783 / MRR 0.827 across 20 queries,
 codebase-memory-mcp scored Recall@10 0.374 / MRR 0.243, and grep scored
 Recall@10 0.191 / MRR 0.168. Competitors can still match parts of the pitch
 with louder numbers: codebase-memory-mcp claims 66 languages and Linux kernel
@@ -192,8 +192,8 @@ being boxed into "semantic grep" next to smaller MCP search servers.
 
 | # | Item | Why now | Effort |
 |---|---|---|---:|
-| 1 | Re-run v0.41 benchmark suite and update README/blog claims | Public proof lags implementation and competitors are publishing numbers | **Partial 2026-04-26: direct OpenClaw baseline refreshed** |
-| 2 | Direct competitor benchmark: `claude-context` and `codebase-memory-mcp` | Closest direct threats; enables honest positioning | **Partial 2026-04-26: codebase-memory-mcp measured; claude-context credentials/runtime pending** |
+| 1 | Re-run v0.41 benchmark suite and update README/blog claims | Public proof lags implementation and competitors are publishing numbers | **Partial 2026-04-27: direct OpenClaw baseline refreshed** |
+| 2 | Direct competitor benchmark: `claude-context` and `codebase-memory-mcp` | Closest direct threats; enables honest positioning | **Partial 2026-04-27: codebase-memory-mcp measured; claude-context credentials/runtime pending** |
 | 3 | Fix `list_files` to use indexed file/chunk metadata, not symbol table | Symbol-free docs/configs are indexed but can disappear from inventory | **Done 2026-04-24** |
 | 4 | Add "golden path" agent workflows to README/docs | Reduces tool overload and improves adoption | **Done 2026-04-24** |
 | 5 | Rename/copy hardening for `rename_symbol` | Prevents users/agents from mistaking exact text replacement for semantic rename | **Partial 2026-04-24: dry-run + explicit exact-string warning shipped** |
@@ -263,7 +263,7 @@ python3 benchmarks/competitor_benchmark.py \
 Result:
 
 ```text
-codixing:            20 queries, Precision@10 0.291, Recall@10 0.807, MRR 0.789
+codixing:            20 queries, Precision@10 0.261, Recall@10 0.783, MRR 0.827
 codebase-memory-mcp: 20 queries, Precision@10 0.147, Recall@10 0.374, MRR 0.243
 grep:                20 queries, Precision@10 0.125, Recall@10 0.191, MRR 0.168
 ```

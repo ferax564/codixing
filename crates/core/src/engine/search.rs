@@ -692,10 +692,20 @@ impl Engine {
     /// ranked chunks where that identifier appears — including call sites,
     /// imports, and variable usages, not just the definition.
     pub fn search_usages(&self, symbol: &str, limit: usize) -> Result<Vec<SearchResult>> {
-        let query = SearchQuery::new(symbol).with_limit(limit);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Fetch a wider candidate set so usage-specific ranking can recover
+        // import/call sites that raw BM25 places below definitions or tests.
+        let candidate_limit = limit.saturating_mul(5).max(50).min(limit.max(100));
+        let query = SearchQuery::new(symbol).with_limit(candidate_limit);
         let mut results = BM25Retriever::new(&self.tantivy).search(&query)?;
         // Apply PageRank boost so architecturally central files rank first.
         self.apply_graph_boost(&mut results, self.config.graph.boost_weight);
+        rerank_usage_results(&mut results, symbol);
+        dedup_usage_files(&mut results);
+        results.truncate(limit);
         Ok(results)
     }
 
@@ -1015,6 +1025,185 @@ pub(super) fn is_test_file(path: &str) -> bool {
         return true;
     }
     false
+}
+
+/// Apply usage-specific ranking after raw identifier retrieval.
+///
+/// `search_usages` is different from definition search: users usually want
+/// production call sites and import sites first, while definitions, docs, tests,
+/// and barrel re-exports are still valid but less useful ranked evidence.
+pub(super) fn rerank_usage_results(results: &mut [SearchResult], symbol: &str) {
+    let symbol = symbol.trim();
+    if symbol.is_empty() {
+        return;
+    }
+
+    let mut changed = false;
+    for result in results.iter_mut() {
+        let multiplier = usage_score_multiplier(result, symbol);
+        if (multiplier - 1.0).abs() > f32::EPSILON {
+            result.score *= multiplier;
+            changed = true;
+        }
+    }
+
+    if changed {
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+}
+
+pub(super) fn dedup_usage_files(results: &mut Vec<SearchResult>) {
+    use std::collections::HashSet;
+
+    let mut seen = HashSet::new();
+    results.retain(|result| seen.insert(result.file_path.clone()));
+}
+
+fn usage_score_multiplier(result: &SearchResult, symbol: &str) -> f32 {
+    let mut multiplier = 1.0;
+    let function_like = symbol
+        .chars()
+        .next()
+        .map(|c| c.is_lowercase() || c == '_')
+        .unwrap_or(false);
+
+    if has_import_reference(&result.content, symbol) {
+        multiplier *= if function_like { 1.0 } else { 2.4 };
+    }
+    if has_call_reference(&result.content, symbol) {
+        multiplier *= if function_like { 1.0 } else { 1.6 };
+    }
+    if has_reexport_reference(&result.content, symbol) {
+        multiplier *= 0.7;
+    }
+    if looks_like_symbol_definition(result, symbol) {
+        multiplier *= 0.02;
+    }
+    if result.is_doc() {
+        multiplier *= 0.01;
+    }
+    if is_test_file(&result.file_path) || is_test_chunk(result) {
+        multiplier *= 0.25;
+    }
+
+    multiplier
+}
+
+fn has_import_reference(content: &str, symbol: &str) -> bool {
+    let needle = symbol.to_ascii_lowercase();
+    content.lines().any(|line| {
+        let line = line.trim_start().to_ascii_lowercase();
+        line.contains(&needle)
+            && (line.starts_with("import ")
+                || line.starts_with("import{")
+                || line.starts_with("use ")
+                || line.starts_with("from ")
+                || line.contains(" require(")
+                || line.contains(" require ("))
+    })
+}
+
+fn has_reexport_reference(content: &str, symbol: &str) -> bool {
+    let needle = symbol.to_ascii_lowercase();
+    content.lines().any(|line| {
+        let line = line.trim_start().to_ascii_lowercase();
+        line.contains(&needle)
+            && line.starts_with("export ")
+            && (line.contains(" from ") || line.contains(" from\"") || line.contains(" from'"))
+    })
+}
+
+fn has_call_reference(content: &str, symbol: &str) -> bool {
+    let needle = format!("{symbol}(").to_ascii_lowercase();
+    content.lines().any(|line| {
+        let normalized = normalize_definition_line(line);
+        normalized.contains(&needle) && !line_starts_like_definition(&normalized, symbol)
+    })
+}
+
+fn looks_like_symbol_definition(result: &SearchResult, symbol: &str) -> bool {
+    let lower_symbol = symbol.to_ascii_lowercase();
+    let signature = result.signature.to_ascii_lowercase();
+    if !signature.is_empty() && signature.contains(&lower_symbol) {
+        return true;
+    }
+
+    let patterns = [
+        format!("function {lower_symbol}"),
+        format!("async function {lower_symbol}"),
+        format!("const {lower_symbol}"),
+        format!("let {lower_symbol}"),
+        format!("var {lower_symbol}"),
+        format!("class {lower_symbol}"),
+        format!("interface {lower_symbol}"),
+        format!("type {lower_symbol}"),
+        format!("enum {lower_symbol}"),
+        format!("struct {lower_symbol}"),
+        format!("trait {lower_symbol}"),
+        format!("fn {lower_symbol}"),
+        format!("def {lower_symbol}"),
+    ];
+
+    result.content.lines().any(|line| {
+        let normalized = normalize_definition_line(line);
+        patterns.iter().any(|pattern| normalized.contains(pattern))
+            || (normalized.contains(&lower_symbol) && line_starts_like_any_definition(&normalized))
+    })
+}
+
+fn normalize_definition_line(line: &str) -> String {
+    line.trim_start()
+        .trim_start_matches("export ")
+        .trim_start_matches("pub ")
+        .trim_start_matches("public ")
+        .trim_start_matches("private ")
+        .trim_start_matches("protected ")
+        .to_ascii_lowercase()
+}
+
+fn line_starts_like_definition(normalized: &str, symbol: &str) -> bool {
+    let lower_symbol = symbol.to_ascii_lowercase();
+    [
+        format!("function {lower_symbol}"),
+        format!("async function {lower_symbol}"),
+        format!("const {lower_symbol}"),
+        format!("let {lower_symbol}"),
+        format!("var {lower_symbol}"),
+        format!("class {lower_symbol}"),
+        format!("interface {lower_symbol}"),
+        format!("type {lower_symbol}"),
+        format!("enum {lower_symbol}"),
+        format!("struct {lower_symbol}"),
+        format!("trait {lower_symbol}"),
+        format!("fn {lower_symbol}"),
+        format!("def {lower_symbol}"),
+    ]
+    .iter()
+    .any(|pattern| normalized.starts_with(pattern))
+}
+
+fn line_starts_like_any_definition(normalized: &str) -> bool {
+    [
+        "function ",
+        "async function ",
+        "const ",
+        "let ",
+        "var ",
+        "class ",
+        "interface ",
+        "type ",
+        "enum ",
+        "struct ",
+        "trait ",
+        "fn ",
+        "def ",
+    ]
+    .iter()
+    .any(|prefix| normalized.starts_with(prefix))
 }
 
 /// Check if a file is part of the search/retrieval infrastructure.

@@ -6,7 +6,7 @@ with the date of its last commit (via `git log -1 --format=%ci`, *not*
 filesystem mtime, which resets on worktree checkout).
 
 **Freshness policy:** results are considered stale after **14 days**. As of
-**2026-04-26**, anything last measured before **2026-04-12** is flagged
+**2026-04-27**, anything last measured before **2026-04-13** is flagged
 `STALE — candidate for re-run`. Stale results are kept for provenance; none of
 them are deleted by this index.
 
@@ -78,10 +78,10 @@ which is what happened during the v0.41 shipped-verification.
 | `agent_benchmark_large_march_replay_medium.md` | 2026-04-14 | fresh |
 | `agent_benchmark_large.json` | 2026-04-14 | fresh |
 | `agent_benchmark_large.md` | 2026-04-14 | fresh |
-| `competitor_benchmark.json` | 2026-04-26 | fresh |
-| `competitor_benchmark.md` | 2026-04-26 | fresh |
-| `external_competitor_benchmark.json` | 2026-04-26 | fresh |
-| `external_competitor_benchmark.md` | 2026-04-26 | fresh |
+| `competitor_benchmark.json` | 2026-04-27 | fresh |
+| `competitor_benchmark.md` | 2026-04-27 | fresh |
+| `external_competitor_benchmark.json` | 2026-04-27 | fresh |
+| `external_competitor_benchmark.md` | 2026-04-27 | fresh |
 
 ## Re-running
 

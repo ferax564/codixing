@@ -30,7 +30,7 @@ path_regex = '([A-Za-z0-9_./@+-]+\.(?:ts|tsx|js|jsx|rs|py|go|java|cpp|c|h|hpp|md
 
 [tool.commands]
 symbol = '{codixing} symbols "{pattern}"'
-usage = '{codixing} usages "{symbol}" --limit {result_limit}'
+usage = '{codixing} usages "{symbol}" --limit {result_limit} --file ""'
 concept = '{codixing} search "{query}" --strategy fast --limit {result_limit} --json'
 cross-package = '{codixing} cross-imports --from "{from_dir}" --to "{to_dir}" {cross_pattern_arg}'
 
