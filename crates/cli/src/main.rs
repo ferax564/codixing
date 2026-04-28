@@ -693,8 +693,36 @@ impl StrategyArg {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+#[cfg(windows)]
+const WINDOWS_CLI_STACK_SIZE: usize = 16 * 1024 * 1024;
+
+fn main() -> Result<()> {
+    #[cfg(windows)]
+    {
+        let handle = std::thread::Builder::new()
+            .name("codixing-main".to_string())
+            .stack_size(WINDOWS_CLI_STACK_SIZE)
+            .spawn(run_cli)
+            .context("failed to start CLI thread")?;
+
+        return handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("CLI thread panicked"))?;
+    }
+
+    #[cfg(not(windows))]
+    run_cli()
+}
+
+fn run_cli() -> Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to build Tokio runtime")?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
