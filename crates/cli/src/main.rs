@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use regex::Regex;
 use tracing_subscriber::EnvFilter;
 
 use codixing_core::{
@@ -227,6 +228,12 @@ enum Command {
         /// Target directory (module being imported from).
         #[arg(long)]
         to: String,
+
+        /// Optional regex that must match the importing source file.
+        /// Useful for narrowing broad package-boundary queries to a specific
+        /// symbol or import shape.
+        #[arg(long)]
+        pattern: Option<String>,
     },
 
     /// Literal or regex text scan across indexed files (trigram-accelerated).
@@ -686,8 +693,36 @@ impl StrategyArg {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+#[cfg(windows)]
+const WINDOWS_CLI_STACK_SIZE: usize = 16 * 1024 * 1024;
+
+fn main() -> Result<()> {
+    #[cfg(windows)]
+    {
+        let handle = std::thread::Builder::new()
+            .name("codixing-main".to_string())
+            .stack_size(WINDOWS_CLI_STACK_SIZE)
+            .spawn(run_cli)
+            .context("failed to start CLI thread")?;
+
+        return handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("CLI thread panicked"))?;
+    }
+
+    #[cfg(not(windows))]
+    run_cli()
+}
+
+fn run_cli() -> Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to build Tokio runtime")?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
@@ -779,7 +814,7 @@ async fn main() -> Result<()> {
         Command::Callers { file, depth } => cmd_callers(file, depth),
         Command::Callees { file, depth } => cmd_callees(file, depth),
         Command::Dependencies { file, depth } => cmd_dependencies(file, depth),
-        Command::CrossImports { from, to } => cmd_cross_imports(from, to),
+        Command::CrossImports { from, to, pattern } => cmd_cross_imports(from, to, pattern),
         Command::Grep {
             pattern,
             file,
@@ -1739,7 +1774,7 @@ fn cmd_dependencies(file: String, depth: usize) -> Result<()> {
     Ok(())
 }
 
-fn cmd_cross_imports(from: String, to: String) -> Result<()> {
+fn cmd_cross_imports(from: String, to: String, pattern: Option<String>) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
     let engine = Engine::open(&root).with_context(|| {
         format!(
@@ -1748,9 +1783,19 @@ fn cmd_cross_imports(from: String, to: String) -> Result<()> {
         )
     })?;
 
-    let ranked = engine.cross_imports_ranked(&from, &to, None);
+    let mut ranked = engine.cross_imports_ranked(&from, &to, None);
+    if let Some(pattern) = pattern.as_deref() {
+        ranked = filter_ranked_files_by_pattern(&engine, ranked, pattern)?;
+    }
     if ranked.is_empty() {
-        eprintln!("No files in \"{}\" import from \"{}\"", from, to);
+        if let Some(pattern) = pattern.as_deref() {
+            eprintln!(
+                "No files in \"{}\" import from \"{}\" and match pattern \"{}\"",
+                from, to, pattern
+            );
+        } else {
+            eprintln!("No files in \"{}\" import from \"{}\"", from, to);
+        }
         return Ok(());
     }
 
@@ -1758,12 +1803,33 @@ fn cmd_cross_imports(from: String, to: String) -> Result<()> {
         println!("{f} (score: {score:.3})");
     }
     eprintln!(
-        "\n{} file(s) in \"{}\" import from \"{}\".",
+        "\n{} file(s) in \"{}\" import from \"{}\"{}.",
         ranked.len(),
         from,
-        to
+        to,
+        pattern
+            .as_deref()
+            .map(|p| format!(" and match pattern \"{p}\""))
+            .unwrap_or_default()
     );
     Ok(())
+}
+
+fn filter_ranked_files_by_pattern(
+    engine: &Engine,
+    ranked: Vec<(String, f32)>,
+    pattern: &str,
+) -> Result<Vec<(String, f32)>> {
+    Regex::new(pattern).with_context(|| format!("invalid --pattern regex: {pattern}"))?;
+
+    let mut filtered = Vec::new();
+    for (file, score) in ranked {
+        let matches = engine.grep_code(pattern, false, Some(&file), 0, 1)?;
+        if !matches.is_empty() {
+            filtered.push((file, score));
+        }
+    }
+    Ok(filtered)
 }
 
 fn cmd_usages(

@@ -7,7 +7,7 @@ read_only = true
 
 [[tools]]
 name = "rename_symbol"
-description = "Rename an identifier across all indexed files in the project. Performs exact-string replacement (not semantic rename) and immediately reindexes every modified file. Use when you need a fast codebase-wide rename for identifiers that aren't ambiguous; prefer your editor's LSP-backed rename for overloaded names or shadowed locals."
+description = "Perform a plain substring replacement across indexed files in the project. This is not a semantic rename: old_name is matched anywhere, including inside larger identifiers, comments, and strings, then modified files are immediately reindexed. Use only when the text is globally unambiguous; prefer dry_run=true first, and prefer your editor's LSP-backed rename for overloaded names, shadowed locals, or language-aware refactors."
 handler = "analysis::call_rename_symbol"
 calling_convention = "engine_mut_args"
 read_only = false
@@ -25,6 +25,10 @@ required = true
 [tools.params.file_filter]
 type = "string"
 description = "Optional file path substring \u2014 restrict the rename to matching files only"
+
+[tools.params.dry_run]
+type = "boolean"
+description = "When true, report how many files/replacements would change without writing or reindexing. Default: false."
 
 [[tools]]
 name = "find_tests"

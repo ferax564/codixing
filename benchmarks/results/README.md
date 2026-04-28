@@ -6,9 +6,54 @@ with the date of its last commit (via `git log -1 --format=%ci`, *not*
 filesystem mtime, which resets on worktree checkout).
 
 **Freshness policy:** results are considered stale after **14 days**. As of
-**2026-04-16**, anything last committed before **2026-04-02** is flagged
+**2026-04-27**, anything last measured before **2026-04-13** is flagged
 `STALE — candidate for re-run`. Stale results are kept for provenance; none of
 them are deleted by this index.
+
+## Release-to-release performance comparison
+
+The criterion `base/` + `change/` directories under `target/criterion/<bench>/`
+track **consecutive runs on whatever commit is checked out** — they are
+useless for "did vX.Y regress vs vX.(Y-1)" questions because the base gets
+overwritten every run.
+
+The right tool is a named baseline:
+
+```bash
+# At release time, capture numbers for the released tag.
+git checkout v0.41.0
+cargo bench --bench search_bench -- --save-baseline v0.41
+
+# Later (on main, before cutting v0.42), diff against that baseline.
+git checkout main
+cargo bench --bench search_bench -- --baseline v0.41
+```
+
+Criterion will emit the delta inline per benchmark:
+
+```text
+bm25_search_identifier  time:   [72.4 µs 72.5 µs 72.6 µs]
+                        change: [-1.2% +0.1% +1.5%] (p = 0.87 > 0.05)
+                        No change in performance detected.
+```
+
+Named baselines live under `target/criterion/<bench>/<name>/`, but
+`cargo clean` removes the entire `target/` directory, including Criterion
+baselines and reports. They are **not** committed — each developer captures
+their own locally against release tags. Back up `target/criterion/` or store
+baselines as versioned artifacts before running `cargo clean` if you need to
+preserve them.
+
+**Recommended capture points:**
+
+- On every release tag — release scripts should add
+  `-- --save-baseline $TAG` to their `cargo bench` invocation.
+- Before a large refactor — name the baseline `pre-<slug>` so you can diff
+  the refactor against its own starting point.
+
+Without this, comparing two releases requires `git worktree add /tmp/oldver
+<oldtag>` + a second full rebuild + a manual diff of the terminal output,
+which is what happened during the v0.41 shipped-verification.
 
 ## Results
 
@@ -24,8 +69,8 @@ them are deleted by this index.
 | `swe_bench_lite_eval.md` | 2026-03-14 | STALE — candidate for re-run |
 | `agent_benchmark.json` | 2026-03-29 | STALE — candidate for re-run |
 | `agent_benchmark.md` | 2026-03-29 | STALE — candidate for re-run |
-| `queue_v2_benchmark.json` | 2026-04-06 | fresh |
-| `queue_v2_benchmark.md` | 2026-04-06 | fresh |
+| `queue_v2_benchmark.json` | 2026-04-06 | STALE — candidate for re-run |
+| `queue_v2_benchmark.md` | 2026-04-06 | STALE — candidate for re-run |
 | `agent_benchmark_large_hard.json` | 2026-04-14 | fresh |
 | `agent_benchmark_large_hard.md` | 2026-04-14 | fresh |
 | `agent_benchmark_large_hard_full.json` | 2026-04-14 | fresh |
@@ -36,6 +81,10 @@ them are deleted by this index.
 | `agent_benchmark_large_march_replay_medium.md` | 2026-04-14 | fresh |
 | `agent_benchmark_large.json` | 2026-04-14 | fresh |
 | `agent_benchmark_large.md` | 2026-04-14 | fresh |
+| `competitor_benchmark.json` | 2026-04-28 | fresh |
+| `competitor_benchmark.md` | 2026-04-28 | fresh |
+| `external_competitor_benchmark.json` | 2026-04-28 | fresh |
+| `external_competitor_benchmark.md` | 2026-04-28 | fresh |
 
 ## Re-running
 

@@ -204,6 +204,31 @@ fn list_files_limit() {
     );
 }
 
+#[test]
+fn list_files_includes_symbol_free_docs() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("README.md"),
+        "# Project Notes\n\nThis document has no code symbols.\n",
+    )
+    .unwrap();
+    let mut engine = make_engine(root);
+
+    let (out, err) = dispatch_tool(
+        &mut engine,
+        "list_files",
+        &json!({"pattern": "README.md"}),
+        None,
+    );
+    assert!(!err, "list_files returned error: {out}");
+    assert!(
+        out.contains("README.md"),
+        "symbol-free README.md should be listed: {out}"
+    );
+    assert!(out.contains("chunks"), "chunk count should be shown: {out}");
+}
+
 // -------------------------------------------------------------------------
 // outline_file
 // -------------------------------------------------------------------------
@@ -442,6 +467,95 @@ fn rename_symbol_with_file_filter() {
     assert!(
         rs_content.contains("compute"),
         "main.rs should be untouched by .py filter"
+    );
+}
+
+#[test]
+fn rename_symbol_dry_run_does_not_modify_files() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let mut engine = make_engine(root);
+
+    let (out, err) = dispatch_tool(
+        &mut engine,
+        "rename_symbol",
+        &json!({"old_name": "compute", "new_name": "calculate", "dry_run": true}),
+        None,
+    );
+    assert!(!err, "rename_symbol dry_run returned error: {out}");
+    assert!(out.contains("Dry run"), "unexpected output: {out}");
+    assert!(out.contains("No files changed"), "unexpected output: {out}");
+
+    let content = fs::read_to_string(root.join("src/main.rs")).unwrap();
+    assert!(
+        content.contains("compute"),
+        "dry_run should not modify source: {content}"
+    );
+    assert!(
+        !content.contains("calculate"),
+        "dry_run should not write new name: {content}"
+    );
+}
+
+// -------------------------------------------------------------------------
+// graph
+// -------------------------------------------------------------------------
+
+#[test]
+fn cross_imports_pattern_filters_alias_imports() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("src/plugin-sdk")).unwrap();
+    fs::create_dir_all(root.join("extensions/openai")).unwrap();
+    fs::create_dir_all(root.join("extensions/noisy")).unwrap();
+    fs::write(
+        root.join("src/plugin-sdk/plugin-entry.ts"),
+        "export function definePluginEntry() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src/plugin-sdk/runtime.ts"),
+        "export function runtimeOnly() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("extensions/openai/index.ts"),
+        r#"import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+export const plugin = definePluginEntry();
+"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("extensions/noisy/index.ts"),
+        r#"import { runtimeOnly } from "openclaw/plugin-sdk/runtime";
+export const value = runtimeOnly();
+"#,
+    )
+    .unwrap();
+
+    let mut cfg = IndexConfig::new(root);
+    cfg.embedding.enabled = false;
+    let mut engine = Engine::init(root, cfg).expect("engine init failed");
+
+    let (out, err) = dispatch_tool(
+        &mut engine,
+        "cross_imports",
+        &json!({
+            "from": "extensions",
+            "to": "src/plugin-sdk",
+            "pattern": "import.*definePluginEntry.*from.*plugin-sdk"
+        }),
+        None,
+    );
+
+    assert!(!err, "cross_imports returned error: {out}");
+    assert!(
+        out.contains("extensions/openai/index.ts"),
+        "expected matching plugin entry importer, got: {out}"
+    );
+    assert!(
+        !out.contains("extensions/noisy/index.ts"),
+        "pattern filter should remove unrelated plugin-sdk import: {out}"
     );
 }
 

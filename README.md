@@ -71,6 +71,23 @@ At 50 agent sessions/day, that's **$1,400/month** back in your pocket — and th
 | Natural language search | No | Yes (BM25 + optional embeddings) |
 | Token budget management | No | Yes (auto-truncation) |
 
+### Agent golden path
+
+If you are wiring Codixing into an AI agent, start with these tools instead of
+exposing the whole surface at once:
+
+| Task | Use this first | Why |
+|------|----------------|-----|
+| Find relevant code from a concept | `code_search` / `codixing search` | Ranked, token-bounded retrieval for natural language and code terms |
+| Jump to a known definition | `find_symbol` / `codixing symbols` | Definitions only, not every textual mention |
+| Check blast radius before editing | `search_usages --complete` or `predict_impact` / `codixing impact` | Deterministic callers/importers/tests instead of top-K guesses |
+| Understand a feature | `feature_hub` or `get_context_for_task` | One call combines search, dependencies, dependents, and tests |
+| Inspect exact text | `grep_code` / `codixing grep` | Literal/regex scan for strings, errors, TODOs, and generated names |
+| Focus on current work | `focus_map` / `codixing graph --map` | Graph-ranked context biased toward changed or seed files |
+
+The rest of the MCP tools are specialist tools. Use `search_tools` and
+`get_tool_schema` when an agent needs to discover a narrower capability.
+
 ---
 
 ## Getting Started
@@ -232,9 +249,15 @@ code --install-extension codixing.vsix
 | Search latency | 30-42ms | 36-40ms |
 | Top-1 accuracy | 7/10 | **10/10** |
 
-**Retrieval accuracy** (OpenClaw, 9.4K files): Codixing R@10 = **0.763** vs grep R@10 = 0.345 — **2× better retrieval** (MRR = 0.706).
+**Retrieval accuracy** (OpenClaw, 20 curated file-localization queries, 2026-04-28):
 
-> *Last measured on v0.26.0 / OpenClaw 9.4K (2026-02). Re-measurement on v0.38.1 pending — see [issue tracker](https://github.com/ferax564/codixing/issues).*
+| Tool | Recall@10 | MRR | Notes |
+|------|----------:|----:|-------|
+| Codixing | **0.802** | **0.827** | `symbols`, `usages`, `search`, and `cross-imports` routed by query type |
+| codebase-memory-mcp v0.6.0 | 0.374 | 0.243 | Local CLI benchmark; semantic tool was not exposed by the downloaded build |
+| grep | 0.191 | 0.168 | Baseline recursive text scan |
+
+Raw results: [external_competitor_benchmark.md](benchmarks/results/external_competitor_benchmark.md). To reproduce the full table, set `CODEBASE_MEMORY_MCP=/path/to/codebase-memory-mcp` for a local v0.6.0 binary, then run [run_external_competitors.sh](benchmarks/run_external_competitors.sh).
 
 **Large codebase** (368K LoC, 7,607 files): Init 7.9s, search 94ms, 99% token reduction vs grep.
 

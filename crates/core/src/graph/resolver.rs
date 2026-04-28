@@ -187,9 +187,11 @@ impl ImportResolver {
     fn resolve_js_ts(&self, import: &str, source_file: &str) -> Option<String> {
         let source_dir = parent_dir(source_file);
 
-        // Absolute (non-relative) imports are external packages.
+        // Absolute package imports are normally external, but monorepos often
+        // expose local packages through path aliases such as
+        // `openclaw/plugin-sdk/plugin-entry` -> `src/plugin-sdk/plugin-entry.ts`.
         if !import.starts_with("./") && !import.starts_with("../") {
-            return None;
+            return self.resolve_js_ts_alias(import);
         }
 
         let joined = join_paths(&source_dir, import);
@@ -230,6 +232,76 @@ impl ImportResolver {
         // Try as directory index.
         for ext in &["ts", "tsx", "js", "jsx"] {
             let candidate = format!("{norm}/index.{ext}");
+            if self.indexed_files.contains(&candidate) {
+                return Some(candidate);
+            }
+        }
+
+        None
+    }
+
+    fn resolve_js_ts_alias(&self, import: &str) -> Option<String> {
+        let parts: Vec<&str> = import.split('/').filter(|part| !part.is_empty()).collect();
+        if parts.is_empty() {
+            return None;
+        }
+
+        let mut candidates = Vec::new();
+        let mut src_suffix_directory_candidates = Vec::new();
+        candidates.push(import.to_string());
+        candidates.push(format!("src/{import}"));
+
+        // Try package-suffix aliases, e.g. `@scope/pkg/foo` -> `src/pkg/foo`.
+        for start in 1..parts.len() {
+            let suffix = parts[start..].join("/");
+            candidates.push(suffix.clone());
+            if suffix.contains('/') {
+                candidates.push(format!("src/{suffix}"));
+            } else {
+                src_suffix_directory_candidates.push(format!("src/{suffix}"));
+            }
+        }
+
+        for base in candidates {
+            if let Some(path) = self.resolve_js_ts_candidate(&base) {
+                return Some(path);
+            }
+        }
+
+        for base in src_suffix_directory_candidates {
+            if let Some(path) = self.resolve_js_ts_directory_index_candidate(&base) {
+                return Some(path);
+            }
+        }
+
+        None
+    }
+
+    fn resolve_js_ts_directory_index_candidate(&self, base: &str) -> Option<String> {
+        for ext in &["ts", "tsx", "js", "jsx"] {
+            let candidate = format!("{base}/index.{ext}");
+            if self.indexed_files.contains(&candidate) {
+                return Some(candidate);
+            }
+        }
+
+        None
+    }
+
+    fn resolve_js_ts_candidate(&self, base: &str) -> Option<String> {
+        if self.indexed_files.contains(base) {
+            return Some(base.to_string());
+        }
+
+        for ext in &["ts", "tsx", "js", "jsx", "mts", "cts"] {
+            let candidate = format!("{base}.{ext}");
+            if self.indexed_files.contains(&candidate) {
+                return Some(candidate);
+            }
+        }
+
+        for ext in &["ts", "tsx", "js", "jsx"] {
+            let candidate = format!("{base}/index.{ext}");
             if self.indexed_files.contains(&candidate) {
                 return Some(candidate);
             }
@@ -801,6 +873,36 @@ mod tests {
             is_relative: false,
         };
         assert_eq!(resolver.resolve(&raw, "src/index.ts"), None);
+    }
+
+    #[test]
+    fn typescript_package_alias_resolves_to_src_suffix() {
+        let resolver = make_resolver(&["src/plugin-sdk/plugin-entry.ts"]);
+        let raw = RawImport {
+            path: "openclaw/plugin-sdk/plugin-entry".to_string(),
+            language: Language::TypeScript,
+            is_relative: false,
+        };
+
+        assert_eq!(
+            resolver.resolve(&raw, "extensions/openai/index.ts"),
+            Some("src/plugin-sdk/plugin-entry.ts".to_string())
+        );
+    }
+
+    #[test]
+    fn typescript_package_alias_resolves_directory_index() {
+        let resolver = make_resolver(&["src/plugin-sdk/index.ts"]);
+        let raw = RawImport {
+            path: "openclaw/plugin-sdk".to_string(),
+            language: Language::TypeScript,
+            is_relative: false,
+        };
+
+        assert_eq!(
+            resolver.resolve(&raw, "extensions/openai/index.ts"),
+            Some("src/plugin-sdk/index.ts".to_string())
+        );
     }
 
     #[test]

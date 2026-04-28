@@ -307,6 +307,30 @@ ORT_DYLIB_PATH=~/.local/lib/libonnxruntime.so LD_LIBRARY_PATH=~/.local/lib \
 
 Trigram pre-filtering provides massive speedups for **selective** patterns (identifiers, specific strings) at scale. Patterns that match most files see no benefit — this is expected and correct (the trigram index can't eliminate candidates that genuinely match).
 
+### Release-to-release perf comparison
+
+Use criterion's **named baselines** — not the default `base/change/` dirs, which get overwritten on every run and are useless for "did vX.Y regress vs vX.(Y-1)".
+
+```bash
+# At release time, capture numbers for the released tag.
+git checkout v0.41.0
+cargo bench --bench search_bench -- --save-baseline v0.41
+
+# Before cutting the next release, diff against the baseline.
+git checkout main
+cargo bench --bench search_bench -- --baseline v0.41
+```
+
+Criterion emits the delta inline:
+
+```text
+bm25_search_identifier  time:   [72.4 µs 72.5 µs 72.6 µs]
+                        change: [-1.2% +0.1% +1.5%] (p = 0.87 > 0.05)
+                        No change in performance detected.
+```
+
+See `benchmarks/results/README.md` § "Release-to-release performance comparison" for the full workflow. Named baselines live under `target/criterion/<bench>/<name>/`, but `cargo clean` removes `target/`, including Criterion baselines and reports.
+
 ## Embedding Model Benchmark
 
 **Apple M4 (127 files, 1054 chunks):**
