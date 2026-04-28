@@ -80,7 +80,7 @@ exposing the whole surface at once:
 |------|----------------|-----|
 | Find relevant code from a concept | `code_search` / `codixing search` | Ranked, token-bounded retrieval for natural language and code terms |
 | Jump to a known definition | `find_symbol` / `codixing symbols` | Definitions only, not every textual mention |
-| Check blast radius before editing | `search_usages --complete` or `change_impact` / `codixing impact` | Deterministic callers/importers/tests instead of top-K guesses |
+| Check blast radius before editing | `search_usages --complete` or `predict_impact` / `codixing impact` | Deterministic callers/importers/tests instead of top-K guesses |
 | Understand a feature | `feature_hub` or `get_context_for_task` | One call combines search, dependencies, dependents, and tests |
 | Inspect exact text | `grep_code` / `codixing grep` | Literal/regex scan for strings, errors, TODOs, and generated names |
 | Focus on current work | `focus_map` / `codixing graph --map` | Graph-ranked context biased toward changed or seed files |
@@ -249,15 +249,15 @@ code --install-extension codixing.vsix
 | Search latency | 30-42ms | 36-40ms |
 | Top-1 accuracy | 7/10 | **10/10** |
 
-**Retrieval accuracy** (OpenClaw, 20 curated file-localization queries, 2026-04-27):
+**Retrieval accuracy** (OpenClaw, 20 curated file-localization queries, 2026-04-28):
 
 | Tool | Recall@10 | MRR | Notes |
 |------|----------:|----:|-------|
-| Codixing | **0.783** | **0.827** | `symbols`, `usages`, `search`, and `cross-imports` routed by query type |
+| Codixing | **0.802** | **0.827** | `symbols`, `usages`, `search`, and `cross-imports` routed by query type |
 | codebase-memory-mcp v0.6.0 | 0.374 | 0.243 | Local CLI benchmark; semantic tool was not exposed by the downloaded build |
 | grep | 0.191 | 0.168 | Baseline recursive text scan |
 
-Raw results: [external_competitor_benchmark.md](benchmarks/results/external_competitor_benchmark.md). Reproduce with [run_external_competitors.sh](benchmarks/run_external_competitors.sh).
+Raw results: [external_competitor_benchmark.md](benchmarks/results/external_competitor_benchmark.md). To reproduce the full table, set `CODEBASE_MEMORY_MCP=/path/to/codebase-memory-mcp` for a local v0.6.0 binary, then run [run_external_competitors.sh](benchmarks/run_external_competitors.sh).
 
 **Large codebase** (368K LoC, 7,607 files): Init 7.9s, search 94ms, 99% token reduction vs grep.
 

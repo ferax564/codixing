@@ -698,7 +698,13 @@ impl Engine {
 
         // Fetch a wider candidate set so usage-specific ranking can recover
         // import/call sites that raw BM25 places below definitions or tests.
-        let candidate_limit = limit.saturating_mul(5).max(50).min(limit.max(100));
+        const MIN_USAGE_OVERFETCH_RATIO: usize = 5;
+        const MIN_USAGE_CANDIDATES: usize = 50;
+        const MAX_USAGE_CANDIDATES: usize = 1_000;
+        let candidate_limit = limit
+            .saturating_mul(MIN_USAGE_OVERFETCH_RATIO)
+            .max(MIN_USAGE_CANDIDATES)
+            .min(MAX_USAGE_CANDIDATES.max(limit));
         let query = SearchQuery::new(symbol).with_limit(candidate_limit);
         let mut results = BM25Retriever::new(&self.tantivy).search(&query)?;
         // Apply PageRank boost so architecturally central files rank first.
@@ -1126,32 +1132,14 @@ fn has_call_reference(content: &str, symbol: &str) -> bool {
 }
 
 fn looks_like_symbol_definition(result: &SearchResult, symbol: &str) -> bool {
-    let lower_symbol = symbol.to_ascii_lowercase();
     let signature = result.signature.to_ascii_lowercase();
-    if !signature.is_empty() && signature.contains(&lower_symbol) {
+    if !signature.is_empty() && line_starts_like_definition(&signature, symbol) {
         return true;
     }
 
-    let patterns = [
-        format!("function {lower_symbol}"),
-        format!("async function {lower_symbol}"),
-        format!("const {lower_symbol}"),
-        format!("let {lower_symbol}"),
-        format!("var {lower_symbol}"),
-        format!("class {lower_symbol}"),
-        format!("interface {lower_symbol}"),
-        format!("type {lower_symbol}"),
-        format!("enum {lower_symbol}"),
-        format!("struct {lower_symbol}"),
-        format!("trait {lower_symbol}"),
-        format!("fn {lower_symbol}"),
-        format!("def {lower_symbol}"),
-    ];
-
     result.content.lines().any(|line| {
         let normalized = normalize_definition_line(line);
-        patterns.iter().any(|pattern| normalized.contains(pattern))
-            || (normalized.contains(&lower_symbol) && line_starts_like_any_definition(&normalized))
+        line_starts_like_definition(&normalized, symbol)
     })
 }
 
@@ -1184,26 +1172,6 @@ fn line_starts_like_definition(normalized: &str, symbol: &str) -> bool {
     ]
     .iter()
     .any(|pattern| normalized.starts_with(pattern))
-}
-
-fn line_starts_like_any_definition(normalized: &str) -> bool {
-    [
-        "function ",
-        "async function ",
-        "const ",
-        "let ",
-        "var ",
-        "class ",
-        "interface ",
-        "type ",
-        "enum ",
-        "struct ",
-        "trait ",
-        "fn ",
-        "def ",
-    ]
-    .iter()
-    .any(|prefix| normalized.starts_with(prefix))
 }
 
 /// Check if a file is part of the search/retrieval infrastructure.

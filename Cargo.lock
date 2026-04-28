@@ -688,6 +688,7 @@ dependencies = [
  "clap",
  "codixing-core",
  "dashmap 6.1.0",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

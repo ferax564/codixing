@@ -11,9 +11,7 @@ SETUP_LOG="$ROOT/benchmarks/results/${OUTPUT_PREFIX}_setup.md"
 
 mkdir -p "$ROOT/benchmarks/results"
 
-if [[ ! -x "$ROOT/target/release/codixing" ]]; then
-  cargo build --release -p codixing
-fi
+cargo build --release -p codixing
 
 {
   echo "# External Competitor Benchmark Setup"

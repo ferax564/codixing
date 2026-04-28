@@ -162,8 +162,8 @@ Local single-binary structural context
 ```
 
 The last line is improving but still incomplete. A direct OpenClaw harness now
-captures Codixing vs grep and codebase-memory-mcp locally: on 2026-04-27
-Codixing scored Recall@10 0.783 / MRR 0.827 across 20 queries,
+captures Codixing vs grep and codebase-memory-mcp locally: on 2026-04-28
+Codixing scored Recall@10 0.802 / MRR 0.827 across 20 queries,
 codebase-memory-mcp scored Recall@10 0.374 / MRR 0.243, and grep scored
 Recall@10 0.191 / MRR 0.168. Competitors can still match parts of the pitch
 with louder numbers: codebase-memory-mcp claims 66 languages and Linux kernel
@@ -263,7 +263,7 @@ python3 benchmarks/competitor_benchmark.py \
 Result:
 
 ```text
-codixing:            20 queries, Precision@10 0.261, Recall@10 0.783, MRR 0.827
+codixing:            20 queries, Precision@10 0.281, Recall@10 0.802, MRR 0.827
 codebase-memory-mcp: 20 queries, Precision@10 0.147, Recall@10 0.374, MRR 0.243
 grep:                20 queries, Precision@10 0.125, Recall@10 0.191, MRR 0.168
 ```

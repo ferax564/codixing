@@ -22,6 +22,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import time
 from dataclasses import asdict, dataclass, field
@@ -175,7 +176,7 @@ def validate_queries(queries: list[dict[str, Any]], repo: Path) -> list[str]:
 
 def render_command(template: str, query: dict[str, Any], repo: Path, top_k: int) -> str:
     pattern = query.get("grep_pattern", query.get("text", ""))
-    values = {
+    raw_values = {
         "repo": str(repo),
         "codixing": str(ROOT / "target" / "release" / "codixing"),
         "query": query.get("text", ""),
@@ -189,10 +190,25 @@ def render_command(template: str, query: dict[str, Any], repo: Path, top_k: int)
         "codebase_memory": os.environ.get("CODEBASE_MEMORY_MCP", "codebase-memory-mcp"),
         "codebase_memory_project": os.environ.get("CODEBASE_MEMORY_PROJECT", project_name(repo)),
         "cbm_cache": os.environ.get("CBM_CACHE_DIR", ""),
-        "cross_pattern_arg": f'--pattern "{normalize_bre_pattern(pattern)}"'
-        if query.get("cross_pattern")
-        else "",
     }
+    values = {key: shlex.quote(str(value)) for key, value in raw_values.items()}
+    values["cross_pattern_arg"] = (
+        f"--pattern {shlex.quote(normalize_bre_pattern(pattern))}"
+        if query.get("cross_pattern")
+        else ""
+    )
+
+    codebase_project = raw_values["codebase_memory_project"]
+    values["codebase_memory_symbol_payload"] = shlex.quote(
+        json.dumps({"project": codebase_project, "name_pattern": pattern, "limit": top_k})
+    )
+    values["codebase_memory_usage_payload"] = shlex.quote(
+        json.dumps({"project": codebase_project, "pattern": raw_values["symbol"], "limit": top_k * 3})
+    )
+    values["codebase_memory_concept_payload"] = shlex.quote(
+        json.dumps({"project": codebase_project, "pattern": pattern, "limit": top_k * 3})
+    )
+    values["codebase_memory_cross_payload"] = values["codebase_memory_concept_payload"]
 
     rendered = template
     for field_name, raw in values.items():

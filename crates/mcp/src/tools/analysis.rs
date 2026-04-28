@@ -188,7 +188,12 @@ pub(crate) fn call_rename_symbol(engine: &mut Engine, args: &Value) -> (String, 
                     .map(|ff| f.contains(ff.as_str()))
                     .unwrap_or(true)
             })
-            .filter_map(|rel| engine.config().resolve_path(&rel))
+            .map(|rel| {
+                engine
+                    .config()
+                    .resolve_path(&rel)
+                    .unwrap_or_else(|| engine.config().root.join(rel))
+            })
             .collect()
     };
 

@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use regex::Regex;
 use tracing_subscriber::EnvFilter;
 
 use codixing_core::{
@@ -1791,11 +1792,11 @@ fn filter_ranked_files_by_pattern(
     ranked: Vec<(String, f32)>,
     pattern: &str,
 ) -> Result<Vec<(String, f32)>> {
+    Regex::new(pattern).with_context(|| format!("invalid --pattern regex: {pattern}"))?;
+
     let mut filtered = Vec::new();
     for (file, score) in ranked {
-        let matches = engine
-            .grep_code(pattern, false, Some(&file), 0, 1)
-            .with_context(|| format!("invalid --pattern regex: {pattern}"))?;
+        let matches = engine.grep_code(pattern, false, Some(&file), 0, 1)?;
         if !matches.is_empty() {
             filtered.push((file, score));
         }

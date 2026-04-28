@@ -247,20 +247,41 @@ impl ImportResolver {
         }
 
         let mut candidates = Vec::new();
+        let mut src_suffix_directory_candidates = Vec::new();
         candidates.push(import.to_string());
         candidates.push(format!("src/{import}"));
 
         // Try package-suffix aliases, e.g. `@scope/pkg/foo` -> `src/pkg/foo`.
-        // Keep one-segment suffixes only for directory-index resolution below.
         for start in 1..parts.len() {
             let suffix = parts[start..].join("/");
             candidates.push(suffix.clone());
-            candidates.push(format!("src/{suffix}"));
+            if suffix.contains('/') {
+                candidates.push(format!("src/{suffix}"));
+            } else {
+                src_suffix_directory_candidates.push(format!("src/{suffix}"));
+            }
         }
 
         for base in candidates {
             if let Some(path) = self.resolve_js_ts_candidate(&base) {
                 return Some(path);
+            }
+        }
+
+        for base in src_suffix_directory_candidates {
+            if let Some(path) = self.resolve_js_ts_directory_index_candidate(&base) {
+                return Some(path);
+            }
+        }
+
+        None
+    }
+
+    fn resolve_js_ts_directory_index_candidate(&self, base: &str) -> Option<String> {
+        for ext in &["ts", "tsx", "js", "jsx"] {
+            let candidate = format!("{base}/index.{ext}");
+            if self.indexed_files.contains(&candidate) {
+                return Some(candidate);
             }
         }
 

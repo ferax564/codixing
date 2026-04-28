@@ -81,10 +81,10 @@ which is what happened during the v0.41 shipped-verification.
 | `agent_benchmark_large_march_replay_medium.md` | 2026-04-14 | fresh |
 | `agent_benchmark_large.json` | 2026-04-14 | fresh |
 | `agent_benchmark_large.md` | 2026-04-14 | fresh |
-| `competitor_benchmark.json` | 2026-04-27 | fresh |
-| `competitor_benchmark.md` | 2026-04-27 | fresh |
-| `external_competitor_benchmark.json` | 2026-04-27 | fresh |
-| `external_competitor_benchmark.md` | 2026-04-27 | fresh |
+| `competitor_benchmark.json` | 2026-04-28 | fresh |
+| `competitor_benchmark.md` | 2026-04-28 | fresh |
+| `external_competitor_benchmark.json` | 2026-04-28 | fresh |
+| `external_competitor_benchmark.md` | 2026-04-28 | fresh |
 
 ## Re-running
 
