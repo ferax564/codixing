@@ -323,13 +323,13 @@ cargo bench --bench search_bench -- --baseline v0.41
 
 Criterion emits the delta inline:
 
-```
+```text
 bm25_search_identifier  time:   [72.4 µs 72.5 µs 72.6 µs]
                         change: [-1.2% +0.1% +1.5%] (p = 0.87 > 0.05)
                         No change in performance detected.
 ```
 
-See `benchmarks/results/README.md` § "Release-to-release performance comparison" for the full workflow. Named baselines live under `target/criterion/<bench>/<name>/` and survive `cargo clean` (criterion owns the directory).
+See `benchmarks/results/README.md` § "Release-to-release performance comparison" for the full workflow. Named baselines live under `target/criterion/<bench>/<name>/`, but `cargo clean` removes `target/`, including Criterion baselines and reports.
 
 ## Embedding Model Benchmark
 

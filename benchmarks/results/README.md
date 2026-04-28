@@ -31,15 +31,18 @@ cargo bench --bench search_bench -- --baseline v0.41
 
 Criterion will emit the delta inline per benchmark:
 
-```
+```text
 bm25_search_identifier  time:   [72.4 µs 72.5 µs 72.6 µs]
                         change: [-1.2% +0.1% +1.5%] (p = 0.87 > 0.05)
                         No change in performance detected.
 ```
 
-Named baselines live under `target/criterion/<bench>/<name>/` and survive
-`cargo clean` (criterion owns `target/criterion/`, not cargo). They are **not**
-committed — each developer captures their own locally against release tags.
+Named baselines live under `target/criterion/<bench>/<name>/`, but
+`cargo clean` removes the entire `target/` directory, including Criterion
+baselines and reports. They are **not** committed — each developer captures
+their own locally against release tags. Back up `target/criterion/` or store
+baselines as versioned artifacts before running `cargo clean` if you need to
+preserve them.
 
 **Recommended capture points:**
 
