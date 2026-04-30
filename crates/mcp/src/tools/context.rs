@@ -101,6 +101,8 @@ pub(crate) fn call_get_context_for_task(
 }
 
 pub(crate) fn call_assemble_location_context(engine: &Engine, args: &Value) -> (String, bool) {
+    use codixing_core::engine::context_assembly::BudgetMode;
+
     let file = match args.get("file").and_then(|v| v.as_str()) {
         Some(f) => f.to_string(),
         None => return ("Missing required argument: file".to_string(), true),
@@ -110,13 +112,32 @@ pub(crate) fn call_assemble_location_context(engine: &Engine, args: &Value) -> (
         .get("token_budget")
         .and_then(|v| v.as_u64())
         .unwrap_or(4096) as usize;
+    let budget_mode = match args.get("budget_mode").and_then(|v| v.as_str()) {
+        Some("strict") => BudgetMode::Strict,
+        _ => BudgetMode::Soft,
+    };
 
-    let ctx = engine.assemble_context_for_location(&file, line, token_budget);
+    let ctx =
+        engine.assemble_context_for_location_with_mode(&file, line, token_budget, budget_mode);
 
+    let over_marker = if ctx.over_budget {
+        " ⚠ over budget"
+    } else {
+        ""
+    };
     let mut out = format!(
-        "## Context: {}:{}\n\nToken budget: {} | Used: {}\n\n",
-        ctx.primary.file_path, line, token_budget, ctx.total_tokens
+        "## Context: {}:{}\n\nToken budget: {} ({}) | Used: {}{}\n",
+        ctx.primary.file_path,
+        line,
+        token_budget,
+        ctx.budget_mode.as_str(),
+        ctx.total_tokens,
+        over_marker
     );
+    if let Some(reason) = &ctx.oversize_reason {
+        out.push_str(&format!("Note: {reason}\n"));
+    }
+    out.push('\n');
 
     out.push_str(&format!(
         "### Primary (L{}\u{2013}L{})\n```\n{}\n```\n\n",

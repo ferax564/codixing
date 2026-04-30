@@ -17,3 +17,7 @@ description = "Line number (0-indexed, default: 0)"
 [tools.params.token_budget]
 type = "integer"
 description = "Maximum token budget (default: 4096)"
+
+[tools.params.budget_mode]
+type = "string"
+description = "How to treat token_budget. 'soft' (default) emits the primary chunk in full even if it overshoots and reports the overshoot in the response header; 'strict' slices the primary chunk into a line window centered on the requested line so the assembled context fits the budget."
