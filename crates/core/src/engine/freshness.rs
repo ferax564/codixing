@@ -19,8 +19,10 @@ pub struct FreshnessOptions {
     pub threshold_days: u64,
     /// Glob pattern to include (substring match, e.g. "*.rs", "crates/").
     pub include_pattern: Option<String>,
-    /// Additional exclude pattern (substring match).
-    pub exclude_pattern: Option<String>,
+    /// Substring patterns to exclude. A file matches if it contains *any*
+    /// of these patterns. Empty vec = no extra exclusion beyond the
+    /// orphan-detection defaults.
+    pub exclude_patterns: Vec<String>,
 }
 
 impl Default for FreshnessOptions {
@@ -28,7 +30,7 @@ impl Default for FreshnessOptions {
         Self {
             threshold_days: 21,
             include_pattern: None,
-            exclude_pattern: None,
+            exclude_patterns: Vec::new(),
         }
     }
 }
@@ -126,7 +128,7 @@ impl Engine {
             if let Some(ref inc) = options.include_pattern {
                 orphan_opts.include_patterns = vec![inc.clone()];
             }
-            if let Some(ref exc) = options.exclude_pattern {
+            for exc in &options.exclude_patterns {
                 orphan_opts.exclude_patterns.push(exc.clone());
             }
             self.find_orphans(orphan_opts)
@@ -162,10 +164,12 @@ impl Engine {
                     continue;
                 }
             }
-            if let Some(ref exc) = options.exclude_pattern {
-                if file.contains(exc.as_str()) {
-                    continue;
-                }
+            if options
+                .exclude_patterns
+                .iter()
+                .any(|p| file.contains(p.as_str()))
+            {
+                continue;
             }
 
             // Compute days since last commit.
@@ -301,7 +305,7 @@ mod tests {
         let report = engine.audit_freshness(FreshnessOptions {
             threshold_days: 180,
             include_pattern: None,
-            exclude_pattern: None,
+            exclude_patterns: Vec::new(),
         });
 
         assert!(
@@ -310,5 +314,46 @@ mod tests {
              file_chunk_counts is empty, got files_audited={}",
             report.files_audited
         );
+    }
+
+    #[test]
+    fn audit_excludes_every_pattern_in_the_list() {
+        // Regression for #103: --exclude must accept multiple patterns and
+        // skip files matching ANY of them. Pre-fix the CLI rejected repeated
+        // --exclude flags entirely; post-fix the option is `Vec<String>` and
+        // the freshness loop matches with `.any()`.
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::write(
+            root.join("real.rs"),
+            "fn hello() { world(); }\nfn world() {}\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("vendor")).unwrap();
+        fs::write(root.join("vendor/dep.rs"), "fn vendored() {}\n").unwrap();
+        fs::create_dir_all(root.join("node_modules")).unwrap();
+        fs::write(
+            root.join("node_modules/m.rs"),
+            "fn from_node_modules() {}\n",
+        )
+        .unwrap();
+
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+        let engine = Engine::init(&root, config).unwrap();
+
+        let report = engine.audit_freshness(FreshnessOptions {
+            threshold_days: 0,
+            include_pattern: None,
+            exclude_patterns: vec!["vendor".to_string(), "node_modules".to_string()],
+        });
+
+        for entry in &report.entries {
+            assert!(
+                !entry.file_path.contains("vendor") && !entry.file_path.contains("node_modules"),
+                "exclude patterns leaked into report: {}",
+                entry.file_path
+            );
+        }
     }
 }

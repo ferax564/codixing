@@ -477,8 +477,10 @@ enum Command {
         include: Option<String>,
 
         /// File pattern to exclude (substring match, e.g. "test", "vendor").
-        #[arg(long)]
-        exclude: Option<String>,
+        /// May be repeated to exclude multiple patterns:
+        /// `--exclude .codixing --exclude node_modules`.
+        #[arg(long, action = clap::ArgAction::Append)]
+        exclude: Vec<String>,
 
         /// Project root directory (defaults to current directory).
         #[arg(default_value = ".")]
@@ -2592,7 +2594,7 @@ fn cmd_audit(
     path: PathBuf,
     threshold_days: u64,
     include: Option<String>,
-    exclude: Option<String>,
+    exclude: Vec<String>,
 ) -> Result<()> {
     let root = path
         .canonicalize()
@@ -2608,7 +2610,7 @@ fn cmd_audit(
     let options = FreshnessOptions {
         threshold_days,
         include_pattern: include,
-        exclude_pattern: exclude,
+        exclude_patterns: exclude,
     };
 
     let report = engine.audit_freshness(options);

@@ -14,15 +14,22 @@ pub(crate) fn call_audit_freshness(engine: &Engine, args: &Value) -> (String, bo
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let exclude_pattern = args
-        .get("exclude")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    // Accept either a single string or an array of strings for `exclude` so
+    // existing single-pattern callers keep working while agents can pass a
+    // mixed list like ["node_modules", "vendor", ".codixing"] in one call.
+    let exclude_patterns = match args.get("exclude") {
+        Some(Value::String(s)) => vec![s.clone()],
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect(),
+        _ => Vec::new(),
+    };
 
     let options = FreshnessOptions {
         threshold_days,
         include_pattern,
-        exclude_pattern,
+        exclude_patterns,
     };
 
     let report = engine.audit_freshness(options);
