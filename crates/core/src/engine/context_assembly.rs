@@ -10,6 +10,36 @@ use crate::retriever::SearchResult;
 
 use super::Engine;
 
+/// How the assembler treats `token_budget`.
+///
+/// `Soft` (default) preserves the legacy behavior: the primary chunk is
+/// emitted in full even if it exceeds the budget on its own, and only the
+/// derived imports/callees/examples are bounded. `Strict` enforces the
+/// budget as a hard cap by slicing the primary chunk down to a window of
+/// lines around the caller-supplied line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub enum BudgetMode {
+    /// Budget is a target. Primary chunks larger than the budget are kept
+    /// intact, and `AssembledContext::over_budget` is set so callers can
+    /// surface the overshoot.
+    #[default]
+    Soft,
+    /// Budget is a hard cap. The primary chunk is sliced around the focus
+    /// line until the assembled context fits, even if that means dropping
+    /// the surrounding function body.
+    Strict,
+}
+
+impl BudgetMode {
+    /// Stable string label used in CLI/MCP output.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BudgetMode::Soft => "soft",
+            BudgetMode::Strict => "strict",
+        }
+    }
+}
+
 /// Assembled cross-file context for a code location.
 #[derive(Debug, Clone, Serialize)]
 pub struct AssembledContext {
@@ -23,6 +53,17 @@ pub struct AssembledContext {
     pub examples: Vec<UsageExample>,
     /// Total estimated token count of the assembled context.
     pub total_tokens: usize,
+    /// Budget the caller asked for, before any soft/strict adjustment.
+    pub requested_budget: usize,
+    /// Whether the budget was treated as a target (`Soft`) or hard cap
+    /// (`Strict`).
+    pub budget_mode: BudgetMode,
+    /// True when `total_tokens > requested_budget`. Always false for
+    /// `Strict` unless the minimum 1-line slice still overshoots.
+    pub over_budget: bool,
+    /// Human-readable explanation when the assembled context could not be
+    /// shrunk further. `None` when the budget is satisfied.
+    pub oversize_reason: Option<String>,
 }
 
 /// A snippet of code from a related file, used as context.
@@ -45,16 +86,112 @@ pub fn estimate_token_count(text: &str) -> usize {
     text.len().div_ceil(4)
 }
 
+/// In-place shrink the primary chunk to a line window centered on `focus_line`
+/// such that the resulting content fits within ~80% of `budget` (leaving room
+/// for the imports/callees/examples sections).
+///
+/// `focus_line` is the absolute file line (0-indexed) the caller asked about.
+/// The window is grown symmetrically until adding more lines would exceed the
+/// budget. Always preserves at least one line — the focus line itself.
+fn shrink_primary_to_window(
+    primary: &mut SearchResult,
+    file: &str,
+    focus_line: u64,
+    budget: usize,
+    engine: &Engine,
+) {
+    // Reserve ~20% of the budget for the dependent sections so a strict
+    // budget still produces useful import/callee context.
+    let primary_target = budget.saturating_sub(budget / 5).max(64);
+
+    // Re-read the file as raw lines so we can grow a symmetric window.
+    let abs = engine
+        .config
+        .resolve_path(file)
+        .unwrap_or_else(|| engine.config.root.join(file));
+    let file_text = match std::fs::read_to_string(&abs) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    let lines: Vec<&str> = file_text.lines().collect();
+    let total = lines.len();
+    if total == 0 {
+        return;
+    }
+    let focus = (focus_line as usize).min(total.saturating_sub(1));
+
+    let mut start = focus;
+    let mut end = focus;
+    let mut content = lines[focus].to_string();
+    let mut tokens = estimate_token_count(&content);
+
+    loop {
+        let can_grow_up = start > 0;
+        let can_grow_down = end + 1 < total;
+        if !can_grow_up && !can_grow_down {
+            break;
+        }
+
+        // Pick the side that grows the smaller token jump first.
+        let up_cost = if can_grow_up {
+            estimate_token_count(lines[start - 1]) + 1
+        } else {
+            usize::MAX
+        };
+        let down_cost = if can_grow_down {
+            estimate_token_count(lines[end + 1]) + 1
+        } else {
+            usize::MAX
+        };
+        let pick_up = up_cost <= down_cost;
+
+        let next_tokens = if pick_up {
+            tokens + up_cost
+        } else {
+            tokens + down_cost
+        };
+        if next_tokens > primary_target {
+            break;
+        }
+
+        if pick_up {
+            start -= 1;
+        } else {
+            end += 1;
+        }
+        content = lines[start..=end].join("\n");
+        tokens = next_tokens;
+    }
+
+    primary.line_start = start as u64;
+    primary.line_end = end as u64;
+    primary.content = content;
+}
+
 impl Engine {
     /// Assemble cross-file context for a code location specified by file path and line.
     ///
     /// This is the primary entry point for the CLI and MCP tool. It constructs
     /// a minimal `SearchResult` for the location and delegates to `assemble_context`.
+    ///
+    /// Backwards-compatible shim: defaults to `BudgetMode::Soft` so existing
+    /// callers see the legacy "primary chunk emitted in full" behavior.
     pub fn assemble_context_for_location(
         &self,
         file: &str,
         line: u64,
         token_budget: usize,
+    ) -> AssembledContext {
+        self.assemble_context_for_location_with_mode(file, line, token_budget, BudgetMode::Soft)
+    }
+
+    /// Assemble cross-file context for a code location with explicit budget mode.
+    pub fn assemble_context_for_location_with_mode(
+        &self,
+        file: &str,
+        line: u64,
+        token_budget: usize,
+        mode: BudgetMode,
     ) -> AssembledContext {
         // Read the file content around the target line to construct a primary result.
         let content = self
@@ -87,7 +224,7 @@ impl Engine {
             (line, line.saturating_add(30), String::new(), content)
         };
 
-        let primary = SearchResult {
+        let mut primary = SearchResult {
             chunk_id: format!("{file}:{line_start}"),
             file_path: file.to_string(),
             language: String::new(),
@@ -99,7 +236,17 @@ impl Engine {
             content,
         };
 
-        self.assemble_context(&primary, token_budget)
+        // Strict mode: shrink the primary chunk to a window around `line`
+        // before letting `assemble_context` allocate the imports/callees
+        // budget. Without this the primary chunk alone can exceed the
+        // budget and the rest of the context degenerates to nothing.
+        if mode == BudgetMode::Strict
+            && estimate_token_count(&primary.content) > token_budget.saturating_sub(64)
+        {
+            shrink_primary_to_window(&mut primary, file, line, token_budget, self);
+        }
+
+        self.assemble_context_with_mode(&primary, token_budget, mode)
     }
 
     /// Assemble cross-file context for a search result.
@@ -117,6 +264,21 @@ impl Engine {
     /// 3. **Usage examples (30%)**: From `find_usage_examples`. Fit within
     ///    remaining budget.
     pub fn assemble_context(&self, result: &SearchResult, token_budget: usize) -> AssembledContext {
+        self.assemble_context_with_mode(result, token_budget, BudgetMode::Soft)
+    }
+
+    /// Assemble cross-file context with explicit `BudgetMode`.
+    ///
+    /// `Soft` keeps the primary chunk intact even when it exceeds `token_budget`
+    /// and reports the overshoot via `AssembledContext::over_budget`.
+    /// `Strict` expects the caller to have already shrunk the primary chunk
+    /// (see `assemble_context_for_location_with_mode`).
+    pub fn assemble_context_with_mode(
+        &self,
+        result: &SearchResult,
+        token_budget: usize,
+        mode: BudgetMode,
+    ) -> AssembledContext {
         let primary_tokens = estimate_token_count(&result.content);
         let remaining = token_budget.saturating_sub(primary_tokens);
 
@@ -147,12 +309,29 @@ impl Engine {
                 .map(|e| estimate_token_count(&e.context))
                 .sum::<usize>();
 
+        let over_budget = total_tokens > token_budget;
+        let oversize_reason = if over_budget {
+            // The only way the assembler exceeds the requested budget is when
+            // the primary chunk is itself larger than the budget — derived
+            // sections honor `import_budget`/`callee_budget`/`example_budget`.
+            let span = result.line_end.saturating_sub(result.line_start) + 1;
+            Some(format!(
+                "primary chunk indivisible (function spans {span} line(s), {primary_tokens} tokens > budget {token_budget}); pass --budget-mode strict to slice the primary chunk around --line N",
+            ))
+        } else {
+            None
+        };
+
         AssembledContext {
             primary: result.clone(),
             imports,
             callees,
             examples,
             total_tokens,
+            requested_budget: token_budget,
+            budget_mode: mode,
+            over_budget,
+            oversize_reason,
         }
     }
 
@@ -369,9 +548,107 @@ mod tests {
             callees: Vec::new(),
             examples: Vec::new(),
             total_tokens: 10,
+            requested_budget: 4096,
+            budget_mode: BudgetMode::Soft,
+            over_budget: false,
+            oversize_reason: None,
         };
         let json = serde_json::to_string(&ctx).unwrap();
         assert!(json.contains("src/main.rs"));
         assert!(json.contains("src/config.rs"));
+        assert!(json.contains("\"budget_mode\":\"Soft\""));
+    }
+
+    #[test]
+    fn soft_mode_records_overshoot_with_reason() {
+        // Regression for #102: soft mode must report when the primary chunk
+        // alone exceeds the requested budget so callers can surface the
+        // overshoot instead of silently shipping over the cap.
+        use crate::{Engine, IndexConfig};
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        // Build a single very large function so the primary chunk is
+        // indivisible under the legacy assembler.
+        let mut body = String::from("fn big() {\n");
+        for i in 0..400 {
+            body.push_str(&format!("    let x{i} = {i} + {i};\n"));
+        }
+        body.push_str("}\n");
+        fs::write(root.join("big.rs"), &body).unwrap();
+
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+        let engine = Engine::init(&root, config).unwrap();
+
+        let ctx = engine.assemble_context_for_location_with_mode(
+            "big.rs",
+            5,
+            500, // tiny budget vs ~2.5K-token function
+            BudgetMode::Soft,
+        );
+        assert!(
+            ctx.over_budget,
+            "soft mode should flag overshoot: total={}, budget={}",
+            ctx.total_tokens, ctx.requested_budget
+        );
+        let reason = ctx.oversize_reason.as_deref().unwrap_or_default();
+        assert!(
+            reason.contains("primary chunk indivisible"),
+            "reason should explain why: {reason}"
+        );
+        assert!(
+            reason.contains("--budget-mode strict"),
+            "reason should point at the strict escape hatch: {reason}"
+        );
+    }
+
+    #[test]
+    fn strict_mode_slices_primary_to_fit_budget() {
+        // Regression for #102: strict mode must enforce the budget as a
+        // hard cap by slicing the primary chunk around `--line N`.
+        use crate::{Engine, IndexConfig};
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let mut body = String::from("fn big() {\n");
+        for i in 0..400 {
+            body.push_str(&format!("    let x{i} = {i} + {i};\n"));
+        }
+        body.push_str("}\n");
+        fs::write(root.join("big.rs"), &body).unwrap();
+
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+        let engine = Engine::init(&root, config).unwrap();
+
+        let budget = 500;
+        let ctx = engine.assemble_context_for_location_with_mode(
+            "big.rs",
+            200,
+            budget,
+            BudgetMode::Strict,
+        );
+        assert!(
+            ctx.total_tokens <= budget,
+            "strict mode should keep total ≤ budget: total={}, budget={}",
+            ctx.total_tokens,
+            budget
+        );
+        assert!(
+            !ctx.over_budget,
+            "strict mode should not be flagged over budget when slicing succeeded"
+        );
+        // Window centered on line 200 should have shrunk the original
+        // 400+ line function into something much smaller.
+        let span = ctx.primary.line_end - ctx.primary.line_start + 1;
+        assert!(
+            span < 400,
+            "primary chunk should have been sliced down (span={span})"
+        );
     }
 }

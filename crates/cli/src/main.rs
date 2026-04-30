@@ -545,10 +545,34 @@ enum Command {
         #[arg(long, default_value = "4096")]
         token_budget: usize,
 
+        /// How to treat `--token-budget`. `soft` (default) emits the
+        /// primary chunk in full even when it exceeds the budget and
+        /// reports the overshoot; `strict` slices the primary chunk to a
+        /// line window around `--line N` so the assembled context fits.
+        #[arg(long, value_enum, default_value_t = BudgetModeArg::Soft)]
+        budget_mode: BudgetModeArg,
+
         /// Output as JSON.
         #[arg(long)]
         json: bool,
     },
+}
+
+/// Mirror of `codixing_core::context_assembly::BudgetMode` for clap.
+/// Kept separate so we don't have to derive `ValueEnum` in the core crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum BudgetModeArg {
+    Soft,
+    Strict,
+}
+
+impl From<BudgetModeArg> for codixing_core::engine::context_assembly::BudgetMode {
+    fn from(value: BudgetModeArg) -> Self {
+        match value {
+            BudgetModeArg::Soft => Self::Soft,
+            BudgetModeArg::Strict => Self::Strict,
+        }
+    }
 }
 
 /// Subcommands for the `codixing filter` command.
@@ -887,8 +911,9 @@ async fn async_main() -> Result<()> {
             file,
             line,
             token_budget,
+            budget_mode,
             json,
-        } => cmd_context(file, line, token_budget, json),
+        } => cmd_context(file, line, token_budget, budget_mode.into(), json),
     }
 }
 
@@ -2897,7 +2922,13 @@ fn cmd_examples(symbol: String, limit: usize, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_context(file: String, line: u64, token_budget: usize, json: bool) -> Result<()> {
+fn cmd_context(
+    file: String,
+    line: u64,
+    token_budget: usize,
+    budget_mode: codixing_core::engine::context_assembly::BudgetMode,
+    json: bool,
+) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
     let engine = Engine::open(&root).with_context(|| {
         format!(
@@ -2906,7 +2937,8 @@ fn cmd_context(file: String, line: u64, token_budget: usize, json: bool) -> Resu
         )
     })?;
 
-    let ctx = engine.assemble_context_for_location(&file, line, token_budget);
+    let ctx =
+        engine.assemble_context_for_location_with_mode(&file, line, token_budget, budget_mode);
 
     if json {
         println!("{}", serde_json::to_string_pretty(&ctx)?);
@@ -2914,10 +2946,22 @@ fn cmd_context(file: String, line: u64, token_budget: usize, json: bool) -> Resu
     }
 
     println!("# Context: {}:{}\n", ctx.primary.file_path, line);
+    let over_marker = if ctx.over_budget {
+        " ⚠ over budget"
+    } else {
+        ""
+    };
     println!(
-        "Token budget: {} | Used: {}\n",
-        token_budget, ctx.total_tokens
+        "Token budget: {} ({}) | Used: {}{}",
+        token_budget,
+        ctx.budget_mode.as_str(),
+        ctx.total_tokens,
+        over_marker
     );
+    if let Some(reason) = &ctx.oversize_reason {
+        println!("Note: {reason}");
+    }
+    println!();
 
     println!(
         "## Primary chunk (L{}-L{})",
