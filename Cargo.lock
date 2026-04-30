@@ -682,7 +682,7 @@ dependencies = [
 
 [[package]]
 name = "codixing"
-version = "0.41.1"
+version = "0.41.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -699,7 +699,7 @@ dependencies = [
 
 [[package]]
 name = "codixing-core"
-version = "0.41.1"
+version = "0.41.2"
 dependencies = [
  "bitcode",
  "codixing-core",
@@ -764,7 +764,7 @@ dependencies = [
 
 [[package]]
 name = "codixing-lsp"
-version = "0.41.1"
+version = "0.41.2"
 dependencies = [
  "codixing-core",
  "serde_json",
@@ -779,7 +779,7 @@ dependencies = [
 
 [[package]]
 name = "codixing-mcp"
-version = "0.41.1"
+version = "0.41.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -796,7 +796,7 @@ dependencies = [
 
 [[package]]
 name = "codixing-server"
-version = "0.41.1"
+version = "0.41.2"
 dependencies = [
  "anyhow",
  "axum 0.8.8",
