@@ -253,6 +253,21 @@ enum Command {
         /// symbol or import shape.
         #[arg(long)]
         pattern: Option<String>,
+
+        /// Also count call-graph edges, not just real imports. Off by
+        /// default — call edges are not enforceable architectural
+        /// boundaries and produce false positives when an unrelated
+        /// function call shares a name with a symbol in the target
+        /// package (issue #101).
+        #[arg(long)]
+        include_calls: bool,
+
+        /// Hide the matched-import evidence printed beneath each result.
+        /// Default output shows `↳ <target> via <raw import>` for the
+        /// first matched edge so callers can verify the boundary claim
+        /// without re-reading the source.
+        #[arg(long)]
+        no_evidence: bool,
     },
 
     /// Literal or regex text scan across indexed files (trigram-accelerated).
@@ -885,7 +900,13 @@ async fn async_main() -> Result<()> {
         Command::Callers { file, depth } => cmd_callers(file, depth),
         Command::Callees { file, depth } => cmd_callees(file, depth),
         Command::Dependencies { file, depth } => cmd_dependencies(file, depth),
-        Command::CrossImports { from, to, pattern } => cmd_cross_imports(from, to, pattern),
+        Command::CrossImports {
+            from,
+            to,
+            pattern,
+            include_calls,
+            no_evidence,
+        } => cmd_cross_imports(from, to, pattern, include_calls, no_evidence),
         Command::Grep {
             pattern,
             file,
@@ -1847,7 +1868,15 @@ fn cmd_dependencies(file: String, depth: usize) -> Result<()> {
     Ok(())
 }
 
-fn cmd_cross_imports(from: String, to: String, pattern: Option<String>) -> Result<()> {
+fn cmd_cross_imports(
+    from: String,
+    to: String,
+    pattern: Option<String>,
+    include_calls: bool,
+    no_evidence: bool,
+) -> Result<()> {
+    use codixing_core::graph::EdgeKind;
+
     let root = std::env::current_dir().context("cannot determine current directory")?;
     let engine = Engine::open(&root).with_context(|| {
         format!(
@@ -1856,11 +1885,29 @@ fn cmd_cross_imports(from: String, to: String, pattern: Option<String>) -> Resul
         )
     })?;
 
-    let mut ranked = engine.cross_imports_ranked(&from, &to, None);
+    let kinds: Vec<EdgeKind> = if include_calls {
+        vec![EdgeKind::Resolved, EdgeKind::External, EdgeKind::Calls]
+    } else {
+        vec![EdgeKind::Resolved, EdgeKind::External]
+    };
+
+    let mut ranked_with_evidence = engine.cross_imports_ranked_with_evidence(&from, &to, &kinds);
+
+    // Re-apply the pattern filter on top of the evidence-aware list so
+    // `--pattern` keeps working without losing the matched-edge metadata.
     if let Some(pattern) = pattern.as_deref() {
-        ranked = filter_ranked_files_by_pattern(&engine, ranked, pattern)?;
+        Regex::new(pattern).with_context(|| format!("invalid --pattern regex: {pattern}"))?;
+        let mut filtered = Vec::new();
+        for entry in ranked_with_evidence.into_iter() {
+            let matches = engine.grep_code(pattern, false, Some(&entry.0), 0, 1)?;
+            if !matches.is_empty() {
+                filtered.push(entry);
+            }
+        }
+        ranked_with_evidence = filtered;
     }
-    if ranked.is_empty() {
+
+    if ranked_with_evidence.is_empty() {
         if let Some(pattern) = pattern.as_deref() {
             eprintln!(
                 "No files in \"{}\" import from \"{}\" and match pattern \"{}\"",
@@ -1872,12 +1919,31 @@ fn cmd_cross_imports(from: String, to: String, pattern: Option<String>) -> Resul
         return Ok(());
     }
 
-    for (f, score) in &ranked {
-        println!("{f} (score: {score:.3})");
+    for (file, score, evidence) in &ranked_with_evidence {
+        println!("{file} (score: {score:.3})");
+        if !no_evidence {
+            // Show the strongest matched edge so the user can verify the
+            // boundary claim without re-grepping the source. We pick the
+            // first entry since edges are accumulated in graph-iteration
+            // order; multiple edges per source are rare but possible.
+            if let Some((target, raw_import, kind)) = evidence.first() {
+                let kind_label = match kind {
+                    EdgeKind::Resolved => "import",
+                    EdgeKind::External => "external import",
+                    EdgeKind::Calls => "call",
+                    EdgeKind::DocumentedBy => "doc reference",
+                };
+                if raw_import.is_empty() {
+                    println!("    ↳ {target} ({kind_label})");
+                } else {
+                    println!("    ↳ {target} via `{raw_import}` ({kind_label})");
+                }
+            }
+        }
     }
     eprintln!(
         "\n{} file(s) in \"{}\" import from \"{}\"{}.",
-        ranked.len(),
+        ranked_with_evidence.len(),
         from,
         to,
         pattern
@@ -1886,23 +1952,6 @@ fn cmd_cross_imports(from: String, to: String, pattern: Option<String>) -> Resul
             .unwrap_or_default()
     );
     Ok(())
-}
-
-fn filter_ranked_files_by_pattern(
-    engine: &Engine,
-    ranked: Vec<(String, f32)>,
-    pattern: &str,
-) -> Result<Vec<(String, f32)>> {
-    Regex::new(pattern).with_context(|| format!("invalid --pattern regex: {pattern}"))?;
-
-    let mut filtered = Vec::new();
-    for (file, score) in ranked {
-        let matches = engine.grep_code(pattern, false, Some(&file), 0, 1)?;
-        if !matches.is_empty() {
-            filtered.push((file, score));
-        }
-    }
-    Ok(filtered)
 }
 
 fn cmd_usages(

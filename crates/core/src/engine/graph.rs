@@ -74,6 +74,8 @@ impl Engine {
     /// Find files under `from_prefix` that import any file under `to_prefix`, ranked by relevance.
     ///
     /// Results are sorted by score descending: score = sum(target_pagerank) × (1 + recency_boost).
+    /// Considers only true import-graph edges (Resolved + External). Use
+    /// [`Self::cross_imports_ranked_with_kinds`] to broaden the kinds.
     pub fn cross_imports_ranked(
         &self,
         from_prefix: &str,
@@ -86,6 +88,45 @@ impl Engine {
                 let recency = self.get_recency_map();
                 g.cross_imports_ranked(from_prefix, to_prefix, Some(recency), limit)
             })
+            .unwrap_or_default()
+    }
+
+    /// Lower-level variant of [`Self::cross_imports_ranked`] that lets
+    /// the caller pick which `EdgeKind`s count as an import-boundary edge.
+    pub fn cross_imports_ranked_with_kinds(
+        &self,
+        from_prefix: &str,
+        to_prefix: &str,
+        limit: Option<usize>,
+        kinds: &[crate::graph::EdgeKind],
+    ) -> Vec<(String, f32)> {
+        self.graph
+            .as_ref()
+            .map(|g| {
+                let recency = self.get_recency_map();
+                g.cross_imports_ranked_with_kinds(
+                    from_prefix,
+                    to_prefix,
+                    Some(recency),
+                    limit,
+                    kinds,
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    /// Cross-imports query that returns matched-edge evidence per source
+    /// file. Each tuple is `(source_path, score, vec![(target_path,
+    /// raw_import, edge_kind), ...])`.
+    pub fn cross_imports_ranked_with_evidence(
+        &self,
+        from_prefix: &str,
+        to_prefix: &str,
+        kinds: &[crate::graph::EdgeKind],
+    ) -> Vec<crate::graph::CrossImportEvidenceRow> {
+        self.graph
+            .as_ref()
+            .map(|g| g.cross_imports_ranked_with_evidence(from_prefix, to_prefix, kinds))
             .unwrap_or_default()
     }
 
