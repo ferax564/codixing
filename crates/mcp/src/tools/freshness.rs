@@ -1,6 +1,6 @@
 //! MCP handler for the `audit_freshness` tool.
 
-use codixing_core::{Engine, FreshnessOptions, FreshnessTier};
+use codixing_core::{AuditProfile, Engine, FreshnessOptions, FreshnessTier};
 use serde_json::Value;
 
 pub(crate) fn call_audit_freshness(engine: &Engine, args: &Value) -> (String, bool) {
@@ -26,10 +26,17 @@ pub(crate) fn call_audit_freshness(engine: &Engine, args: &Value) -> (String, bo
         _ => Vec::new(),
     };
 
+    let profile = match args.get("profile").and_then(|v| v.as_str()) {
+        Some("code") => AuditProfile::Code,
+        Some("app") => AuditProfile::App,
+        _ => AuditProfile::Mixed,
+    };
+
     let options = FreshnessOptions {
         threshold_days,
         include_pattern,
         exclude_patterns,
+        profile,
     };
 
     let report = engine.audit_freshness(options);

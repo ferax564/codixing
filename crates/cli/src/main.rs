@@ -501,6 +501,13 @@ enum Command {
         #[arg(long, action = clap::ArgAction::Append)]
         exclude: Vec<String>,
 
+        /// Audit profile, controls how documentation/static assets are
+        /// classified. `mixed` (default) treats docs/templates/assets as
+        /// `Info` so they never show up as `Critical` dead code; `code`
+        /// excludes them entirely; `app` keeps the legacy firehose.
+        #[arg(long, value_enum, default_value_t = AuditProfileArg::Mixed)]
+        profile: AuditProfileArg,
+
         /// Project root directory (defaults to current directory).
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -583,6 +590,24 @@ enum Command {
 enum BudgetModeArg {
     Soft,
     Strict,
+}
+
+/// Mirror of `codixing_core::AuditProfile` for clap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum AuditProfileArg {
+    Code,
+    Mixed,
+    App,
+}
+
+impl From<AuditProfileArg> for codixing_core::AuditProfile {
+    fn from(value: AuditProfileArg) -> Self {
+        match value {
+            AuditProfileArg::Code => Self::Code,
+            AuditProfileArg::Mixed => Self::Mixed,
+            AuditProfileArg::App => Self::App,
+        }
+    }
 }
 
 impl From<BudgetModeArg> for codixing_core::engine::context_assembly::BudgetMode {
@@ -917,8 +942,9 @@ async fn async_main() -> Result<()> {
             threshold_days,
             include,
             exclude,
+            profile,
             path,
-        } => cmd_audit(path, threshold_days, include, exclude),
+        } => cmd_audit(path, threshold_days, include, exclude, profile.into()),
         Command::Impact { file, json } => cmd_impact(file, json),
         Command::Api { file, json } => cmd_api(file, json),
         Command::Types { symbol, json } => cmd_types(symbol, json),
@@ -2640,6 +2666,7 @@ fn cmd_audit(
     threshold_days: u64,
     include: Option<String>,
     exclude: Vec<String>,
+    profile: codixing_core::AuditProfile,
 ) -> Result<()> {
     let root = path
         .canonicalize()
@@ -2656,6 +2683,7 @@ fn cmd_audit(
         threshold_days,
         include_pattern: include,
         exclude_patterns: exclude,
+        profile,
     };
 
     let report = engine.audit_freshness(options);
