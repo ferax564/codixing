@@ -803,20 +803,12 @@ fn matlab_field_name(node: &Node, source: &[u8]) -> Option<String> {
     match node.kind() {
         "identifier" => {
             let t = node_text(node, source).trim().to_string();
-            if t.is_empty() {
-                None
-            } else {
-                Some(t)
-            }
+            if t.is_empty() { None } else { Some(t) }
         }
         "function_call" => {
             let name_node = node.child_by_field_name("name")?;
             let t = node_text(&name_node, source).trim().to_string();
-            if t.is_empty() {
-                None
-            } else {
-                Some(t)
-            }
+            if t.is_empty() { None } else { Some(t) }
         }
         _ => None,
     }
