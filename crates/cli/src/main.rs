@@ -178,6 +178,25 @@ enum Command {
         action: HookAction,
     },
 
+    /// Self-heal a partially deleted `.codixing/` index.
+    ///
+    /// When the directory exists but `config.json` or `meta.json` are missing
+    /// (e.g. an interrupted upgrade or a stray cleanup), every command fails
+    /// with a confusing "I/O error: No such file or directory". `repair`
+    /// rebuilds the missing metadata files in place using safe defaults and
+    /// preserves the existing tantivy/, vectors/, graph/, and symbol blobs.
+    /// Run `codixing sync` afterwards to refresh the entry counts.
+    Repair {
+        /// Project root containing the `.codixing/` directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Skip the post-repair `sync` step. Use when you only want to write
+        /// the missing metadata files without touching the rest of the index.
+        #[arg(long)]
+        no_sync: bool,
+    },
+
     /// Find the shortest path between two files in the dependency graph.
     Path {
         /// Source file (relative path).
@@ -836,6 +855,7 @@ async fn async_main() -> Result<()> {
             obsidian,
         ),
         Command::Hook { action } => cmd_hook(action),
+        Command::Repair { path, no_sync } => cmd_repair(path, no_sync),
         Command::Path { from, to } => cmd_path(from, to),
         Command::Callers { file, depth } => cmd_callers(file, depth),
         Command::Callees { file, depth } => cmd_callees(file, depth),
@@ -3022,6 +3042,73 @@ fn cmd_context(
         }
     }
 
+    Ok(())
+}
+
+fn cmd_repair(path: PathBuf, no_sync: bool) -> Result<()> {
+    use codixing_core::persistence::IndexStore;
+
+    let root = path
+        .canonicalize()
+        .with_context(|| format!("path not found: {}", path.display()))?;
+
+    let audit = IndexStore::audit_layout(&root);
+    if !audit.dir_exists {
+        anyhow::bail!(
+            "no `.codixing/` directory at {} — there is nothing to repair. \
+             Run `codixing init {}` to create a fresh index.",
+            root.display(),
+            root.display()
+        );
+    }
+
+    if let Some(version) = &audit.meta_version {
+        println!("Found existing index built by codixing {version}.");
+    } else {
+        println!("Found existing `.codixing/` directory (meta.json missing or unreadable).");
+    }
+
+    if audit.essentials_missing.is_empty() {
+        println!("All essential metadata files are present — nothing to repair.");
+        for p in &audit.essentials_present {
+            println!("  ok: {}", p.display());
+        }
+        return Ok(());
+    }
+
+    println!("Missing essential files:");
+    for p in &audit.essentials_missing {
+        println!("  missing: {}", p.display());
+    }
+    if !audit.optional_present.is_empty() {
+        println!("Preserved artifacts:");
+        for p in &audit.optional_present {
+            println!("  keep: {}", p.display());
+        }
+    }
+
+    let report = IndexStore::repair(&root)?;
+    println!("\nRepaired:");
+    for p in &report.created {
+        println!("  created: {}", p.display());
+    }
+
+    if no_sync {
+        println!("\nSkipped post-repair sync (--no-sync). Run `codixing sync` to refresh counts.");
+        return Ok(());
+    }
+
+    println!("\nRunning `sync` to refresh index metadata from disk…");
+    cmd_sync(
+        root.clone(),
+        /* no_embed */ true,
+        /* rebuild_graph */ false,
+    )
+    .with_context(
+        || "post-repair sync failed; index metadata was rewritten but counts may be stale",
+    )?;
+
+    println!("Repair complete. The index is ready for `codixing search` / `audit`.");
     Ok(())
 }
 

@@ -30,6 +30,16 @@ pub enum CodixingError {
     #[error("index not found at {path} — run `codixing init` first")]
     IndexNotFound { path: PathBuf },
 
+    #[error(
+        "index at {root}/.codixing/ is incomplete (missing: {missing:?}). \
+         Run `codixing repair {root}` to rebuild the missing metadata in place, \
+         or `codixing init {root}` to wipe and re-index from scratch."
+    )]
+    PartialIndex {
+        root: PathBuf,
+        missing: Vec<PathBuf>,
+    },
+
     #[error("watcher error: {0}")]
     Watcher(#[from] notify::Error),
 
