@@ -199,7 +199,10 @@ impl IndexStore {
         if dir_exists {
             for file in &[CONFIG_FILE, META_FILE] {
                 let path = codixing_dir.join(file);
-                if path.exists() {
+                // Use `is_file` rather than `exists` so a stray directory
+                // named `meta.json` does not fool the audit into thinking
+                // the index is healthy.
+                if path.is_file() {
                     essentials_present.push(path);
                 } else {
                     essentials_missing.push(path);

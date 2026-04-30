@@ -22,15 +22,15 @@ use crate::language::Language;
 
 // Re-export public types from sub-modules.
 pub use community::CommunityResult;
-pub use cypher_export::{CypherExportOptions, export_cypher};
+pub use cypher_export::{export_cypher, CypherExportOptions};
 pub use extractor::{CallExtractor, ImportExtractor};
-pub use graphml_export::{GraphmlExportOptions, export_graphml};
+pub use graphml_export::{export_graphml, GraphmlExportOptions};
 pub use html_export::HtmlExportOptions;
-pub use obsidian_export::{ObsidianExportOptions, export_obsidian};
+pub use obsidian_export::{export_obsidian, ObsidianExportOptions};
 pub use pagerank::{
     compute_pagerank, compute_personalized_pagerank, compute_weighted_personalized_pagerank,
 };
-pub use repomap::{RepoMapOptions, generate_repo_map};
+pub use repomap::{generate_repo_map, RepoMapOptions};
 pub use resolver::ImportResolver;
 pub use surprise::SurprisingEdge;
 pub use types::{ReferenceKind, SymbolKind, SymbolNode};
@@ -530,6 +530,23 @@ impl CodeGraph {
         to_prefix: &str,
         kinds: &[EdgeKind],
     ) -> Vec<CrossImportEvidenceRow> {
+        self.cross_imports_ranked_with_evidence_recency(from_prefix, to_prefix, None, kinds)
+    }
+
+    /// Recency-aware variant of [`Self::cross_imports_ranked_with_evidence`].
+    ///
+    /// Mirrors the scoring model used by [`Self::cross_imports_ranked`] so
+    /// that the CLI evidence path stays on the same recency-weighted
+    /// PageRank ranking. Without the recency multiplier, a long-stale
+    /// importer can outrank a recently touched one — a regression noted
+    /// during review of the v0.41.2 cross-imports fix.
+    pub fn cross_imports_ranked_with_evidence_recency(
+        &self,
+        from_prefix: &str,
+        to_prefix: &str,
+        recency_map: Option<&std::collections::HashMap<String, i64>>,
+        kinds: &[EdgeKind],
+    ) -> Vec<CrossImportEvidenceRow> {
         let mut acc: std::collections::HashMap<String, (f32, Vec<CrossImportEvidence>)> =
             std::collections::HashMap::new();
 
@@ -553,6 +570,22 @@ impl CodeGraph {
                     edge_data.raw_import.clone(),
                     edge_data.kind.clone(),
                 ));
+            }
+        }
+
+        // Match `cross_imports_ranked`'s recency multiplier so the evidence
+        // path produces the same ranking as the score-only path.
+        if let Some(rmap) = recency_map {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            for (file, (score, _)) in acc.iter_mut() {
+                if let Some(&commit_ts) = rmap.get(file) {
+                    let days_old = ((now - commit_ts) as f64 / 86400.0).max(0.0);
+                    let boost = (-0.05 * days_old).exp();
+                    *score *= 1.0 + boost as f32;
+                }
             }
         }
 
@@ -1320,6 +1353,56 @@ mod tests {
         );
         let names_with_calls: Vec<&str> = with_calls.iter().map(|(p, _)| p.as_str()).collect();
         assert!(names_with_calls.contains(&"internal/web/sampler/sampler.go"));
+    }
+
+    #[test]
+    fn cross_imports_evidence_applies_recency_boost() {
+        // Regression for review of #101: when the CLI moved to the
+        // evidence-aware path it lost the recency multiplier from
+        // `cross_imports_ranked`, so older importers could outrank
+        // freshly modified ones. The recency-aware evidence variant
+        // restores parity with the score-only path.
+        let mut g = CodeGraph::new();
+        g.add_edge(
+            "src/gateway/fresh.rs",
+            "src/auth/jwt.rs",
+            "crate::auth::jwt",
+            Language::Rust,
+            Language::Rust,
+        );
+        g.add_edge(
+            "src/gateway/stale.rs",
+            "src/auth/jwt.rs",
+            "crate::auth::jwt",
+            Language::Rust,
+            Language::Rust,
+        );
+
+        // Equalize raw PageRank so recency is the only differentiator.
+        let mut pr = std::collections::HashMap::new();
+        pr.insert("src/auth/jwt.rs".to_string(), 0.5f32);
+        g.apply_pagerank(&pr);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let mut recency = std::collections::HashMap::new();
+        recency.insert("src/gateway/fresh.rs".to_string(), now); // today
+        recency.insert("src/gateway/stale.rs".to_string(), now - 200 * 86_400); // ~7 months ago
+
+        let ranked = g.cross_imports_ranked_with_evidence_recency(
+            "src/gateway",
+            "src/auth",
+            Some(&recency),
+            DEFAULT_IMPORT_BOUNDARY_KINDS,
+        );
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(
+            ranked[0].0, "src/gateway/fresh.rs",
+            "freshly modified importer should rank first"
+        );
+        assert!(ranked[0].1 > ranked[1].1);
     }
 
     #[test]

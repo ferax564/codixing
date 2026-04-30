@@ -140,9 +140,10 @@ codixing init . --embed --model bge-small-en    # one-time, ~2 min on a medium r
 codixing search "how does auth work" --strategy fast
 ```
 
-Embeddings require ONNX Runtime (`pip install onnxruntime`, or download from the
-[onnxruntime releases](https://github.com/microsoft/onnxruntime/releases)) and live
-on the `--embed` path only — BM25-only installs do not need it.
+ONNX-based embedding models (`bge-small-en`, `bge-base-en`, etc.) require ONNX
+Runtime (`pip install onnxruntime`, or download from the
+[onnxruntime releases](https://github.com/microsoft/onnxruntime/releases)). The
+static `model2vec` model and BM25-only installs do not need it.
 
 ---
 

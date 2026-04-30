@@ -167,6 +167,9 @@ func ParseJWT(token string) (*Claims, error) {
 }
 
 fn assert_recall_at_k(engine: &Engine, query: &str, expected_file: &str, k: usize) {
+    // Surface engine errors instead of swallowing them as empty results;
+    // an `unwrap_or_default()` here would dress up "search panicked" as
+    // "ranking regression" and waste debug time on the wrong layer.
     let results = engine
         .search(SearchQuery {
             query: query.to_string(),
@@ -177,7 +180,7 @@ fn assert_recall_at_k(engine: &Engine, query: &str, expected_file: &str, k: usiz
             queries: None,
             doc_filter: None,
         })
-        .unwrap_or_default();
+        .expect("search should succeed on the operational fixture");
     let found: HashSet<&str> = results.iter().map(|r| r.file_path.as_str()).collect();
     assert!(
         found.contains(expected_file),

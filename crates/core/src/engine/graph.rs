@@ -126,7 +126,15 @@ impl Engine {
     ) -> Vec<crate::graph::CrossImportEvidenceRow> {
         self.graph
             .as_ref()
-            .map(|g| g.cross_imports_ranked_with_evidence(from_prefix, to_prefix, kinds))
+            .map(|g| {
+                let recency = self.get_recency_map();
+                g.cross_imports_ranked_with_evidence_recency(
+                    from_prefix,
+                    to_prefix,
+                    Some(recency),
+                    kinds,
+                )
+            })
             .unwrap_or_default()
     }
 

@@ -127,9 +127,19 @@ where
             if let Some(rest) = trimmed.strip_prefix("//go:embed") {
                 found_directive = true;
                 for token in rest.split_whitespace() {
-                    // `//go:embed` accepts globs; strip trailing `/*` so we
-                    // can use the prefix for path matching.
-                    let cleaned = token.trim_end_matches('*').trim_end_matches('/');
+                    // `//go:embed` accepts both bare globs (`templates/*`)
+                    // and quoted patterns (`"templates/*"` for paths with
+                    // spaces). Strip surrounding quotes before trimming
+                    // glob suffixes so the prefix matches actual files.
+                    let unquoted = token
+                        .trim_start_matches('"')
+                        .trim_end_matches('"')
+                        .trim_start_matches('\'')
+                        .trim_end_matches('\'');
+                    let cleaned = unquoted
+                        .trim_end_matches('*')
+                        .trim_end_matches('/')
+                        .trim_end_matches("/*");
                     if !cleaned.is_empty() {
                         // Resolve the directive token relative to the file's
                         // own directory so `//go:embed templates` in
@@ -614,6 +624,51 @@ mod tests {
                 entry.file_path
             );
         }
+    }
+
+    #[test]
+    fn go_embed_root_handles_quoted_patterns() {
+        // Regression for review of #103: `//go:embed "templates/*"` is
+        // valid Go (quoted patterns let you embed paths with spaces).
+        // Pre-fix the prefix included the surrounding quotes and never
+        // matched a real file path, so the embed wrapper lost its
+        // mixed-profile protection.
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::create_dir_all(root.join("web/templates")).unwrap();
+        fs::write(
+            root.join("web/templates/index.html"),
+            "<html><body>hi</body></html>\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("web/embed.go"),
+            "package web\n\nimport \"embed\"\n\n//go:embed \"templates/*\"\nvar Templates embed.FS\n",
+        )
+        .unwrap();
+
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+        let engine = Engine::init(&root, config).unwrap();
+
+        let report = engine.audit_freshness(FreshnessOptions {
+            threshold_days: 0,
+            include_pattern: None,
+            exclude_patterns: Vec::new(),
+            profile: AuditProfile::Mixed,
+        });
+
+        let embed_entry = report
+            .entries
+            .iter()
+            .find(|e| e.file_path.ends_with("web/embed.go"))
+            .expect("web/embed.go should appear in the audit");
+        assert_eq!(
+            embed_entry.tier,
+            FreshnessTier::Info,
+            "quoted go-embed root should still be Info, got {:?}",
+            embed_entry.tier
+        );
     }
 
     #[test]

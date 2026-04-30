@@ -101,8 +101,11 @@ fn shrink_primary_to_window(
     engine: &Engine,
 ) {
     // Reserve ~20% of the budget for the dependent sections so a strict
-    // budget still produces useful import/callee context.
-    let primary_target = budget.saturating_sub(budget / 5).max(64);
+    // budget still produces useful import/callee context. Floor at 1
+    // token so callers passing tiny budgets still get a hard cap (a 64-
+    // token floor previously let strict mode silently exceed budgets
+    // smaller than 80 tokens).
+    let primary_target = budget.saturating_sub(budget / 5).max(1);
 
     // Re-read the file as raw lines so we can grow a symmetric window.
     let abs = engine
@@ -315,8 +318,16 @@ impl Engine {
             // the primary chunk is itself larger than the budget — derived
             // sections honor `import_budget`/`callee_budget`/`example_budget`.
             let span = result.line_end.saturating_sub(result.line_start) + 1;
+            let hint = match mode {
+                BudgetMode::Soft => {
+                    "; pass --budget-mode strict to slice the primary chunk around --line N"
+                }
+                BudgetMode::Strict => {
+                    "; the requested budget is below the minimum 1-line slice for this file"
+                }
+            };
             Some(format!(
-                "primary chunk indivisible (function spans {span} line(s), {primary_tokens} tokens > budget {token_budget}); pass --budget-mode strict to slice the primary chunk around --line N",
+                "primary chunk indivisible (function spans {span} line(s), {primary_tokens} tokens > budget {token_budget}){hint}",
             ))
         } else {
             None
