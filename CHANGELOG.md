@@ -6,9 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-## [0.41.3] — 2026-05-01
+## [0.42.0] — 2026-05-01
 
-Windows indexing reliability fix.
+Tier 1 partial bundle plus the Windows indexing fix that briefly carried a
+v0.41.3 tag (collapsed into v0.42.0 — the v0.41.3 tag was deleted before any
+binaries / npm published, so v0.42.0 is the first shipped release that
+contains both the #107 fix and the Tier 1 features). Two Tier 1 items
+deferred to v0.43 — see [`plans/2026-05-01-v0.42-pr1-pr2.md`](plans/2026-05-01-v0.42-pr1-pr2.md)
+for the deferral rationale.
 
 ### Fixed
 
@@ -17,6 +22,16 @@ Windows indexing reliability fix.
 ### Added
 
 - **`codixing init --threads N` and `codixing sync --threads N`** — explicit cap on the Rayon worker pool used during indexing. Default behavior matches the new platform-aware cap (`num_cpus` on Unix/macOS, `min(num_cpus, 4)` on Windows). 4 new unit tests covering clap parsing of both subcommands and the platform default.
+- **`SharedSession` JSONL persistence** — new opt-in `SharedSession::with_persistence(max_events, decay_minutes, path)` and `SharedSession::with_persistence_or_default(path)` constructors back the in-memory store with an append-only JSONL log. Each `record()` additionally writes a wall-clock-timestamped `PersistedSessionEvent` line (`Instant` doesn't serialize, so persistence uses `SystemTime::now().duration_since(UNIX_EPOCH)` at record time). On open, the existing log is replayed; events older than `3× decay_minutes` are dropped because they contribute zero boost anyway. `SharedSession::read_persisted(path)` exposes the log to offline learners. Engine `init` / `open` / `open_read_only` now construct sessions with persistence at `.codixing/shared_session.jsonl` by default, falling back to in-memory only on filesystem errors. Clones share the same `Arc<Mutex<File>>` so writes from cloned handles serialize through the same descriptor. 6 new unit tests cover the round-trip, corrupt-line skipping, missing-file behavior, the 3× decay window drop, parent-dir creation, and clone-shared writes. The `--learn-reformulations` consumer of this log defers to v0.43 — recording sessions today builds the data v0.43 will mine.
+- **Jupyter notebook parallel cell processing** — `engine::indexing::process_jupyter_file` now uses `cells.par_iter().try_for_each` instead of a sequential loop. Each rayon worker owns its own `tree_sitter::Parser` (already constructed per-cell, so this required no parser pooling); chunk and entity counts moved from `usize` mutables to `AtomicUsize`. Lock-free DashMap-backed sinks (`chunk_meta_map`, `pending_embeds`, `pending_doc_refs`) plus the internally synchronized `tantivy.add_chunk` and `symbols.insert` mean no new synchronization primitives — concurrent writes were already safe. Expected ~4-5× wall-clock speedup on notebooks with ≥10 code cells; small notebooks see no slowdown because rayon's work-stealing kicks in below the parallelism threshold. The 3 existing Jupyter integration tests pass unchanged, validating that ordering-independent parallel writes produce identical chunk + symbol output.
+- **Real-PDF round-trip test fixture** — `crates/core/tests/fixtures/minimal.pdf` is a 2-page PDF generated via reportlab and committed binary-as-binary. The new `real_pdf_round_trip_extracts_content_and_symbol_refs` test (feature-gated under `--features pdf`) verifies that `pdf-extract` actually returns the embedded code references (`Engine::init`, `add_chunk`, `ChunkConfig`, `sync_index`, `SymbolTable::insert`) and that `extract_pdf_symbol_refs` finds all five. Discovered along the way: `pdf-extract` 0.9 does NOT emit form-feed page separators for reportlab-produced PDFs (pages concatenate with `\n\n` instead). Other generators (poppler) DO trigger the form-feed splitter. The `parse_pdf_sections` page-split logic stays correct for the latter — it just degrades to a single section for reportlab output, which the test reflects. The previous attempt at hand-crafted byte-literal PDFs (removed in v0.41 simplify pass) wouldn't have caught this difference; only a real binary fixture does.
+
+Test count: 1226 → 1239 (+13: 4 clap-parse / thread-cap tests from the #107 fix, 6 shared_session persistence tests, 1 real-PDF round-trip test, 2 doctests).
+
+### Deferred to v0.43
+
+- `codixing sync --learn-reformulations` — needs `SharedSessionEvent.query: Option<String>` field extension plus MCP `search.rs` integration to record query text alongside result paths. The persistence groundwork shipped here in v0.42 stores the events; v0.43 wires the consumer.
+- Jupyter notebook incremental sync (`engine::sync::reindex_file_impl`) — porting `process_jupyter_file` to the sync context requires careful state plumbing across `IndexContext` (DashMap-backed) vs `&mut Engine` (direct field access). ~80 LOC + cell-iteration shared helper extraction.
 
 ## [0.41.0] — 2026-04-19
 
