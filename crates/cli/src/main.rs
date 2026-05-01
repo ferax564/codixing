@@ -73,6 +73,18 @@ enum Command {
         /// No effect without --embed.
         #[arg(long)]
         wait: bool,
+
+        /// Cap the number of parallel worker threads used for indexing.
+        ///
+        /// Default: `num_cpus` on Unix/macOS, `min(num_cpus, 4)` on Windows
+        /// (works around issue #107: NTFS races on `.term` file creation
+        /// when more than ~4 Rayon workers feed Tantivy concurrently).
+        ///
+        /// Override only if you know what you're doing — values above the
+        /// platform default reintroduce the Windows race; values below
+        /// trade indexing speed for safety.
+        #[arg(long, value_name = "N")]
+        threads: Option<usize>,
     },
 
     /// Search the code index.
@@ -412,6 +424,14 @@ enum Command {
         /// (e.g. after a large refactor that moved many imports around).
         #[arg(long)]
         rebuild_graph: bool,
+
+        /// Cap the number of parallel worker threads used during sync.
+        ///
+        /// Default: `num_cpus` on Unix/macOS, `min(num_cpus, 4)` on Windows
+        /// (mirrors `init --threads`; same Windows NTFS race rationale,
+        /// see issue #107).
+        #[arg(long, value_name = "N")]
+        threads: Option<usize>,
     },
 
     /// Fast git-aware sync: re-indexes only files changed since the last indexed git commit.
@@ -827,6 +847,7 @@ async fn async_main() -> Result<()> {
             reranker,
             defer_embeddings,
             wait,
+            threads,
         } => cmd_init(
             path,
             also,
@@ -836,6 +857,7 @@ async fn async_main() -> Result<()> {
             reranker,
             defer_embeddings,
             wait,
+            threads,
         ),
         Command::Search {
             query,
@@ -952,7 +974,8 @@ async fn async_main() -> Result<()> {
             path,
             no_embed,
             rebuild_graph,
-        } => cmd_sync(path, no_embed, rebuild_graph),
+            threads,
+        } => cmd_sync(path, no_embed, rebuild_graph, threads),
         Command::GitSync { path } => cmd_git_sync(path),
         Command::Embed { path } => cmd_embed(path),
         Command::BenchEmbed { path, force, json } => cmd_bench_embed(path, force, json),
@@ -981,6 +1004,43 @@ async fn async_main() -> Result<()> {
             budget_mode,
             json,
         } => cmd_context(file, line, token_budget, budget_mode.into(), json),
+    }
+}
+
+/// Configure Rayon's global thread pool size for the indexing pipeline.
+///
+/// Issue #107: on Windows, more than ~4 Rayon workers feeding Tantivy
+/// concurrently triggers an NTFS race where a fresh segment `.term` file
+/// returns `ERROR_ACCESS_DENIED` (os error 5) — usually because Windows
+/// Defender is still holding a handle from real-time scanning. Capping
+/// the pool to 4 workers on Windows eliminates the race in the reporter's
+/// repro (22-core box, fails at 8+ workers, succeeds at 4).
+///
+/// On Unix/macOS, no race exists — the cap is `num_cpus` (Rayon's own
+/// default), and `--threads` only narrows it.
+///
+/// `build_global` is one-shot; if another caller has already initialized
+/// the pool (e.g. tests sharing a process), the second call returns an
+/// error which we silently ignore.
+fn configure_thread_pool(threads: Option<usize>) {
+    let n = threads.unwrap_or_else(default_thread_cap);
+    if let Err(e) = rayon::ThreadPoolBuilder::new()
+        .num_threads(n)
+        .build_global()
+    {
+        tracing::debug!("rayon global pool already initialized: {e}");
+    }
+}
+
+/// Default Rayon thread count for indexing when `--threads` is unset.
+fn default_thread_cap() -> usize {
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    if cfg!(target_os = "windows") {
+        cpus.min(4)
+    } else {
+        cpus
     }
 }
 
@@ -1052,7 +1112,10 @@ fn cmd_init(
     reranker: bool,
     defer_embeddings: bool,
     wait: bool,
+    threads: Option<usize>,
 ) -> Result<()> {
+    configure_thread_pool(threads);
+
     let root = path
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
@@ -2246,7 +2309,14 @@ fn cmd_update(path: PathBuf, dry_run: bool, file: Option<String>) -> Result<()> 
     Ok(())
 }
 
-fn cmd_sync(path: PathBuf, no_embed: bool, rebuild_graph: bool) -> Result<()> {
+fn cmd_sync(
+    path: PathBuf,
+    no_embed: bool,
+    rebuild_graph: bool,
+    threads: Option<usize>,
+) -> Result<()> {
+    configure_thread_pool(threads);
+
     let root = path
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
@@ -3180,6 +3250,7 @@ fn cmd_repair(path: PathBuf, no_sync: bool) -> Result<()> {
         root.clone(),
         /* no_embed */ true,
         /* rebuild_graph */ false,
+        /* threads */ None,
     )
     .with_context(
         || "post-repair sync failed; index metadata was rewritten but counts may be stale",
@@ -3277,4 +3348,52 @@ fn cmd_hook(action: HookAction) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// `--threads N` flows through to the `Init` variant. Issue #107 regression
+    /// guard: if the flag is dropped from the clap variant, `cmd_init` falls
+    /// back to Rayon's uncapped default and Windows users hit the NTFS race
+    /// again.
+    #[test]
+    fn init_threads_flag_parses() {
+        let cli =
+            Cli::try_parse_from(["codixing", "init", ".", "--threads", "8"]).expect("clap parse");
+        match cli.command {
+            Command::Init { threads, .. } => assert_eq!(threads, Some(8)),
+            _ => panic!("expected Init variant"),
+        }
+    }
+
+    #[test]
+    fn init_threads_flag_optional() {
+        let cli = Cli::try_parse_from(["codixing", "init", "."]).expect("clap parse");
+        match cli.command {
+            Command::Init { threads, .. } => assert_eq!(threads, None),
+            _ => panic!("expected Init variant"),
+        }
+    }
+
+    #[test]
+    fn sync_threads_flag_parses() {
+        let cli =
+            Cli::try_parse_from(["codixing", "sync", ".", "--threads", "2"]).expect("clap parse");
+        match cli.command {
+            Command::Sync { threads, .. } => assert_eq!(threads, Some(2)),
+            _ => panic!("expected Sync variant"),
+        }
+    }
+
+    #[test]
+    fn default_thread_cap_caps_on_windows() {
+        let n = default_thread_cap();
+        assert!(n >= 1, "thread cap must be ≥ 1, got {n}");
+        if cfg!(target_os = "windows") {
+            assert!(n <= 4, "Windows cap must be ≤ 4 (issue #107), got {n}");
+        }
+    }
 }
