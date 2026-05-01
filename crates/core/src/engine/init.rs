@@ -456,6 +456,8 @@ impl Engine {
         let filter_pipeline = FilterPipeline::load(&store.codixing_dir());
         filter_pipeline.clear();
 
+        let shared_session_path = store.codixing_dir().join("shared_session.jsonl");
+
         Ok(Self {
             config,
             store,
@@ -484,7 +486,7 @@ impl Engine {
             reranker,
             trigram,
             session,
-            shared_session: SharedSession::default_new(),
+            shared_session: SharedSession::with_persistence_or_default(&shared_session_path),
             read_only: false,
             file_trigram,
             recency_map: std::sync::OnceLock::new(),
@@ -769,6 +771,7 @@ impl Engine {
         let trigram = std::sync::OnceLock::new();
         let file_trigram = std::sync::OnceLock::new();
         let filter_pipeline = FilterPipeline::load(&store.codixing_dir());
+        let shared_session_path = store.codixing_dir().join("shared_session.jsonl");
 
         Ok(Self {
             config,
@@ -788,7 +791,7 @@ impl Engine {
             reranker,
             trigram,
             session,
-            shared_session: SharedSession::default_new(),
+            shared_session: SharedSession::with_persistence_or_default(&shared_session_path),
             read_only,
             file_trigram,
             recency_map: std::sync::OnceLock::new(),
@@ -993,6 +996,7 @@ impl Engine {
 
         // Trigram indexes are lazy-loaded on first use via OnceLock.
         let filter_pipeline = FilterPipeline::load(&store.codixing_dir());
+        let shared_session_path = store.codixing_dir().join("shared_session.jsonl");
 
         Ok(Self {
             config,
@@ -1012,7 +1016,7 @@ impl Engine {
             reranker,
             trigram: std::sync::OnceLock::new(),
             session,
-            shared_session: SharedSession::default_new(),
+            shared_session: SharedSession::with_persistence_or_default(&shared_session_path),
             read_only: true,
             file_trigram: std::sync::OnceLock::new(),
             recency_map: std::sync::OnceLock::new(),

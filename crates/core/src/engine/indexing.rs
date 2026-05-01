@@ -287,6 +287,15 @@ fn process_doc_file(
 ///   the chunk content but not back into the `.ipynb` JSON.
 /// - Cell imports do not participate in the cross-file import graph yet —
 ///   pending_imports / pending_calls are not populated for notebook cells.
+///
+/// **Parallelism (v0.42)**: cells are processed via `par_iter().try_for_each`.
+/// Each rayon worker owns a fresh `tree_sitter::Parser` (the one place
+/// per-cell that can't be shared) and writes chunks into the lock-free
+/// DashMap-backed sinks on `IndexContext`. `tantivy.add_chunk` and
+/// `symbols.insert` are internally synchronized, so concurrent writes are
+/// safe but serialize at the lock — the win is in tree-sitter parse +
+/// chunk-builder time, not Tantivy ingest. Expected ~4-5× on notebooks
+/// with ≥10 code cells.
 fn process_jupyter_file(rel_str: &str, source: &[u8], ctx: &IndexContext<'_>) -> Result<()> {
     let cells = match ipynb::parse_notebook(source) {
         Ok(cells) => cells,
@@ -296,12 +305,12 @@ fn process_jupyter_file(rel_str: &str, source: &[u8], ctx: &IndexContext<'_>) ->
         }
     };
 
-    let mut total_chunks = 0usize;
-    let mut total_entities = 0usize;
+    let total_chunks = AtomicUsize::new(0);
+    let total_entities = AtomicUsize::new(0);
 
-    for cell in cells {
+    cells.par_iter().try_for_each(|cell| -> Result<()> {
         if matches!(cell.kind, CellKind::Raw) {
-            continue;
+            return Ok(());
         }
         let cell_scope = format!("cell-{}", cell.id);
         let cell_bytes = cell.source.as_bytes();
@@ -315,23 +324,26 @@ fn process_jupyter_file(rel_str: &str, source: &[u8], ctx: &IndexContext<'_>) ->
                 // to Jupyter, so use a throwaway path for dispatch only.
                 let synthetic = PathBuf::from(format!("cell.{ext}"));
                 let Some(cell_lang) = detect_language(&synthetic) else {
-                    continue;
+                    return Ok(());
                 };
                 let Some(lang_support) = ctx.parser.registry().get(cell_lang) else {
-                    continue;
+                    return Ok(());
                 };
 
                 // Direct tree-sitter parse, bypassing the path-keyed cache
-                // so we don't thrash it with per-cell synthetic paths.
+                // so we don't thrash it with per-cell synthetic paths. Each
+                // rayon worker owns its own parser (tree_sitter::Parser is
+                // !Send-by-value, but constructed inside the closure each
+                // call so this is fine).
                 let mut ts_parser = tree_sitter::Parser::new();
                 if ts_parser
                     .set_language(&lang_support.tree_sitter_language())
                     .is_err()
                 {
-                    continue;
+                    return Ok(());
                 }
                 let Some(tree) = ts_parser.parse(cell_bytes, None) else {
-                    continue;
+                    return Ok(());
                 };
                 let entities = lang_support.extract_entities(&tree, cell_bytes);
 
@@ -349,7 +361,7 @@ fn process_jupyter_file(rel_str: &str, source: &[u8], ctx: &IndexContext<'_>) ->
                     chunk.scope_chain = scope;
                 }
 
-                total_chunks += chunks.len();
+                total_chunks.fetch_add(chunks.len(), Ordering::Relaxed);
                 for chunk in &chunks {
                     ctx.tantivy.add_chunk(chunk)?;
                     ctx.chunk_meta_map.insert(
@@ -377,11 +389,11 @@ fn process_jupyter_file(rel_str: &str, source: &[u8], ctx: &IndexContext<'_>) ->
                     sym.scope = scope;
                     ctx.symbols.insert(sym);
                 }
-                total_entities += entities.len();
+                total_entities.fetch_add(entities.len(), Ordering::Relaxed);
             }
             CellKind::Markdown => {
                 let Some(doc_support) = ctx.parser.registry().get_doc(Language::Markdown) else {
-                    continue;
+                    return Ok(());
                 };
                 let file_name_hint = format!("{cell_scope}.md");
                 let sections =
@@ -409,7 +421,7 @@ fn process_jupyter_file(rel_str: &str, source: &[u8], ctx: &IndexContext<'_>) ->
                         .collect();
                 }
 
-                total_chunks += chunks.len();
+                total_chunks.fetch_add(chunks.len(), Ordering::Relaxed);
                 for chunk in &chunks {
                     ctx.tantivy.add_chunk(chunk)?;
                     ctx.chunk_meta_map.insert(
@@ -439,8 +451,11 @@ fn process_jupyter_file(rel_str: &str, source: &[u8], ctx: &IndexContext<'_>) ->
             }
             CellKind::Raw => unreachable!("raw cells filtered above"),
         }
-    }
+        Ok(())
+    })?;
 
+    let total_chunks = total_chunks.load(Ordering::Relaxed);
+    let total_entities = total_entities.load(Ordering::Relaxed);
     ctx.chunk_count.fetch_add(total_chunks, Ordering::Relaxed);
     ctx.file_chunk_map.insert(rel_str.to_string(), total_chunks);
 
