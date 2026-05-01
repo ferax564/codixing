@@ -178,6 +178,25 @@ enum Command {
         action: HookAction,
     },
 
+    /// Self-heal a partially deleted `.codixing/` index.
+    ///
+    /// When the directory exists but `config.json` or `meta.json` are missing
+    /// (e.g. an interrupted upgrade or a stray cleanup), every command fails
+    /// with a confusing "I/O error: No such file or directory". `repair`
+    /// rebuilds the missing metadata files in place using safe defaults and
+    /// preserves the existing tantivy/, vectors/, graph/, and symbol blobs.
+    /// Run `codixing sync` afterwards to refresh the entry counts.
+    Repair {
+        /// Project root containing the `.codixing/` directory.
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Skip the post-repair `sync` step. Use when you only want to write
+        /// the missing metadata files without touching the rest of the index.
+        #[arg(long)]
+        no_sync: bool,
+    },
+
     /// Find the shortest path between two files in the dependency graph.
     Path {
         /// Source file (relative path).
@@ -234,6 +253,21 @@ enum Command {
         /// symbol or import shape.
         #[arg(long)]
         pattern: Option<String>,
+
+        /// Also count call-graph edges, not just real imports. Off by
+        /// default — call edges are not enforceable architectural
+        /// boundaries and produce false positives when an unrelated
+        /// function call shares a name with a symbol in the target
+        /// package (issue #101).
+        #[arg(long)]
+        include_calls: bool,
+
+        /// Hide the matched-import evidence printed beneath each result.
+        /// Default output shows `↳ <target> via <raw import>` for the
+        /// first matched edge so callers can verify the boundary claim
+        /// without re-reading the source.
+        #[arg(long)]
+        no_evidence: bool,
     },
 
     /// Literal or regex text scan across indexed files (trigram-accelerated).
@@ -477,8 +511,17 @@ enum Command {
         include: Option<String>,
 
         /// File pattern to exclude (substring match, e.g. "test", "vendor").
-        #[arg(long)]
-        exclude: Option<String>,
+        /// May be repeated to exclude multiple patterns:
+        /// `--exclude .codixing --exclude node_modules`.
+        #[arg(long, action = clap::ArgAction::Append)]
+        exclude: Vec<String>,
+
+        /// Audit profile, controls how documentation/static assets are
+        /// classified. `mixed` (default) treats docs/templates/assets as
+        /// `Info` so they never show up as `Critical` dead code; `code`
+        /// excludes them entirely; `app` keeps the legacy firehose.
+        #[arg(long, value_enum, default_value_t = AuditProfileArg::Mixed)]
+        profile: AuditProfileArg,
 
         /// Project root directory (defaults to current directory).
         #[arg(default_value = ".")]
@@ -543,10 +586,52 @@ enum Command {
         #[arg(long, default_value = "4096")]
         token_budget: usize,
 
+        /// How to treat `--token-budget`. `soft` (default) emits the
+        /// primary chunk in full even when it exceeds the budget and
+        /// reports the overshoot; `strict` slices the primary chunk to a
+        /// line window around `--line N` so the assembled context fits.
+        #[arg(long, value_enum, default_value_t = BudgetModeArg::Soft)]
+        budget_mode: BudgetModeArg,
+
         /// Output as JSON.
         #[arg(long)]
         json: bool,
     },
+}
+
+/// Mirror of `codixing_core::context_assembly::BudgetMode` for clap.
+/// Kept separate so we don't have to derive `ValueEnum` in the core crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum BudgetModeArg {
+    Soft,
+    Strict,
+}
+
+/// Mirror of `codixing_core::AuditProfile` for clap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum AuditProfileArg {
+    Code,
+    Mixed,
+    App,
+}
+
+impl From<AuditProfileArg> for codixing_core::AuditProfile {
+    fn from(value: AuditProfileArg) -> Self {
+        match value {
+            AuditProfileArg::Code => Self::Code,
+            AuditProfileArg::Mixed => Self::Mixed,
+            AuditProfileArg::App => Self::App,
+        }
+    }
+}
+
+impl From<BudgetModeArg> for codixing_core::engine::context_assembly::BudgetMode {
+    fn from(value: BudgetModeArg) -> Self {
+        match value {
+            BudgetModeArg::Soft => Self::Soft,
+            BudgetModeArg::Strict => Self::Strict,
+        }
+    }
 }
 
 /// Subcommands for the `codixing filter` command.
@@ -810,11 +895,18 @@ async fn async_main() -> Result<()> {
             obsidian,
         ),
         Command::Hook { action } => cmd_hook(action),
+        Command::Repair { path, no_sync } => cmd_repair(path, no_sync),
         Command::Path { from, to } => cmd_path(from, to),
         Command::Callers { file, depth } => cmd_callers(file, depth),
         Command::Callees { file, depth } => cmd_callees(file, depth),
         Command::Dependencies { file, depth } => cmd_dependencies(file, depth),
-        Command::CrossImports { from, to, pattern } => cmd_cross_imports(from, to, pattern),
+        Command::CrossImports {
+            from,
+            to,
+            pattern,
+            include_calls,
+            no_evidence,
+        } => cmd_cross_imports(from, to, pattern, include_calls, no_evidence),
         Command::Grep {
             pattern,
             file,
@@ -871,8 +963,9 @@ async fn async_main() -> Result<()> {
             threshold_days,
             include,
             exclude,
+            profile,
             path,
-        } => cmd_audit(path, threshold_days, include, exclude),
+        } => cmd_audit(path, threshold_days, include, exclude, profile.into()),
         Command::Impact { file, json } => cmd_impact(file, json),
         Command::Api { file, json } => cmd_api(file, json),
         Command::Types { symbol, json } => cmd_types(symbol, json),
@@ -885,8 +978,9 @@ async fn async_main() -> Result<()> {
             file,
             line,
             token_budget,
+            budget_mode,
             json,
-        } => cmd_context(file, line, token_budget, json),
+        } => cmd_context(file, line, token_budget, budget_mode.into(), json),
     }
 }
 
@@ -1774,7 +1868,15 @@ fn cmd_dependencies(file: String, depth: usize) -> Result<()> {
     Ok(())
 }
 
-fn cmd_cross_imports(from: String, to: String, pattern: Option<String>) -> Result<()> {
+fn cmd_cross_imports(
+    from: String,
+    to: String,
+    pattern: Option<String>,
+    include_calls: bool,
+    no_evidence: bool,
+) -> Result<()> {
+    use codixing_core::graph::EdgeKind;
+
     let root = std::env::current_dir().context("cannot determine current directory")?;
     let engine = Engine::open(&root).with_context(|| {
         format!(
@@ -1783,11 +1885,29 @@ fn cmd_cross_imports(from: String, to: String, pattern: Option<String>) -> Resul
         )
     })?;
 
-    let mut ranked = engine.cross_imports_ranked(&from, &to, None);
+    let kinds: Vec<EdgeKind> = if include_calls {
+        vec![EdgeKind::Resolved, EdgeKind::External, EdgeKind::Calls]
+    } else {
+        vec![EdgeKind::Resolved, EdgeKind::External]
+    };
+
+    let mut ranked_with_evidence = engine.cross_imports_ranked_with_evidence(&from, &to, &kinds);
+
+    // Re-apply the pattern filter on top of the evidence-aware list so
+    // `--pattern` keeps working without losing the matched-edge metadata.
     if let Some(pattern) = pattern.as_deref() {
-        ranked = filter_ranked_files_by_pattern(&engine, ranked, pattern)?;
+        Regex::new(pattern).with_context(|| format!("invalid --pattern regex: {pattern}"))?;
+        let mut filtered = Vec::new();
+        for entry in ranked_with_evidence.into_iter() {
+            let matches = engine.grep_code(pattern, false, Some(&entry.0), 0, 1)?;
+            if !matches.is_empty() {
+                filtered.push(entry);
+            }
+        }
+        ranked_with_evidence = filtered;
     }
-    if ranked.is_empty() {
+
+    if ranked_with_evidence.is_empty() {
         if let Some(pattern) = pattern.as_deref() {
             eprintln!(
                 "No files in \"{}\" import from \"{}\" and match pattern \"{}\"",
@@ -1799,12 +1919,31 @@ fn cmd_cross_imports(from: String, to: String, pattern: Option<String>) -> Resul
         return Ok(());
     }
 
-    for (f, score) in &ranked {
-        println!("{f} (score: {score:.3})");
+    for (file, score, evidence) in &ranked_with_evidence {
+        println!("{file} (score: {score:.3})");
+        if !no_evidence {
+            // Show the strongest matched edge so the user can verify the
+            // boundary claim without re-grepping the source. We pick the
+            // first entry since edges are accumulated in graph-iteration
+            // order; multiple edges per source are rare but possible.
+            if let Some((target, raw_import, kind)) = evidence.first() {
+                let kind_label = match kind {
+                    EdgeKind::Resolved => "import",
+                    EdgeKind::External => "external import",
+                    EdgeKind::Calls => "call",
+                    EdgeKind::DocumentedBy => "doc reference",
+                };
+                if raw_import.is_empty() {
+                    println!("    ↳ {target} ({kind_label})");
+                } else {
+                    println!("    ↳ {target} via `{raw_import}` ({kind_label})");
+                }
+            }
+        }
     }
     eprintln!(
         "\n{} file(s) in \"{}\" import from \"{}\"{}.",
-        ranked.len(),
+        ranked_with_evidence.len(),
         from,
         to,
         pattern
@@ -1813,23 +1952,6 @@ fn cmd_cross_imports(from: String, to: String, pattern: Option<String>) -> Resul
             .unwrap_or_default()
     );
     Ok(())
-}
-
-fn filter_ranked_files_by_pattern(
-    engine: &Engine,
-    ranked: Vec<(String, f32)>,
-    pattern: &str,
-) -> Result<Vec<(String, f32)>> {
-    Regex::new(pattern).with_context(|| format!("invalid --pattern regex: {pattern}"))?;
-
-    let mut filtered = Vec::new();
-    for (file, score) in ranked {
-        let matches = engine.grep_code(pattern, false, Some(&file), 0, 1)?;
-        if !matches.is_empty() {
-            filtered.push((file, score));
-        }
-    }
-    Ok(filtered)
 }
 
 fn cmd_usages(
@@ -2592,7 +2714,8 @@ fn cmd_audit(
     path: PathBuf,
     threshold_days: u64,
     include: Option<String>,
-    exclude: Option<String>,
+    exclude: Vec<String>,
+    profile: codixing_core::AuditProfile,
 ) -> Result<()> {
     let root = path
         .canonicalize()
@@ -2608,7 +2731,8 @@ fn cmd_audit(
     let options = FreshnessOptions {
         threshold_days,
         include_pattern: include,
-        exclude_pattern: exclude,
+        exclude_patterns: exclude,
+        profile,
     };
 
     let report = engine.audit_freshness(options);
@@ -2895,7 +3019,13 @@ fn cmd_examples(symbol: String, limit: usize, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_context(file: String, line: u64, token_budget: usize, json: bool) -> Result<()> {
+fn cmd_context(
+    file: String,
+    line: u64,
+    token_budget: usize,
+    budget_mode: codixing_core::engine::context_assembly::BudgetMode,
+    json: bool,
+) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
     let engine = Engine::open(&root).with_context(|| {
         format!(
@@ -2904,7 +3034,8 @@ fn cmd_context(file: String, line: u64, token_budget: usize, json: bool) -> Resu
         )
     })?;
 
-    let ctx = engine.assemble_context_for_location(&file, line, token_budget);
+    let ctx =
+        engine.assemble_context_for_location_with_mode(&file, line, token_budget, budget_mode);
 
     if json {
         println!("{}", serde_json::to_string_pretty(&ctx)?);
@@ -2912,10 +3043,22 @@ fn cmd_context(file: String, line: u64, token_budget: usize, json: bool) -> Resu
     }
 
     println!("# Context: {}:{}\n", ctx.primary.file_path, line);
+    let over_marker = if ctx.over_budget {
+        " ⚠ over budget"
+    } else {
+        ""
+    };
     println!(
-        "Token budget: {} | Used: {}\n",
-        token_budget, ctx.total_tokens
+        "Token budget: {} ({}) | Used: {}{}",
+        token_budget,
+        ctx.budget_mode.as_str(),
+        ctx.total_tokens,
+        over_marker
     );
+    if let Some(reason) = &ctx.oversize_reason {
+        println!("Note: {reason}");
+    }
+    println!();
 
     println!(
         "## Primary chunk (L{}-L{})",
@@ -2976,6 +3119,73 @@ fn cmd_context(file: String, line: u64, token_budget: usize, json: bool) -> Resu
         }
     }
 
+    Ok(())
+}
+
+fn cmd_repair(path: PathBuf, no_sync: bool) -> Result<()> {
+    use codixing_core::persistence::IndexStore;
+
+    let root = path
+        .canonicalize()
+        .with_context(|| format!("path not found: {}", path.display()))?;
+
+    let audit = IndexStore::audit_layout(&root);
+    if !audit.dir_exists {
+        anyhow::bail!(
+            "no `.codixing/` directory at {} — there is nothing to repair. \
+             Run `codixing init {}` to create a fresh index.",
+            root.display(),
+            root.display()
+        );
+    }
+
+    if let Some(version) = &audit.meta_version {
+        println!("Found existing index built by codixing {version}.");
+    } else {
+        println!("Found existing `.codixing/` directory (meta.json missing or unreadable).");
+    }
+
+    if audit.essentials_missing.is_empty() {
+        println!("All essential metadata files are present — nothing to repair.");
+        for p in &audit.essentials_present {
+            println!("  ok: {}", p.display());
+        }
+        return Ok(());
+    }
+
+    println!("Missing essential files:");
+    for p in &audit.essentials_missing {
+        println!("  missing: {}", p.display());
+    }
+    if !audit.optional_present.is_empty() {
+        println!("Preserved artifacts:");
+        for p in &audit.optional_present {
+            println!("  keep: {}", p.display());
+        }
+    }
+
+    let report = IndexStore::repair(&root)?;
+    println!("\nRepaired:");
+    for p in &report.created {
+        println!("  created: {}", p.display());
+    }
+
+    if no_sync {
+        println!("\nSkipped post-repair sync (--no-sync). Run `codixing sync` to refresh counts.");
+        return Ok(());
+    }
+
+    println!("\nRunning `sync` to refresh index metadata from disk…");
+    cmd_sync(
+        root.clone(),
+        /* no_embed */ true,
+        /* rebuild_graph */ false,
+    )
+    .with_context(
+        || "post-repair sync failed; index metadata was rewritten but counts may be stale",
+    )?;
+
+    println!("Repair complete. The index is ready for `codixing search` / `audit`.");
     Ok(())
 }
 

@@ -15,4 +15,8 @@ description = "File pattern to include (substring match, e.g. 'crates/', '*.rs')
 
 [tools.params.exclude]
 type = "string"
-description = "File pattern to exclude (substring match, e.g. 'test', 'vendor'). Appended to the default exclusions."
+description = "File pattern to exclude (substring match, e.g. 'test', 'vendor'). Accepts either a single string or an array of strings; a file is excluded when it matches any pattern. Appended to the default exclusions."
+
+[tools.params.profile]
+type = "string"
+description = "Audit profile controlling how docs/templates/static assets are classified. 'mixed' (default) caps documentation, HTML/CSS/SVG assets, and Go //go:embed wrappers at the Info tier so they never surface as Critical dead code. 'code' excludes those file kinds entirely for source-only repos. 'app' preserves the legacy firehose with no extra classification."

@@ -158,7 +158,12 @@ impl IndexStore {
 
     /// Open an existing `.codixing/` directory.
     ///
-    /// Returns [`CodixingError::IndexNotFound`] if the directory does not exist.
+    /// Returns [`CodixingError::IndexNotFound`] if the directory does not exist
+    /// at all, or [`CodixingError::PartialIndex`] if the directory exists but
+    /// is missing the metadata files needed to bring up the engine
+    /// (`config.json` and/or `meta.json`). The latter case happens after a
+    /// partial deletion or when an older index format is missing newer
+    /// required files, and is the failure mode addressed by `codixing repair`.
     pub fn open(root: &Path) -> Result<Self> {
         let codixing_dir = root.join(CODEFORGE_DIR);
         if !codixing_dir.is_dir() {
@@ -166,11 +171,150 @@ impl IndexStore {
                 path: root.to_path_buf(),
             });
         }
+
+        let audit = Self::audit_layout(root);
+        if !audit.essentials_missing.is_empty() {
+            return Err(CodixingError::PartialIndex {
+                root: root.to_path_buf(),
+                missing: audit.essentials_missing,
+            });
+        }
+
         Ok(Self {
             root: root.to_path_buf(),
         })
     }
 
+    /// Inspect a `.codixing/` directory layout without instantiating the engine.
+    ///
+    /// Reports which essential metadata files are present or missing so the
+    /// CLI can tell users whether to run `codixing repair` (rebuild the
+    /// missing pieces) or `codixing init` (wipe and reindex from scratch).
+    pub fn audit_layout(root: &Path) -> LayoutAudit {
+        let codixing_dir = root.join(CODEFORGE_DIR);
+        let dir_exists = codixing_dir.is_dir();
+
+        let mut essentials_present = Vec::new();
+        let mut essentials_missing = Vec::new();
+        if dir_exists {
+            for file in &[CONFIG_FILE, META_FILE] {
+                let path = codixing_dir.join(file);
+                // Use `is_file` rather than `exists` so a stray directory
+                // named `meta.json` does not fool the audit into thinking
+                // the index is healthy.
+                if path.is_file() {
+                    essentials_present.push(path);
+                } else {
+                    essentials_missing.push(path);
+                }
+            }
+        }
+
+        // Optional artifacts — useful to mention in the repair report so
+        // users know whether tantivy/embeddings/symbols were preserved.
+        let mut optional_present = Vec::new();
+        if dir_exists {
+            for sub in &[TANTIVY_DIR, VECTORS_DIR, GRAPH_DIR] {
+                let path = codixing_dir.join(sub);
+                if path.exists() {
+                    optional_present.push(path);
+                }
+            }
+            for file in &[
+                SYMBOLS_FILE,
+                SYMBOLS_V2_FILE,
+                CHUNK_META_FILE,
+                CONCEPTS_FILE,
+                REFORMULATIONS_FILE,
+            ] {
+                let path = codixing_dir.join(file);
+                if path.exists() {
+                    optional_present.push(path);
+                }
+            }
+        }
+
+        // Best-effort: read the version field from meta.json if it survived
+        // so `codixing repair` can mention "indexed by 0.40.x, current 0.41.x".
+        let meta_version = codixing_dir
+            .join(META_FILE)
+            .exists()
+            .then(|| fs::read_to_string(codixing_dir.join(META_FILE)).ok())
+            .flatten()
+            .and_then(|s| serde_json::from_str::<IndexMeta>(&s).ok())
+            .map(|m| m.version);
+
+        LayoutAudit {
+            dir_exists,
+            essentials_present,
+            essentials_missing,
+            optional_present,
+            meta_version,
+        }
+    }
+
+    /// Rebuild missing metadata files in place using safe defaults.
+    ///
+    /// Preserves any existing artifacts (tantivy/, vectors/, graph/, symbols
+    /// blobs). Writes a default [`IndexConfig`] and [`IndexMeta`] when those
+    /// files are absent. Returns the list of files that were created so the
+    /// caller can surface a recovery report.
+    ///
+    /// This does *not* re-index source files — call `codixing sync` (or
+    /// `Engine::open` followed by sync) afterwards to repopulate counts.
+    pub fn repair(root: &Path) -> Result<RepairReport> {
+        let codixing_dir = root.join(CODEFORGE_DIR);
+        fs::create_dir_all(&codixing_dir)?;
+        fs::create_dir_all(codixing_dir.join(TANTIVY_DIR))?;
+        fs::create_dir_all(codixing_dir.join(VECTORS_DIR))?;
+        fs::create_dir_all(codixing_dir.join(GRAPH_DIR))?;
+
+        let store = Self {
+            root: root.to_path_buf(),
+        };
+
+        let mut created = Vec::new();
+        let config_path = codixing_dir.join(CONFIG_FILE);
+        if !config_path.exists() {
+            store.save_config(&IndexConfig::new(root))?;
+            created.push(config_path);
+        }
+        let meta_path = codixing_dir.join(META_FILE);
+        if !meta_path.exists() {
+            store.save_meta(&IndexMeta::default())?;
+            created.push(meta_path);
+        }
+
+        Ok(RepairReport { created })
+    }
+}
+
+/// Snapshot of which `.codixing/` files are present, missing, or salvageable.
+#[derive(Debug, Clone)]
+pub struct LayoutAudit {
+    pub dir_exists: bool,
+    pub essentials_present: Vec<PathBuf>,
+    pub essentials_missing: Vec<PathBuf>,
+    pub optional_present: Vec<PathBuf>,
+    pub meta_version: Option<String>,
+}
+
+impl LayoutAudit {
+    /// True when every file required to open the engine is in place.
+    pub fn is_complete(&self) -> bool {
+        self.dir_exists && self.essentials_missing.is_empty()
+    }
+}
+
+/// What `IndexStore::repair` rewrote (or left alone) on disk.
+#[derive(Debug, Clone)]
+pub struct RepairReport {
+    /// Paths of the files this call created. Empty when the layout was already
+    /// complete and nothing needed to be recreated.
+    pub created: Vec<PathBuf>,
+}
+
+impl IndexStore {
     /// Check if a `.codixing/` directory exists at root.
     pub fn exists(root: &Path) -> bool {
         root.join(CODEFORGE_DIR).is_dir()
@@ -482,6 +626,71 @@ mod tests {
             matches!(err, CodixingError::IndexNotFound { .. }),
             "expected IndexNotFound, got: {err}"
         );
+    }
+
+    #[test]
+    fn open_partial_layout_returns_partial_index_error() {
+        // Regression for #100: when `.codixing/` exists with index artifacts
+        // but `config.json` is missing, `IndexStore::open` must return a
+        // PartialIndex error naming the missing file instead of letting the
+        // failure surface as a generic `I/O error: No such file or directory`.
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let config = IndexConfig::new(root);
+        IndexStore::init(root, &config).unwrap();
+
+        // Simulate the failure mode reported in the issue.
+        fs::remove_file(root.join(CODEFORGE_DIR).join(CONFIG_FILE)).unwrap();
+
+        let err = IndexStore::open(root).unwrap_err();
+        match err {
+            CodixingError::PartialIndex { ref missing, .. } => {
+                assert!(
+                    missing.iter().any(|p| p.ends_with(CONFIG_FILE)),
+                    "missing list should include config.json: {missing:?}"
+                );
+                let rendered = format!("{err}");
+                assert!(
+                    rendered.contains("codixing repair"),
+                    "error should suggest repair: {rendered}"
+                );
+            }
+            other => panic!("expected PartialIndex, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn repair_recreates_missing_metadata_in_place() {
+        // Regression for #100: `IndexStore::repair` must rewrite the missing
+        // metadata files using safe defaults while leaving existing
+        // artifacts (tantivy/, vectors/, graph/) untouched.
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let config = IndexConfig::new(root);
+        IndexStore::init(root, &config).unwrap();
+
+        // Drop the metadata files but keep a marker file under tantivy/ so
+        // we can prove repair did not nuke the rest of the index.
+        let tantivy_marker = root.join(CODEFORGE_DIR).join(TANTIVY_DIR).join("MARKER");
+        fs::write(&tantivy_marker, b"keep me").unwrap();
+        fs::remove_file(root.join(CODEFORGE_DIR).join(CONFIG_FILE)).unwrap();
+        fs::remove_file(root.join(CODEFORGE_DIR).join(META_FILE)).unwrap();
+
+        let pre = IndexStore::audit_layout(root);
+        assert!(!pre.is_complete());
+
+        let report = IndexStore::repair(root).unwrap();
+        assert_eq!(report.created.len(), 2, "should have rewritten 2 files");
+
+        let post = IndexStore::audit_layout(root);
+        assert!(post.is_complete(), "layout should be complete after repair");
+        assert!(
+            tantivy_marker.exists(),
+            "repair must not delete preserved tantivy artifacts"
+        );
+
+        // Sanity: store is now openable.
+        IndexStore::open(root).unwrap();
     }
 
     #[test]

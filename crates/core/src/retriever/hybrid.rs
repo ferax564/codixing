@@ -35,6 +35,35 @@ pub(crate) fn expand_vector_query(query: &str) -> Option<String> {
             &["coverage", "test coverage"],
             &["find_tests", "test_mapping"],
         ),
+        // Operational / launch-readiness queries — issue #104.
+        // These groups bridge the gap between agent task descriptions and
+        // the names code actually uses. The triggers are intentionally
+        // narrow so unrelated queries don't pick up noise.
+        (
+            &[
+                "security headers",
+                "browser security headers",
+                "hsts",
+                "csp",
+            ],
+            &["server", "main", "router", "X-Frame-Options"],
+        ),
+        (
+            &["installer", "install script", "release checksum", "sha256"],
+            &["install.sh", "checksum", "signature", "provenance", "SLSA"],
+        ),
+        (
+            &["webhook secret", "webhook endpoint", "webhook signature"],
+            &["webhook", "Stripe-Signature", "secret"],
+        ),
+        (
+            &["host key", "host key pinning", "ssh fingerprint"],
+            &["ssh", "hostkey", "fingerprint", "HostKeyCallback"],
+        ),
+        (
+            &["rate limit", "rate limiting", "throttle"],
+            &["limiter", "ratelimit", "token bucket", "middleware"],
+        ),
     ];
 
     for (triggers, expansions) in synonyms {
@@ -358,5 +387,41 @@ mod tests {
         let fused = rrf_fuse(&list, &[], 60.0);
         assert_eq!(fused.len(), 1);
         assert_eq!(fused[0].chunk_id, "z");
+    }
+
+    #[test]
+    fn vector_query_expands_operational_synonyms() {
+        // Issue #104: agents describe security/operational tasks
+        // conceptually ("HSTS CSP", "installer checksum", "rate limit"),
+        // not by file name. The vector-query expansion bridges that gap
+        // for hybrid retrieval. BM25 keeps the original query, so this
+        // expansion is a no-op for BM25-only installs.
+        let cases = &[
+            ("browser security headers HSTS CSP", "X-Frame-Options"),
+            ("installer verify release checksum sha256", "install.sh"),
+            ("stripe webhook endpoint secret", "Stripe-Signature"),
+            ("ssh host key pinning", "fingerprint"),
+            ("rate limiting middleware", "limiter"),
+        ];
+        for (query, expected_term) in cases {
+            let expanded = expand_vector_query(query)
+                .unwrap_or_else(|| panic!("expected expansion for {query:?}"));
+            assert!(
+                expanded.contains(expected_term),
+                "expansion of {query:?} should contain {expected_term:?}; got {expanded:?}"
+            );
+            // Original query must be preserved.
+            assert!(
+                expanded.contains(query),
+                "expansion must keep original query: got {expanded:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn vector_query_does_not_expand_unrelated_text() {
+        // Guard against the synonym map firing on unrelated queries.
+        assert!(expand_vector_query("hello world").is_none());
+        assert!(expand_vector_query("Parser new language").is_none());
     }
 }

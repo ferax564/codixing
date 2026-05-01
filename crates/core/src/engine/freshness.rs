@@ -6,11 +6,39 @@
 //! - `find_orphans` (graph connectivity — files with no importers)
 //! - `callers` (count files that import a given file)
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::orphans::{OrphanConfidence, OrphanOptions};
 
 use super::Engine;
+
+/// Audit profile: what kind of repo this is, which decides whether docs
+/// and static assets get flagged as code orphans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AuditProfile {
+    /// Source-only repo. Skip documentation, templates, and static assets
+    /// entirely so the audit signal stays focused on code.
+    Code,
+    /// Application repo with docs, templates, and static assets co-located
+    /// with code (this is the default, matches the EZKeel-style "mixed"
+    /// repo from issue #103). Docs/templates/static files are classified
+    /// separately from code orphans and capped at the `Info` tier.
+    #[default]
+    Mixed,
+    /// Audit everything with no extra classification. Equivalent to the
+    /// pre-0.41.2 behavior — kept for users who liked the firehose.
+    App,
+}
+
+impl AuditProfile {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AuditProfile::Code => "code",
+            AuditProfile::Mixed => "mixed",
+            AuditProfile::App => "app",
+        }
+    }
+}
 
 /// Options for the freshness audit.
 #[derive(Debug, Clone)]
@@ -19,8 +47,12 @@ pub struct FreshnessOptions {
     pub threshold_days: u64,
     /// Glob pattern to include (substring match, e.g. "*.rs", "crates/").
     pub include_pattern: Option<String>,
-    /// Additional exclude pattern (substring match).
-    pub exclude_pattern: Option<String>,
+    /// Substring patterns to exclude. A file matches if it contains *any*
+    /// of these patterns. Empty vec = no extra exclusion beyond the
+    /// orphan-detection defaults.
+    pub exclude_patterns: Vec<String>,
+    /// Audit profile, controls how docs/templates/static assets are scored.
+    pub profile: AuditProfile,
 }
 
 impl Default for FreshnessOptions {
@@ -28,9 +60,110 @@ impl Default for FreshnessOptions {
         Self {
             threshold_days: 21,
             include_pattern: None,
-            exclude_pattern: None,
+            exclude_patterns: Vec::new(),
+            profile: AuditProfile::default(),
         }
     }
+}
+
+/// File extensions that are documentation/markup, not importable code.
+const DOC_EXTS: &[&str] = &["md", "markdown", "mdx", "rst", "adoc", "asciidoc", "txt"];
+/// File extensions that are static assets / templates served by code,
+/// never imported themselves but routinely referenced via `//go:embed`,
+/// `include_bytes!`, or framework asset pipelines.
+const ASSET_EXTS: &[&str] = &[
+    "html", "htm", "css", "scss", "svg", "png", "jpg", "jpeg", "gif", "ico", "webp", "woff",
+    "woff2", "ttf", "json", "yaml", "yml", "toml",
+];
+
+fn extension_is(path: &str, candidates: &[&str]) -> bool {
+    let ext = match path.rsplit_once('.') {
+        Some((_, ext)) => ext.to_ascii_lowercase(),
+        None => return false,
+    };
+    candidates.iter().any(|c| c == &ext)
+}
+
+fn is_doc_file(path: &str) -> bool {
+    extension_is(path, DOC_EXTS)
+}
+
+fn is_asset_file(path: &str) -> bool {
+    extension_is(path, ASSET_EXTS)
+}
+
+/// Best-effort scan for Go `//go:embed` directives across the indexed file
+/// set. Returns the union of:
+/// - Go file paths that contain at least one `//go:embed` line.
+/// - Directory prefixes named in those directives, normalized to forward
+///   slashes and relative to the project root.
+///
+/// The match is line-prefix based and intentionally tolerant — false
+/// positives downgrade severity, they do not introduce broken behavior.
+fn detect_go_embed_roots<I, S>(
+    project_root: &std::path::Path,
+    files: I,
+) -> (HashSet<String>, Vec<String>)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut wrappers = HashSet::new();
+    let mut prefixes: Vec<String> = Vec::new();
+
+    for file in files {
+        let file = file.as_ref();
+        if !file.ends_with(".go") {
+            continue;
+        }
+        let abs = project_root.join(file);
+        let content = match std::fs::read_to_string(&abs) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let mut found_directive = false;
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if let Some(rest) = trimmed.strip_prefix("//go:embed") {
+                found_directive = true;
+                for token in rest.split_whitespace() {
+                    // `//go:embed` accepts both bare globs (`templates/*`)
+                    // and quoted patterns (`"templates/*"` for paths with
+                    // spaces). Strip surrounding quotes before trimming
+                    // glob suffixes so the prefix matches actual files.
+                    let unquoted = token
+                        .trim_start_matches('"')
+                        .trim_end_matches('"')
+                        .trim_start_matches('\'')
+                        .trim_end_matches('\'');
+                    let cleaned = unquoted
+                        .trim_end_matches('*')
+                        .trim_end_matches('/')
+                        .trim_end_matches("/*");
+                    if !cleaned.is_empty() {
+                        // Resolve the directive token relative to the file's
+                        // own directory so `//go:embed templates` in
+                        // `web/embed.go` becomes `web/templates`.
+                        let parent = std::path::Path::new(file).parent();
+                        let joined = match parent {
+                            Some(p) if !p.as_os_str().is_empty() => {
+                                p.join(cleaned).to_string_lossy().replace('\\', "/")
+                            }
+                            _ => cleaned.to_string(),
+                        };
+                        prefixes.push(joined);
+                    }
+                }
+            }
+        }
+        if found_directive {
+            wrappers.insert(file.to_string());
+        }
+    }
+
+    prefixes.sort();
+    prefixes.dedup();
+    (wrappers, prefixes)
 }
 
 /// Classification tier for a file in the freshness audit.
@@ -126,7 +259,7 @@ impl Engine {
             if let Some(ref inc) = options.include_pattern {
                 orphan_opts.include_patterns = vec![inc.clone()];
             }
-            if let Some(ref exc) = options.exclude_pattern {
+            for exc in &options.exclude_patterns {
                 orphan_opts.exclude_patterns.push(exc.clone());
             }
             self.find_orphans(orphan_opts)
@@ -155,6 +288,23 @@ impl Engine {
         let mut entries: Vec<FreshnessEntry> = Vec::new();
         let files_audited = all_files.len();
 
+        // Detect Go `//go:embed` wrappers + their target prefixes so we
+        // never flag the embed root file or anything embedded under it as
+        // dead code. Skipped on the `App` profile to preserve the legacy
+        // firehose behavior for users who explicitly opt out of the new
+        // classification.
+        let (embed_wrappers, embed_prefixes) = if options.profile == AuditProfile::App {
+            (HashSet::new(), Vec::new())
+        } else {
+            detect_go_embed_roots(self.store.root(), all_files.iter().map(|s| s.as_str()))
+        };
+        let is_embed_protected = |path: &str| -> bool {
+            embed_wrappers.contains(path)
+                || embed_prefixes
+                    .iter()
+                    .any(|p| path == p || path.starts_with(&format!("{p}/")))
+        };
+
         for file in &all_files {
             // Apply include/exclude filters.
             if let Some(ref inc) = options.include_pattern {
@@ -162,10 +312,20 @@ impl Engine {
                     continue;
                 }
             }
-            if let Some(ref exc) = options.exclude_pattern {
-                if file.contains(exc.as_str()) {
-                    continue;
-                }
+            if options
+                .exclude_patterns
+                .iter()
+                .any(|p| file.contains(p.as_str()))
+            {
+                continue;
+            }
+
+            // Profile-driven filtering / classification.
+            let is_doc = is_doc_file(file);
+            let is_asset = is_asset_file(file);
+            match options.profile {
+                AuditProfile::Code if is_doc || is_asset => continue,
+                _ => {}
             }
 
             // Compute days since last commit.
@@ -200,7 +360,34 @@ impl Engine {
                 0
             };
 
-            let (tier, reason) = if is_strong_orphan && is_stale {
+            // Mixed-profile classification: documentation, static assets,
+            // and Go embed wrappers are not import-graph nodes — they
+            // routinely show up as "orphans" because nothing imports them
+            // in the language sense. Cap their tier at `Info` and label
+            // the reason so users can tell intentional standalone files
+            // apart from dead code.
+            let asset_label = if options.profile != AuditProfile::App {
+                if is_embed_protected(file) {
+                    Some("Go embed root / embedded asset")
+                } else if is_doc {
+                    Some("documentation")
+                } else if is_asset {
+                    Some("static asset / template")
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let (tier, reason) = if let Some(label) = asset_label {
+                (
+                    FreshnessTier::Info,
+                    format!(
+                        "{label} — no code importers expected (last modified {days_old} day(s) ago)"
+                    ),
+                )
+            } else if is_strong_orphan && is_stale {
                 (
                     FreshnessTier::Critical,
                     format!(
@@ -301,7 +488,8 @@ mod tests {
         let report = engine.audit_freshness(FreshnessOptions {
             threshold_days: 180,
             include_pattern: None,
-            exclude_pattern: None,
+            exclude_patterns: Vec::new(),
+            profile: AuditProfile::App,
         });
 
         assert!(
@@ -309,6 +497,227 @@ mod tests {
             "audit should count both files via the graph even when \
              file_chunk_counts is empty, got files_audited={}",
             report.files_audited
+        );
+    }
+
+    #[test]
+    fn audit_excludes_every_pattern_in_the_list() {
+        // Regression for #103: --exclude must accept multiple patterns and
+        // skip files matching ANY of them. Pre-fix the CLI rejected repeated
+        // --exclude flags entirely; post-fix the option is `Vec<String>` and
+        // the freshness loop matches with `.any()`.
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::write(
+            root.join("real.rs"),
+            "fn hello() { world(); }\nfn world() {}\n",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("vendor")).unwrap();
+        fs::write(root.join("vendor/dep.rs"), "fn vendored() {}\n").unwrap();
+        fs::create_dir_all(root.join("node_modules")).unwrap();
+        fs::write(
+            root.join("node_modules/m.rs"),
+            "fn from_node_modules() {}\n",
+        )
+        .unwrap();
+
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+        let engine = Engine::init(&root, config).unwrap();
+
+        let report = engine.audit_freshness(FreshnessOptions {
+            threshold_days: 0,
+            include_pattern: None,
+            exclude_patterns: vec!["vendor".to_string(), "node_modules".to_string()],
+            profile: AuditProfile::App,
+        });
+
+        for entry in &report.entries {
+            assert!(
+                !entry.file_path.contains("vendor") && !entry.file_path.contains("node_modules"),
+                "exclude patterns leaked into report: {}",
+                entry.file_path
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_profile_classifies_docs_as_info_not_critical() {
+        // Regression for #103: docs and templates routinely have no
+        // importers and look stale, but they're not dead code. Default
+        // `mixed` profile must cap them at `Info` instead of `Critical`.
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::create_dir_all(root.join("docs")).unwrap();
+        fs::write(root.join("docs/design.md"), "# Design notes\n").unwrap();
+        fs::write(root.join("README.md"), "# Project\n").unwrap();
+        fs::create_dir_all(root.join("web/templates")).unwrap();
+        fs::write(
+            root.join("web/templates/index.html"),
+            "<html><body>hi</body></html>\n",
+        )
+        .unwrap();
+
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+        let engine = Engine::init(&root, config).unwrap();
+
+        let report = engine.audit_freshness(FreshnessOptions {
+            threshold_days: 0,
+            include_pattern: None,
+            exclude_patterns: Vec::new(),
+            profile: AuditProfile::Mixed,
+        });
+
+        let docs: Vec<_> = report
+            .entries
+            .iter()
+            .filter(|e| e.file_path.ends_with(".md") || e.file_path.ends_with(".html"))
+            .collect();
+        assert!(!docs.is_empty(), "should have surfaced doc/template files");
+        for entry in &docs {
+            assert_eq!(
+                entry.tier,
+                FreshnessTier::Info,
+                "doc/template should be Info under mixed profile, got {:?} for {}",
+                entry.tier,
+                entry.file_path
+            );
+            assert!(
+                entry.reason.contains("documentation") || entry.reason.contains("static asset"),
+                "reason should label the asset kind: {} ({})",
+                entry.file_path,
+                entry.reason
+            );
+        }
+    }
+
+    #[test]
+    fn code_profile_skips_docs_and_static_assets() {
+        // `--profile code` is for source-only repos. Docs / templates /
+        // assets should be excluded from the audit entirely.
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::write(root.join("README.md"), "# Project\n").unwrap();
+        fs::write(
+            root.join("real.rs"),
+            "fn hello() { world(); }\nfn world() {}\n",
+        )
+        .unwrap();
+
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+        let engine = Engine::init(&root, config).unwrap();
+
+        let report = engine.audit_freshness(FreshnessOptions {
+            threshold_days: 0,
+            include_pattern: None,
+            exclude_patterns: Vec::new(),
+            profile: AuditProfile::Code,
+        });
+
+        for entry in &report.entries {
+            assert!(
+                !entry.file_path.ends_with(".md"),
+                "code profile should skip docs: {}",
+                entry.file_path
+            );
+        }
+    }
+
+    #[test]
+    fn go_embed_root_handles_quoted_patterns() {
+        // Regression for review of #103: `//go:embed "templates/*"` is
+        // valid Go (quoted patterns let you embed paths with spaces).
+        // Pre-fix the prefix included the surrounding quotes and never
+        // matched a real file path, so the embed wrapper lost its
+        // mixed-profile protection.
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::create_dir_all(root.join("web/templates")).unwrap();
+        fs::write(
+            root.join("web/templates/index.html"),
+            "<html><body>hi</body></html>\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("web/embed.go"),
+            "package web\n\nimport \"embed\"\n\n//go:embed \"templates/*\"\nvar Templates embed.FS\n",
+        )
+        .unwrap();
+
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+        let engine = Engine::init(&root, config).unwrap();
+
+        let report = engine.audit_freshness(FreshnessOptions {
+            threshold_days: 0,
+            include_pattern: None,
+            exclude_patterns: Vec::new(),
+            profile: AuditProfile::Mixed,
+        });
+
+        let embed_entry = report
+            .entries
+            .iter()
+            .find(|e| e.file_path.ends_with("web/embed.go"))
+            .expect("web/embed.go should appear in the audit");
+        assert_eq!(
+            embed_entry.tier,
+            FreshnessTier::Info,
+            "quoted go-embed root should still be Info, got {:?}",
+            embed_entry.tier
+        );
+    }
+
+    #[test]
+    fn go_embed_root_protected_from_critical_dead_code_flag() {
+        // Regression for #103: `web/embed.go` exists solely to expose a
+        // `//go:embed` filesystem to the rest of the program. Nothing in
+        // the import graph imports it directly, so it would otherwise
+        // show up as `Critical` dead code. With Go-embed detection it
+        // gets the protected `Info` label instead.
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::create_dir_all(root.join("web/templates")).unwrap();
+        fs::write(
+            root.join("web/templates/index.html"),
+            "<html><body>hi</body></html>\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("web/embed.go"),
+            "package web\n\nimport \"embed\"\n\n//go:embed templates\nvar Templates embed.FS\n",
+        )
+        .unwrap();
+
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+        let engine = Engine::init(&root, config).unwrap();
+
+        let report = engine.audit_freshness(FreshnessOptions {
+            threshold_days: 0,
+            include_pattern: None,
+            exclude_patterns: Vec::new(),
+            profile: AuditProfile::Mixed,
+        });
+
+        let embed_entry = report
+            .entries
+            .iter()
+            .find(|e| e.file_path.ends_with("web/embed.go"))
+            .expect("web/embed.go should appear in the audit");
+        assert_eq!(
+            embed_entry.tier,
+            FreshnessTier::Info,
+            "go-embed root file should be Info, got {:?}",
+            embed_entry.tier
+        );
+        assert!(
+            embed_entry.reason.contains("Go embed"),
+            "reason should mention Go embed: {}",
+            embed_entry.reason
         );
     }
 }

@@ -80,6 +80,13 @@ jobs:
       - name: Format check
         run: cargo fmt --check
 
+      - name: README ↔ CLI subcommand drift check
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          cargo build --release -p codixing
+          scripts/check_readme_commands.sh ./target/release/codixing
+
   vscode:
     name: VS Code Extension
     runs-on: ubuntu-latest

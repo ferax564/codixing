@@ -127,6 +127,19 @@ fn default_edge_confidence() -> EdgeConfidence {
     EdgeConfidence::Verified
 }
 
+/// Edge kinds that constitute a true *import-graph* boundary, used by
+/// `cross_imports*`. Calls and DocumentedBy edges are intentionally
+/// excluded because they are not enforceable architectural boundaries.
+pub const DEFAULT_IMPORT_BOUNDARY_KINDS: &[EdgeKind] = &[EdgeKind::Resolved, EdgeKind::External];
+
+/// One matched edge contributing to a `cross_imports_ranked_with_evidence`
+/// result: `(target_file, raw_import_text, edge_kind)`.
+pub type CrossImportEvidence = (String, String, EdgeKind);
+
+/// One row of `cross_imports_ranked_with_evidence`: source file path,
+/// score, and the per-edge evidence list that produced the score.
+pub type CrossImportEvidenceRow = (String, f32, Vec<CrossImportEvidence>);
+
 /// Flat, serialization-friendly representation of the graph.
 ///
 /// Used for bitcode persistence — avoids petgraph index fragility across rebuilds.
@@ -420,6 +433,13 @@ impl CodeGraph {
     /// a recency boost: `1 + exp(-0.05 * days_old)` for the source file.
     ///
     /// Returns `(file_path, score)` pairs sorted by score descending.
+    ///
+    /// Considers only true import-graph edges (`EdgeKind::Resolved` and
+    /// `EdgeKind::External`). Call-graph and DocumentedBy edges are
+    /// excluded so that an unrelated function call sharing a name with a
+    /// symbol in the target package does not produce a phantom
+    /// architecture-boundary violation. Use
+    /// [`Self::cross_imports_ranked_with_kinds`] to broaden the edge kinds.
     pub fn cross_imports_ranked(
         &self,
         from_prefix: &str,
@@ -427,12 +447,35 @@ impl CodeGraph {
         recency_map: Option<&std::collections::HashMap<String, i64>>,
         limit: Option<usize>,
     ) -> Vec<(String, f32)> {
+        self.cross_imports_ranked_with_kinds(
+            from_prefix,
+            to_prefix,
+            recency_map,
+            limit,
+            DEFAULT_IMPORT_BOUNDARY_KINDS,
+        )
+    }
+
+    /// Lower-level cross-import query that lets the caller pick which
+    /// `EdgeKind`s count as an import-boundary edge.
+    pub fn cross_imports_ranked_with_kinds(
+        &self,
+        from_prefix: &str,
+        to_prefix: &str,
+        recency_map: Option<&std::collections::HashMap<String, i64>>,
+        limit: Option<usize>,
+        kinds: &[EdgeKind],
+    ) -> Vec<(String, f32)> {
         let mut scores: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
 
         for edge in self.graph.edge_references() {
             let source = &self.graph[edge.source()];
             let target = &self.graph[edge.target()];
+            let edge_kind = &edge.weight().kind;
 
+            if !kinds.iter().any(|k| k == edge_kind) {
+                continue;
+            }
             if source.file_path.starts_with(from_prefix)
                 && target.file_path.starts_with(to_prefix)
                 && !source.file_path.starts_with("__ext__:")
@@ -470,6 +513,91 @@ impl CodeGraph {
             ranked.truncate(lim);
         }
 
+        ranked
+    }
+
+    /// Evidence-aware variant of [`Self::cross_imports_ranked`] that also
+    /// returns the matched import line(s) for each source file.
+    ///
+    /// Each result is `(source_path, score, evidence)`, where `evidence`
+    /// holds `(target_path, raw_import, edge_kind)` for every edge that
+    /// contributed to the score. Surfacing the matched line per the
+    /// `cross-imports` issue (#101) lets callers verify the boundary
+    /// claim without re-grepping the source file.
+    pub fn cross_imports_ranked_with_evidence(
+        &self,
+        from_prefix: &str,
+        to_prefix: &str,
+        kinds: &[EdgeKind],
+    ) -> Vec<CrossImportEvidenceRow> {
+        self.cross_imports_ranked_with_evidence_recency(from_prefix, to_prefix, None, kinds)
+    }
+
+    /// Recency-aware variant of [`Self::cross_imports_ranked_with_evidence`].
+    ///
+    /// Mirrors the scoring model used by [`Self::cross_imports_ranked`] so
+    /// that the CLI evidence path stays on the same recency-weighted
+    /// PageRank ranking. Without the recency multiplier, a long-stale
+    /// importer can outrank a recently touched one — a regression noted
+    /// during review of the v0.41.2 cross-imports fix.
+    pub fn cross_imports_ranked_with_evidence_recency(
+        &self,
+        from_prefix: &str,
+        to_prefix: &str,
+        recency_map: Option<&std::collections::HashMap<String, i64>>,
+        kinds: &[EdgeKind],
+    ) -> Vec<CrossImportEvidenceRow> {
+        let mut acc: std::collections::HashMap<String, (f32, Vec<CrossImportEvidence>)> =
+            std::collections::HashMap::new();
+
+        for edge in self.graph.edge_references() {
+            let source = &self.graph[edge.source()];
+            let target = &self.graph[edge.target()];
+            let edge_data = edge.weight();
+            if !kinds.iter().any(|k| k == &edge_data.kind) {
+                continue;
+            }
+            if source.file_path.starts_with(from_prefix)
+                && target.file_path.starts_with(to_prefix)
+                && !source.file_path.starts_with("__ext__:")
+            {
+                let entry = acc
+                    .entry(source.file_path.clone())
+                    .or_insert((0.0, Vec::new()));
+                entry.0 += target.pagerank.max(0.001);
+                entry.1.push((
+                    target.file_path.clone(),
+                    edge_data.raw_import.clone(),
+                    edge_data.kind.clone(),
+                ));
+            }
+        }
+
+        // Match `cross_imports_ranked`'s recency multiplier so the evidence
+        // path produces the same ranking as the score-only path.
+        if let Some(rmap) = recency_map {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            for (file, (score, _)) in acc.iter_mut() {
+                if let Some(&commit_ts) = rmap.get(file) {
+                    let days_old = ((now - commit_ts) as f64 / 86400.0).max(0.0);
+                    let boost = (-0.05 * days_old).exp();
+                    *score *= 1.0 + boost as f32;
+                }
+            }
+        }
+
+        let mut ranked: Vec<CrossImportEvidenceRow> = acc
+            .into_iter()
+            .map(|(path, (score, ev))| (path, score, ev))
+            .collect();
+        ranked.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
         ranked
     }
 
@@ -1178,6 +1306,128 @@ mod tests {
         assert_eq!(ranked[0].0, "src/gateway/a.rs");
         assert_eq!(ranked[1].0, "src/gateway/b.rs");
         assert!(ranked[0].1 > ranked[1].1);
+    }
+
+    #[test]
+    fn cross_imports_ranked_excludes_call_edges_by_default() {
+        // Regression for #101: a call-graph edge from a file in `from`
+        // to a symbol defined under `to` must NOT register as a cross
+        // import. Only import-graph edges (Resolved + External) should
+        // count. Pre-fix the EZKeel report flagged
+        // internal/web/sampler/sampler.go because a call edge happened
+        // to land on cli/internal/* even though no actual import existed.
+        let mut g = CodeGraph::new();
+        g.add_edge(
+            "internal/web/api/handler.go",
+            "cli/internal/auth/jwt.go",
+            "github.com/example/cli/internal/auth",
+            Language::Go,
+            Language::Go,
+        );
+        g.add_call_edge(
+            "internal/web/sampler/sampler.go",
+            "cli/internal/util/strings.go",
+            "Sanitize",
+            Language::Go,
+            Language::Go,
+        );
+
+        let ranked = g.cross_imports_ranked("internal/web", "cli/internal", None, None);
+        let names: Vec<&str> = ranked.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(
+            names.contains(&"internal/web/api/handler.go"),
+            "real importer must remain in results: {names:?}"
+        );
+        assert!(
+            !names.contains(&"internal/web/sampler/sampler.go"),
+            "call-only edge must not appear in cross-imports: {names:?}"
+        );
+
+        // Opt-in: kinds=[Calls] surfaces the call edge again.
+        let with_calls = g.cross_imports_ranked_with_kinds(
+            "internal/web",
+            "cli/internal",
+            None,
+            None,
+            &[EdgeKind::Resolved, EdgeKind::Calls],
+        );
+        let names_with_calls: Vec<&str> = with_calls.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(names_with_calls.contains(&"internal/web/sampler/sampler.go"));
+    }
+
+    #[test]
+    fn cross_imports_evidence_applies_recency_boost() {
+        // Regression for review of #101: when the CLI moved to the
+        // evidence-aware path it lost the recency multiplier from
+        // `cross_imports_ranked`, so older importers could outrank
+        // freshly modified ones. The recency-aware evidence variant
+        // restores parity with the score-only path.
+        let mut g = CodeGraph::new();
+        g.add_edge(
+            "src/gateway/fresh.rs",
+            "src/auth/jwt.rs",
+            "crate::auth::jwt",
+            Language::Rust,
+            Language::Rust,
+        );
+        g.add_edge(
+            "src/gateway/stale.rs",
+            "src/auth/jwt.rs",
+            "crate::auth::jwt",
+            Language::Rust,
+            Language::Rust,
+        );
+
+        // Equalize raw PageRank so recency is the only differentiator.
+        let mut pr = std::collections::HashMap::new();
+        pr.insert("src/auth/jwt.rs".to_string(), 0.5f32);
+        g.apply_pagerank(&pr);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let mut recency = std::collections::HashMap::new();
+        recency.insert("src/gateway/fresh.rs".to_string(), now); // today
+        recency.insert("src/gateway/stale.rs".to_string(), now - 200 * 86_400); // ~7 months ago
+
+        let ranked = g.cross_imports_ranked_with_evidence_recency(
+            "src/gateway",
+            "src/auth",
+            Some(&recency),
+            DEFAULT_IMPORT_BOUNDARY_KINDS,
+        );
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(
+            ranked[0].0, "src/gateway/fresh.rs",
+            "freshly modified importer should rank first"
+        );
+        assert!(ranked[0].1 > ranked[1].1);
+    }
+
+    #[test]
+    fn cross_imports_evidence_includes_raw_import() {
+        let mut g = CodeGraph::new();
+        g.add_edge(
+            "internal/web/api/handler.go",
+            "cli/internal/auth/jwt.go",
+            "github.com/example/cli/internal/auth",
+            Language::Go,
+            Language::Go,
+        );
+
+        let evidence = g.cross_imports_ranked_with_evidence(
+            "internal/web",
+            "cli/internal",
+            DEFAULT_IMPORT_BOUNDARY_KINDS,
+        );
+        assert_eq!(evidence.len(), 1);
+        let (file, _score, edges) = &evidence[0];
+        assert_eq!(file, "internal/web/api/handler.go");
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].0, "cli/internal/auth/jwt.go");
+        assert_eq!(edges[0].1, "github.com/example/cli/internal/auth");
+        assert_eq!(edges[0].2, EdgeKind::Resolved);
     }
 
     #[test]

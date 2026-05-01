@@ -132,20 +132,24 @@ codixing graph --token-budget 4000
 
 ### Hybrid search (optional)
 
-BM25-only works great for most queries. For natural-language queries ("how does the auth flow work?"), add semantic embeddings:
+`codixing init` builds BM25 + symbol graph by default. For natural-language queries
+("how does the auth flow work?"), opt into semantic embeddings with `--embed`:
 
 ```bash
-codixing init . --model bge-small-en    # one-time, ~2 min
+codixing init . --embed --model bge-small-en    # one-time, ~2 min on a medium repo
 codixing search "how does auth work" --strategy fast
 ```
 
-Requires ONNX Runtime (`pip install onnxruntime` or download from GitHub).
+ONNX-based embedding models (`bge-small-en`, `bge-base-en`, etc.) require ONNX
+Runtime (`pip install onnxruntime`, or download from the
+[onnxruntime releases](https://github.com/microsoft/onnxruntime/releases)). The
+static `model2vec` model and BM25-only installs do not need it.
 
 ---
 
 ## CLI Commands
 
-26 commands for code intelligence:
+The most common commands (run `codixing --help` for the full list):
 
 ```bash
 codixing search "query"          # Semantic code search
@@ -293,7 +297,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Cross-file context assembly** — `codixing context` follows import chains and callees to assemble understanding context
 - **Query-personalized PageRank** — Query-time graph boost seeds PageRank from query-relevant nodes for context-aware ranking
 - **Learned query reformulation** — Project-specific vocabulary expansion learns from codebase patterns
-- **CLI + MCP** — 26 CLI commands for direct use (including the new `codixing grep` literal/regex scanner); 67 MCP tools for editor integration (search, graph traversal, file operations, code review, git analysis, session memory, federation discovery)
+- **CLI + MCP** — Full CLI surface for direct use (run `codixing --help`); 67 MCP tools for editor integration (search, graph traversal, file operations, code review, git analysis, session memory, federation discovery)
 - **File freshness audit** — `audit_freshness` tool identifies stale and orphaned files across releases
 - **Preflight gates** — Plugin enforces existence scanning before proposing new features
 - **TypeScript import resolution** — Resolve `.js` → `.ts` imports with node16/bundler moduleResolution support, enabling 0.8+ R@10 on cross-package code discovery
@@ -355,7 +359,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 │  + Exact (trigram) · Graph boost · Definition 3.5× · Session     │
 │  SearchPipeline: composable stages, 6 strategies                  │
 │                                                                   │
-│  API: CLI (25 cmds) · MCP (67 tools, JSON-RPC 2.0) · LSP · HTTP  │
+│  API: CLI · MCP (67 tools, JSON-RPC 2.0) · LSP · HTTP            │
 │       Daemon (Unix socket / Windows named pipe) · File Watcher   │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -366,7 +370,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 1202 tests
+cargo test --workspace        # 1226 tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```
