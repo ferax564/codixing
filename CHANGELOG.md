@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.41.3] — 2026-05-01
+
+Windows indexing reliability fix.
+
+### Fixed
+
+- **`codixing init` / `codixing sync` race on Windows with high core counts (#107)** — On a 22-core Windows 11 box, `codixing init` crashed almost immediately with `Failed to open file for write: '<segment-id>.term', PermissionDenied (os error 5)`. After the first failure Tantivy's writer thread is killed, every subsequent file warns "An index writer was killed", and the index ends up empty. Reporter's empirical signal: `RAYON_NUM_THREADS=4` works, `RAYON_NUM_THREADS=8` crashes. Root cause: Windows Defender real-time scanning briefly holds a handle on freshly-created `.term` files, returning `ERROR_ACCESS_DENIED` (mandatory file-sharing on NTFS, unlike Unix advisory locks); high Rayon worker counts saturate Tantivy's segment-write rate enough to surface the race on the very first segment. Fix caps the global Rayon pool to `min(num_cpus, 4)` on Windows by default (Unix unchanged) and adds `--threads N` on `init` and `sync` for explicit overrides. Smoke-tested on the reporter's repro — pending external confirmation.
+
+### Added
+
+- **`codixing init --threads N` and `codixing sync --threads N`** — explicit cap on the Rayon worker pool used during indexing. Default behavior matches the new platform-aware cap (`num_cpus` on Unix/macOS, `min(num_cpus, 4)` on Windows). 4 new unit tests covering clap parsing of both subcommands and the platform default.
+
 ## [0.41.0] — 2026-04-19
 
 Doc-format expansion + structural retrieval hardening. Ships the five
