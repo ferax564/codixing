@@ -557,7 +557,7 @@ pub fn handle_auth_request(req: Request) -&gt; Result&lt;Token&gt;</span>
         <div class="pre-label">Plugin (recommended)</div>
         <pre><code><span class="tok-cmd">claude plugin marketplace add</span> ferax564/codixing
 <span class="tok-cmd">claude plugin install</span> codixing@codixing</code></pre>
-        <p>Installs the MCP server (68 tools) plus five slash commands: <code>/codixing-setup</code> (index + register), <code>/codixing-explore</code> (architecture deep-dive), <code>/codixing-review</code> (code review with impact analysis), <code>/codixing-preflight</code> (duplicate detection), <code>/codixing-release</code> (automated release pipeline). Restart Claude Code after installing.</p>
+        <p>Installs the MCP server (70-tool catalog) plus five slash commands: <code>/codixing-setup</code> (index + register), <code>/codixing-explore</code> (architecture deep-dive), <code>/codixing-review</code> (code review with impact analysis), <code>/codixing-preflight</code> (duplicate detection), <code>/codixing-release</code> (automated release pipeline). Restart Claude Code after installing.</p>
 
         <p>Alternatively, register just the MCP server without the plugin:</p>
         <div class="pre-label">MCP only</div>
@@ -565,7 +565,7 @@ pub fn handle_auth_request(req: Request) -&gt; Result&lt;Token&gt;</span>
 
         <h3>OpenAI Codex CLI</h3>
 
-        <p>Install the binary first, then register the MCP server. Codex requires the local binary &mdash; <code>npx</code> is not supported. All 68 tools are advertised on <code>tools/list</code> regardless of client.</p>
+        <p>Install the binary first, then register the MCP server. Codex requires the local binary &mdash; <code>npx</code> is not supported. The MCP catalog contains 70 tools; the active <code>tools/list</code> response is profile-filtered and can be changed at runtime with <code>set_mcp_profile</code>.</p>
         <div class="pre-label">shell</div>
         <pre><code><span class="tok-cmd">curl -fsSL</span> https://codixing.com/install.sh | sh
 <span class="tok-cmd">codex mcp add</span> codixing -- codixing-mcp --root .</code></pre>
@@ -927,13 +927,16 @@ Sync complete in 0.12s</span></code></pre>
         <h3>Auto-init</h3>
         <p>If no index exists at <code>--root</code>, the MCP server automatically runs <code>init --model bge-small-en</code> before serving the first request. No manual setup required when connecting from Claude Code.</p>
 
+        <h3>Runtime tool profiles</h3>
+        <p>The startup <code>--profile</code> flag only sets the initial profile. Agents can call <code>get_mcp_profile</code> to inspect the active profile, then <code>set_mcp_profile</code> to switch between <code>minimal</code>, <code>reviewer</code>, <code>editor</code>, and <code>dangerous</code> for the current MCP connection without killing the server. Successful switches emit <code>notifications/tools/list_changed</code> so clients can refresh <code>tools/list</code>.</p>
+
         <h3>VS Code / Cursor extension</h3>
         <p>Install the extension from <code>editors/vscode/</code>. It exposes 6 commands and auto-writes the MCP server entry to both <code>~/.claude.json</code> and <code>~/.cursor/mcp.json</code>.</p>
       </section>
 
       <!-- MCP Tools -->
       <section class="doc-section" id="mcp-tools">
-        <h2>MCP — Tools Reference (33 highlighted of 68 total)</h2>
+        <h2>MCP — Tools Reference (35 highlighted of 70 total)</h2>
         <p>All tools are called via JSON-RPC 2.0 <code>tools/call</code> with a <code>name</code> and <code>arguments</code> object. Write tools (<code>write_file</code>, <code>edit_file</code>, <code>delete_file</code>) automatically reindex after every operation. Intelligence tools expose the call graph, impact analysis, context stitching, complexity metrics, persistent memory, test discovery, duplicate detection, PR review context, and project onboarding generation.</p>
 
         <div class="tool-card">
@@ -1088,6 +1091,33 @@ Sync complete in 0.12s</span></code></pre>
             <p>Returns a snapshot of the current index state: file count, symbol count, vector count, graph node/edge counts, last sync commit, and strategy availability.</p>
             <div class="pre-label">parameters</div>
             <pre><code>{}  <span class="tok-comment">// no parameters required</span></code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name">get_mcp_profile</span>
+            <span class="tool-desc">Inspect the active MCP tool profile</span>
+          </div>
+          <div class="tool-body">
+            <p>Returns versioned JSON with the active profile for the current connection, the available profiles, and their safety levels. Use this before requesting broader tool access.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{}  <span class="tok-comment">// no parameters required</span></code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name">set_mcp_profile</span>
+            <span class="tool-desc">Switch tools without restarting MCP</span>
+          </div>
+          <div class="tool-body">
+            <p>Changes the active profile for the current connection and emits <code>notifications/tools/list_changed</code>. Use <code>editor</code> for non-destructive edits; <code>dangerous</code> requires explicit confirmation.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"profile"</span>: <span class="tok-str">"editor"</span>,           <span class="tok-comment">// minimal|reviewer|editor|dangerous</span>
+  <span class="tok-key">"confirm_dangerous"</span>: <span class="tok-num">false</span>   <span class="tok-comment">// true required for dangerous</span>
+}</code></pre>
           </div>
         </div>
 

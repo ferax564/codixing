@@ -178,13 +178,14 @@ Full reference: [codixing.com/docs](https://codixing.com/docs)
 
 ### MCP server (optional)
 
-For editors with MCP support, the `codixing-mcp` binary exposes 68 JSON-RPC 2.0 tools.
+For editors with MCP support, the `codixing-mcp` binary has a 70-tool JSON-RPC 2.0 catalog.
 It starts in the read-only `reviewer` profile by default; use `--profile minimal`
 for a narrow search/symbol/repo-map surface, `--profile editor` or
 `--allow-write-tools` for non-destructive write helpers, and `--profile dangerous`
-only when destructive file and shell tools are intentional. Auto-forked daemons
-use profile-scoped socket/pipe names so a reviewer client never proxies through
-an editor or dangerous daemon by accident.
+only when destructive file and shell tools are intentional. Agents can also call
+`get_mcp_profile` and `set_mcp_profile` to inspect or switch the active profile
+for the current MCP connection without restarting the server; successful switches
+emit `notifications/tools/list_changed` so clients can refresh `tools/list`.
 
 | Category | Tools |
 |----------|-------|
@@ -194,7 +195,7 @@ an editor or dangerous daemon by accident.
 | **Analysis** | agent_context_pack, find_tests, find_source_for_test, get_complexity, review_context, rename_symbol, run_tests, get_context_for_task, check_staleness, generate_onboarding, audit_freshness |
 | **Git** | git_diff, get_hotspots, search_changes, get_blame |
 | **Session** | remember, recall, forget, get_session_summary, session_status, session_reset_focus |
-| **Meta** | index_status, search_tools, get_tool_schema, enrich_docs |
+| **Meta** | index_status, search_tools, get_tool_schema, get_mcp_profile, set_mcp_profile, enrich_docs |
 
 ### Daemon mode
 
@@ -305,7 +306,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Agent context pack** — `codixing agent-context-pack` and MCP `agent_context_pack` compile a versioned JSON pack with repo orientation, must-read evidence handles, related symbols, likely tests, docs, risks, and recommended next tools
 - **Query-personalized PageRank** — Query-time graph boost seeds PageRank from query-relevant nodes for context-aware ranking
 - **Learned query reformulation** — Project-specific vocabulary expansion learns from codebase patterns
-- **CLI + MCP** — Full CLI surface for direct use (run `codixing --help`); 68 MCP tools for editor integration (search, graph traversal, file operations, code review, git analysis, session memory, federation discovery)
+- **CLI + MCP** — Full CLI surface for direct use (run `codixing --help`); 70 MCP tools for editor integration (search, graph traversal, file operations, code review, git analysis, session memory, federation discovery)
 - **File freshness audit** — `audit_freshness` tool identifies stale and orphaned files across releases
 - **Preflight gates** — Plugin enforces existence scanning before proposing new features
 - **TypeScript import resolution** — Resolve `.js` → `.ts` imports with node16/bundler moduleResolution support, enabling 0.8+ R@10 on cross-package code discovery
@@ -368,7 +369,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 │  + Exact (trigram) · Graph boost · Definition 3.5× · Session     │
 │  SearchPipeline: composable stages, 6 strategies                  │
 │                                                                   │
-│  API: CLI · MCP (68 tools, JSON-RPC 2.0) · LSP · HTTP            │
+│  API: CLI · MCP (70 tools, JSON-RPC 2.0) · LSP · HTTP            │
 │       Daemon (Unix socket / Windows named pipe) · File Watcher   │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -379,7 +380,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 1258 tests
+cargo test --workspace        # 1261 tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```

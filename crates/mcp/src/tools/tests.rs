@@ -85,13 +85,13 @@ func TestHandleRequest(t *testing.T) {
 // -------------------------------------------------------------------------
 
 #[test]
-fn tool_definitions_returns_61_tools() {
+fn tool_definitions_returns_63_tools() {
     let defs = tool_definitions();
     let arr = defs.as_array().expect("tool_definitions returns array");
     assert_eq!(
         arr.len(),
-        61,
-        "expected exactly 61 tool definitions (59 + 2 meta-tools), got {}",
+        63,
+        "expected exactly 63 tool definitions (59 + 4 meta-tools), got {}",
         arr.len()
     );
 }
@@ -134,6 +134,8 @@ fn tool_definitions_phase10_tools_present() {
         "get_complexity",
         "review_context",
         "generate_onboarding",
+        "get_mcp_profile",
+        "set_mcp_profile",
     ] {
         assert!(
             names.contains(expected),
@@ -1529,16 +1531,18 @@ fn search_tools_finds_search_tools() {
 fn search_tools_empty_query_returns_all() {
     let (out, err) = call_search_tools(&json!({"query": ""}));
     assert!(!err, "search_tools returned error: {out}");
-    // Should list all tools (61 core + 6 federation + 1 deprecated list_projects = 68).
+    // Should list all tools (63 core + 6 federation + 1 deprecated list_projects = 70).
     assert!(
         out.contains("code_search")
             && out.contains("find_symbol")
-            && out.contains("get_tool_schema"),
+            && out.contains("get_tool_schema")
+            && out.contains("get_mcp_profile")
+            && out.contains("set_mcp_profile"),
         "empty query should return all tools: {out}"
     );
     assert!(
-        out.contains("68 results"),
-        "should report 68 results for empty query: {out}"
+        out.contains("70 results"),
+        "should report 70 results for empty query: {out}"
     );
 }
 

@@ -1015,7 +1015,7 @@
     <div class="hero">
       <div class="hero-badge">
         <span class="badge-dot"></span>
-        Rust-native &bull; 1258 tests &bull; 28 CLI commands &bull; 73% token savings
+        Rust-native &bull; 1261 tests &bull; 28 CLI commands &bull; 73% token savings
       </div>
       <h1>Your AI agent is<br><span class="grad">burning money on grep</span></h1>
       <p class="hero-sub">
@@ -1520,8 +1520,8 @@
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#30d158" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 17h6M17 14v6"/><path d="M7 10v4M10 7h4M17 10v4"/></svg>
           </div>
           <h3>CLI + MCP</h3>
-          <p>28 CLI commands for direct use, plus 68 JSON-RPC 2.0 tools for Claude Code and any MCP-capable client. MCP starts read-only by default, with explicit profiles for minimal search, editing, and dangerous operations.</p>
-          <span class="feature-tag">28 CLI cmds &bull; 68 MCP tools &bull; stdin/stdout &bull; Unix socket</span>
+          <p>28 CLI commands for direct use, plus a 70-tool JSON-RPC 2.0 catalog for Claude Code and any MCP-capable client. MCP starts read-only by default, with explicit profiles for minimal search, editing, and dangerous operations that agents can switch per connection.</p>
+          <span class="feature-tag">28 CLI cmds &bull; 70 MCP tools &bull; runtime profiles &bull; Unix socket</span>
         </div>
         <div class="feature-card" style="--delay:0.35s">
           <div class="feature-icon pink">
@@ -1557,7 +1557,7 @@
       <div class="mcp-layout">
         <div>
           <div class="section-label reveal">CLI &amp; MCP Integration</div>
-          <h2 class="section-title reveal">28 CLI commands +<br>68 MCP tools</h2>
+          <h2 class="section-title reveal">28 CLI commands +<br>70 MCP tools</h2>
           <p class="section-sub reveal">Use Codixing directly from the terminal with 28 commands, or connect any MCP-capable editor. MCP profiles keep agents scoped: reviewer is read-only by default, minimal narrows discovery, editor enables non-destructive writes, and dangerous must be requested explicitly. Auto-forked daemons are profile-isolated.</p>
           <div class="tools-grid reveal">
             <div class="tool-card">
@@ -1696,7 +1696,7 @@
             <div class="step-num">4</div>
             <div class="step-content">
               <h4>Connect to Claude Code</h4>
-              <p>Drop in an <code>.mcp.json</code>, or run <code>claude mcp add codixing -- npx -y codixing-mcp --root . --no-daemon-fork</code>. Claude Code picks up all 68 tools automatically.</p>
+              <p>Drop in an <code>.mcp.json</code>, or run <code>claude mcp add codixing -- npx -y codixing-mcp --root . --no-daemon-fork</code>. Claude Code starts with the reviewer profile and can switch tool profiles at runtime through <code>set_mcp_profile</code>.</p>
             </div>
           </div>
         </div>

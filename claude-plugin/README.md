@@ -45,11 +45,11 @@ The plugin ships a **PreToolUse hook** that intercepts Grep calls targeting code
 | `/codixing-preflight` | Duplicate detection — searches for existing implementations before new features |
 | `/codixing-release` | Automated release pipeline — version bump, tests, docs, CI, blog, X post |
 
-### MCP server (68 tools)
+### MCP server (70-tool catalog)
 
 The plugin bundles the Codixing MCP server via `npx`. On first use, it downloads the `codixing-mcp` binary (~45MB) which then runs locally — no external APIs, no cloud dependencies.
 
-The server starts in the read-only `reviewer` profile by default. Use `--profile minimal` for a narrow search/symbol/repo-map surface, `--profile editor` or `--allow-write-tools` for non-destructive write helpers, and `--profile dangerous` only when destructive file and shell tools are intentional. Auto-forked daemons use profile-scoped socket/pipe names so clients do not inherit a broader profile by accident.
+The server starts in the read-only `reviewer` profile by default. Use `--profile minimal` for a narrow search/symbol/repo-map surface, `--profile editor` or `--allow-write-tools` for non-destructive write helpers, and `--profile dangerous` only when destructive file and shell tools are intentional. Agents can also call `get_mcp_profile` and `set_mcp_profile` to inspect or switch the active profile for the current MCP connection without restarting the server.
 
 ### CLI commands (28)
 

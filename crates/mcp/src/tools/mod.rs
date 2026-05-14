@@ -188,6 +188,24 @@ pub(crate) fn call_get_tool_schema(args: &Value) -> (String, bool) {
     (out, false)
 }
 
+/// Profile management tools are handled in the JSON-RPC layer because they
+/// mutate per-connection dispatch state rather than the repository engine.
+pub(crate) fn call_get_mcp_profile_placeholder(_args: &Value) -> (String, bool) {
+    (
+        "Internal error: get_mcp_profile must be handled by the JSON-RPC dispatcher.".to_string(),
+        true,
+    )
+}
+
+/// Profile management tools are handled in the JSON-RPC layer because they
+/// mutate per-connection dispatch state rather than the repository engine.
+pub(crate) fn call_set_mcp_profile_placeholder(_args: &Value) -> (String, bool) {
+    (
+        "Internal error: set_mcp_profile must be handled by the JSON-RPC dispatcher.".to_string(),
+        true,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------

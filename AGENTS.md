@@ -64,7 +64,7 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 
 - `crates/core/` — engine: AST parsing, BM25, graph, embeddings, PageRank, test mapping, shared sessions, queue-based embedding (optional `rustqueue` feature), doc indexing (Markdown + HTML + reStructuredText + AsciiDoc + plain-text + OpenAPI/Swagger + Jupyter notebook dispatcher + optional PDF via `--features pdf`), change impact analysis, semantic concept graph, API surface analysis, type relations, usage example mining, cross-file context assembly, behavioral signatures, query-personalized PageRank (with LRU cache for repeat-seed BM25 sets), learned query reformulation (identifier co-occurrence + doc-to-code + session mining algorithm), output filter pipeline (TOML-based, tee recovery)
 - `crates/cli/` — `codixing` CLI binary
-- `crates/mcp/` — MCP server (`codixing-mcp`), 68 tools in `src/tools/` (always shipped in full — the `--medium` curation was removed in v0.38 after the agent benchmark showed it hid high-leverage tools like `get_complexity`)
+- `crates/mcp/` — MCP server (`codixing-mcp`), 70 tools in `src/tools/` (always shipped in full — the `--medium` curation was removed in v0.38 after the agent benchmark showed it hid high-leverage tools like `get_complexity`)
 - `crates/server/` — HTTP API server (`codixing-server`), REST endpoints with SSE streaming for sync
 - `crates/core/src/federation/` — cross-repo federated search (`--federation config.json`)
 - `crates/lsp/` — LSP server (`codixing-lsp`), hover/go-to-def/refs/symbols/call hierarchy/complexity diagnostics/rename/semantic tokens
@@ -75,7 +75,7 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 
 ```bash
 cargo build --release --workspace          # build all binaries
-cargo test --workspace                      # run all tests (1258)
+cargo test --workspace                      # run all tests (1261)
 cargo clippy --workspace -- -D warnings     # lint (must pass)
 cargo fmt --check                           # format check (must pass)
 
@@ -140,7 +140,7 @@ Both are covered by `scripts/bump_version.py`; edit by hand only if you know why
 Every commit MUST pass all 3 checks. No exceptions:
 
 ```bash
-cargo test --workspace                      # ALL tests must pass (1258)
+cargo test --workspace                      # ALL tests must pass (1261)
 cargo clippy --workspace -- -D warnings     # zero warnings
 cargo fmt --check                           # zero diffs
 ```
@@ -262,10 +262,13 @@ The `.mcp.json` configures the Codixing MCP server for Codex. **Required flags:*
 - `--no-daemon-fork` — prevents stale daemon socket issues that silently kill the MCP connection
 
 The `--medium` flag was removed in v0.38. `codixing-mcp` now always advertises
-the full 68-tool set on `tools/list`. The April 2026 agent benchmark found
+the full 70-tool catalog. The April 2026 agent benchmark found
 `--medium` was hiding `get_complexity`, `review_context`, and other showcase
 tools — fixing the curation restored the March "66% fewer tokens / 66% fewer
 calls" headline. See `docs/research-recall-stickiness-2026-04-13.md` §4.19–4.24.
+MCP profile flags set the startup default only; agents can call
+`get_mcp_profile` and `set_mcp_profile` at runtime to inspect or switch the
+active profile for the current connection without killing the MCP server.
 
 Example `.mcp.json`:
 ```json

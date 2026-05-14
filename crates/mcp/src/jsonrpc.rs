@@ -44,7 +44,21 @@ impl McpProfile {
         }
     }
 
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "minimal" => Some(Self::Minimal),
+            "reviewer" => Some(Self::Reviewer),
+            "editor" => Some(Self::Editor),
+            "dangerous" => Some(Self::Dangerous),
+            _ => None,
+        }
+    }
+
     fn allows_tool(self, name: &str) -> bool {
+        if is_profile_management_tool(name) {
+            return true;
+        }
+
         if !tools::is_known_tool(name) {
             return true;
         }
@@ -60,17 +74,21 @@ impl McpProfile {
     fn blocked_message(self, name: &str) -> String {
         match self {
             Self::Minimal => format!(
-                "Tool '{name}' is not available in MCP profile 'minimal'. Start codixing-mcp with --profile reviewer for the full read-only tool set."
+                "Tool '{name}' is not available in MCP profile 'minimal'. Call set_mcp_profile with profile='reviewer' to enable the full read-only tool set without restarting the MCP server."
             ),
             Self::Reviewer => format!(
-                "Tool '{name}' is blocked by MCP profile 'reviewer' because it can mutate project state. Start codixing-mcp with --profile editor or --allow-write-tools to enable non-destructive write tools."
+                "Tool '{name}' is blocked by MCP profile 'reviewer' because it can mutate project state. Call set_mcp_profile with profile='editor' to enable non-destructive write tools without restarting the MCP server."
             ),
             Self::Editor => format!(
-                "Tool '{name}' is blocked by MCP profile 'editor' because it is destructive or can execute shell commands. Start codixing-mcp with --profile dangerous to expose it."
+                "Tool '{name}' is blocked by MCP profile 'editor' because it is destructive or can execute shell commands. Call set_mcp_profile with profile='dangerous' and confirm_dangerous=true to expose it without restarting the MCP server."
             ),
             Self::Dangerous => format!("Tool '{name}' is unexpectedly blocked."),
         }
     }
+}
+
+fn is_profile_management_tool(name: &str) -> bool {
+    matches!(name, "get_mcp_profile" | "set_mcp_profile")
 }
 
 fn is_minimal_tool(name: &str) -> bool {
@@ -78,6 +96,8 @@ fn is_minimal_tool(name: &str) -> bool {
         name,
         "search_tools"
             | "get_tool_schema"
+            | "get_mcp_profile"
+            | "set_mcp_profile"
             | "index_status"
             | "agent_context_pack"
             | "code_search"
@@ -106,6 +126,8 @@ where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
+    let mut active_profile = profile;
+
     while let Some(line) = reader.next_line().await? {
         let line = line.trim().to_string();
         if line.is_empty() {
@@ -139,7 +161,7 @@ where
             req.params,
             &federation,
             &mut writer,
-            profile,
+            &mut active_profile,
         )
         .await;
         write_line(&mut writer, &response).await?;
@@ -166,7 +188,7 @@ async fn dispatch<W>(
     params: Option<Value>,
     federation: &Option<Arc<FederatedEngine>>,
     writer: &mut BufWriter<W>,
-    profile: McpProfile,
+    profile: &mut McpProfile,
 ) -> Value
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -174,7 +196,7 @@ where
     match method {
         "initialize" => handle_initialize(id, params),
         "initialized" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
-        "tools/list" => handle_tools_list(id, federation.is_some(), profile),
+        "tools/list" => handle_tools_list(id, federation.is_some(), *profile),
         "tools/call" => handle_tools_call(engine, id, params, federation, writer, profile).await,
         _ => {
             let err = JsonRpcError::method_not_found(id, method);
@@ -186,7 +208,7 @@ where
 fn handle_initialize(id: Value, _params: Option<Value>) -> Value {
     let result = json!({
         "protocolVersion": "2024-11-05",
-        "capabilities": { "tools": {} },
+        "capabilities": { "tools": { "listChanged": true } },
         "serverInfo": { "name": "codixing", "version": env!("CARGO_PKG_VERSION") }
     });
     serde_json::to_value(JsonRpcResponse::new(id, result)).unwrap_or(Value::Null)
@@ -212,7 +234,7 @@ async fn handle_tools_call<W>(
     params: Option<Value>,
     federation: &Option<Arc<FederatedEngine>>,
     writer: &mut BufWriter<W>,
-    profile: McpProfile,
+    profile: &mut McpProfile,
 ) -> Value
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -237,6 +259,10 @@ where
         .get("arguments")
         .cloned()
         .unwrap_or(Value::Object(serde_json::Map::new()));
+
+    if is_profile_management_tool(&tool_name) {
+        return handle_profile_management_tool(id, &tool_name, &args, profile, writer).await;
+    }
 
     if !profile.allows_tool(&tool_name) {
         return build_tool_response(
@@ -299,6 +325,141 @@ where
 
     let call_result = call_result.await;
     build_tool_response(id, tool_name, call_result)
+}
+
+async fn handle_profile_management_tool<W>(
+    id: Value,
+    tool_name: &str,
+    args: &Value,
+    profile: &mut McpProfile,
+    writer: &mut BufWriter<W>,
+) -> Value
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    match tool_name {
+        "get_mcp_profile" => build_tool_response(
+            id,
+            tool_name.to_string(),
+            Ok((profile_status_json(*profile, None, false), false)),
+        ),
+        "set_mcp_profile" => {
+            let requested = match args.get("profile").and_then(|v| v.as_str()) {
+                Some(profile) => profile,
+                None => {
+                    return build_tool_response(
+                        id,
+                        tool_name.to_string(),
+                        Ok((
+                            "Missing required parameter 'profile' (minimal, reviewer, editor, dangerous).".to_string(),
+                            true,
+                        )),
+                    );
+                }
+            };
+
+            let Some(next_profile) = McpProfile::from_name(requested) else {
+                return build_tool_response(
+                    id,
+                    tool_name.to_string(),
+                    Ok((
+                        format!(
+                            "Unknown MCP profile '{requested}'. Expected one of: minimal, reviewer, editor, dangerous."
+                        ),
+                        true,
+                    )),
+                );
+            };
+
+            if next_profile == McpProfile::Dangerous
+                && !args
+                    .get("confirm_dangerous")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            {
+                return build_tool_response(
+                    id,
+                    tool_name.to_string(),
+                    Ok((
+                        "Switching to MCP profile 'dangerous' exposes destructive filesystem and shell tools. Re-run with confirm_dangerous=true to confirm.".to_string(),
+                        true,
+                    )),
+                );
+            }
+
+            let previous = *profile;
+            let changed = previous != next_profile;
+            *profile = next_profile;
+
+            if changed {
+                let notification = json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/tools/list_changed"
+                });
+                if let Err(err) = write_line(writer, &notification).await {
+                    warn!(error = %err, "failed to notify client that MCP tool list changed");
+                }
+            }
+
+            build_tool_response(
+                id,
+                tool_name.to_string(),
+                Ok((
+                    profile_status_json(*profile, Some(previous), changed),
+                    false,
+                )),
+            )
+        }
+        _ => build_tool_response(
+            id,
+            tool_name.to_string(),
+            Ok((
+                format!("Unknown profile management tool: {tool_name}"),
+                true,
+            )),
+        ),
+    }
+}
+
+fn profile_status_json(
+    active_profile: McpProfile,
+    previous_profile: Option<McpProfile>,
+    changed: bool,
+) -> String {
+    let message = if changed {
+        "MCP profile updated. Clients should refresh tools/list; a notifications/tools/list_changed event was emitted."
+    } else {
+        "MCP profile unchanged."
+    };
+
+    let payload = json!({
+        "schema_version": 1,
+        "active_profile": active_profile.as_str(),
+        "previous_profile": previous_profile.map(McpProfile::as_str),
+        "changed": changed,
+        "tool_list_changed": changed,
+        "available_profiles": [
+            {
+                "name": "minimal",
+                "description": "Narrow discovery profile: context pack, search, symbols, repo map, and meta-tools."
+            },
+            {
+                "name": "reviewer",
+                "description": "Read-only review profile: all read-only tools, no mutation."
+            },
+            {
+                "name": "editor",
+                "description": "Read-only tools plus non-destructive write helpers."
+            },
+            {
+                "name": "dangerous",
+                "description": "Full tool profile, including destructive filesystem and shell tools."
+            }
+        ],
+        "message": message
+    });
+
+    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
 }
 
 /// Build the final JSON-RPC response for a tools/call result.
@@ -456,6 +617,7 @@ mod tests {
         assert_eq!(responses.len(), 1);
         let result = &responses[0]["result"];
         assert_eq!(result["protocolVersion"], "2024-11-05");
+        assert_eq!(result["capabilities"]["tools"]["listChanged"], true);
         assert_eq!(result["serverInfo"]["name"], "codixing");
         assert_eq!(result["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
     }
@@ -575,11 +737,140 @@ mod tests {
         let tools = responses[0]["result"]["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         assert!(names.contains(&"search_tools"));
+        assert!(names.contains(&"get_mcp_profile"));
+        assert!(names.contains(&"set_mcp_profile"));
         assert!(names.contains(&"code_search"));
         assert!(names.contains(&"find_symbol"));
         assert!(names.contains(&"get_repo_map"));
         assert!(!names.contains(&"read_file"));
         assert!(!names.contains(&"write_file"));
+    }
+
+    #[tokio::test]
+    async fn set_mcp_profile_expands_tools_without_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_test_engine(dir.path());
+
+        let responses = run_requests_with_profile(
+            engine,
+            &[
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/list"
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "set_mcp_profile",
+                        "arguments": { "profile": "reviewer" }
+                    }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/list"
+                }),
+            ],
+            McpProfile::Minimal,
+        )
+        .await;
+
+        let before = responses
+            .iter()
+            .find(|response| response["id"] == 1)
+            .expect("missing initial tools/list response");
+        let before_tools = before["result"]["tools"].as_array().unwrap();
+        let before_names: Vec<&str> = before_tools
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert!(!before_names.contains(&"read_file"));
+
+        let changed_notification = responses
+            .iter()
+            .any(|response| response["method"] == "notifications/tools/list_changed");
+        assert!(
+            changed_notification,
+            "profile switch should ask clients to refresh tools/list"
+        );
+
+        let set_response = responses
+            .iter()
+            .find(|response| response["id"] == 2)
+            .expect("missing set_mcp_profile response");
+        assert_eq!(set_response["result"]["isError"], false);
+        let profile_text = set_response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        let profile_json: Value = serde_json::from_str(profile_text).unwrap();
+        assert_eq!(profile_json["active_profile"], "reviewer");
+        assert_eq!(profile_json["previous_profile"], "minimal");
+        assert_eq!(profile_json["changed"], true);
+
+        let after = responses
+            .iter()
+            .find(|response| response["id"] == 3)
+            .expect("missing refreshed tools/list response");
+        let after_tools = after["result"]["tools"].as_array().unwrap();
+        let after_names: Vec<&str> = after_tools
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert!(after_names.contains(&"read_file"));
+        assert!(!after_names.contains(&"write_file"));
+    }
+
+    #[tokio::test]
+    async fn dangerous_profile_requires_confirmation() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_test_engine(dir.path());
+
+        let responses = run_requests_with_profile(
+            engine,
+            &[
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "set_mcp_profile",
+                        "arguments": { "profile": "dangerous" }
+                    }
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/list"
+                }),
+            ],
+            McpProfile::Reviewer,
+        )
+        .await;
+
+        let set_response = responses
+            .iter()
+            .find(|response| response["id"] == 1)
+            .expect("missing set_mcp_profile response");
+        assert_eq!(set_response["result"]["isError"], true);
+        let text = set_response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("confirm_dangerous=true"));
+
+        let tools_response = responses
+            .iter()
+            .find(|response| response["id"] == 2)
+            .expect("missing tools/list response");
+        let tools = tools_response["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert!(!names.contains(&"delete_file"));
+        assert!(!names.contains(&"run_tests"));
     }
 
     #[tokio::test]
