@@ -177,7 +177,13 @@ Full reference: [codixing.com/docs](https://codixing.com/docs)
 
 ### MCP server (optional)
 
-For editors with MCP support, the `codixing-mcp` binary exposes 67 JSON-RPC 2.0 tools:
+For editors with MCP support, the `codixing-mcp` binary exposes 67 JSON-RPC 2.0 tools.
+It starts in the read-only `reviewer` profile by default; use `--profile minimal`
+for a narrow search/symbol/repo-map surface, `--profile editor` or
+`--allow-write-tools` for non-destructive write helpers, and `--profile dangerous`
+only when destructive file and shell tools are intentional. Auto-forked daemons
+use profile-scoped socket/pipe names so a reviewer client never proxies through
+an editor or dangerous daemon by accident.
 
 | Category | Tools |
 |----------|-------|
@@ -305,6 +311,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Model2Vec with code-aware preprocessing** — Static embeddings via `potion-base-8M` (no ONNX needed, instant init). CamelCase/snake_case splitting before tokenization reduces subword fragments by 50-70%, achieving MRR 1.000 on concept queries
 - **Jina Code Int8** — `jina-embeddings-v2-base-code` int8-quantized for ARM64 (768 dims, 8ms/query, nDCG@10 0.949). Set `JINA_CODE_INT8_ONNX` env var to the model path
 - **Embedding speed measurement** — New `bench-embed` CLI subcommand for profiling embedding performance across custom models
+- **Health diagnostics** — `codixing doctor` reports binary/version, index metadata health, git staleness, daemon endpoint status, ONNX runtime configuration, and index disk usage in human or JSON form
 - **Daemon mode** — Engine stays in memory, auto-starts on first connection, Unix socket (macOS/Linux) or named pipe (Windows) IPC, file watcher for live index updates, 30-min idle timeout
 - **Field-weighted BM25** — Configurable per-field boosting (entity_names 3×, signature 2×, scope_chain 1.5×, content 1×)
 - **Search pipeline** — Composable search stages (definition boost, test demotion, path match, graph boost, recency boost, graph semantic propagation via GraphPropagationStage, file-level dedup via FileDedupStage, truncation) with 6 strategies including trigram exact-match
@@ -370,7 +377,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 1239 tests
+cargo test --workspace        # 1254 tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```

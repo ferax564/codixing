@@ -1,7 +1,7 @@
 {
   "name": "codixing",
   "description": "Code retrieval engine that saves your AI agent 73% of its token budget. Replaces grep with ranked, AST-aware search so models spend tokens reasoning, not reading. Before modifying code, Codixing tells Claude what will break \u2014 predicting impact across the dependency graph, finding affected tests, and tracing callers through the call hierarchy. Unlike text search, Codixing builds an AST-aware index with BM25 + semantic hybrid retrieval, dependency graphs with PageRank ranking, and trigram-accelerated grep \u2014 all running locally with zero cloud dependencies.\n\n67 MCP tools cover the full development loop: search by symbol or natural language, trace dependencies, predict change impact, discover test coverage, review complexity, and navigate unfamiliar codebases. Five built-in slash commands (/codixing-setup, /codixing-explore, /codixing-review, /codixing-preflight, /codixing-release) provide guided workflows for project onboarding, architecture exploration, and dependency-aware code review. Dogfooding hooks automatically redirect Grep and Bash-invoked grep/rg/find to the Codixing CLI so agents always use the right tool. Tested at scale on the Linux kernel (63K C/H files, 84K-node graph). Runs on macOS and Linux; Windows support is available for the raw CLI/MCP binary but the plugin's bash-based dogfooding hooks are not currently tested on Windows.",
-  "version": "0.42.0",
+  "version": "0.43.0",
   "author": {
     "name": "ferax564",
     "url": "https://codixing.com"

@@ -81,6 +81,14 @@ struct Args {
     /// in direct (non-daemon) mode even when no daemon is running.
     #[arg(long)]
     no_daemon_fork: bool,
+
+    /// MCP tool exposure profile. Defaults to read-only reviewer mode.
+    #[arg(long, value_enum, default_value_t = jsonrpc::McpProfile::Reviewer)]
+    profile: jsonrpc::McpProfile,
+
+    /// Shortcut for `--profile editor`: expose non-destructive write tools.
+    #[arg(long)]
+    allow_write_tools: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -98,6 +106,7 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    let profile = effective_profile(args.profile, args.allow_write_tools)?;
 
     let root = args
         .root
@@ -107,7 +116,7 @@ async fn main() -> Result<()> {
     #[cfg(unix)]
     let socket_path = args
         .socket
-        .unwrap_or_else(|| root.join(".codixing/daemon.sock"));
+        .unwrap_or_else(|| default_socket_path(&root, profile));
 
     // Optionally load a federated engine for cross-repo search.
     let federation: Option<Arc<FederatedEngine>> = match &args.federation {
@@ -139,12 +148,12 @@ async fn main() -> Result<()> {
 
         #[cfg(unix)]
         {
-            daemon::run_daemon(engine, &socket_path, federation).await
+            daemon::run_daemon(engine, &socket_path, federation, profile).await
         }
         #[cfg(windows)]
         {
-            let pipe_name = daemon_windows::pipe_name_for_root(&root);
-            daemon_windows::run_daemon(engine, &pipe_name, federation).await
+            let pipe_name = daemon_windows::pipe_name_for_root(&root, profile);
+            daemon_windows::run_daemon(engine, &pipe_name, federation, profile).await
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -185,6 +194,8 @@ async fn main() -> Result<()> {
                         .to_string(),
                 );
             }
+            daemon_args.push("--profile".to_string());
+            daemon_args.push(profile.as_str().to_string());
             std::process::Command::new(&exe)
                 .args(&daemon_args)
                 .stdin(std::process::Stdio::null())
@@ -204,7 +215,7 @@ async fn main() -> Result<()> {
 
         // Auto-fork a daemon if none is running (Windows).
         #[cfg(windows)]
-        let pipe_name = daemon_windows::pipe_name_for_root(&root);
+        let pipe_name = daemon_windows::pipe_name_for_root(&root, profile);
         #[cfg(windows)]
         if !args.no_daemon_fork && !daemon_windows::pipe_alive(&pipe_name).await {
             info!("auto-starting daemon on pipe {}", pipe_name);
@@ -228,6 +239,8 @@ async fn main() -> Result<()> {
                         .to_string(),
                 );
             }
+            daemon_args.push("--profile".to_string());
+            daemon_args.push(profile.as_str().to_string());
             std::process::Command::new(&exe)
                 .args(&daemon_args)
                 .stdin(std::process::Stdio::null())
@@ -274,10 +287,33 @@ async fn main() -> Result<()> {
                 BufReader::new(stdin).lines(),
                 BufWriter::new(stdout),
                 federation,
+                profile,
             )
             .await
         }
     }
+}
+
+fn effective_profile(
+    profile: jsonrpc::McpProfile,
+    allow_write_tools: bool,
+) -> Result<jsonrpc::McpProfile> {
+    if !allow_write_tools {
+        return Ok(profile);
+    }
+    match profile {
+        jsonrpc::McpProfile::Reviewer => Ok(jsonrpc::McpProfile::Editor),
+        jsonrpc::McpProfile::Editor | jsonrpc::McpProfile::Dangerous => Ok(profile),
+        jsonrpc::McpProfile::Minimal => {
+            anyhow::bail!("--allow-write-tools cannot be combined with --profile minimal")
+        }
+    }
+}
+
+#[cfg(unix)]
+fn default_socket_path(root: &Path, profile: jsonrpc::McpProfile) -> PathBuf {
+    root.join(".codixing")
+        .join(format!("daemon-{}.sock", profile.as_str()))
 }
 
 // ---------------------------------------------------------------------------
