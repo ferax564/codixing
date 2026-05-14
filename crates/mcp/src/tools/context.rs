@@ -3,7 +3,7 @@
 use serde_json::Value;
 
 use codixing_core::context_assembly::IntelligentContextAssembler;
-use codixing_core::{Engine, SearchQuery};
+use codixing_core::{AgentContextMode, Engine, SearchQuery};
 
 use super::common::ProgressReporter;
 
@@ -98,6 +98,76 @@ pub(crate) fn call_get_context_for_task(
     }
 
     (out, false)
+}
+
+pub(crate) fn call_agent_context_pack(
+    engine: &Engine,
+    args: &Value,
+    progress: Option<&ProgressReporter>,
+) -> (String, bool) {
+    let task = match args.get("task").and_then(|v| v.as_str()) {
+        Some(t) => t.to_string(),
+        None => return ("Missing required argument: task".to_string(), true),
+    };
+    let mode = match args
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("understand")
+        .parse::<AgentContextMode>()
+    {
+        Ok(mode) => mode,
+        Err(e) => return (e, true),
+    };
+    let token_budget = args
+        .get("token_budget")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(6000) as usize;
+    let changed_files = match args.get("changed_files") {
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+            .collect(),
+        Some(Value::String(value)) => value
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        _ => Vec::new(),
+    };
+    let branch = args
+        .get("branch")
+        .and_then(|v| v.as_str())
+        .map(ToOwned::to_owned);
+    let risk_level = args
+        .get("risk_level")
+        .and_then(|v| v.as_str())
+        .map(ToOwned::to_owned);
+
+    if let Some(p) = progress {
+        p.report(0, "Compiling agent context pack...");
+    }
+
+    let pack = match engine.agent_context_pack(
+        &task,
+        mode,
+        token_budget,
+        &changed_files,
+        branch,
+        risk_level,
+    ) {
+        Ok(pack) => pack,
+        Err(e) => return (format!("agent_context_pack error: {e}"), true),
+    };
+
+    if let Some(p) = progress {
+        p.report(100, "Agent context pack ready.");
+    }
+
+    match serde_json::to_string_pretty(&pack) {
+        Ok(json) => (json, false),
+        Err(e) => (format!("JSON serialization error: {e}"), true),
+    }
 }
 
 pub(crate) fn call_assemble_location_context(engine: &Engine, args: &Value) -> (String, bool) {

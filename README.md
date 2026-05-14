@@ -168,6 +168,7 @@ codixing api src/engine.rs       # Public API surface
 codixing types Engine            # Type relationships
 codixing examples add_chunk      # Usage examples from tests + callers
 codixing context src/engine.rs   # Cross-file context assembly
+codixing agent-context-pack "task" # Stable JSON context pack for agents
 codixing init .                  # Index a project
 codixing sync                    # Incremental re-index
 codixing audit                   # Find stale files
@@ -177,7 +178,7 @@ Full reference: [codixing.com/docs](https://codixing.com/docs)
 
 ### MCP server (optional)
 
-For editors with MCP support, the `codixing-mcp` binary exposes 67 JSON-RPC 2.0 tools.
+For editors with MCP support, the `codixing-mcp` binary exposes 68 JSON-RPC 2.0 tools.
 It starts in the read-only `reviewer` profile by default; use `--profile minimal`
 for a narrow search/symbol/repo-map surface, `--profile editor` or
 `--allow-write-tools` for non-destructive write helpers, and `--profile dangerous`
@@ -190,7 +191,7 @@ an editor or dangerous daemon by accident.
 | **Search** | code_search, find_symbol, grep_code, search_usages, read_symbol, find_similar, stitch_context |
 | **Graph** | get_repo_map, focus_map, get_references, get_transitive_deps, symbol_callers, symbol_callees, predict_impact, find_orphans, explain |
 | **Files** | read_file, write_file, edit_file, delete_file, apply_patch, list_files, outline_file |
-| **Analysis** | find_tests, find_source_for_test, get_complexity, review_context, rename_symbol, run_tests, get_context_for_task, check_staleness, generate_onboarding, audit_freshness |
+| **Analysis** | agent_context_pack, find_tests, find_source_for_test, get_complexity, review_context, rename_symbol, run_tests, get_context_for_task, check_staleness, generate_onboarding, audit_freshness |
 | **Git** | git_diff, get_hotspots, search_changes, get_blame |
 | **Session** | remember, recall, forget, get_session_summary, session_status, session_reset_focus |
 | **Meta** | index_status, search_tools, get_tool_schema, enrich_docs |
@@ -301,9 +302,10 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Type-aware search** — `codixing types` shows type relationships: implements, extends, returns, contains
 - **Usage example mining** — `codixing examples` finds real usage from tests, callers, and doc blocks
 - **Cross-file context assembly** — `codixing context` follows import chains and callees to assemble understanding context
+- **Agent context pack** — `codixing agent-context-pack` and MCP `agent_context_pack` compile a versioned JSON pack with repo orientation, must-read evidence handles, related symbols, likely tests, docs, risks, and recommended next tools
 - **Query-personalized PageRank** — Query-time graph boost seeds PageRank from query-relevant nodes for context-aware ranking
 - **Learned query reformulation** — Project-specific vocabulary expansion learns from codebase patterns
-- **CLI + MCP** — Full CLI surface for direct use (run `codixing --help`); 67 MCP tools for editor integration (search, graph traversal, file operations, code review, git analysis, session memory, federation discovery)
+- **CLI + MCP** — Full CLI surface for direct use (run `codixing --help`); 68 MCP tools for editor integration (search, graph traversal, file operations, code review, git analysis, session memory, federation discovery)
 - **File freshness audit** — `audit_freshness` tool identifies stale and orphaned files across releases
 - **Preflight gates** — Plugin enforces existence scanning before proposing new features
 - **TypeScript import resolution** — Resolve `.js` → `.ts` imports with node16/bundler moduleResolution support, enabling 0.8+ R@10 on cross-package code discovery
@@ -366,7 +368,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 │  + Exact (trigram) · Graph boost · Definition 3.5× · Session     │
 │  SearchPipeline: composable stages, 6 strategies                  │
 │                                                                   │
-│  API: CLI · MCP (67 tools, JSON-RPC 2.0) · LSP · HTTP            │
+│  API: CLI · MCP (68 tools, JSON-RPC 2.0) · LSP · HTTP            │
 │       Daemon (Unix socket / Windows named pipe) · File Watcher   │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -377,7 +379,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 1254 tests
+cargo test --workspace        # 1258 tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```

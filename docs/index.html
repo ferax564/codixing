@@ -10,7 +10,7 @@
   <!-- Open Graph -->
   <meta property="og:type" content="website" />
   <meta property="og:title" content="Codixing — Code Retrieval Engine for AI Agents" />
-  <meta property="og:description" content="R@10=0.763 retrieval accuracy. 73% fewer tokens. 27 CLI commands. Hybrid BM25 + embeddings + call graph PageRank — in a single Rust binary." />
+  <meta property="og:description" content="R@10=0.763 retrieval accuracy. 73% fewer tokens. 28 CLI commands. Hybrid BM25 + embeddings + call graph PageRank — in a single Rust binary." />
   <meta property="og:url" content="https://codixing.com/" />
   <meta property="og:image" content="https://codixing.com/og-image.png" />
   <meta property="og:image:width" content="1200" />
@@ -20,7 +20,7 @@
   <!-- Twitter/X Card -->
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="Codixing — Code Retrieval Engine for AI Agents" />
-  <meta name="twitter:description" content="R@10=0.763 retrieval accuracy. 73% fewer tokens. 27 CLI commands. Hybrid BM25 + embeddings + call graph PageRank — in a single Rust binary." />
+  <meta name="twitter:description" content="R@10=0.763 retrieval accuracy. 73% fewer tokens. 28 CLI commands. Hybrid BM25 + embeddings + call graph PageRank — in a single Rust binary." />
   <meta name="twitter:image" content="https://codixing.com/og-image.png" />
 
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -966,7 +966,21 @@
       .hero { padding: 100px 0 48px; }
       .nav-links { display: none; }
       .feature-grid { grid-template-columns: 1fr; }
-      .metrics-strip { grid-template-columns: 1fr 1fr; }
+      .metrics-strip { grid-template-columns: 1fr; }
+      .metric-item { min-width: 0; padding: 18px 12px; }
+      .bench-card { grid-column: auto !important; min-width: 0; padding: 22px; }
+      .cost-metrics { grid-template-columns: 1fr !important; }
+      .accuracy-metrics { grid-template-columns: 1fr 1fr !important; }
+      .code-tabs { overflow-x: auto; }
+      .code-tab { flex: 0 0 auto; }
+      .code-pane { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+      .code-pane span { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+      .terminal-body { padding: 16px; overflow-x: hidden; }
+      .t-line { white-space: normal; flex-wrap: wrap; align-items: flex-start; }
+      .t-line span:not(.t-prompt) { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+      .t-output { flex-basis: 100%; padding-left: 0; }
+      .code-pane-qs { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+      .code-pane-qs span { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
       .footer-inner { flex-direction: column; align-items: center; }
       section { padding: 64px 0; }
     }
@@ -1001,7 +1015,7 @@
     <div class="hero">
       <div class="hero-badge">
         <span class="badge-dot"></span>
-        Rust-native &bull; 1254 tests &bull; 27 CLI commands &bull; 73% token savings
+        Rust-native &bull; 1258 tests &bull; 28 CLI commands &bull; 73% token savings
       </div>
       <h1>Your AI agent is<br><span class="grad">burning money on grep</span></h1>
       <p class="hero-sub">
@@ -1250,7 +1264,7 @@
             <strong style="color:var(--red)">~84,600 tokens</strong> of raw output. With Codixing, the same session uses
             <strong style="color:var(--green)">~22,900 tokens</strong>&mdash;same signal, 73% less noise.
           </p>
-          <div style="margin-top:24px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px">
+          <div class="cost-metrics" style="margin-top:24px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:24px">
             <div style="text-align:center">
               <div style="font-size:2rem;font-weight:700;color:var(--green)">$0.93</div>
               <div style="color:var(--text-muted);font-size:0.85rem">saved per session<br><span style="font-size:0.8em">(Opus @ $15/M tokens)</span></div>
@@ -1420,7 +1434,7 @@
         <div class="bench-card" style="grid-column: span 2;">
           <h3 style="font-size:1.1rem">Retrieval accuracy &mdash; OpenClaw benchmark (9,493 files)</h3>
           <p style="margin-top:8px;color:var(--text-muted);font-size:0.9rem">Mixed C/C++/ObjC codebase. 4 query categories, multiple ground-truth file targets per query.</p>
-          <div style="margin-top:20px;display:grid;grid-template-columns:repeat(5,1fr);gap:16px;text-align:center">
+          <div class="accuracy-metrics" style="margin-top:20px;display:grid;grid-template-columns:repeat(5,1fr);gap:16px;text-align:center">
             <div>
               <div style="font-size:1.8rem;font-weight:700;color:var(--cyan)">0.763</div>
               <div style="color:var(--text-muted);font-size:0.82rem">R@10<br><span style="font-size:0.8em">Overall</span></div>
@@ -1506,8 +1520,8 @@
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#30d158" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 17h6M17 14v6"/><path d="M7 10v4M10 7h4M17 10v4"/></svg>
           </div>
           <h3>CLI + MCP</h3>
-          <p>27 CLI commands for direct use, plus 67 JSON-RPC 2.0 tools for Claude Code and any MCP-capable client. MCP starts read-only by default, with explicit profiles for minimal search, editing, and dangerous operations.</p>
-          <span class="feature-tag">27 CLI cmds &bull; 67 MCP tools &bull; stdin/stdout &bull; Unix socket</span>
+          <p>28 CLI commands for direct use, plus 68 JSON-RPC 2.0 tools for Claude Code and any MCP-capable client. MCP starts read-only by default, with explicit profiles for minimal search, editing, and dangerous operations.</p>
+          <span class="feature-tag">28 CLI cmds &bull; 68 MCP tools &bull; stdin/stdout &bull; Unix socket</span>
         </div>
         <div class="feature-card" style="--delay:0.35s">
           <div class="feature-icon pink">
@@ -1543,8 +1557,8 @@
       <div class="mcp-layout">
         <div>
           <div class="section-label reveal">CLI &amp; MCP Integration</div>
-          <h2 class="section-title reveal">27 CLI commands +<br>67 MCP tools</h2>
-          <p class="section-sub reveal">Use Codixing directly from the terminal with 27 commands, or connect any MCP-capable editor. MCP profiles keep agents scoped: reviewer is read-only by default, minimal narrows discovery, editor enables non-destructive writes, and dangerous must be requested explicitly. Auto-forked daemons are profile-isolated.</p>
+          <h2 class="section-title reveal">28 CLI commands +<br>68 MCP tools</h2>
+          <p class="section-sub reveal">Use Codixing directly from the terminal with 28 commands, or connect any MCP-capable editor. MCP profiles keep agents scoped: reviewer is read-only by default, minimal narrows discovery, editor enables non-destructive writes, and dangerous must be requested explicitly. Auto-forked daemons are profile-isolated.</p>
           <div class="tools-grid reveal">
             <div class="tool-card">
               <div class="tool-name">code_search</div>
@@ -1682,7 +1696,7 @@
             <div class="step-num">4</div>
             <div class="step-content">
               <h4>Connect to Claude Code</h4>
-              <p>Drop in an <code>.mcp.json</code>, or run <code>claude mcp add codixing -- npx -y codixing-mcp --root . --no-daemon-fork</code>. Claude Code picks up all 67 tools automatically.</p>
+              <p>Drop in an <code>.mcp.json</code>, or run <code>claude mcp add codixing -- npx -y codixing-mcp --root . --no-daemon-fork</code>. Claude Code picks up all 68 tools automatically.</p>
             </div>
           </div>
         </div>

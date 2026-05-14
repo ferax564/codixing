@@ -157,8 +157,40 @@ fn e2e_initialize_and_tools_list() {
     assert!(names.contains(&"find_symbol"), "missing find_symbol tool");
     assert!(names.contains(&"get_repo_map"), "missing get_repo_map tool");
     assert!(
+        names.contains(&"agent_context_pack"),
+        "missing agent_context_pack tool"
+    );
+    assert!(
         !names.contains(&"write_file"),
         "default reviewer profile should hide write_file"
+    );
+}
+
+#[test]
+fn e2e_minimal_profile_includes_agent_context_pack() {
+    let project = setup_indexed_project();
+    let root = project.path().to_str().unwrap();
+
+    let responses = run_mcp(
+        &["--root", root, "--profile", "minimal"],
+        &[tools_list_request(1)],
+    );
+
+    let list_resp = responses
+        .iter()
+        .find(|r| r["id"] == 1)
+        .expect("missing tools/list response");
+    let tools = list_resp["result"]["tools"]
+        .as_array()
+        .expect("tools should be an array");
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert!(
+        names.contains(&"agent_context_pack"),
+        "minimal profile should expose the context-pack entry point"
+    );
+    assert!(
+        !names.contains(&"write_file"),
+        "minimal profile should hide write_file"
     );
 }
 

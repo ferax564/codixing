@@ -9,9 +9,9 @@ use regex::Regex;
 use tracing_subscriber::EnvFilter;
 
 use codixing_core::{
-    EmbedTimingStats, EmbeddingModel, Engine, FederatedEngine, FederationConfig, FreshnessOptions,
-    FreshnessTier, GrepOptions, HtmlExportOptions, IndexConfig, RepoMapOptions, SearchQuery,
-    Strategy, discover_projects, to_federation_config,
+    AgentContextMode, EmbedTimingStats, EmbeddingModel, Engine, FederatedEngine, FederationConfig,
+    FreshnessOptions, FreshnessTier, GrepOptions, HtmlExportOptions, IndexConfig, RepoMapOptions,
+    SearchQuery, Strategy, discover_projects, to_federation_config,
 };
 
 #[derive(Parser)]
@@ -628,6 +628,33 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+
+    /// Build a stable JSON context pack for an AI agent task.
+    #[command(name = "agent-context-pack", alias = "agent_context_pack")]
+    AgentContextPack {
+        /// Natural language task description.
+        task: String,
+
+        /// Workflow mode for ranking and next-tool recommendations.
+        #[arg(long, value_enum, default_value_t = AgentContextModeArg::Understand)]
+        mode: AgentContextModeArg,
+
+        /// Token budget for the JSON context pack.
+        #[arg(long, default_value = "6000")]
+        token_budget: usize,
+
+        /// File already changed or known to be task-local. Repeatable.
+        #[arg(long = "changed-file", value_name = "PATH")]
+        changed_files: Vec<String>,
+
+        /// Optional branch/worktree label to include in the schema.
+        #[arg(long)]
+        branch: Option<String>,
+
+        /// Optional caller risk label (for example: low, medium, high).
+        #[arg(long)]
+        risk_level: Option<String>,
+    },
 }
 
 /// Mirror of `codixing_core::context_assembly::BudgetMode` for clap.
@@ -636,6 +663,18 @@ enum Command {
 enum BudgetModeArg {
     Soft,
     Strict,
+}
+
+/// Mirror of `codixing_core::AgentContextMode` for clap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum AgentContextModeArg {
+    Locate,
+    Understand,
+    Edit,
+    Review,
+    Test,
+    Migrate,
+    Incident,
 }
 
 /// Mirror of `codixing_core::AuditProfile` for clap.
@@ -661,6 +700,20 @@ impl From<BudgetModeArg> for codixing_core::engine::context_assembly::BudgetMode
         match value {
             BudgetModeArg::Soft => Self::Soft,
             BudgetModeArg::Strict => Self::Strict,
+        }
+    }
+}
+
+impl From<AgentContextModeArg> for AgentContextMode {
+    fn from(value: AgentContextModeArg) -> Self {
+        match value {
+            AgentContextModeArg::Locate => Self::Locate,
+            AgentContextModeArg::Understand => Self::Understand,
+            AgentContextModeArg::Edit => Self::Edit,
+            AgentContextModeArg::Review => Self::Review,
+            AgentContextModeArg::Test => Self::Test,
+            AgentContextModeArg::Migrate => Self::Migrate,
+            AgentContextModeArg::Incident => Self::Incident,
         }
     }
 }
@@ -1016,6 +1069,21 @@ async fn async_main() -> Result<()> {
             budget_mode,
             json,
         } => cmd_context(file, line, token_budget, budget_mode.into(), json),
+        Command::AgentContextPack {
+            task,
+            mode,
+            token_budget,
+            changed_files,
+            branch,
+            risk_level,
+        } => cmd_agent_context_pack(
+            task,
+            mode.into(),
+            token_budget,
+            changed_files,
+            branch,
+            risk_level,
+        ),
     }
 }
 
@@ -3201,6 +3269,34 @@ fn cmd_context(
         }
     }
 
+    Ok(())
+}
+
+fn cmd_agent_context_pack(
+    task: String,
+    mode: AgentContextMode,
+    token_budget: usize,
+    changed_files: Vec<String>,
+    branch: Option<String>,
+    risk_level: Option<String>,
+) -> Result<()> {
+    let root = std::env::current_dir().context("cannot determine current directory")?;
+    let engine = Engine::open(&root).with_context(|| {
+        format!(
+            "no index found at {} — run `codixing init` first",
+            root.display()
+        )
+    })?;
+
+    let pack = engine.agent_context_pack(
+        &task,
+        mode,
+        token_budget,
+        &changed_files,
+        branch,
+        risk_level,
+    )?;
+    println!("{}", serde_json::to_string_pretty(&pack)?);
     Ok(())
 }
 

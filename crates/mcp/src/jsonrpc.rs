@@ -79,6 +79,7 @@ fn is_minimal_tool(name: &str) -> bool {
         "search_tools"
             | "get_tool_schema"
             | "index_status"
+            | "agent_context_pack"
             | "code_search"
             | "find_symbol"
             | "read_symbol"

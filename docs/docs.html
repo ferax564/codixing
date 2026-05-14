@@ -454,6 +454,7 @@
         <a href="#cli-graph">graph</a>
         <a href="#cli-callers">callers / callees</a>
         <a href="#cli-usages">usages</a>
+        <a href="#cli-agent-context-pack">agent-context-pack</a>
         <a href="#cli-sync">sync / git-sync</a>
         <a href="#cli-analyze">analyze</a>
       </div>
@@ -556,7 +557,7 @@ pub fn handle_auth_request(req: Request) -&gt; Result&lt;Token&gt;</span>
         <div class="pre-label">Plugin (recommended)</div>
         <pre><code><span class="tok-cmd">claude plugin marketplace add</span> ferax564/codixing
 <span class="tok-cmd">claude plugin install</span> codixing@codixing</code></pre>
-        <p>Installs the MCP server (67 tools) plus five slash commands: <code>/codixing-setup</code> (index + register), <code>/codixing-explore</code> (architecture deep-dive), <code>/codixing-review</code> (code review with impact analysis), <code>/codixing-preflight</code> (duplicate detection), <code>/codixing-release</code> (automated release pipeline). Restart Claude Code after installing.</p>
+        <p>Installs the MCP server (68 tools) plus five slash commands: <code>/codixing-setup</code> (index + register), <code>/codixing-explore</code> (architecture deep-dive), <code>/codixing-review</code> (code review with impact analysis), <code>/codixing-preflight</code> (duplicate detection), <code>/codixing-release</code> (automated release pipeline). Restart Claude Code after installing.</p>
 
         <p>Alternatively, register just the MCP server without the plugin:</p>
         <div class="pre-label">MCP only</div>
@@ -564,7 +565,7 @@ pub fn handle_auth_request(req: Request) -&gt; Result&lt;Token&gt;</span>
 
         <h3>OpenAI Codex CLI</h3>
 
-        <p>Install the binary first, then register the MCP server. Codex requires the local binary &mdash; <code>npx</code> is not supported. All 67 tools are advertised on <code>tools/list</code> regardless of client.</p>
+        <p>Install the binary first, then register the MCP server. Codex requires the local binary &mdash; <code>npx</code> is not supported. All 68 tools are advertised on <code>tools/list</code> regardless of client.</p>
         <div class="pre-label">shell</div>
         <pre><code><span class="tok-cmd">curl -fsSL</span> https://codixing.com/install.sh | sh
 <span class="tok-cmd">codex mcp add</span> codixing -- codixing-mcp --root .</code></pre>
@@ -750,6 +751,32 @@ handler.rs → db/user.rs → models.rs</span></code></pre>
 ► tests/retrieval_test.rs:22   [call]</span></code></pre>
       </section>
 
+      <!-- CLI: agent-context-pack -->
+      <section class="doc-section" id="cli-agent-context-pack">
+        <h2>CLI — <code>agent-context-pack</code></h2>
+        <p>Compile a stable JSON context pack for an AI agent task. The pack includes repo orientation, must-read evidence handles, related symbols, likely tests, docs, risks, and recommended next tools.</p>
+
+        <div class="pre-label">usage</div>
+        <pre><code>codixing agent-context-pack &lt;TASK&gt; [--mode edit] [--changed-file &lt;PATH&gt;]</code></pre>
+
+        <table class="doc-table">
+          <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td>--mode &lt;M&gt;</td><td>understand</td><td>One of: <code>locate</code>, <code>understand</code>, <code>edit</code>, <code>review</code>, <code>test</code>, <code>migrate</code>, <code>incident</code></td></tr>
+            <tr><td>--token-budget &lt;N&gt;</td><td>6000</td><td>Approximate maximum tokens for the JSON payload</td></tr>
+            <tr><td>--changed-file &lt;PATH&gt;</td><td>—</td><td>Repeatable task-local file anchor pinned into the pack</td></tr>
+            <tr><td>--branch &lt;NAME&gt;</td><td>—</td><td>Optional branch/worktree label copied into the schema</td></tr>
+            <tr><td>--risk-level &lt;LEVEL&gt;</td><td>—</td><td>Optional caller risk label such as <code>low</code>, <code>medium</code>, or <code>high</code></td></tr>
+          </tbody>
+        </table>
+
+        <div class="pre-label">example</div>
+        <pre><code>codixing agent-context-pack "add branch-aware artifact cache" \
+  --mode edit \
+  --changed-file crates/core/src/catalog.rs \
+  --token-budget 6000</code></pre>
+      </section>
+
       <!-- CLI: sync -->
       <section class="doc-section" id="cli-sync">
         <h2>CLI — <code>sync</code> &amp; <code>git-sync</code></h2>
@@ -906,7 +933,7 @@ Sync complete in 0.12s</span></code></pre>
 
       <!-- MCP Tools -->
       <section class="doc-section" id="mcp-tools">
-        <h2>MCP — Tools Reference (32 highlighted of 67 total)</h2>
+        <h2>MCP — Tools Reference (33 highlighted of 68 total)</h2>
         <p>All tools are called via JSON-RPC 2.0 <code>tools/call</code> with a <code>name</code> and <code>arguments</code> object. Write tools (<code>write_file</code>, <code>edit_file</code>, <code>delete_file</code>) automatically reindex after every operation. Intelligence tools expose the call graph, impact analysis, context stitching, complexity metrics, persistent memory, test discovery, duplicate detection, PR review context, and project onboarding generation.</p>
 
         <div class="tool-card">
@@ -1151,6 +1178,24 @@ Sync complete in 0.12s</span></code></pre>
             <pre><code>{
   <span class="tok-key">"symbol"</span>: <span class="tok-str">"compute_pagerank"</span>,
   <span class="tok-key">"file"</span>:   <span class="tok-str">"graph/mod.rs"</span>  <span class="tok-comment">// optional disambiguator</span>
+}</code></pre>
+          </div>
+        </div>
+
+        <div class="tool-card">
+          <div class="tool-header">
+            <span class="tool-name" style="color:#a78bfa">agent_context_pack</span>
+            <span class="tool-desc">Stable JSON context pack for agent workflows</span>
+          </div>
+          <div class="tool-body">
+            <p>Compiles ranked repo orientation, must-read evidence handles, related symbols, likely tests, docs and conventions, risks, and recommended next tools under a token budget. Use as the first call for locate, understand, edit, review, test, migrate, and incident workflows.</p>
+            <div class="pre-label">parameters</div>
+            <pre><code>{
+  <span class="tok-key">"task"</span>:          <span class="tok-str">"add branch-aware artifact cache"</span>,
+  <span class="tok-key">"mode"</span>:          <span class="tok-str">"edit"</span>,
+  <span class="tok-key">"token_budget"</span>:  <span class="tok-num">6000</span>,
+  <span class="tok-key">"changed_files"</span>: [<span class="tok-str">"crates/core/src/catalog.rs"</span>],
+  <span class="tok-key">"risk_level"</span>:    <span class="tok-str">"high"</span>
 }</code></pre>
           </div>
         </div>

@@ -3,10 +3,14 @@
 //! Given a code location, assembles the matched chunk plus its import chain,
 //! key callees, and usage examples — all within a configurable token budget.
 
-use serde::Serialize;
+use std::collections::HashSet;
+use std::str::FromStr;
+
+use serde::{Deserialize, Serialize};
 
 use crate::engine::examples::UsageExample;
-use crate::retriever::SearchResult;
+use crate::error::Result;
+use crate::retriever::{DocFilter, SearchQuery, SearchResult, Strategy};
 
 use super::Engine;
 
@@ -38,6 +42,155 @@ impl BudgetMode {
             BudgetMode::Strict => "strict",
         }
     }
+}
+
+/// Agent workflow mode for [`AgentContextPack`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentContextMode {
+    /// Find relevant files and symbols only.
+    Locate,
+    /// Explain the repository context for the task.
+    #[default]
+    Understand,
+    /// Prepare for a code edit.
+    Edit,
+    /// Review a diff or proposed change.
+    Review,
+    /// Select likely tests and verification paths.
+    Test,
+    /// Plan a cross-cutting migration.
+    Migrate,
+    /// Debug a production-like incident.
+    Incident,
+}
+
+impl AgentContextMode {
+    /// Stable string label used in CLI/MCP input and JSON output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Locate => "locate",
+            Self::Understand => "understand",
+            Self::Edit => "edit",
+            Self::Review => "review",
+            Self::Test => "test",
+            Self::Migrate => "migrate",
+            Self::Incident => "incident",
+        }
+    }
+}
+
+impl FromStr for AgentContextMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "locate" => Ok(Self::Locate),
+            "understand" => Ok(Self::Understand),
+            "edit" => Ok(Self::Edit),
+            "review" => Ok(Self::Review),
+            "test" => Ok(Self::Test),
+            "migrate" => Ok(Self::Migrate),
+            "incident" => Ok(Self::Incident),
+            other => Err(format!(
+                "invalid mode '{other}' (expected locate, understand, edit, review, test, migrate, or incident)"
+            )),
+        }
+    }
+}
+
+/// Stable JSON context pack for AI agents.
+///
+/// This schema intentionally ships evidence handles rather than full source
+/// text. Agents can ask Codixing for `read_file(E1)`/`read_symbol(...)` after
+/// receiving this pack, which keeps the first context assembly call compact and
+/// reproducible.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentContextPack {
+    /// Schema version for clients that cache or validate tool output.
+    pub schema_version: u32,
+    /// Task text supplied by the caller.
+    pub task_summary: String,
+    /// Workflow mode used to tune ranking and next-tool recommendations.
+    pub mode: AgentContextMode,
+    /// Caller-provided token budget for this context pack.
+    pub token_budget: usize,
+    /// Optional branch/worktree label supplied by the caller.
+    pub branch: Option<String>,
+    /// Optional caller-provided risk label (for example, low/medium/high).
+    pub risk_level: Option<String>,
+    /// Files supplied as changed or task-local anchors.
+    pub changed_files: Vec<String>,
+    /// Ranked file-level orientation.
+    pub repo_orientation: Vec<AgentContextOrientation>,
+    /// Evidence handles agents should read first.
+    pub must_read: Vec<AgentContextEvidence>,
+    /// Related symbols discovered from evidence files.
+    pub related_symbols: Vec<AgentContextSymbol>,
+    /// Likely tests for the task-local files.
+    pub likely_tests: Vec<AgentContextTest>,
+    /// Documentation and convention files relevant to the task.
+    pub docs_and_conventions: Vec<AgentContextDocument>,
+    /// Risks or guardrails inferred from the pack.
+    pub risks: Vec<String>,
+    /// Suggested follow-up Codixing tools.
+    pub recommended_next_tools: Vec<String>,
+    /// Estimated tokens for this JSON payload.
+    pub total_estimated_tokens: usize,
+    /// True when low-priority sections were dropped to fit the budget.
+    pub truncated: bool,
+}
+
+/// File-level orientation for an agent context pack.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentContextOrientation {
+    pub id: String,
+    pub path: String,
+    pub why: String,
+    pub symbols: Vec<String>,
+}
+
+/// A compact evidence handle that can be expanded by later tools.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentContextEvidence {
+    pub id: String,
+    pub path: String,
+    pub range: String,
+    pub start_line: u64,
+    pub end_line: u64,
+    pub kind: String,
+    pub reason: String,
+    pub score: f32,
+    pub signature: Option<String>,
+}
+
+/// Related symbol metadata for task-local files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentContextSymbol {
+    pub name: String,
+    pub kind: String,
+    pub path: String,
+    pub range: String,
+    pub signature: Option<String>,
+}
+
+/// Test mapping surfaced by an agent context pack.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentContextTest {
+    pub path: String,
+    pub source_path: String,
+    pub confidence: f32,
+    pub reason: String,
+}
+
+/// Documentation or convention evidence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentContextDocument {
+    pub id: String,
+    pub path: String,
+    pub range: String,
+    pub title: Option<String>,
+    pub reason: String,
 }
 
 /// Assembled cross-file context for a code location.
@@ -171,7 +324,425 @@ fn shrink_primary_to_window(
     primary.content = content;
 }
 
+fn human_result_range(start: u64, end: u64) -> (u64, u64, String) {
+    let human_start = start + 1;
+    let human_end = if end <= start { human_start } else { end };
+    (
+        human_start,
+        human_end,
+        format!("L{human_start}-L{human_end}"),
+    )
+}
+
+fn human_symbol_range(start: usize, end: usize) -> String {
+    let human_start = start + 1;
+    let human_end = end + 1;
+    format!("L{human_start}-L{human_end}")
+}
+
+fn result_kind(result: &SearchResult) -> &'static str {
+    if result.is_doc() {
+        "documentation"
+    } else if result.file_path.contains("/test")
+        || result.file_path.contains("/tests/")
+        || result.file_path.contains("__tests__")
+        || result.file_path.ends_with("_test.rs")
+        || result.file_path.ends_with("_test.go")
+        || result.file_path.ends_with(".test.ts")
+        || result.file_path.ends_with(".test.tsx")
+        || result.file_path.ends_with(".spec.ts")
+        || result.file_path.ends_with(".spec.tsx")
+    {
+        "test"
+    } else {
+        "implementation"
+    }
+}
+
+fn doc_title(result: &SearchResult) -> Option<String> {
+    result
+        .content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| {
+            line.trim_start_matches('#')
+                .trim()
+                .chars()
+                .take(100)
+                .collect()
+        })
+}
+
+fn search_limit_for_mode(mode: AgentContextMode, token_budget: usize) -> usize {
+    let mode_limit = match mode {
+        AgentContextMode::Locate => 8,
+        AgentContextMode::Understand => 10,
+        AgentContextMode::Edit => 12,
+        AgentContextMode::Review => 14,
+        AgentContextMode::Test => 12,
+        AgentContextMode::Migrate => 16,
+        AgentContextMode::Incident => 14,
+    };
+    mode_limit.min((token_budget / 300).clamp(4, 16))
+}
+
+fn update_pack_token_estimate(pack: &mut AgentContextPack) {
+    pack.total_estimated_tokens = 0;
+    pack.total_estimated_tokens = serde_json::to_string(pack)
+        .map(|json| estimate_token_count(&json))
+        .unwrap_or(0);
+}
+
+fn enforce_agent_pack_budget(pack: &mut AgentContextPack) {
+    update_pack_token_estimate(pack);
+
+    while pack.total_estimated_tokens > pack.token_budget {
+        let dropped = pack.docs_and_conventions.pop().is_some()
+            || pack.related_symbols.pop().is_some()
+            || pack.likely_tests.pop().is_some()
+            || pack.repo_orientation.pop().is_some()
+            || pack.must_read.pop().is_some();
+
+        if !dropped {
+            break;
+        }
+        pack.truncated = true;
+        update_pack_token_estimate(pack);
+    }
+}
+
 impl Engine {
+    /// Build a stable JSON context pack for AI agents from a task description.
+    ///
+    /// The returned pack contains ranked file orientation, evidence handles,
+    /// related symbols, likely tests, docs/conventions, risks, and suggested
+    /// next tools. Source bodies are intentionally omitted; agents should expand
+    /// evidence IDs with follow-up read tools.
+    pub fn agent_context_pack(
+        &self,
+        task: &str,
+        mode: AgentContextMode,
+        token_budget: usize,
+        changed_files: &[String],
+        branch: Option<String>,
+        risk_level: Option<String>,
+    ) -> Result<AgentContextPack> {
+        let token_budget = token_budget.max(256);
+        let limit = search_limit_for_mode(mode, token_budget);
+        let strategy = match mode {
+            AgentContextMode::Locate => Strategy::Instant,
+            _ => self.detect_strategy(task),
+        };
+
+        let results = self.search(
+            SearchQuery::new(task)
+                .with_limit(limit)
+                .with_strategy(strategy)
+                .with_doc_filter(DocFilter::CodeOnly),
+        )?;
+
+        let mut selected = Vec::new();
+        let mut seen_locations = HashSet::new();
+
+        for file in changed_files {
+            if let Some(result) = results.iter().find(|r| r.file_path == *file).cloned() {
+                let key = format!(
+                    "{}:{}:{}",
+                    result.file_path, result.line_start, result.line_end
+                );
+                if seen_locations.insert(key) {
+                    selected.push(result);
+                }
+                continue;
+            }
+
+            if let Some(result) = self.agent_context_file_anchor(file)? {
+                let key = format!(
+                    "{}:{}:{}",
+                    result.file_path, result.line_start, result.line_end
+                );
+                if seen_locations.insert(key) {
+                    selected.push(result);
+                }
+            }
+        }
+
+        for result in results {
+            let key = format!(
+                "{}:{}:{}",
+                result.file_path, result.line_start, result.line_end
+            );
+            if seen_locations.insert(key) {
+                selected.push(result);
+            }
+        }
+
+        let changed_set: HashSet<&str> = changed_files.iter().map(String::as_str).collect();
+        let mut must_read = Vec::new();
+        for result in selected.iter().take(limit) {
+            let (start_line, end_line, range) =
+                human_result_range(result.line_start, result.line_end);
+            let reason = if changed_set.contains(result.file_path.as_str()) {
+                "Caller marked this file as changed or task-local".to_string()
+            } else {
+                format!("Ranked {:.2} for the task query", result.score)
+            };
+            must_read.push(AgentContextEvidence {
+                id: format!("E{}", must_read.len() + 1),
+                path: result.file_path.clone(),
+                range,
+                start_line,
+                end_line,
+                kind: result_kind(result).to_string(),
+                reason,
+                score: result.score,
+                signature: if result.signature.trim().is_empty() {
+                    None
+                } else {
+                    Some(result.signature.clone())
+                },
+            });
+        }
+
+        let mut repo_orientation = Vec::new();
+        let mut seen_files = HashSet::new();
+        for evidence in &must_read {
+            if !seen_files.insert(evidence.path.clone()) {
+                continue;
+            }
+            let mut symbols = self.symbols.filter("", Some(&evidence.path));
+            symbols.sort_by_key(|s| s.line_start);
+            let symbols = symbols
+                .into_iter()
+                .take(6)
+                .map(|s| {
+                    s.signature
+                        .unwrap_or_else(|| format!("{} {}", s.kind, s.name))
+                })
+                .collect();
+            let why = if changed_set.contains(evidence.path.as_str()) {
+                "Changed-file anchor for this task".to_string()
+            } else {
+                format!("Contains evidence handle {}", evidence.id)
+            };
+            repo_orientation.push(AgentContextOrientation {
+                id: format!("O{}", repo_orientation.len() + 1),
+                path: evidence.path.clone(),
+                why,
+                symbols,
+            });
+        }
+
+        let mut related_symbols = Vec::new();
+        let mut seen_symbols = HashSet::new();
+        for evidence in &must_read {
+            let mut symbols = self.symbols.filter("", Some(&evidence.path));
+            symbols.sort_by_key(|s| s.line_start);
+            for symbol in symbols.into_iter().take(8) {
+                let key = format!("{}:{}:{}", symbol.file_path, symbol.name, symbol.line_start);
+                if !seen_symbols.insert(key) {
+                    continue;
+                }
+                related_symbols.push(AgentContextSymbol {
+                    name: symbol.name,
+                    kind: symbol.kind.to_string(),
+                    path: symbol.file_path,
+                    range: human_symbol_range(symbol.line_start, symbol.line_end),
+                    signature: symbol.signature,
+                });
+                if related_symbols.len() >= 16 {
+                    break;
+                }
+            }
+            if related_symbols.len() >= 16 {
+                break;
+            }
+        }
+
+        let mut likely_tests = Vec::new();
+        let mut seen_tests = HashSet::new();
+        for path in changed_files
+            .iter()
+            .map(String::as_str)
+            .chain(repo_orientation.iter().map(|o| o.path.as_str()))
+        {
+            for mapping in self.find_tests_for_file(path).into_iter().take(4) {
+                let key = format!("{}:{}", mapping.source_file, mapping.test_file);
+                if seen_tests.insert(key) {
+                    likely_tests.push(AgentContextTest {
+                        path: mapping.test_file,
+                        source_path: mapping.source_file,
+                        confidence: mapping.confidence,
+                        reason: mapping.reason,
+                    });
+                }
+                if likely_tests.len() >= 12 {
+                    break;
+                }
+            }
+            if likely_tests.len() >= 12 {
+                break;
+            }
+        }
+
+        let docs = self
+            .search(
+                SearchQuery::new(task)
+                    .with_limit(4)
+                    .with_strategy(Strategy::Instant)
+                    .with_doc_filter(DocFilter::DocsOnly),
+            )
+            .unwrap_or_default();
+        let docs_and_conventions = docs
+            .iter()
+            .enumerate()
+            .map(|(idx, result)| {
+                let (_, _, range) = human_result_range(result.line_start, result.line_end);
+                AgentContextDocument {
+                    id: format!("D{}", idx + 1),
+                    path: result.file_path.clone(),
+                    range,
+                    title: doc_title(result),
+                    reason: "Relevant documentation or repository convention".to_string(),
+                }
+            })
+            .collect();
+
+        let mut risks = Vec::new();
+        if matches!(
+            mode,
+            AgentContextMode::Edit | AgentContextMode::Migrate | AgentContextMode::Incident
+        ) {
+            risks.push("Run change_impact before editing each implementation file.".to_string());
+        }
+        if matches!(mode, AgentContextMode::Review) {
+            risks.push(
+                "Compare this pack against the actual diff before drawing review conclusions."
+                    .to_string(),
+            );
+        }
+        if !likely_tests.is_empty() {
+            risks.push("Run the likely_tests set before finalizing changes.".to_string());
+        }
+        if must_read.iter().any(|e| {
+            e.path.contains("mcp")
+                || e.path.contains("cli")
+                || e.path.contains("api")
+                || e.path.contains("server")
+        }) {
+            risks.push(
+                "Some evidence touches a user-facing API surface; check docs and compatibility."
+                    .to_string(),
+            );
+        }
+        if let Some(level) = risk_level.as_deref() {
+            if matches!(level.to_ascii_lowercase().as_str(), "high" | "critical") {
+                risks.push(
+                    "High risk level requested; prefer patch preview, impact analysis, and full tests."
+                        .to_string(),
+                );
+            }
+        }
+
+        let first_path = must_read
+            .first()
+            .map(|e| e.path.as_str())
+            .unwrap_or("<path>");
+        let mut recommended_next_tools = vec!["read_file(E1)".to_string()];
+        match mode {
+            AgentContextMode::Locate => {
+                recommended_next_tools.push("find_symbol(<symbol>)".to_string());
+                recommended_next_tools.push("code_search(<refined query>)".to_string());
+            }
+            AgentContextMode::Understand => {
+                recommended_next_tools.push(format!("assemble_location_context({first_path})"));
+                recommended_next_tools.push("get_repo_map".to_string());
+            }
+            AgentContextMode::Edit | AgentContextMode::Migrate => {
+                recommended_next_tools.push(format!("change_impact({first_path})"));
+                recommended_next_tools.push(format!("find_tests(file={first_path})"));
+                recommended_next_tools.push(format!("api_surface({first_path})"));
+            }
+            AgentContextMode::Review => {
+                recommended_next_tools.push("review_context(<diff>)".to_string());
+                recommended_next_tools.push(format!("change_impact({first_path})"));
+            }
+            AgentContextMode::Test => {
+                recommended_next_tools.push(format!("find_tests(file={first_path})"));
+                recommended_next_tools.push("find_source_for_test(<test file>)".to_string());
+            }
+            AgentContextMode::Incident => {
+                recommended_next_tools.push(format!("change_impact({first_path})"));
+                recommended_next_tools.push("search_changes(<symptom>)".to_string());
+                recommended_next_tools.push("get_hotspots".to_string());
+            }
+        }
+
+        let mut pack = AgentContextPack {
+            schema_version: 1,
+            task_summary: task.to_string(),
+            mode,
+            token_budget,
+            branch,
+            risk_level,
+            changed_files: changed_files.to_vec(),
+            repo_orientation,
+            must_read,
+            related_symbols,
+            likely_tests,
+            docs_and_conventions,
+            risks,
+            recommended_next_tools,
+            total_estimated_tokens: 0,
+            truncated: false,
+        };
+        enforce_agent_pack_budget(&mut pack);
+        Ok(pack)
+    }
+
+    fn agent_context_file_anchor(&self, file: &str) -> Result<Option<SearchResult>> {
+        let mut symbols = self.symbols.filter("", Some(file));
+        symbols.sort_by_key(|s| s.line_start);
+
+        if let Some(symbol) = symbols.into_iter().next() {
+            let content = self
+                .read_file_range(
+                    file,
+                    Some(symbol.line_start as u64),
+                    Some(symbol.line_end as u64),
+                )?
+                .unwrap_or_default();
+            return Ok(Some(SearchResult {
+                chunk_id: format!("agent-anchor:{file}:{}", symbol.line_start),
+                file_path: file.to_string(),
+                language: symbol.language.name().to_string(),
+                score: 1.0,
+                line_start: symbol.line_start as u64,
+                line_end: symbol.line_end as u64 + 1,
+                signature: symbol.signature.clone().unwrap_or_default(),
+                scope_chain: symbol.scope.clone(),
+                content,
+            }));
+        }
+
+        let Some(content) = self.read_file_range(file, None, Some(80))? else {
+            return Ok(None);
+        };
+        let line_count = content.lines().count().max(1) as u64;
+        Ok(Some(SearchResult {
+            chunk_id: format!("agent-anchor:{file}:0"),
+            file_path: file.to_string(),
+            language: String::new(),
+            score: 1.0,
+            line_start: 0,
+            line_end: line_count,
+            signature: String::new(),
+            scope_chain: Vec::new(),
+            content,
+        }))
+    }
+
     /// Assemble cross-file context for a code location specified by file path and line.
     ///
     /// This is the primary entry point for the CLI and MCP tool. It constructs
@@ -660,6 +1231,76 @@ mod tests {
         assert!(
             span < 400,
             "primary chunk should have been sliced down (span={span})"
+        );
+    }
+
+    #[test]
+    fn agent_context_pack_serializes_stable_schema() {
+        use crate::{Engine, IndexConfig};
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("tests")).unwrap();
+        fs::write(
+            root.join("src/greeting.rs"),
+            "pub fn greeting(name: &str) -> String {\n    format!(\"hello {name}\")\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("tests/greeting_test.rs"),
+            "#[test]\nfn greeting_includes_name() {\n    assert!(crate::greeting(\"codixing\").contains(\"codixing\"));\n}\n",
+        )
+        .unwrap();
+        fs::write(root.join("README.md"), "# Greeting module\n").unwrap();
+
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+        let engine = Engine::init(&root, config).unwrap();
+
+        let pack = engine
+            .agent_context_pack(
+                "change greeting output",
+                AgentContextMode::Edit,
+                3000,
+                &["src/greeting.rs".to_string()],
+                Some("feature/greeting".to_string()),
+                Some("high".to_string()),
+            )
+            .unwrap();
+
+        assert_eq!(pack.schema_version, 1);
+        assert_eq!(pack.mode, AgentContextMode::Edit);
+        assert_eq!(pack.branch.as_deref(), Some("feature/greeting"));
+        assert!(
+            pack.must_read
+                .iter()
+                .any(|entry| entry.path == "src/greeting.rs"),
+            "changed file should be pinned into must_read: {pack:#?}"
+        );
+        assert!(
+            pack.likely_tests
+                .iter()
+                .any(|test| test.path == "tests/greeting_test.rs"),
+            "expected mapped tests in pack: {pack:#?}"
+        );
+        assert!(
+            pack.recommended_next_tools
+                .iter()
+                .any(|tool| tool.starts_with("change_impact(")),
+            "edit mode should recommend impact analysis: {pack:#?}"
+        );
+
+        let json = serde_json::to_value(&pack).unwrap();
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["mode"], "edit");
+        assert!(
+            json["must_read"][0]["id"]
+                .as_str()
+                .unwrap()
+                .starts_with('E')
         );
     }
 }
