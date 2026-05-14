@@ -1,6 +1,6 @@
 # Codixing Plugin for Claude Code
 
-Code retrieval engine plugin that saves your agent tool calls and tokens on hard structural tasks — AST-aware search, dependency graph intelligence, and 67 MCP tools (all always advertised on `tools/list`).
+Code retrieval engine plugin that saves your agent tool calls and tokens on hard structural tasks — AST-aware search, dependency graph intelligence, and profile-gated MCP tools.
 
 ## Install
 
@@ -49,9 +49,9 @@ The plugin ships a **PreToolUse hook** that intercepts Grep calls targeting code
 
 The plugin bundles the Codixing MCP server via `npx`. On first use, it downloads the `codixing-mcp` binary (~45MB) which then runs locally — no external APIs, no cloud dependencies.
 
-All 67 tools are always advertised on `tools/list`. The previous `--medium` and `--compact` curation flags were both removed — the April 2026 agent benchmark found that `--medium` was silently hiding `get_complexity`, `review_context`, and other high-leverage tools, erasing the tool-call / token savings on the exact tasks Codixing is designed for. Full tool load restored the reproducible "66% fewer tokens, 66% fewer calls" headline.
+The server starts in the read-only `reviewer` profile by default. Use `--profile minimal` for a narrow search/symbol/repo-map surface, `--profile editor` or `--allow-write-tools` for non-destructive write helpers, and `--profile dangerous` only when destructive file and shell tools are intentional. Auto-forked daemons use profile-scoped socket/pipe names so clients do not inherit a broader profile by accident.
 
-### CLI commands (26)
+### CLI commands (27)
 
 ```bash
 codixing search "query"          # Semantic code search

@@ -17,6 +17,80 @@ use crate::protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use crate::tools;
 
 // ---------------------------------------------------------------------------
+// MCP profiles
+// ---------------------------------------------------------------------------
+
+/// Tool exposure and mutation policy for an MCP server instance.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum McpProfile {
+    /// Narrow discovery profile: search, symbols, repo map, and meta-tools only.
+    Minimal,
+    /// Read-only review profile: all read-only tools, no mutation.
+    #[default]
+    Reviewer,
+    /// Editing profile: read-only tools plus non-destructive write helpers.
+    Editor,
+    /// Full tool profile, including destructive filesystem and shell tools.
+    Dangerous,
+}
+
+impl McpProfile {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Reviewer => "reviewer",
+            Self::Editor => "editor",
+            Self::Dangerous => "dangerous",
+        }
+    }
+
+    fn allows_tool(self, name: &str) -> bool {
+        if !tools::is_known_tool(name) {
+            return true;
+        }
+
+        match self {
+            Self::Minimal => is_minimal_tool(name),
+            Self::Reviewer => tools::is_read_only_tool(name),
+            Self::Editor => tools::is_read_only_tool(name) || !is_dangerous_write_tool(name),
+            Self::Dangerous => true,
+        }
+    }
+
+    fn blocked_message(self, name: &str) -> String {
+        match self {
+            Self::Minimal => format!(
+                "Tool '{name}' is not available in MCP profile 'minimal'. Start codixing-mcp with --profile reviewer for the full read-only tool set."
+            ),
+            Self::Reviewer => format!(
+                "Tool '{name}' is blocked by MCP profile 'reviewer' because it can mutate project state. Start codixing-mcp with --profile editor or --allow-write-tools to enable non-destructive write tools."
+            ),
+            Self::Editor => format!(
+                "Tool '{name}' is blocked by MCP profile 'editor' because it is destructive or can execute shell commands. Start codixing-mcp with --profile dangerous to expose it."
+            ),
+            Self::Dangerous => format!("Tool '{name}' is unexpectedly blocked."),
+        }
+    }
+}
+
+fn is_minimal_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "search_tools"
+            | "get_tool_schema"
+            | "index_status"
+            | "code_search"
+            | "find_symbol"
+            | "read_symbol"
+            | "get_repo_map"
+    )
+}
+
+fn is_dangerous_write_tool(name: &str) -> bool {
+    matches!(name, "delete_file" | "run_tests")
+}
+
+// ---------------------------------------------------------------------------
 // Core JSON-RPC message loop (generic over any AsyncRead + AsyncWrite)
 // ---------------------------------------------------------------------------
 
@@ -25,6 +99,7 @@ pub(crate) async fn run_jsonrpc_loop<R, W>(
     mut reader: tokio::io::Lines<BufReader<R>>,
     mut writer: BufWriter<W>,
     federation: Option<Arc<FederatedEngine>>,
+    profile: McpProfile,
 ) -> Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -63,6 +138,7 @@ where
             req.params,
             &federation,
             &mut writer,
+            profile,
         )
         .await;
         write_line(&mut writer, &response).await?;
@@ -89,6 +165,7 @@ async fn dispatch<W>(
     params: Option<Value>,
     federation: &Option<Arc<FederatedEngine>>,
     writer: &mut BufWriter<W>,
+    profile: McpProfile,
 ) -> Value
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -96,8 +173,8 @@ where
     match method {
         "initialize" => handle_initialize(id, params),
         "initialized" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
-        "tools/list" => handle_tools_list(id, federation.is_some()),
-        "tools/call" => handle_tools_call(engine, id, params, federation, writer).await,
+        "tools/list" => handle_tools_list(id, federation.is_some(), profile),
+        "tools/call" => handle_tools_call(engine, id, params, federation, writer, profile).await,
         _ => {
             let err = JsonRpcError::method_not_found(id, method);
             serde_json::to_value(err).unwrap_or(Value::Null)
@@ -109,13 +186,21 @@ fn handle_initialize(id: Value, _params: Option<Value>) -> Value {
     let result = json!({
         "protocolVersion": "2024-11-05",
         "capabilities": { "tools": {} },
-        "serverInfo": { "name": "codixing", "version": "0.4.0" }
+        "serverInfo": { "name": "codixing", "version": env!("CARGO_PKG_VERSION") }
     });
     serde_json::to_value(JsonRpcResponse::new(id, result)).unwrap_or(Value::Null)
 }
 
-fn handle_tools_list(id: Value, has_federation: bool) -> Value {
-    let tool_defs = tools::tool_definitions_with_federation(has_federation);
+fn handle_tools_list(id: Value, has_federation: bool, profile: McpProfile) -> Value {
+    let mut tool_defs = tools::tool_definitions_with_federation(has_federation);
+    if let Some(arr) = tool_defs.as_array_mut() {
+        arr.retain(|tool| {
+            tool.get("name")
+                .and_then(|v| v.as_str())
+                .map(|name| profile.allows_tool(name))
+                .unwrap_or(true)
+        });
+    }
     let result = json!({ "tools": tool_defs });
     serde_json::to_value(JsonRpcResponse::new(id, result)).unwrap_or(Value::Null)
 }
@@ -126,6 +211,7 @@ async fn handle_tools_call<W>(
     params: Option<Value>,
     federation: &Option<Arc<FederatedEngine>>,
     writer: &mut BufWriter<W>,
+    profile: McpProfile,
 ) -> Value
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -150,6 +236,14 @@ where
         .get("arguments")
         .cloned()
         .unwrap_or(Value::Object(serde_json::Map::new()));
+
+    if !profile.allows_tool(&tool_name) {
+        return build_tool_response(
+            id,
+            tool_name.clone(),
+            Ok((profile.blocked_message(&tool_name), true)),
+        );
+    }
 
     let engine_arc = Arc::clone(engine);
     let tool_name_clone = tool_name.clone();
@@ -288,6 +382,14 @@ mod tests {
 
     /// Send JSON-RPC request lines into the loop and collect all response lines.
     async fn run_requests(engine: Engine, requests: &[Value]) -> Vec<Value> {
+        run_requests_with_profile(engine, requests, McpProfile::default()).await
+    }
+
+    async fn run_requests_with_profile(
+        engine: Engine,
+        requests: &[Value],
+        profile: McpProfile,
+    ) -> Vec<Value> {
         // Build the request payload (one JSON line per request).
         let mut input = Vec::new();
         for req in requests {
@@ -315,6 +417,7 @@ mod tests {
                 BufReader::new(server_read).lines(),
                 BufWriter::new(server_write),
                 None,
+                profile,
             )
             .await
             .unwrap();
@@ -353,6 +456,7 @@ mod tests {
         let result = &responses[0]["result"];
         assert_eq!(result["protocolVersion"], "2024-11-05");
         assert_eq!(result["serverInfo"]["name"], "codixing");
+        assert_eq!(result["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
     }
 
     #[tokio::test]
@@ -383,6 +487,98 @@ mod tests {
         assert!(names.contains(&"code_search"), "missing code_search tool");
         assert!(names.contains(&"find_symbol"), "missing find_symbol tool");
         assert!(names.contains(&"get_repo_map"), "missing get_repo_map tool");
+    }
+
+    #[tokio::test]
+    async fn reviewer_profile_hides_and_blocks_write_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_test_engine(dir.path());
+
+        let responses = run_requests_with_profile(
+            engine,
+            &[
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/list"
+                }),
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "write_file",
+                        "arguments": {
+                            "file": "blocked.rs",
+                            "content": "pub fn blocked() {}"
+                        }
+                    }
+                }),
+            ],
+            McpProfile::Reviewer,
+        )
+        .await;
+
+        let tools = responses[0]["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"code_search"));
+        assert!(!names.contains(&"write_file"));
+
+        let result = &responses[1]["result"];
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("profile 'reviewer'"));
+        assert!(!dir.path().join("blocked.rs").exists());
+    }
+
+    #[tokio::test]
+    async fn editor_profile_hides_destructive_tools_but_keeps_edit_helpers() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_test_engine(dir.path());
+
+        let responses = run_requests_with_profile(
+            engine,
+            &[json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/list"
+            })],
+            McpProfile::Editor,
+        )
+        .await;
+
+        let tools = responses[0]["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"write_file"));
+        assert!(names.contains(&"edit_file"));
+        assert!(!names.contains(&"delete_file"));
+        assert!(!names.contains(&"run_tests"));
+    }
+
+    #[tokio::test]
+    async fn minimal_profile_exposes_only_context_entrypoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_test_engine(dir.path());
+
+        let responses = run_requests_with_profile(
+            engine,
+            &[json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/list"
+            })],
+            McpProfile::Minimal,
+        )
+        .await;
+
+        let tools = responses[0]["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"search_tools"));
+        assert!(names.contains(&"code_search"));
+        assert!(names.contains(&"find_symbol"));
+        assert!(names.contains(&"get_repo_map"));
+        assert!(!names.contains(&"read_file"));
+        assert!(!names.contains(&"write_file"));
     }
 
     #[tokio::test]
@@ -578,9 +774,14 @@ mod tests {
         let daemon_handle = tokio::spawn(async move {
             // Accept exactly one connection.
             let (stream, _) = listener.accept().await.unwrap();
-            crate::daemon::handle_socket_connection(stream, engine_clone, None)
-                .await
-                .unwrap();
+            crate::daemon::handle_socket_connection(
+                stream,
+                engine_clone,
+                None,
+                McpProfile::default(),
+            )
+            .await
+            .unwrap();
         });
 
         // Give the listener a moment to bind.
@@ -616,6 +817,10 @@ mod tests {
 
         assert_eq!(responses.len(), 2);
         assert_eq!(responses[0]["result"]["serverInfo"]["name"], "codixing");
+        assert_eq!(
+            responses[0]["result"]["serverInfo"]["version"],
+            env!("CARGO_PKG_VERSION")
+        );
 
         let tools = responses[1]["result"]["tools"].as_array().unwrap();
         assert!(tools.len() >= 10);
@@ -653,6 +858,7 @@ mod tests {
                 BufReader::new(server_read).lines(),
                 BufWriter::new(server_write),
                 None,
+                McpProfile::default(),
             )
             .await
             .unwrap();

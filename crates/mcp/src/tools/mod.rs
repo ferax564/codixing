@@ -46,7 +46,8 @@ mod generated {
 
 // Re-export generated public API so callers see the same interface as before.
 pub use generated::{
-    federation_tool_definitions, is_read_only_tool, list_projects_tool_definition, tool_definitions,
+    federation_tool_definitions, is_known_tool, is_read_only_tool, list_projects_tool_definition,
+    tool_definitions,
 };
 
 // ---------------------------------------------------------------------------

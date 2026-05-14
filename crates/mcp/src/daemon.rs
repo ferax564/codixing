@@ -15,7 +15,7 @@ use tracing::{info, warn};
 
 use codixing_core::{Engine, FederatedEngine};
 
-use crate::jsonrpc::run_jsonrpc_loop;
+use crate::jsonrpc::{McpProfile, run_jsonrpc_loop};
 
 // ---------------------------------------------------------------------------
 // Idle timeout watchdog
@@ -43,6 +43,7 @@ pub(crate) async fn run_daemon(
     engine: Arc<RwLock<Engine>>,
     socket_path: &Path,
     federation: Option<Arc<FederatedEngine>>,
+    profile: McpProfile,
 ) -> Result<()> {
     // Remove stale socket file if it exists.
     if socket_path.exists() {
@@ -163,7 +164,8 @@ pub(crate) async fn run_daemon(
         let engine_clone = Arc::clone(&engine);
         let fed_clone = federation.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_socket_connection(stream, engine_clone, fed_clone).await {
+            if let Err(e) = handle_socket_connection(stream, engine_clone, fed_clone, profile).await
+            {
                 warn!(error = %e, "daemon: connection error");
             }
         });
@@ -175,6 +177,7 @@ pub(crate) async fn handle_socket_connection(
     stream: UnixStream,
     engine: Arc<RwLock<Engine>>,
     federation: Option<Arc<FederatedEngine>>,
+    profile: McpProfile,
 ) -> Result<()> {
     let (read_half, write_half) = stream.into_split();
     run_jsonrpc_loop(
@@ -182,6 +185,7 @@ pub(crate) async fn handle_socket_connection(
         BufReader::new(read_half).lines(),
         BufWriter::new(write_half),
         federation,
+        profile,
     )
     .await
 }

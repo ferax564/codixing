@@ -1,4 +1,4 @@
-# Codixing — Claude Instructions
+# Codixing — Codex Instructions
 
 ## Code Search & Navigation
 
@@ -66,7 +66,7 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 - `crates/server/` — HTTP API server (`codixing-server`), REST endpoints with SSE streaming for sync
 - `crates/core/src/federation/` — cross-repo federated search (`--federation config.json`)
 - `crates/lsp/` — LSP server (`codixing-lsp`), hover/go-to-def/refs/symbols/call hierarchy/complexity diagnostics/rename/semantic tokens
-- `claude-plugin/` — Claude Code plugin with 5 skills + MCP server config
+- `Codex-plugin/` — Codex plugin with 5 skills + MCP server config
 - `.codixing/` — index data (do not edit manually)
 
 ## Build & Test
@@ -91,7 +91,7 @@ cargo run --release -p codixing-cli -- bench-embed /path/to/repo --model bge-sma
 
 ## Plugin Skills
 
-The Codixing Claude Code plugin provides 5 slash commands:
+The Codixing Codex plugin provides 5 slash commands:
 
 | Skill | Purpose |
 |-------|---------|
@@ -106,7 +106,7 @@ The Codixing Claude Code plugin provides 5 slash commands:
 Use `/codixing-release [version]` to ship. It handles everything:
 1. Pre-flight checks (clean state, tests, clippy, fmt)
 2. Version bump in all 5 locations
-3. Documentation update (README, CLAUDE.md, docs/index.html)
+3. Documentation update (README, AGENTS.md, docs/index.html)
 4. PR creation + CI monitoring + review comment fixes
 5. Merge + tag (with auto-tag re-push workaround)
 6. GitHub Release notes
@@ -120,14 +120,14 @@ When bumping the version, update ALL of these files:
 1. `Cargo.toml` — `workspace.package.version`
 2. `npm/package.json` — `version`
 3. `docs/install.sh` — `VERSION`
-4. `claude-plugin/.claude-plugin/plugin.json` — `version`
-5. `.claude-plugin/marketplace.json` — `metadata.version` AND `plugins[0].version`
+4. `Codex-plugin/.Codex-plugin/plugin.json` — `version`
+5. `.Codex-plugin/marketplace.json` — `metadata.version` AND `plugins[0].version`
 
 ### Dual plugin manifest
 
 The plugin lives in two files that must stay version-synced:
-- `.claude-plugin/marketplace.json` — registry entry for the Claude Code marketplace (what `claude plugin marketplace add` reads).
-- `claude-plugin/.claude-plugin/plugin.json` — the actual plugin bundle that ships with hooks + skills.
+- `.Codex-plugin/marketplace.json` — registry entry for the Codex marketplace (what `Codex plugin marketplace add` reads).
+- `Codex-plugin/.Codex-plugin/plugin.json` — the actual plugin bundle that ships with hooks + skills.
 
 Both are covered by `scripts/bump_version.py`; edit by hand only if you know why.
 
@@ -159,9 +159,9 @@ Never ship visual changes without visual verification.
 ### Documentation is part of the feature
 
 Every feature commit MUST include documentation updates:
-- Update test count in README.md, CLAUDE.md, and docs/index.html
+- Update test count in README.md, AGENTS.md, and docs/index.html
 - Update feature descriptions in README.md Key Features if applicable
-- Update CLAUDE.md if the change affects project structure, tools, or capabilities
+- Update AGENTS.md if the change affects project structure, tools, or capabilities
 - Update docs/docs.html if LSP or MCP capabilities change
 
 Never batch documentation updates after implementation — document as you go.
@@ -188,7 +188,7 @@ Implementation plans MUST use actual API signatures, not guesses:
 When launching multiple feature branches in parallel (e.g. via worktree agents):
 
 1. **Plan merge order upfront.** Identify which files are shared and decide merge order from smallest/most-independent to largest.
-2. **Each PR must include its own docs updates.** Update README, website, test counts, and CLAUDE.md as part of each feature PR.
+2. **Each PR must include its own docs updates.** Update README, website, test counts, and AGENTS.md as part of each feature PR.
 3. **Merge one at a time, wait for CI.** After each squash-merge, pull main, verify CI passes on main (including the Jekyll/Pages build), THEN rebase the next PR.
 4. **Check for behavioral interactions.** When planning features that change binary behavior (e.g., daemon auto-fork), explicitly note impacts on existing tests that spawn the binary as a subprocess.
 
@@ -211,7 +211,7 @@ Before merging any PR:
 - [ ] All CI checks green (macOS + Ubuntu + Windows)
 - [ ] GitHub Pages build passes (no Jekyll/Liquid errors)
 - [ ] Review comments addressed and responded to
-- [ ] Test count in README/CLAUDE.md/website matches actual `cargo test` output
+- [ ] Test count in README/AGENTS.md/website matches actual `cargo test` output
 - [ ] Documentation updated for all new features
 
 ### Release checklist
@@ -225,7 +225,7 @@ Before tagging a release:
 - [ ] README Key Features section reflects new features
 - [ ] docs/index.html test count and tool count are correct
 - [ ] docs/docs.html has no stale references
-- [ ] Plugin version matches in both `claude-plugin/` and `.claude-plugin/marketplace.json`
+- [ ] Plugin version matches in both `Codex-plugin/` and `.Codex-plugin/marketplace.json`
 - [ ] GitHub Pages build succeeds (check the deploy workflow)
 - [ ] **CI run on the merge commit produced `binaries-linux-x86_64`, `binaries-macos-aarch64`, and `binaries-windows-x86_64` artifacts** — `release.yml` downloads these by commit SHA instead of rebuilding. Check the Actions tab for the CI run on the target commit. If the release-build job failed or never ran, re-trigger CI (push an empty commit) before tagging, or `release.yml` will fail to find artifacts. Artifact retention is 14 days.
 
@@ -255,7 +255,7 @@ When adding a new crate that depends on `codixing-core`, ALWAYS:
 
 ## MCP Server Configuration
 
-The `.mcp.json` configures the Codixing MCP server for Claude Code. **Required flags:**
+The `.mcp.json` configures the Codixing MCP server for Codex. **Required flags:**
 
 - `--no-daemon-fork` — prevents stale daemon socket issues that silently kill the MCP connection
 

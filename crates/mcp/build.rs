@@ -427,6 +427,22 @@ fn main() {
     code.push_str("    )\n");
     code.push_str("}\n\n");
 
+    // is_known_tool()
+    code.push_str("/// Returns true if the name matches any generated MCP tool.\n");
+    code.push_str("pub fn is_known_tool(name: &str) -> bool {\n");
+    code.push_str("    matches!(\n");
+    code.push_str("        name,\n");
+    for (i, tool) in all_tools_combined.iter().enumerate() {
+        if i == 0 {
+            code.push_str(&format!("        \"{}\"", tool.name));
+        } else {
+            code.push_str(&format!("\n            | \"{}\"", tool.name));
+        }
+    }
+    code.push('\n');
+    code.push_str("    )\n");
+    code.push_str("}\n\n");
+
     // is_meta_tool() — kept available for future dynamic-discovery use cases.
     code.push_str(
         "/// Returns true if the tool is a meta-tool (used for dynamic tool discovery).\n",

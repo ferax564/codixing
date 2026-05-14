@@ -36,7 +36,7 @@ claude mcp add codixing -- npx -y codixing-mcp --root . --no-daemon-fork
 - 24 languages via tree-sitter AST parsing
 - Hybrid BM25 + vector search with 100% top-1 accuracy
 - Code dependency graph with PageRank scoring
-- All tools always advertised on `tools/list` (no curation flag)
+- Read-only `reviewer` MCP profile by default; explicit `minimal`, `editor`, and `dangerous` profiles
 - Token-budgeted output (never overflows context)
 - Zero-config — auto-indexes any git repo
 

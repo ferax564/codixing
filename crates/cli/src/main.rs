@@ -1,6 +1,6 @@
 mod daemon_proxy;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -207,6 +207,17 @@ enum Command {
         /// the missing metadata files without touching the rest of the index.
         #[arg(long)]
         no_sync: bool,
+    },
+
+    /// Diagnose binary, index, embedding runtime, daemon, and git/index health.
+    Doctor {
+        /// Project root to inspect (defaults to current directory).
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Output the health report as JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Find the shortest path between two files in the dependency graph.
@@ -918,6 +929,7 @@ async fn async_main() -> Result<()> {
         ),
         Command::Hook { action } => cmd_hook(action),
         Command::Repair { path, no_sync } => cmd_repair(path, no_sync),
+        Command::Doctor { path, json } => cmd_doctor(path, json),
         Command::Path { from, to } => cmd_path(from, to),
         Command::Callers { file, depth } => cmd_callers(file, depth),
         Command::Callees { file, depth } => cmd_callees(file, depth),
@@ -3190,6 +3202,263 @@ fn cmd_context(
     }
 
     Ok(())
+}
+
+fn cmd_doctor(path: PathBuf, json: bool) -> Result<()> {
+    use codixing_core::persistence::IndexStore;
+
+    let root = path
+        .canonicalize()
+        .with_context(|| format!("path not found: {}", path.display()))?;
+    let codixing_dir = root.join(".codixing");
+    let audit = IndexStore::audit_layout(&root);
+    let disk_bytes = directory_size(&codixing_dir);
+    let daemon = daemon_health(&root);
+    let onnx = onnx_health();
+    let git_head = current_git_head(&root);
+
+    let mut meta_json = serde_json::Value::Null;
+    let mut config_json = serde_json::Value::Null;
+    let mut indexed_commit = None;
+    let status = if !audit.dir_exists {
+        "missing"
+    } else if !audit.essentials_missing.is_empty() {
+        "partial"
+    } else {
+        match IndexStore::open(&root) {
+            Ok(store) => {
+                match store.load_meta() {
+                    Ok(meta) => {
+                        indexed_commit = meta.git_commit.clone();
+                        meta_json = serde_json::json!({
+                            "version": meta.version,
+                            "file_count": meta.file_count,
+                            "chunk_count": meta.chunk_count,
+                            "symbol_count": meta.symbol_count,
+                            "last_indexed": meta.last_indexed,
+                            "git_commit": meta.git_commit,
+                        });
+                    }
+                    Err(err) => {
+                        meta_json = serde_json::json!({ "error": err.to_string() });
+                    }
+                }
+
+                match store.load_config() {
+                    Ok(config) => {
+                        config_json = serde_json::json!({
+                            "embedding_enabled": config.embedding.enabled,
+                            "embedding_model": config.embedding.model,
+                            "reranker_enabled": config.embedding.reranker_enabled,
+                            "languages": config.languages,
+                            "extra_roots": config.extra_roots,
+                        });
+                    }
+                    Err(err) => {
+                        config_json = serde_json::json!({ "error": err.to_string() });
+                    }
+                }
+
+                "ok"
+            }
+            Err(_) => "partial",
+        }
+    };
+
+    let stale_status = match (&git_head, &indexed_commit) {
+        (Some(head), Some(indexed)) if head == indexed => "current",
+        (Some(_), Some(_)) => "stale",
+        (Some(_), None) => "not_indexed_with_git",
+        (None, Some(_)) => "git_unavailable",
+        (None, None) => "unknown",
+    };
+
+    let report = serde_json::json!({
+        "binary": {
+            "name": "codixing",
+            "version": env!("CARGO_PKG_VERSION"),
+        },
+        "root": root,
+        "index": {
+            "status": status,
+            "dir_exists": audit.dir_exists,
+            "essential_missing": paths_to_strings(&audit.essentials_missing),
+            "essential_present": paths_to_strings(&audit.essentials_present),
+            "optional_artifacts": paths_to_strings(&audit.optional_present),
+            "disk_bytes": disk_bytes,
+            "meta": meta_json,
+            "config": config_json,
+            "staleness": {
+                "status": stale_status,
+                "git_head": git_head,
+                "indexed_commit": indexed_commit,
+            },
+        },
+        "onnx": onnx,
+        "daemon": daemon,
+    });
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("# Codixing Doctor");
+    println!("Binary: codixing {}", env!("CARGO_PKG_VERSION"));
+    println!("Root: {}", report["root"].as_str().unwrap_or(""));
+    println!("Index: {status}");
+    println!("Index disk: {}", format_bytes(disk_bytes));
+    println!("Git staleness: {stale_status}");
+    if let Some(head) = report["index"]["staleness"]["git_head"].as_str() {
+        println!("Git HEAD: {head}");
+    }
+    if let Some(indexed) = report["index"]["staleness"]["indexed_commit"].as_str() {
+        println!("Indexed commit: {indexed}");
+    }
+    println!(
+        "Daemon endpoint: {} ({})",
+        report["daemon"]["endpoint"].as_str().unwrap_or("unknown"),
+        if report["daemon"]["connectable"].as_bool().unwrap_or(false) {
+            "connectable"
+        } else if report["daemon"]["present"].as_bool().unwrap_or(false) {
+            "present but not connectable"
+        } else {
+            "not present"
+        }
+    );
+    println!(
+        "ONNX runtime: {}",
+        if report["onnx"]["ort_dylib_exists"]
+            .as_bool()
+            .unwrap_or(false)
+        {
+            "configured"
+        } else {
+            "not configured"
+        }
+    );
+
+    if let Some(meta) = report["index"]["meta"].as_object() {
+        if meta.get("error").is_none() {
+            println!(
+                "Indexed files: {} | chunks: {} | symbols: {}",
+                meta["file_count"].as_u64().unwrap_or(0),
+                meta["chunk_count"].as_u64().unwrap_or(0),
+                meta["symbol_count"].as_u64().unwrap_or(0)
+            );
+        }
+    }
+
+    if !audit.essentials_missing.is_empty() {
+        println!("Missing essential files:");
+        for path in &audit.essentials_missing {
+            println!("  {}", path.display());
+        }
+    }
+
+    Ok(())
+}
+
+fn paths_to_strings(paths: &[PathBuf]) -> Vec<String> {
+    paths.iter().map(|p| p.display().to_string()).collect()
+}
+
+fn directory_size(path: &Path) -> u64 {
+    let mut total = 0;
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let meta = match entry.metadata() {
+                Ok(meta) => meta,
+                Err(_) => continue,
+            };
+            if meta.is_dir() {
+                pending.push(entry.path());
+            } else if meta.is_file() {
+                total += meta.len();
+            }
+        }
+    }
+    total
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+fn current_git_head(root: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let head = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (!head.is_empty()).then_some(head)
+}
+
+fn onnx_health() -> serde_json::Value {
+    let ort_dylib_path = std::env::var("ORT_DYLIB_PATH").ok();
+    let ort_dylib_exists = ort_dylib_path
+        .as_deref()
+        .map(|p| Path::new(p).is_file())
+        .unwrap_or(false);
+
+    serde_json::json!({
+        "ort_dylib_path": ort_dylib_path,
+        "ort_dylib_exists": ort_dylib_exists,
+        "ld_library_path_set": std::env::var_os("LD_LIBRARY_PATH").is_some(),
+        "dyld_library_path_set": std::env::var_os("DYLD_LIBRARY_PATH").is_some(),
+    })
+}
+
+#[cfg(unix)]
+fn daemon_health(root: &Path) -> serde_json::Value {
+    let endpoint = root.join(".codixing").join("daemon.sock");
+    let present = endpoint.exists();
+    let connectable = std::os::unix::net::UnixStream::connect(&endpoint).is_ok();
+    serde_json::json!({
+        "endpoint": endpoint,
+        "present": present,
+        "connectable": connectable,
+    })
+}
+
+#[cfg(windows)]
+fn daemon_health(root: &Path) -> serde_json::Value {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    root.hash(&mut hasher);
+    let endpoint = format!(r"\\.\pipe\codixing-{:016x}", hasher.finish());
+    let connectable = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&endpoint)
+        .is_ok();
+    serde_json::json!({
+        "endpoint": endpoint,
+        "present": connectable,
+        "connectable": connectable,
+    })
 }
 
 fn cmd_repair(path: PathBuf, no_sync: bool) -> Result<()> {

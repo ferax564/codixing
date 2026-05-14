@@ -127,6 +127,11 @@ fn e2e_initialize_and_tools_list() {
         init_resp["result"]["serverInfo"]["name"], "codixing",
         "serverInfo.name should be 'codixing'"
     );
+    assert_eq!(
+        init_resp["result"]["serverInfo"]["version"],
+        env!("CARGO_PKG_VERSION"),
+        "serverInfo.version should match the codixing-mcp package version"
+    );
     assert!(
         init_resp["result"]["protocolVersion"].is_string(),
         "protocolVersion should be present"
@@ -151,6 +156,36 @@ fn e2e_initialize_and_tools_list() {
     assert!(names.contains(&"code_search"), "missing code_search tool");
     assert!(names.contains(&"find_symbol"), "missing find_symbol tool");
     assert!(names.contains(&"get_repo_map"), "missing get_repo_map tool");
+    assert!(
+        !names.contains(&"write_file"),
+        "default reviewer profile should hide write_file"
+    );
+}
+
+#[test]
+fn e2e_editor_profile_lists_non_destructive_write_tools() {
+    let project = setup_indexed_project();
+    let root = project.path().to_str().unwrap();
+
+    let responses = run_mcp(
+        &["--root", root, "--profile", "editor"],
+        &[tools_list_request(1)],
+    );
+
+    let list_resp = responses
+        .iter()
+        .find(|r| r["id"] == 1)
+        .expect("missing tools/list response");
+    let tools = list_resp["result"]["tools"]
+        .as_array()
+        .expect("tools should be an array");
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert!(names.contains(&"write_file"), "missing write_file");
+    assert!(names.contains(&"edit_file"), "missing edit_file");
+    assert!(
+        !names.contains(&"delete_file"),
+        "editor profile should hide destructive delete_file"
+    );
 }
 
 #[test]
