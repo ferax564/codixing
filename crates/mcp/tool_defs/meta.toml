@@ -24,3 +24,28 @@ type = "array"
 description = "Tool name(s) to get schemas for (e.g. ['code_search', 'find_symbol'])"
 required = true
 items_type = "string"
+
+[[tools]]
+name = "get_mcp_profile"
+description = "Use this to inspect the active MCP tool exposure profile for this connection, along with the available profiles and their safety levels."
+handler = "self::call_get_mcp_profile_placeholder"
+calling_convention = "args_only"
+read_only = true
+meta = true
+
+[[tools]]
+name = "set_mcp_profile"
+description = "Switch the active MCP tool exposure profile for this connection without restarting the server. Use this when an agent needs more or fewer tools than the startup profile exposed."
+handler = "self::call_set_mcp_profile_placeholder"
+calling_convention = "args_only"
+read_only = true
+meta = true
+
+[tools.params.profile]
+type = "string"
+description = "Target profile: minimal, reviewer, editor, or dangerous."
+required = true
+
+[tools.params.confirm_dangerous]
+type = "boolean"
+description = "Required and must be true when switching to the dangerous profile, which exposes destructive filesystem and shell tools."

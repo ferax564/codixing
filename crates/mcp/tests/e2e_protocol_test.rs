@@ -136,6 +136,10 @@ fn e2e_initialize_and_tools_list() {
         init_resp["result"]["protocolVersion"].is_string(),
         "protocolVersion should be present"
     );
+    assert_eq!(
+        init_resp["result"]["capabilities"]["tools"]["listChanged"], true,
+        "server should advertise dynamic tools/list updates"
+    );
 
     // Response 2: tools/list
     let list_resp = responses
@@ -157,8 +161,125 @@ fn e2e_initialize_and_tools_list() {
     assert!(names.contains(&"find_symbol"), "missing find_symbol tool");
     assert!(names.contains(&"get_repo_map"), "missing get_repo_map tool");
     assert!(
+        names.contains(&"agent_context_pack"),
+        "missing agent_context_pack tool"
+    );
+    assert!(
         !names.contains(&"write_file"),
         "default reviewer profile should hide write_file"
+    );
+}
+
+#[test]
+fn e2e_minimal_profile_includes_agent_context_pack() {
+    let project = setup_indexed_project();
+    let root = project.path().to_str().unwrap();
+
+    let responses = run_mcp(
+        &["--root", root, "--profile", "minimal"],
+        &[tools_list_request(1)],
+    );
+
+    let list_resp = responses
+        .iter()
+        .find(|r| r["id"] == 1)
+        .expect("missing tools/list response");
+    let tools = list_resp["result"]["tools"]
+        .as_array()
+        .expect("tools should be an array");
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert!(
+        names.contains(&"agent_context_pack"),
+        "minimal profile should expose the context-pack entry point"
+    );
+    assert!(
+        names.contains(&"get_mcp_profile"),
+        "minimal profile should expose profile inspection"
+    );
+    assert!(
+        names.contains(&"set_mcp_profile"),
+        "minimal profile should expose runtime profile switching"
+    );
+    assert!(
+        !names.contains(&"write_file"),
+        "minimal profile should hide write_file"
+    );
+}
+
+#[test]
+fn e2e_profile_can_switch_without_restart() {
+    let project = setup_indexed_project();
+    let root = project.path().to_str().unwrap();
+
+    let responses = run_mcp(
+        &["--root", root, "--profile", "minimal"],
+        &[
+            tools_list_request(1),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "set_mcp_profile",
+                    "arguments": { "profile": "reviewer" }
+                }
+            }),
+            tools_list_request(3),
+        ],
+    );
+
+    let before = responses
+        .iter()
+        .find(|r| r["id"] == 1)
+        .expect("missing initial tools/list response");
+    let before_tools = before["result"]["tools"]
+        .as_array()
+        .expect("tools should be an array");
+    let before_names: Vec<&str> = before_tools
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert!(
+        !before_names.contains(&"read_file"),
+        "minimal profile should initially hide read_file"
+    );
+
+    assert!(
+        responses
+            .iter()
+            .any(|r| r["method"] == "notifications/tools/list_changed"),
+        "profile switch should emit tools/list_changed notification"
+    );
+
+    let set_response = responses
+        .iter()
+        .find(|r| r["id"] == 2)
+        .expect("missing set_mcp_profile response");
+    assert_eq!(set_response["result"]["isError"], false);
+    let profile_text = set_response["result"]["content"][0]["text"]
+        .as_str()
+        .expect("profile response should be text");
+    let profile_json: Value = serde_json::from_str(profile_text).expect("profile JSON");
+    assert_eq!(profile_json["active_profile"], "reviewer");
+
+    let after = responses
+        .iter()
+        .find(|r| r["id"] == 3)
+        .expect("missing refreshed tools/list response");
+    let after_tools = after["result"]["tools"]
+        .as_array()
+        .expect("tools should be an array");
+    let after_names: Vec<&str> = after_tools
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert!(
+        after_names.contains(&"read_file"),
+        "reviewer profile should expose read_file after runtime switch"
+    );
+    assert!(
+        !after_names.contains(&"write_file"),
+        "reviewer profile should still hide write_file"
     );
 }
 

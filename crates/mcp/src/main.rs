@@ -82,7 +82,8 @@ struct Args {
     #[arg(long)]
     no_daemon_fork: bool,
 
-    /// MCP tool exposure profile. Defaults to read-only reviewer mode.
+    /// Initial MCP tool exposure profile. Agents can switch per connection
+    /// at runtime with the set_mcp_profile tool.
     #[arg(long, value_enum, default_value_t = jsonrpc::McpProfile::Reviewer)]
     profile: jsonrpc::McpProfile,
 

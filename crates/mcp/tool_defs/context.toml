@@ -17,3 +17,37 @@ description = "Maximum tokens in response (default: 4000)"
 [tools.params.limit]
 type = "integer"
 description = "Maximum number of code snippets (default: 10)"
+
+[[tools]]
+name = "agent_context_pack"
+description = "Compile a stable JSON context pack for an AI agent task. Returns ranked repo orientation, must-read evidence handles, related symbols, likely tests, docs/conventions, risks, and recommended next Codixing tools under a token budget. Use this as the default first call before locate/understand/edit/review/test/migrate/incident workflows."
+handler = "context::call_agent_context_pack"
+calling_convention = "engine_args_progress"
+read_only = true
+
+[tools.params.task]
+type = "string"
+description = "Natural language task description (for example: 'add branch-aware artifact cache', 'review this MCP tool change')"
+required = true
+
+[tools.params.mode]
+type = "string"
+description = "Workflow mode for retrieval routing and next-tool recommendations"
+enum = ["locate", "understand", "edit", "review", "test", "migrate", "incident"]
+
+[tools.params.token_budget]
+type = "integer"
+description = "Approximate maximum tokens for the JSON context pack (default: 6000)"
+
+[tools.params.changed_files]
+type = "array"
+items_type = "string"
+description = "Files already changed or known to be task-local; these are pinned into the pack when indexed"
+
+[tools.params.branch]
+type = "string"
+description = "Optional branch or worktree label to include in the output schema"
+
+[tools.params.risk_level]
+type = "string"
+description = "Optional caller risk label such as low, medium, high, or critical"

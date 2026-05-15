@@ -85,13 +85,13 @@ func TestHandleRequest(t *testing.T) {
 // -------------------------------------------------------------------------
 
 #[test]
-fn tool_definitions_returns_60_tools() {
+fn tool_definitions_returns_63_tools() {
     let defs = tool_definitions();
     let arr = defs.as_array().expect("tool_definitions returns array");
     assert_eq!(
         arr.len(),
-        60,
-        "expected exactly 60 tool definitions (58 + 2 meta-tools), got {}",
+        63,
+        "expected exactly 63 tool definitions (59 + 4 meta-tools), got {}",
         arr.len()
     );
 }
@@ -134,6 +134,8 @@ fn tool_definitions_phase10_tools_present() {
         "get_complexity",
         "review_context",
         "generate_onboarding",
+        "get_mcp_profile",
+        "set_mcp_profile",
     ] {
         assert!(
             names.contains(expected),
@@ -1337,6 +1339,7 @@ fn is_read_only_tool_classifies_correctly() {
     assert!(is_read_only_tool("get_hotspots"));
     assert!(is_read_only_tool("git_diff"));
     assert!(is_read_only_tool("find_source_for_test"));
+    assert!(is_read_only_tool("agent_context_pack"));
 
     // Write tools.
     assert!(!is_read_only_tool("write_file"));
@@ -1363,6 +1366,47 @@ fn dispatch_tool_ref_handles_read_only_tools() {
     // dispatch_tool_ref takes &Engine (not &mut).
     let (out, err) = dispatch_tool_ref(&engine, "code_search", &json!({"query": "hello"}), None);
     assert!(!err, "dispatch_tool_ref code_search returned error: {out}");
+}
+
+#[test]
+fn agent_context_pack_returns_stable_json_schema() {
+    let dir = tempdir().unwrap();
+    let engine = make_engine(dir.path());
+    let (out, err) = dispatch_tool_ref(
+        &engine,
+        "agent_context_pack",
+        &json!({
+            "task": "change compute behavior",
+            "mode": "edit",
+            "token_budget": 3000,
+            "changed_files": ["src/main.rs"],
+            "branch": "codex/test-pack",
+            "risk_level": "high"
+        }),
+        None,
+    );
+    assert!(!err, "agent_context_pack returned error: {out}");
+    let pack: serde_json::Value =
+        serde_json::from_str(&out).unwrap_or_else(|e| panic!("bad JSON: {e}\n{out}"));
+    assert_eq!(pack["schema_version"], 1);
+    assert_eq!(pack["mode"], "edit");
+    assert_eq!(pack["branch"], "codex/test-pack");
+    assert!(
+        pack["must_read"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["path"] == "src/main.rs"),
+        "changed file should be represented in must_read: {out}"
+    );
+    assert!(
+        pack["recommended_next_tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool.as_str().unwrap_or("").starts_with("change_impact(")),
+        "edit mode should recommend change_impact: {out}"
+    );
 }
 
 #[test]
@@ -1487,16 +1531,18 @@ fn search_tools_finds_search_tools() {
 fn search_tools_empty_query_returns_all() {
     let (out, err) = call_search_tools(&json!({"query": ""}));
     assert!(!err, "search_tools returned error: {out}");
-    // Should list all tools (60 core + 6 federation + 1 deprecated list_projects = 67).
+    // Should list all tools (63 core + 6 federation + 1 deprecated list_projects = 70).
     assert!(
         out.contains("code_search")
             && out.contains("find_symbol")
-            && out.contains("get_tool_schema"),
+            && out.contains("get_tool_schema")
+            && out.contains("get_mcp_profile")
+            && out.contains("set_mcp_profile"),
         "empty query should return all tools: {out}"
     );
     assert!(
-        out.contains("67 results"),
-        "should report 67 results for empty query: {out}"
+        out.contains("70 results"),
+        "should report 70 results for empty query: {out}"
     );
 }
 

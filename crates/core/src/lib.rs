@@ -48,6 +48,10 @@ pub mod watcher;
 
 // Re-export primary public API types.
 pub use config::{EmbeddingConfig, EmbeddingModel, GraphConfig, IndexConfig};
+pub use engine::context_assembly::{
+    AgentContextDocument, AgentContextEvidence, AgentContextMode, AgentContextOrientation,
+    AgentContextPack, AgentContextSymbol, AgentContextTest,
+};
 pub use engine::freshness::{
     AuditProfile, FreshnessEntry, FreshnessOptions, FreshnessReport, FreshnessTier,
 };

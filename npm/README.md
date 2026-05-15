@@ -32,7 +32,8 @@ claude mcp add codixing -- npx -y codixing-mcp --root . --no-daemon-fork
 
 ## Features
 
-- 67 MCP tools for code navigation, search, and analysis
+- 70-tool MCP catalog for code navigation, search, analysis, and runtime profile switching
+- Stable `agent_context_pack` JSON schema for agent task setup
 - 24 languages via tree-sitter AST parsing
 - Hybrid BM25 + vector search with 100% top-1 accuracy
 - Code dependency graph with PageRank scoring
