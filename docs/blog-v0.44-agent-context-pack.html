@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>v0.44.0: Codixing ships agent context packs and runtime MCP profiles</title>
+  <meta name="description" content="Codixing v0.44.0 ships agent_context_pack, a stable JSON context compiler for AI agents, plus runtime MCP profile switching so clients can change tool access without restarting the server." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <style>
+    :root {
+      --bg: #000000;
+      --bg-1: #0a0a0f;
+      --bg-2: #0d1117;
+      --bg-3: #161b22;
+      --border: rgba(48, 54, 61, 0.8);
+      --cyan: #00d4aa;
+      --purple: #8b5cf6;
+      --orange: #f97316;
+      --text: #f0f6fc;
+      --text-muted: #8b949e;
+      --text-dim: #484f58;
+      --green: #3fb950;
+      --yellow: #e3b341;
+      --radius: 12px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: "Inter", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.8;
+    }
+    ::selection { background: rgba(0, 212, 170, 0.2); }
+
+    nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      background: rgba(0,0,0,0.85); backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-inner {
+      max-width: 800px; margin: 0 auto; padding: 16px 24px;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .nav-inner a { color: var(--text-muted); text-decoration: none; font-size: 0.9rem; }
+    .nav-inner a:hover { color: var(--cyan); }
+
+    article { max-width: 800px; margin: 0 auto; padding: 120px 24px 80px; }
+    .blog-meta { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 16px; }
+
+    article h1 {
+      font-size: clamp(2rem, 4vw, 2.8rem);
+      font-weight: 700; letter-spacing: -0.03em; line-height: 1.2;
+      margin-bottom: 24px;
+    }
+    .subtitle {
+      font-size: 1.15rem; color: var(--text-muted); line-height: 1.7;
+      margin-bottom: 44px; max-width: 65ch;
+    }
+    article h2 {
+      font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em;
+      margin-top: 56px; margin-bottom: 16px; color: var(--cyan);
+    }
+    article h3 { font-size: 1.15rem; font-weight: 600; margin-top: 36px; margin-bottom: 12px; }
+    article p { margin-bottom: 20px; color: var(--text); font-size: 1.02rem; }
+    article strong { color: var(--cyan); font-weight: 600; }
+    article code {
+      font-family: "JetBrains Mono", monospace; font-size: 0.88em;
+      background: var(--bg-2); padding: 2px 6px; border-radius: 4px; color: var(--cyan);
+    }
+    article a { color: var(--cyan); text-decoration: underline; text-underline-offset: 2px; }
+    article a:hover { color: var(--text); }
+    article ul { margin-bottom: 22px; padding-left: 24px; }
+    article li { margin-bottom: 8px; color: var(--text); }
+
+    pre {
+      background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 20px 24px; overflow-x: auto; font-family: "JetBrains Mono", monospace;
+      font-size: 0.83rem; line-height: 1.7; margin: 20px 0 28px; color: var(--text-muted);
+    }
+    pre .cmd { color: var(--text); }
+    pre .val { color: var(--cyan); }
+    pre .key { color: var(--purple); }
+    pre .str { color: var(--yellow); }
+
+    .callout {
+      background: var(--bg-1); border-left: 3px solid var(--cyan);
+      padding: 20px 24px; border-radius: 0 var(--radius) var(--radius) 0; margin: 28px 0;
+    }
+    .callout p { margin-bottom: 0; color: var(--text-muted); }
+    .callout strong { color: var(--text); }
+
+    .stat-grid {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin: 32px 0;
+    }
+    .stat-card {
+      background: var(--bg-1); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 20px; text-align: center;
+    }
+    .stat-card .stat-val { font-size: 1.6rem; font-weight: 700; color: var(--cyan); }
+    .stat-card .stat-label { font-size: 0.8rem; color: var(--text-muted); margin-top: 4px; }
+
+    .feature-table {
+      width: 100%; border-collapse: collapse; margin: 24px 0 32px; font-size: 0.92rem;
+    }
+    .feature-table th {
+      text-align: left; padding: 10px 14px; background: var(--bg-2);
+      border: 1px solid var(--border); font-weight: 600; font-size: 0.85rem;
+      text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted);
+    }
+    .feature-table td {
+      padding: 10px 14px; border: 1px solid var(--border);
+      color: var(--text);
+    }
+    .feature-table td:first-child {
+      font-family: "JetBrains Mono", monospace; color: var(--cyan); font-size: 0.86rem;
+      white-space: nowrap;
+    }
+
+    footer {
+      max-width: 800px; margin: 0 auto; padding: 40px 24px;
+      border-top: 1px solid var(--border);
+      color: var(--text-dim); font-size: 0.85rem;
+      display: flex; justify-content: space-between;
+    }
+    footer a { color: var(--text-muted); text-decoration: none; }
+
+    @media (max-width: 600px) {
+      article h1 { font-size: 2rem; }
+      .stat-grid { grid-template-columns: repeat(2, 1fr); }
+      .feature-table { font-size: 0.86rem; }
+      .feature-table th, .feature-table td { padding: 9px 10px; }
+      footer { flex-direction: column; gap: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <a href="/index.html" style="font-weight:600;color:var(--text)">Codixing</a>
+      <div style="display:flex;gap:20px">
+        <a href="/blog.html">Blog</a>
+        <a href="/docs.html">Docs</a>
+        <a href="https://github.com/ferax564/codixing">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <article>
+    <a href="/blog.html" style="color:var(--text-muted);font-size:0.85rem;text-decoration:none;display:inline-block;margin-bottom:20px;">&larr; All Posts</a>
+    <div class="blog-meta">May 15, 2026 &bull; Release</div>
+
+    <h1>v0.44.0: agent context packs and runtime MCP profiles</h1>
+
+    <p class="subtitle">
+      Codixing v0.44.0 turns a set of powerful repository tools into a more usable agent workflow. The release adds <code>agent_context_pack</code>, a stable JSON context compiler for large-repo agents, and lets MCP clients change their active tool profile without killing and restarting the server.
+    </p>
+
+    <div class="stat-grid">
+      <div class="stat-card">
+        <div class="stat-val">70</div>
+        <div class="stat-label">MCP tools</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">1261</div>
+        <div class="stat-label">Workspace tests</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">3</div>
+        <div class="stat-label">Release platforms</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">0.44.0</div>
+        <div class="stat-label">Published version</div>
+      </div>
+    </div>
+
+    <h2>Why this release matters</h2>
+
+    <p>Codixing already had the hard parts of repository intelligence: Tree-sitter parsing, BM25 and vector retrieval, symbol indexes, dependency graphs, impact analysis, MCP, CLI, LSP, HTTP, and daemon mode. The next problem was making that intelligence easier for agents to use consistently.</p>
+
+    <p>An agent should not have to guess whether it needs search, usages, impact, examples, repo maps, docs, or test discovery before it can make progress. It should be able to ask Codixing for the context that matters for the task, under a budget, with stable handles that can be expanded when needed.</p>
+
+    <div class="callout">
+      <p><strong>The design goal:</strong> move Codixing from "many useful tools" toward a repository control plane that assembles focused, safe, measurable context for AI software agents.</p>
+    </div>
+
+    <h2>agent_context_pack</h2>
+
+    <p>The new <code>agent_context_pack</code> entry point is the first version of Codixing's context compiler. Given a task, mode, and token budget, it returns a structured JSON package instead of forcing the client to compose a dozen separate searches by hand.</p>
+
+    <pre><span class="cmd">codixing agent-context-pack "add runtime MCP profile switching" --mode edit --token-budget 6000</span></pre>
+
+    <p>The same capability is available through MCP as <code>agent_context_pack</code>, so editor agents can ask for one task-local context bundle before reading or editing files.</p>
+
+    <pre>{
+  <span class="key">"task_summary"</span>: <span class="str">"Add runtime MCP profile switching"</span>,
+  <span class="key">"repo_orientation"</span>: [
+    { <span class="key">"path"</span>: <span class="str">"crates/mcp/src/server.rs"</span>, <span class="key">"why"</span>: <span class="str">"MCP request dispatch and session state"</span> }
+  ],
+  <span class="key">"must_read"</span>: [
+    { <span class="key">"id"</span>: <span class="str">"E1"</span>, <span class="key">"path"</span>: <span class="str">"crates/mcp/src/tools/mod.rs"</span>, <span class="key">"kind"</span>: <span class="str">"tool registry"</span> }
+  ],
+  <span class="key">"likely_tests"</span>: [],
+  <span class="key">"risks"</span>: [
+    <span class="str">"Changing the profile can alter tools/list output for connected MCP clients."</span>
+  ],
+  <span class="key">"recommended_next_tools"</span>: [
+    <span class="str">"read_file(E1)"</span>,
+    <span class="str">"impact(...)"</span>
+  ]
+}</pre>
+
+    <h2>Stable JSON for agents</h2>
+
+    <p>The important part is not only the new command. It is the shape of the response. <code>agent_context_pack</code> returns stable sections that agents can reason over without scraping prose:</p>
+
+    <table class="feature-table">
+      <thead>
+        <tr>
+          <th>Field</th>
+          <th>What it gives the agent</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>repo_orientation</td>
+          <td>Ranked files and symbols that explain where the task lives.</td>
+        </tr>
+        <tr>
+          <td>must_read</td>
+          <td>Evidence handles for focused file ranges the agent should inspect first.</td>
+        </tr>
+        <tr>
+          <td>related_symbols</td>
+          <td>Definitions and symbols that may be affected by the change.</td>
+        </tr>
+        <tr>
+          <td>likely_tests</td>
+          <td>Test files or commands that are likely to cover the affected area.</td>
+        </tr>
+        <tr>
+          <td>risks</td>
+          <td>Behavioral, compatibility, and workflow risks to check before editing.</td>
+        </tr>
+        <tr>
+          <td>recommended_next_tools</td>
+          <td>The next Codixing tools that should deepen the investigation.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>The first supported modes are aimed at real agent workflows: locate, understand, edit, review, test, migrate, and incident. They let clients ask for different context shapes without learning Codixing's full internal routing model.</p>
+
+    <h2>Runtime MCP profile switching</h2>
+
+    <p>The other visible improvement fixes a workflow problem: changing the MCP tool profile used to require killing the MCP process and starting it again with different flags. That was painful in editors, especially when an agent started in a safer profile and later needed additional tools for an approved edit.</p>
+
+    <p>v0.44.0 adds MCP tools for checking and changing the active profile on the current connection:</p>
+
+    <pre><span class="val">get_mcp_profile</span>
+<span class="val">set_mcp_profile</span></pre>
+
+    <p>After a successful profile change, Codixing emits <code>notifications/tools/list_changed</code>, so MCP clients can refresh their available tools without dropping the session. That keeps read-first workflows practical: start narrow, widen when needed, and avoid a server restart.</p>
+
+    <h2>What improved for agents</h2>
+
+    <ul>
+      <li><strong>Fewer orchestration guesses.</strong> Agents can ask for a single context pack instead of guessing the right sequence of search, symbol, usage, impact, and docs calls.</li>
+      <li><strong>Better budget control.</strong> Context packs are designed around token budgets and expandable evidence handles.</li>
+      <li><strong>Safer defaults that stay usable.</strong> Runtime profile switching makes profile gating less frustrating in real editor sessions.</li>
+      <li><strong>A larger but cleaner MCP surface.</strong> The catalog now exposes 70 tools, with profile-aware discovery and a high-level context entry point.</li>
+      <li><strong>Better release coverage.</strong> The release ships with 1261 tests and verified Linux, macOS, and Windows binaries.</li>
+    </ul>
+
+    <h2>Release validation</h2>
+
+    <p>The release went through the full local and GitHub path:</p>
+
+    <ul>
+      <li><code>cargo test --workspace</code> passed locally.</li>
+      <li><code>cargo clippy --workspace -- -D warnings</code> passed locally.</li>
+      <li><code>cargo fmt --check</code> passed locally.</li>
+      <li>Main CI passed on Ubuntu, macOS, and Windows.</li>
+      <li>Coverage, benchmarks, the VS Code extension build, and GitHub Pages deploy completed successfully.</li>
+      <li>Main CI produced Linux x86_64, macOS aarch64, and Windows x86_64 release binaries.</li>
+      <li>The GitHub Release workflow and npm publish workflow completed successfully.</li>
+    </ul>
+
+    <p>The release is available on <a href="https://github.com/ferax564/codixing/releases/tag/v0.44.0">GitHub Releases</a>, and the npm package is published as <code>codixing-mcp@0.44.0</code>.</p>
+
+    <h2>Install</h2>
+
+    <pre><span class="cmd">curl -fsSL https://codixing.com/install.sh | bash</span>
+<span class="cmd">npm install -g codixing-mcp</span></pre>
+
+    <p>v0.44.0 is another step toward Codixing as an agent control plane for repositories: focused context assembly, safer tool access, and release discipline that agents and humans can both inspect.</p>
+  </article>
+
+  <footer>
+    <span>Open source &bull; BSL-1.0</span>
+    <a href="https://github.com/ferax564/codixing">GitHub</a>
+  </footer>
+</body>
+</html>
