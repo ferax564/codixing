@@ -171,6 +171,12 @@ enum Command {
         #[arg(long)]
         html: Option<Option<PathBuf>>,
 
+        /// With --html: overlay diff impact — highlight files changed since this
+        /// git ref (e.g. `main`, `HEAD~1`) and their blast radius. Omit the value
+        /// to diff the working tree against HEAD.
+        #[arg(long, value_name = "REF", num_args = 0..=1, default_missing_value = "")]
+        diff_base: Option<String>,
+
         /// Export graph as GraphML (for Gephi/yEd).
         #[arg(long)]
         graphml: Option<Option<PathBuf>>,
@@ -966,6 +972,7 @@ async fn async_main() -> Result<()> {
             communities,
             surprises,
             html,
+            diff_base,
             graphml,
             cypher,
             obsidian,
@@ -976,6 +983,7 @@ async fn async_main() -> Result<()> {
             communities,
             surprises,
             html,
+            diff_base,
             graphml,
             cypher,
             obsidian,
@@ -1673,6 +1681,34 @@ fn cmd_symbols(filter: String, file: Option<String>, count: bool) -> Result<()> 
     Ok(())
 }
 
+/// Return repo-relative paths of files changed versus `base`.
+///
+/// An empty `base` diffs the working tree (plus index) against `HEAD`; a
+/// non-empty `base` diffs that ref against `HEAD`. Paths are forward-slash and
+/// relative to the repo root, matching graph node ids. Returns an empty vec if
+/// git is unavailable or the command fails.
+fn git_changed_files(root: &std::path::Path, base: &str) -> Vec<String> {
+    let mut args = vec!["diff".to_string(), "--name-only".to_string()];
+    if base.is_empty() {
+        args.push("HEAD".to_string());
+    } else {
+        args.push(base.to_string());
+        args.push("HEAD".to_string());
+    }
+    match std::process::Command::new("git")
+        .current_dir(root)
+        .args(&args)
+        .output()
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cmd_graph(
     path: PathBuf,
@@ -1681,6 +1717,7 @@ fn cmd_graph(
     communities: bool,
     surprises: Option<usize>,
     html: Option<Option<PathBuf>>,
+    diff_base: Option<String>,
     graphml: Option<Option<PathBuf>>,
     cypher: Option<Option<PathBuf>>,
     obsidian: Option<Option<PathBuf>>,
@@ -1727,10 +1764,42 @@ fn cmd_graph(
     // --html: export interactive visualization.
     if let Some(html_path) = html {
         let output = html_path.unwrap_or_else(|| PathBuf::from("graph.html"));
-        // Run community detection first so the HTML has community colors.
+        // Run community detection first so the HTML has layer colors.
         engine.detect_communities();
+
+        let project_name = root
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Codixing")
+            .to_string();
+
+        // Optional diff-impact overlay: changed files (from git) + blast radius.
+        let (changed_files, affected_files) = if let Some(base) = diff_base {
+            let changed = git_changed_files(&root, &base);
+            if changed.is_empty() {
+                eprintln!("No changed files found for the diff base — exporting without overlay.");
+            }
+            let mut affected: std::collections::BTreeSet<String> =
+                std::collections::BTreeSet::new();
+            for f in &changed {
+                let impact = engine.change_impact(f);
+                affected.extend(impact.direct_dependents);
+                affected.extend(impact.transitive_dependents);
+                affected.extend(impact.affected_tests);
+            }
+            for c in &changed {
+                affected.remove(c);
+            }
+            (changed, affected.into_iter().collect())
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
         let opts = HtmlExportOptions {
             output_path: output.clone(),
+            project_name,
+            changed_files,
+            affected_files,
             ..Default::default()
         };
         engine
