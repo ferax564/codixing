@@ -250,12 +250,35 @@ fn build_tour(nodes: &[HtmlNode], layers: &[HtmlLayer]) -> Vec<HtmlTourStep> {
 
 /// Export the dependency graph as a self-contained interactive HTML file.
 pub fn export_html(graph: &CodeGraph, options: &HtmlExportOptions) -> Result<()> {
-    // Collect nodes, filtering externals unless requested.
-    let nodes: Vec<HtmlNode> = graph
+    // Files the diff overlay must keep regardless of the PageRank cap, so a
+    // changed/affected file that ranks below `max_nodes` doesn't get dropped —
+    // which would make the overlay silently vanish on large repos.
+    let force_keep: std::collections::HashSet<&str> = options
+        .changed_files
+        .iter()
+        .chain(options.affected_files.iter())
+        .map(|s| s.as_str())
+        .collect();
+
+    // Collect nodes by PageRank: take the top `max_nodes`, then additionally
+    // pull in any diff file beyond the cap that exists in the graph.
+    let ranked: Vec<_> = graph
         .nodes_by_pagerank()
         .into_iter()
         .filter(|n| options.show_external || !n.file_path.starts_with("__ext__:"))
-        .take(options.max_nodes)
+        .collect();
+    let mut chosen: Vec<&_> = ranked.iter().take(options.max_nodes).copied().collect();
+    if !force_keep.is_empty() {
+        let mut taken: std::collections::HashSet<&str> =
+            chosen.iter().map(|n| n.file_path.as_str()).collect();
+        for n in ranked.iter().skip(options.max_nodes) {
+            if force_keep.contains(n.file_path.as_str()) && taken.insert(n.file_path.as_str()) {
+                chosen.push(n);
+            }
+        }
+    }
+    let nodes: Vec<HtmlNode> = chosen
+        .into_iter()
         .map(|n| HtmlNode {
             label: basename(&n.file_path).to_string(),
             dir: top_segments(&n.file_path, 2),
@@ -1225,6 +1248,35 @@ mod tests {
         let content = std::fs::read_to_string(&out).unwrap();
         assert!(content.contains("\"diff\":"));
         assert!(content.contains("\"changed\":"));
+    }
+
+    #[test]
+    fn diff_files_kept_beyond_max_nodes_cap() {
+        // Regression for the codex-flagged P2: a changed file ranking below the
+        // `max_nodes` cap must still be force-included so the overlay can't
+        // silently vanish on large repos.
+        let mut g = CodeGraph::new();
+        g.add_edge("b.rs", "a.rs", "a", Language::Rust, Language::Rust);
+        g.add_edge("c.rs", "a.rs", "a", Language::Rust, Language::Rust);
+        g.add_edge("z_changed.rs", "a.rs", "a", Language::Rust, Language::Rust);
+
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("cap.html");
+        let opts = HtmlExportOptions {
+            output_path: out.clone(),
+            max_nodes: 1, // only one node fits the PageRank cap
+            changed_files: vec!["z_changed.rs".to_string()],
+            ..Default::default()
+        };
+        export_html(&g, &opts).unwrap();
+
+        let content = std::fs::read_to_string(&out).unwrap();
+        assert!(
+            content.contains("z_changed.rs"),
+            "changed file was dropped past the max_nodes cap"
+        );
+        assert!(content.contains("\"diff\":"));
+        assert!(content.contains("\"changed\":[\"z_changed.rs\"]"));
     }
 
     #[test]
