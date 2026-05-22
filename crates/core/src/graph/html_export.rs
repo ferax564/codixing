@@ -457,6 +457,10 @@ button { font-family: inherit; cursor: pointer; }
 .tbtn:hover { border-color: var(--accent); color: #fff; }
 .tbtn.on { background: var(--accent-soft); border-color: var(--accent); color: #fff; }
 #colorby { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); height: 30px; padding: 0 8px; font-size: 12px; }
+.seg { display: inline-flex; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg button { height: 30px; padding: 0 12px; background: transparent; border: none; color: var(--muted); font-size: 12px; transition: .12s; }
+.seg button:hover { color: var(--text); }
+.seg button.on { background: var(--accent-soft); color: #fff; }
 
 /* Sidebar */
 #sidebar {
@@ -574,6 +578,10 @@ button { font-family: inherit; cursor: pointer; }
   <div id="brand"><span class="dot"></span> Codixing <span class="proj" id="proj-name"></span></div>
   <div class="chips" id="chips"></div>
   <div class="spacer"></div>
+  <div id="viewmode" class="seg">
+    <button data-mode="graph" class="on">Graph</button>
+    <button data-mode="blocks">Blocks</button>
+  </div>
   <label class="chip" style="gap:7px;cursor:pointer;">color by
     <select id="colorby">
       <option value="layer">layer</option>
@@ -715,10 +723,15 @@ let diffMode = false;
 let tour = { active: false, idx: -1 };
 let pf = { from: null, to: null, path: null, pathEdges: {} };
 let alpha = 1.0;
+let viewMode = 'graph';   // 'graph' = force layout, 'blocks' = module boxes
+let blocks = [];          // [{name, dir, x, y, w, h, colorIdx, count}] in blocks mode
 
 // --- Helpers ---------------------------------------------------------------
 function screenToWorld(sx, sy) { return [(sx - tx) / scale, (sy - ty) / scale]; }
-function nodeRadius(n) { return 4 + Math.sqrt(Math.max(n.pagerank, 0)) * 16; }
+function nodeRadius(n) {
+  if (viewMode === 'blocks') return Math.min(7, 3 + Math.sqrt(Math.max(n.pagerank, 0)) * 6);
+  return 4 + Math.sqrt(Math.max(n.pagerank, 0)) * 16;
+}
 function colorFor(n) {
   if (colorMode === 'language') return hashColor(n.language);
   if (colorMode === 'directory') return hashColor(n.dir);
@@ -849,8 +862,66 @@ function animateTo(ntx, nty) {
     if (k<1) requestAnimationFrame(step);
   })(t0);
 }
-function reheat() { alpha = Math.max(alpha, 0.7); }
-document.getElementById('reset-btn').addEventListener('click', function(){ scale=0.9; focusNodes(nodes.map(function(n){return n.id;})); });
+function reheat() {
+  if (viewMode === 'blocks') { layoutBlocks(); return; }
+  alpha = Math.max(alpha, 0.7);
+}
+document.getElementById('reset-btn').addEventListener('click', function(){ scale=0.9; focusNodes(nodes.filter(function(n){return !n.hidden;}).map(function(n){return n.id;})); });
+
+// --- Block view (module boxes) ---------------------------------------------
+let savedPositions = null;
+function layoutBlocks() {
+  // Group visible nodes into module boxes by directory (top-2 path segments).
+  const groups = {};
+  nodes.forEach(function(n) { if (!n.hidden) (groups[n.dir] = groups[n.dir] || []).push(n); });
+  const keys = Object.keys(groups).sort(function(a,b){ return groups[b].length - groups[a].length; });
+  const PAD = 16, HEADER = 30, CELL = 20, GAP = 18;
+  const sized = keys.map(function(k){
+    const members = groups[k].slice().sort(function(a,b){ return b.pagerank - a.pagerank; });
+    const cols = Math.max(1, Math.ceil(Math.sqrt(members.length)));
+    const rows = Math.ceil(members.length / cols);
+    // Box must be wide enough for its grid AND its header (name + count badge).
+    const labelW = k.length * 7.6 + 56;
+    const w = Math.max(PAD*2 + cols*CELL, labelW);
+    return { name: k, members: members, cols: cols, w: w, h: HEADER + PAD + rows*CELL };
+  });
+  // Shelf-pack the boxes into rows under a target width.
+  const area = sized.reduce(function(s,b){ return s + b.w*b.h; }, 0);
+  const targetW = Math.max(900, Math.sqrt(area) * 1.7);
+  let cx = 0, cy = 0, rowH = 0;
+  blocks = [];
+  sized.forEach(function(b){
+    if (cx > 0 && cx + b.w > targetW) { cx = 0; cy += rowH + GAP; rowH = 0; }
+    b.x = cx; b.y = cy; cx += b.w + GAP; rowH = Math.max(rowH, b.h);
+    b.members.forEach(function(n, i){
+      const col = i % b.cols, row = Math.floor(i / b.cols);
+      n.x = b.x + PAD + col*CELL + CELL/2;
+      n.y = b.y + HEADER + row*CELL + CELL/2;
+      n.vx = 0; n.vy = 0;
+    });
+    blocks.push({ name: b.name, x: b.x, y: b.y, w: b.w, h: b.h, count: b.members.length });
+  });
+  // Re-center around the origin so the camera math stays stable.
+  const ox = -targetW/2, oy = -(cy + rowH)/2;
+  blocks.forEach(function(b){ b.x += ox; b.y += oy; });
+  nodes.forEach(function(n){ if (!n.hidden) { n.x += ox; n.y += oy; } });
+}
+function setViewMode(mode) {
+  if (mode === viewMode) return;
+  if (mode === 'blocks') {
+    savedPositions = nodes.map(function(n){ return [n.x, n.y]; });
+    viewMode = 'blocks'; alpha = 0; layoutBlocks();
+  } else {
+    viewMode = 'graph'; blocks = [];
+    if (savedPositions) nodes.forEach(function(n,i){ n.x = savedPositions[i][0]; n.y = savedPositions[i][1]; });
+    alpha = Math.max(alpha, 0.6);
+  }
+  document.querySelectorAll('#viewmode button').forEach(function(b){ b.classList.toggle('on', b.dataset.mode === viewMode); });
+  focusNodes(nodes.filter(function(n){ return !n.hidden; }).map(function(n){ return n.id; }));
+}
+document.querySelectorAll('#viewmode button').forEach(function(b){
+  b.addEventListener('click', function(){ setViewMode(b.dataset.mode); });
+});
 
 // --- Color-by --------------------------------------------------------------
 document.getElementById('colorby').addEventListener('change', function(e){ colorMode = e.target.value; });
@@ -1037,6 +1108,32 @@ function draw() {
   ctx.clearRect(0, 0, W, H);
   ctx.save(); ctx.translate(tx, ty); ctx.scale(scale, scale);
 
+  // Block view: draw module boxes behind everything else.
+  if (viewMode === 'blocks') {
+    ctx.textAlign = 'left';
+    ctx.font = (13/scale) + "px ui-sans-serif, system-ui, sans-serif";
+    blocks.forEach(function(b){
+      const col = hashColor(b.name);
+      ctx.fillStyle = 'rgba(255,255,255,0.018)';
+      ctx.strokeStyle = col; ctx.globalAlpha = 0.45; ctx.lineWidth = 1.2/scale;
+      const r = 10/scale;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(b.x, b.y, b.w, b.h, r); else ctx.rect(b.x, b.y, b.w, b.h);
+      ctx.fill(); ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = col;
+      ctx.fillText(b.name, b.x + 14/scale, b.y + 20/scale);
+      ctx.fillStyle = 'rgba(125,134,148,0.9)';
+      ctx.font = (11/scale) + "px ui-sans-serif, system-ui, sans-serif";
+      const cnt = String(b.count);
+      ctx.textAlign = 'right';
+      ctx.fillText(cnt, b.x + b.w - 12/scale, b.y + 20/scale);
+      ctx.textAlign = 'left';
+      ctx.font = (13/scale) + "px ui-sans-serif, system-ui, sans-serif";
+    });
+    ctx.textAlign = 'center';
+  }
+
   const selId = selected != null ? nodes[selected].id : null;
   const neigh = {};
   if (selId) { neigh[selId] = true; (callees[selId]||[]).forEach(function(x){neigh[x]=true;}); (callers[selId]||[]).forEach(function(x){neigh[x]=true;}); }
@@ -1099,7 +1196,11 @@ function draw() {
   ctx.fillStyle = 'rgba(214,221,232,0.92)';
   ctx.font = (11/scale) + "px ui-sans-serif, system-ui, sans-serif";
   ctx.textAlign = 'center';
-  const labelThreshold = scale > 1.4 ? 0 : (scale > 0.7 ? 0.012 : 0.03);
+  // In blocks mode the box headers are the labels; only label selection/hover
+  // (or when zoomed in far enough to read individual cells).
+  const labelThreshold = viewMode === 'blocks'
+    ? (scale > 2.2 ? 0 : 999)
+    : (scale > 1.4 ? 0 : (scale > 0.7 ? 0.012 : 0.03));
   for (let i = 0; i < nodes.length; i++) {
     const n = nodes[i]; if (n.hidden) continue;
     const show = n.pagerank >= labelThreshold || i === selected || i === hoverNode;
@@ -1248,6 +1349,29 @@ mod tests {
         let content = std::fs::read_to_string(&out).unwrap();
         assert!(content.contains("\"diff\":"));
         assert!(content.contains("\"changed\":"));
+    }
+
+    #[test]
+    fn embeds_block_view() {
+        let mut g = CodeGraph::new();
+        g.add_edge(
+            "crates/core/a.rs",
+            "crates/core/b.rs",
+            "b",
+            Language::Rust,
+            Language::Rust,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("bv.html");
+        let opts = HtmlExportOptions {
+            output_path: out.clone(),
+            ..Default::default()
+        };
+        export_html(&g, &opts).unwrap();
+        let content = std::fs::read_to_string(&out).unwrap();
+        // The Graph/Blocks view toggle and its layout function must ship.
+        assert!(content.contains("data-mode=\"blocks\""));
+        assert!(content.contains("function layoutBlocks"));
     }
 
     #[test]
