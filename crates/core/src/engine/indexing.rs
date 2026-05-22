@@ -176,7 +176,9 @@ pub(super) fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
     // Record the signature fingerprint so the first post-init sync can classify
     // a cosmetic edit. Absent when there are no AST entities (→ STRUCTURAL).
     // Keyed by the normalized relative path (root-invariant).
-    if let Some(fp) = super::fingerprint::signature_fingerprint(&result.entities, &source) {
+    if let Some(fp) =
+        super::fingerprint::signature_fingerprint(&result.entities, &source, result.language)
+    {
         ctx.pending_signatures.insert(rel_str.clone(), fp);
     }
 

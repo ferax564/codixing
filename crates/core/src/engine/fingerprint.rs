@@ -23,7 +23,24 @@
 //! classification would silently produce stale embeddings, which is far worse
 //! than the redundant embed work a conservative STRUCTURAL classification costs.
 
-use crate::language::{EntityKind, SemanticEntity, Visibility};
+use crate::language::{EntityKind, Language, SemanticEntity, Visibility};
+
+/// Languages eligible for COSMETIC reuse — an explicit **opt-in allowlist**.
+///
+/// Cosmetic reuse trusts that the signature fingerprint captures a file's entire
+/// retrieval-relevant surface. That trust must be vetted per language, because
+/// each language's extractor represents structure differently (e.g. struct
+/// fields, class members, and config values are not all emitted as entities, and
+/// some signatures truncate long values). A language earns a place here only with
+/// a regression test pinning "a member rename is detected (STRUCTURAL) while a
+/// body-only edit is reused (COSMETIC)".
+///
+/// Anything not on this list — every other language, plus config / doc / notebook
+/// files — is treated as STRUCTURAL (full re-embed). Start with Rust, the language
+/// the empirical separation was measured on; add others one at a time.
+fn cosmetic_eligible(language: Language) -> bool {
+    matches!(language, Language::Rust)
+}
 
 /// Compute a deterministic signature fingerprint for a file from the semantic
 /// entities its parser extracted.
@@ -36,10 +53,20 @@ use crate::language::{EntityKind, SemanticEntity, Visibility};
 ///
 /// The hash is stable across runs and platforms: entity descriptors are sorted
 /// before hashing so extraction order does not affect the result.
-pub fn signature_fingerprint(entities: &[SemanticEntity], source: &[u8]) -> Option<u64> {
+pub fn signature_fingerprint(
+    entities: &[SemanticEntity],
+    source: &[u8],
+    language: Language,
+) -> Option<u64> {
+    if !cosmetic_eligible(language) {
+        // Language not vetted for cosmetic reuse — treat every change as
+        // STRUCTURAL. This is the opt-in gate that keeps configs, docs, and
+        // not-yet-vetted languages (whose fingerprints may miss member renames
+        // or truncate values) from ever reusing a stale vector.
+        return None;
+    }
     if entities.is_empty() {
-        // No AST-derived structure to fingerprint (config, docs, plain text,
-        // or unsupported language). Be conservative — let the caller re-embed.
+        // No AST-derived structure to fingerprint. Be conservative — re-embed.
         return None;
     }
 
@@ -97,7 +124,7 @@ fn entity_descriptor(e: &SemanticEntity, source: &[u8]) -> String {
     // Member-bearing aggregates: hash the full span so member renames/additions
     // (invisible to the pre-brace signature) change the fingerprint.
     let members = match e.kind {
-        EntityKind::Struct | EntityKind::Enum | EntityKind::Interface => source
+        EntityKind::Struct | EntityKind::Enum | EntityKind::Interface | EntityKind::Trait => source
             .get(e.byte_range.clone())
             .map(|b| xxhash_rust::xxh3::xxh3_64(b).to_string())
             .unwrap_or_default(),
@@ -166,7 +193,7 @@ mod tests {
     fn empty_entities_yield_no_fingerprint() {
         // A file with no AST entities (config / docs) must not be fingerprinted —
         // the caller treats this as STRUCTURAL.
-        assert_eq!(signature_fingerprint(&[], b""), None);
+        assert_eq!(signature_fingerprint(&[], b"", Language::Rust), None);
     }
 
     #[test]
@@ -187,10 +214,10 @@ mod tests {
         ];
         let b = a.clone();
         assert_eq!(
-            signature_fingerprint(&a, b""),
-            signature_fingerprint(&b, b"")
+            signature_fingerprint(&a, b"", Language::Rust),
+            signature_fingerprint(&b, b"", Language::Rust)
         );
-        assert!(signature_fingerprint(&a, b"").is_some());
+        assert!(signature_fingerprint(&a, b"", Language::Rust).is_some());
     }
 
     #[test]
@@ -213,8 +240,8 @@ mod tests {
         b.reverse();
         // Reordering declarations is a cosmetic change → same fingerprint.
         assert_eq!(
-            signature_fingerprint(&a, b""),
-            signature_fingerprint(&b, b"")
+            signature_fingerprint(&a, b"", Language::Rust),
+            signature_fingerprint(&b, b"", Language::Rust)
         );
     }
 
@@ -233,8 +260,8 @@ mod tests {
             Visibility::Public,
         )];
         assert_ne!(
-            signature_fingerprint(&before, b""),
-            signature_fingerprint(&after, b"")
+            signature_fingerprint(&before, b"", Language::Rust),
+            signature_fingerprint(&after, b"", Language::Rust)
         );
     }
 
@@ -253,8 +280,8 @@ mod tests {
             Visibility::Public,
         )];
         assert_ne!(
-            signature_fingerprint(&before, b""),
-            signature_fingerprint(&after, b"")
+            signature_fingerprint(&before, b"", Language::Rust),
+            signature_fingerprint(&after, b"", Language::Rust)
         );
     }
 
@@ -273,8 +300,8 @@ mod tests {
             Visibility::Public,
         )];
         assert_ne!(
-            signature_fingerprint(&before, b""),
-            signature_fingerprint(&after, b"")
+            signature_fingerprint(&before, b"", Language::Rust),
+            signature_fingerprint(&after, b"", Language::Rust)
         );
     }
 
@@ -293,8 +320,8 @@ mod tests {
             Visibility::Private,
         )];
         assert_ne!(
-            signature_fingerprint(&before, b""),
-            signature_fingerprint(&after, b"")
+            signature_fingerprint(&before, b"", Language::Rust),
+            signature_fingerprint(&after, b"", Language::Rust)
         );
     }
 
@@ -316,8 +343,8 @@ mod tests {
             target: "u64".to_string(),
         }];
         assert_ne!(
-            signature_fingerprint(&[before], b""),
-            signature_fingerprint(&[after], b"")
+            signature_fingerprint(&[before], b"", Language::Rust),
+            signature_fingerprint(&[after], b"", Language::Rust)
         );
     }
 
@@ -339,8 +366,8 @@ mod tests {
         );
         b.scope = vec!["Bar".to_string()];
         assert_ne!(
-            signature_fingerprint(&[a], b""),
-            signature_fingerprint(&[b], b"")
+            signature_fingerprint(&[a], b"", Language::Rust),
+            signature_fingerprint(&[b], b"", Language::Rust)
         );
     }
 
@@ -368,8 +395,8 @@ mod tests {
         let a = b"pub struct Config { verbose: bool }";
         let b = b"pub struct Config { debug: bool }";
         assert_ne!(
-            signature_fingerprint(&[struct_over("Config", a)], a),
-            signature_fingerprint(&[struct_over("Config", b)], b),
+            signature_fingerprint(&[struct_over("Config", a)], a, Language::Rust),
+            signature_fingerprint(&[struct_over("Config", b)], b, Language::Rust),
             "a struct field rename must change the fingerprint (STRUCTURAL)"
         );
     }
@@ -379,8 +406,8 @@ mod tests {
         // Identical struct text → identical fingerprint (the member hash is stable).
         let s = b"pub struct Config { verbose: bool }";
         assert_eq!(
-            signature_fingerprint(&[struct_over("Config", s)], s),
-            signature_fingerprint(&[struct_over("Config", s)], s),
+            signature_fingerprint(&[struct_over("Config", s)], s, Language::Rust),
+            signature_fingerprint(&[struct_over("Config", s)], s, Language::Rust),
         );
     }
 
@@ -398,8 +425,28 @@ mod tests {
             )]
         };
         assert_eq!(
-            signature_fingerprint(&f(), b"fn f(a: u32) -> u32 { a + 1 }"),
-            signature_fingerprint(&f(), b"fn f(a: u32) -> u32 { a + 2 }"),
+            signature_fingerprint(&f(), b"fn f(a: u32) -> u32 { a + 1 }", Language::Rust),
+            signature_fingerprint(&f(), b"fn f(a: u32) -> u32 { a + 2 }", Language::Rust),
         );
+    }
+
+    #[test]
+    fn non_allowlisted_language_is_structural() {
+        // A language not on the cosmetic allowlist must never be fingerprinted —
+        // even with real entities — so it is always classified STRUCTURAL. This
+        // is the opt-in gate that keeps configs and not-yet-vetted languages
+        // (whose signatures may truncate values or miss member renames) safe.
+        let ents = vec![entity(
+            EntityKind::Function,
+            "foo",
+            Some("def foo()"),
+            Visibility::Public,
+        )];
+        assert_eq!(
+            signature_fingerprint(&ents, b"def foo(): pass", Language::Python),
+            None
+        );
+        // The same shape on an allowlisted language does fingerprint.
+        assert!(signature_fingerprint(&ents, b"", Language::Rust).is_some());
     }
 }

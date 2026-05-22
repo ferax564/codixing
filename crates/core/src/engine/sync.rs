@@ -806,8 +806,8 @@ impl Engine {
                 Ok(r) => r,
                 Err(_) => continue,
             };
-            let Some(fp) = signature_fingerprint(&result.entities, &source) else {
-                // No AST entities (config/doc/unsupported) — STRUCTURAL.
+            let Some(fp) = signature_fingerprint(&result.entities, &source, result.language) else {
+                // Not allowlisted, or no AST entities — STRUCTURAL.
                 continue;
             };
             // Key signatures by the normalized relative path so they match the
@@ -1553,6 +1553,28 @@ impl Engine {
 
         if !changes.is_empty() {
             self.apply_changes(&changes)?;
+            // `git_sync` mutates the index via `apply_changes` without recomputing
+            // signature fingerprints, leaving `tree_signatures.bin` stale for these
+            // files. Drop their sidecar entries so the next `sync` re-embeds them
+            // as STRUCTURAL (self-healing: it re-stores a fresh fingerprint).
+            // Without this, a later sync that reverts a signature change would
+            // compare against the stale fingerprint and reuse a wrong vector.
+            let touched: std::collections::HashSet<std::path::PathBuf> = changes
+                .iter()
+                .map(|c| {
+                    let rel = self.config.normalize_path(&c.path).unwrap_or_else(|| {
+                        normalize_path(c.path.strip_prefix(&self.config.root).unwrap_or(&c.path))
+                    });
+                    std::path::PathBuf::from(&rel)
+                })
+                .collect();
+            if let Ok(sigs) = self.store.load_tree_signatures() {
+                let kept: Vec<(std::path::PathBuf, u64)> = sigs
+                    .into_iter()
+                    .filter(|(p, _)| !touched.contains(p))
+                    .collect();
+                let _ = self.store.save_tree_signatures(&kept);
+            }
             self.save()?;
         } else {
             // Diff produced no indexable changes (e.g. only docs/assets changed).
