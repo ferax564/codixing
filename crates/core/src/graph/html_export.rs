@@ -1,7 +1,10 @@
 //! Standalone HTML graph export with interactive visualization.
 //!
 //! Generates a self-contained HTML file with an inline force-directed graph
-//! visualization. Uses a minimal canvas-based renderer (no external CDN).
+//! visualization. Uses a minimal canvas-based renderer (no external CDN, no
+//! framework). The embedded app provides search, layer filtering, a guided
+//! tour, a path finder, diff-impact highlighting, and a node detail panel —
+//! all computed client-side over the embedded graph JSON.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -17,10 +20,16 @@ use crate::graph::surprise;
 pub struct HtmlExportOptions {
     /// Maximum number of nodes to include (for performance). Default: 2000.
     pub max_nodes: usize,
-    /// Whether to include __ext__ pseudo-nodes. Default: false.
+    /// Whether to include `__ext__` pseudo-nodes. Default: false.
     pub show_external: bool,
     /// Output file path.
     pub output_path: PathBuf,
+    /// Project name shown in the dashboard header. Default: "Codixing".
+    pub project_name: String,
+    /// Files changed in a diff (for the diff-impact overlay). Empty = no overlay.
+    pub changed_files: Vec<String>,
+    /// Files in the blast radius of the changed files (impact analysis result).
+    pub affected_files: Vec<String>,
 }
 
 impl Default for HtmlExportOptions {
@@ -29,6 +38,9 @@ impl Default for HtmlExportOptions {
             max_nodes: 2000,
             show_external: false,
             output_path: PathBuf::from("graph.html"),
+            project_name: "Codixing".to_string(),
+            changed_files: Vec::new(),
+            affected_files: Vec::new(),
         }
     }
 }
@@ -37,6 +49,12 @@ impl Default for HtmlExportOptions {
 #[derive(Debug, Serialize)]
 struct HtmlNode {
     id: String,
+    /// File basename, for compact labels.
+    label: String,
+    /// Top-level directory segment(s), used for color-by-directory and layer naming.
+    dir: String,
+    /// Display language name (e.g. "Rust").
+    language: String,
     pagerank: f32,
     community: Option<usize>,
     in_degree: usize,
@@ -53,31 +71,218 @@ struct HtmlEdge {
     reasons: Vec<String>,
 }
 
+/// A named architectural layer (derived from a Louvain community).
+#[derive(Debug, Serialize)]
+struct HtmlLayer {
+    id: usize,
+    name: String,
+    node_ids: Vec<String>,
+}
+
+/// One step in the deterministic guided tour.
+#[derive(Debug, Serialize)]
+struct HtmlTourStep {
+    order: usize,
+    title: String,
+    description: String,
+    node_ids: Vec<String>,
+}
+
+/// Diff-impact overlay data.
+#[derive(Debug, Serialize)]
+struct HtmlDiff {
+    changed: Vec<String>,
+    affected: Vec<String>,
+}
+
 /// JSON-serializable stats for the HTML visualization.
 #[derive(Debug, Serialize)]
 struct HtmlStats {
     node_count: usize,
     edge_count: usize,
     community_count: usize,
+    language_count: usize,
 }
 
 /// Full JSON data structure embedded in the HTML.
 #[derive(Debug, Serialize)]
 struct HtmlGraphData {
+    project: String,
     nodes: Vec<HtmlNode>,
     edges: Vec<HtmlEdge>,
+    layers: Vec<HtmlLayer>,
+    tour: Vec<HtmlTourStep>,
+    diff: Option<HtmlDiff>,
     stats: HtmlStats,
+}
+
+/// Basename of a forward-slash path.
+fn basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// First `n` path segments joined with '/', for grouping/coloring by directory.
+fn top_segments(path: &str, n: usize) -> String {
+    let segs: Vec<&str> = path.split('/').collect();
+    if segs.len() <= 1 {
+        return ".".to_string();
+    }
+    // Drop the filename, keep up to `n` leading directory segments.
+    let dirs = &segs[..segs.len() - 1];
+    let take = dirs.len().min(n);
+    if take == 0 {
+        ".".to_string()
+    } else {
+        dirs[..take].join("/")
+    }
+}
+
+/// Build named layers from community assignments. Each community becomes a
+/// layer whose name is the most common 2-segment directory prefix among its
+/// members — a deterministic stand-in for an LLM "architecture analyzer".
+fn build_layers(nodes: &[HtmlNode]) -> Vec<HtmlLayer> {
+    let mut by_comm: HashMap<usize, Vec<&HtmlNode>> = HashMap::new();
+    for n in nodes {
+        if let Some(c) = n.community {
+            by_comm.entry(c).or_default().push(n);
+        }
+    }
+    let mut layers: Vec<HtmlLayer> = by_comm
+        .into_iter()
+        .map(|(id, members)| {
+            // Pick the most frequent directory prefix as the layer name.
+            let mut dir_counts: HashMap<String, usize> = HashMap::new();
+            for m in &members {
+                *dir_counts.entry(top_segments(&m.id, 2)).or_default() += 1;
+            }
+            let name = dir_counts
+                .into_iter()
+                .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
+                .map(|(d, _)| d)
+                .unwrap_or_else(|| format!("layer {id}"));
+            // Members sorted by PageRank desc for stable, meaningful ordering.
+            let mut node_ids: Vec<(String, f32)> =
+                members.iter().map(|m| (m.id.clone(), m.pagerank)).collect();
+            node_ids.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            HtmlLayer {
+                id,
+                name,
+                node_ids: node_ids.into_iter().map(|(id, _)| id).collect(),
+            }
+        })
+        .collect();
+    // Stable order by community id for a deterministic legend.
+    layers.sort_by_key(|l| l.id);
+    layers
+}
+
+/// Build a deterministic guided tour: a "hotspots" step (globally most
+/// depended-upon files) followed by one step per major layer. No LLM — the
+/// ordering is PageRank- and dependency-driven.
+fn build_tour(nodes: &[HtmlNode], layers: &[HtmlLayer]) -> Vec<HtmlTourStep> {
+    if nodes.is_empty() {
+        return Vec::new();
+    }
+    let mut steps = Vec::new();
+    let id_to_node: HashMap<&str, &HtmlNode> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+
+    // Step 1: global hotspots — top files by PageRank (most central / depended-upon).
+    let mut by_pr: Vec<&HtmlNode> = nodes.iter().collect();
+    by_pr.sort_by(|a, b| {
+        b.pagerank
+            .partial_cmp(&a.pagerank)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let hotspots: Vec<&HtmlNode> = by_pr.iter().take(6).copied().collect();
+    if !hotspots.is_empty() {
+        let names: Vec<String> = hotspots
+            .iter()
+            .map(|n| basename(&n.id).to_string())
+            .collect();
+        steps.push(HtmlTourStep {
+            order: 0,
+            title: "Start: the hotspots".to_string(),
+            description: format!(
+                "The most central files by PageRank — the ones most depended upon. Read these first: {}.",
+                names.join(", ")
+            ),
+            node_ids: hotspots.iter().map(|n| n.id.clone()).collect(),
+        });
+    }
+
+    // Following steps: walk the layers, biggest first by aggregate PageRank,
+    // showing each layer's top files — most architecturally significant first.
+    let mut ordered: Vec<&HtmlLayer> = layers.iter().collect();
+    ordered.sort_by(|a, b| {
+        let sa: f32 = a
+            .node_ids
+            .iter()
+            .filter_map(|id| id_to_node.get(id.as_str()))
+            .map(|n| n.pagerank)
+            .sum();
+        let sb: f32 = b
+            .node_ids
+            .iter()
+            .filter_map(|id| id_to_node.get(id.as_str()))
+            .map(|n| n.pagerank)
+            .sum();
+        sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for (i, layer) in ordered.iter().take(8).enumerate() {
+        let top: Vec<&str> = layer.node_ids.iter().take(5).map(|s| s.as_str()).collect();
+        if top.is_empty() {
+            continue;
+        }
+        let names: Vec<String> = top.iter().map(|id| basename(id).to_string()).collect();
+        steps.push(HtmlTourStep {
+            order: i + 1,
+            title: format!("Layer: {}", layer.name),
+            description: format!(
+                "{} files in this area. Key ones: {}.",
+                layer.node_ids.len(),
+                names.join(", ")
+            ),
+            node_ids: top.iter().map(|s| s.to_string()).collect(),
+        });
+    }
+    steps
 }
 
 /// Export the dependency graph as a self-contained interactive HTML file.
 pub fn export_html(graph: &CodeGraph, options: &HtmlExportOptions) -> Result<()> {
-    // Collect nodes, filtering externals unless requested.
-    let nodes: Vec<HtmlNode> = graph
+    // Files the diff overlay must keep regardless of the PageRank cap, so a
+    // changed/affected file that ranks below `max_nodes` doesn't get dropped —
+    // which would make the overlay silently vanish on large repos.
+    let force_keep: std::collections::HashSet<&str> = options
+        .changed_files
+        .iter()
+        .chain(options.affected_files.iter())
+        .map(|s| s.as_str())
+        .collect();
+
+    // Collect nodes by PageRank: take the top `max_nodes`, then additionally
+    // pull in any diff file beyond the cap that exists in the graph.
+    let ranked: Vec<_> = graph
         .nodes_by_pagerank()
         .into_iter()
         .filter(|n| options.show_external || !n.file_path.starts_with("__ext__:"))
-        .take(options.max_nodes)
+        .collect();
+    let mut chosen: Vec<&_> = ranked.iter().take(options.max_nodes).copied().collect();
+    if !force_keep.is_empty() {
+        let mut taken: std::collections::HashSet<&str> =
+            chosen.iter().map(|n| n.file_path.as_str()).collect();
+        for n in ranked.iter().skip(options.max_nodes) {
+            if force_keep.contains(n.file_path.as_str()) && taken.insert(n.file_path.as_str()) {
+                chosen.push(n);
+            }
+        }
+    }
+    let nodes: Vec<HtmlNode> = chosen
+        .into_iter()
         .map(|n| HtmlNode {
+            label: basename(&n.file_path).to_string(),
+            dir: top_segments(&n.file_path, 2),
+            language: format!("{:?}", n.language),
             id: n.file_path.clone(),
             pagerank: n.pagerank,
             community: n.community,
@@ -116,7 +321,7 @@ pub fn export_html(graph: &CodeGraph, options: &HtmlExportOptions) -> Result<()>
         })
         .collect();
 
-    // Count communities.
+    // Count communities and distinct languages.
     let community_count = {
         let mut seen = std::collections::HashSet::new();
         for n in &nodes {
@@ -126,15 +331,53 @@ pub fn export_html(graph: &CodeGraph, options: &HtmlExportOptions) -> Result<()>
         }
         seen.len()
     };
+    let language_count = {
+        let mut seen = std::collections::HashSet::new();
+        for n in &nodes {
+            seen.insert(n.language.clone());
+        }
+        seen.len()
+    };
+
+    let layers = build_layers(&nodes);
+    let tour = build_tour(&nodes, &layers);
+
+    // Diff overlay: only include changed/affected files that are in the graph.
+    let diff = if options.changed_files.is_empty() {
+        None
+    } else {
+        let changed: Vec<String> = options
+            .changed_files
+            .iter()
+            .filter(|f| node_set.contains(f.as_str()))
+            .cloned()
+            .collect();
+        let affected: Vec<String> = options
+            .affected_files
+            .iter()
+            .filter(|f| node_set.contains(f.as_str()))
+            .cloned()
+            .collect();
+        if changed.is_empty() {
+            None
+        } else {
+            Some(HtmlDiff { changed, affected })
+        }
+    };
 
     let data = HtmlGraphData {
+        project: options.project_name.clone(),
         stats: HtmlStats {
             node_count: nodes.len(),
             edge_count: edges.len(),
             community_count,
+            language_count,
         },
         nodes,
         edges,
+        layers,
+        tour,
+        diff,
     };
 
     let json_data = serde_json::to_string(&data)
@@ -143,395 +386,741 @@ pub fn export_html(graph: &CodeGraph, options: &HtmlExportOptions) -> Result<()>
     // Escape </script> sequences to prevent script-tag breakout (XSS).
     let json_data = json_data.replace("</script>", "<\\/script>");
 
-    let html = generate_html(&json_data);
+    let html = TEMPLATE.replace("__GRAPH_DATA_JSON__", &json_data);
     std::fs::write(&options.output_path, html)?;
 
     Ok(())
 }
 
-fn generate_html(json_data: &str) -> String {
-    format!(
-        r##"<!DOCTYPE html>
+/// The dashboard template. `__GRAPH_DATA_JSON__` is replaced with the embedded
+/// graph JSON at export time. Written as a plain raw string (no `format!`) so
+/// CSS/JS braces stay single and the markup is readable. All DOM is built with
+/// `textContent` / `createElement` — no `innerHTML` with dynamic data.
+const TEMPLATE: &str = r##"<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Codixing Dependency Graph</title>
+<title>Codixing — Graph Dashboard</title>
 <style>
-* {{ margin: 0; padding: 0; box-sizing: border-box; }}
-body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e0e0e0; overflow: hidden; }}
-#canvas {{ display: block; }}
-#search {{ position: fixed; top: 12px; left: 12px; z-index: 10; padding: 8px 14px; border: 1px solid #444; border-radius: 6px; background: #16213e; color: #e0e0e0; font-size: 14px; width: 280px; outline: none; }}
-#search:focus {{ border-color: #0f3460; }}
-#legend {{ position: fixed; bottom: 12px; left: 12px; z-index: 10; background: rgba(22,33,62,0.95); border: 1px solid #333; border-radius: 8px; padding: 14px; font-size: 12px; max-width: 260px; }}
-#legend h3 {{ margin-bottom: 8px; font-size: 14px; color: #e94560; }}
-.legend-item {{ display: flex; align-items: center; margin: 4px 0; }}
-.legend-swatch {{ width: 14px; height: 14px; border-radius: 3px; margin-right: 8px; flex-shrink: 0; }}
-.legend-line {{ width: 28px; height: 0; margin-right: 8px; flex-shrink: 0; }}
-#stats {{ position: fixed; top: 12px; right: 12px; z-index: 10; background: rgba(22,33,62,0.95); border: 1px solid #333; border-radius: 8px; padding: 14px; font-size: 12px; max-width: 300px; }}
-#stats h3 {{ margin-bottom: 8px; font-size: 14px; color: #e94560; }}
-#stats .stat-row {{ margin: 3px 0; }}
-#tooltip {{ position: fixed; display: none; background: rgba(22,33,62,0.97); border: 1px solid #555; border-radius: 6px; padding: 10px 14px; font-size: 12px; z-index: 20; pointer-events: none; max-width: 350px; }}
-#tooltip .tt-path {{ font-weight: bold; color: #e94560; margin-bottom: 4px; }}
-#tooltip .tt-row {{ margin: 2px 0; color: #aaa; }}
+:root {
+  --bg: #0a0d13;
+  --panel: #11151d;
+  --panel-2: #161b25;
+  --border: #232a36;
+  --border-soft: #1b212c;
+  --text: #d6dde8;
+  --muted: #7d8694;
+  --muted-2: #586070;
+  --accent: #4f9cf9;
+  --accent-soft: rgba(79,156,249,0.14);
+  --warn: #f0883e;
+  --danger: #f85149;
+  --good: #3fb950;
+  --shadow: 0 8px 30px rgba(0,0,0,0.45);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg); color: var(--text); overflow: hidden;
+  font-size: 13px; line-height: 1.45; -webkit-font-smoothing: antialiased;
+}
+button { font-family: inherit; cursor: pointer; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: #2a313d; border-radius: 6px; border: 2px solid var(--panel); }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* Top bar */
+#topbar {
+  position: fixed; top: 0; left: 0; right: 0; height: 52px; z-index: 30;
+  display: flex; align-items: center; gap: 18px; padding: 0 16px;
+  background: linear-gradient(180deg, rgba(17,21,29,0.96), rgba(17,21,29,0.88));
+  border-bottom: 1px solid var(--border); backdrop-filter: blur(8px);
+}
+#brand { display: flex; align-items: center; gap: 9px; font-weight: 600; font-size: 14px; letter-spacing: .2px; }
+#brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 12px var(--accent); }
+#brand .proj { color: var(--muted); font-weight: 500; }
+.chips { display: flex; gap: 7px; flex-wrap: wrap; }
+.chip {
+  display: inline-flex; align-items: baseline; gap: 5px; padding: 4px 9px;
+  background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: 999px;
+  font-size: 11px; color: var(--muted); white-space: nowrap;
+}
+.chip b { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 600; }
+.spacer { flex: 1; }
+.tbtn {
+  display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 11px;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--text); font-size: 12px; transition: .12s;
+}
+.tbtn:hover { border-color: var(--accent); color: #fff; }
+.tbtn.on { background: var(--accent-soft); border-color: var(--accent); color: #fff; }
+#colorby { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); height: 30px; padding: 0 8px; font-size: 12px; }
+
+/* Sidebar */
+#sidebar {
+  position: fixed; top: 52px; left: 0; bottom: 0; width: 288px; z-index: 20;
+  background: var(--panel); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; overflow-y: auto; transition: transform .2s;
+}
+#sidebar.collapsed { transform: translateX(-288px); }
+.section { border-bottom: 1px solid var(--border-soft); padding: 13px 14px; }
+.section h2 {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted-2);
+  margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between;
+}
+.section h2 .count { color: var(--muted); font-weight: 400; }
+#searchbox {
+  width: 100%; padding: 9px 11px; background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 8px; color: var(--text); font-size: 13px; outline: none; transition: .12s;
+}
+#searchbox:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.hint { color: var(--muted-2); font-size: 11px; margin-top: 7px; }
+
+.layer-row, .surprise-row {
+  display: flex; align-items: center; gap: 9px; padding: 6px 7px; border-radius: 7px;
+  cursor: pointer; transition: .1s; font-size: 12px;
+}
+.layer-row:hover, .surprise-row:hover { background: var(--panel-2); }
+.layer-row.off { opacity: .4; }
+.swatch { width: 11px; height: 11px; border-radius: 3px; flex-shrink: 0; }
+.layer-row .lname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.layer-row .lcount { color: var(--muted-2); font-size: 11px; font-variant-numeric: tabular-nums; }
+.layer-row .eye { color: var(--muted-2); font-size: 12px; }
+
+.toolrow { display: flex; gap: 7px; margin-top: 9px; }
+.sbtn {
+  flex: 1; height: 32px; background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 8px; color: var(--text); font-size: 12px; transition: .12s;
+}
+.sbtn:hover { border-color: var(--accent); }
+.sbtn:disabled { opacity: .4; cursor: default; }
+.sbtn.primary { background: var(--accent-soft); border-color: var(--accent); color: #fff; }
+#tour-desc { color: var(--muted); font-size: 12px; margin-top: 9px; min-height: 18px; }
+#tour-title { font-weight: 600; color: var(--text); }
+.pf-slot {
+  display: flex; align-items: center; gap: 8px; padding: 7px 9px; margin-top: 7px;
+  background: var(--panel-2); border: 1px solid var(--border-soft); border-radius: 7px; font-size: 12px;
+}
+.pf-slot .role { color: var(--muted-2); font-size: 10px; text-transform: uppercase; letter-spacing: .5px; width: 34px; }
+.pf-slot .val { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.pf-slot .val.empty { color: var(--muted-2); font-style: italic; }
+.surprise-row .sscore { color: var(--danger); font-variant-numeric: tabular-nums; font-size: 11px; }
+.surprise-row .spath { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Detail panel */
+#detail {
+  position: fixed; top: 52px; right: 0; bottom: 0; width: 320px; z-index: 20;
+  background: var(--panel); border-left: 1px solid var(--border);
+  overflow-y: auto; transform: translateX(320px); transition: transform .2s;
+}
+#detail.open { transform: translateX(0); }
+#detail .dhead { padding: 16px 16px 13px; border-bottom: 1px solid var(--border-soft); position: relative; }
+#detail .dpath { font-size: 11px; color: var(--muted); word-break: break-all; margin-bottom: 6px; }
+#detail .dname { font-size: 16px; font-weight: 600; word-break: break-all; }
+#detail .dclose { position: absolute; top: 13px; right: 13px; width: 26px; height: 26px; border-radius: 6px; background: var(--panel-2); border: 1px solid var(--border); color: var(--muted); font-size: 15px; }
+#detail .dclose:hover { color: #fff; border-color: var(--accent); }
+.metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--border-soft); }
+.metric { background: var(--panel); padding: 12px 14px; }
+.metric .mlabel { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted-2); }
+.metric .mval { font-size: 17px; font-weight: 600; margin-top: 3px; font-variant-numeric: tabular-nums; word-break: break-all; }
+.rel { padding: 13px 16px; border-top: 1px solid var(--border-soft); }
+.rel h3 { font-size: 10.5px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted-2); margin-bottom: 8px; }
+.rel-item {
+  display: block; width: 100%; text-align: left; padding: 6px 8px; border-radius: 6px;
+  background: transparent; border: none; color: var(--text); font-size: 12px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.rel-item:hover { background: var(--panel-2); color: var(--accent); }
+.rel-empty { color: var(--muted-2); font-size: 12px; font-style: italic; }
+.badge { display: inline-block; padding: 2px 7px; border-radius: 5px; font-size: 10px; font-weight: 600; margin-top: 8px; margin-right: 6px; }
+.badge.changed { background: rgba(240,136,62,0.16); color: var(--warn); border: 1px solid rgba(240,136,62,0.4); }
+.badge.affected { background: rgba(248,81,73,0.14); color: var(--danger); border: 1px solid rgba(248,81,73,0.35); }
+
+/* Canvas */
+#canvas { display: block; position: fixed; top: 52px; left: 0; width: 100vw; height: calc(100vh - 52px); }
+#tooltip {
+  position: fixed; display: none; background: rgba(10,13,19,0.97); border: 1px solid var(--border);
+  border-radius: 8px; padding: 9px 12px; font-size: 12px; z-index: 40; pointer-events: none;
+  max-width: 340px; box-shadow: var(--shadow);
+}
+#tooltip .tt-name { font-weight: 600; margin-bottom: 3px; }
+#tooltip .tt-row { color: var(--muted); font-size: 11px; }
+#toast {
+  position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 50;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 9px;
+  padding: 10px 16px; font-size: 12.5px; display: none; box-shadow: var(--shadow); max-width: 70vw;
+}
+#sidebar-toggle {
+  position: fixed; top: 60px; left: 296px; z-index: 25; width: 26px; height: 30px;
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 0 8px 8px 0;
+  border-left: none; color: var(--muted); transition: left .2s;
+}
+.empty-state { color: var(--muted-2); font-size: 12px; text-align: center; padding: 14px 0; }
+#help-hint { position: fixed; bottom: 12px; right: 16px; z-index: 15; color: var(--muted-2); font-size: 11px; pointer-events: none; }
+@media (max-width: 720px) {
+  #sidebar { width: 80vw; } #sidebar-toggle { left: 80vw; }
+  #detail { width: 86vw; transform: translateX(86vw); }
+  .chips { display: none; }
+  #topbar { gap: 10px; padding: 0 10px; }
+  #brand .proj { display: none; }
+  #reset-btn { display: none; }
+}
 </style>
 </head>
 <body>
-<input id="search" type="text" placeholder="Search files..." />
+<div id="topbar">
+  <div id="brand"><span class="dot"></span> Codixing <span class="proj" id="proj-name"></span></div>
+  <div class="chips" id="chips"></div>
+  <div class="spacer"></div>
+  <label class="chip" style="gap:7px;cursor:pointer;">color by
+    <select id="colorby">
+      <option value="layer">layer</option>
+      <option value="language">language</option>
+      <option value="directory">directory</option>
+    </select>
+  </label>
+  <button class="tbtn" id="diff-btn" style="display:none;">Diff impact</button>
+  <button class="tbtn" id="reset-btn" title="Reset view">Reset</button>
+</div>
+
+<aside id="sidebar">
+  <div class="section">
+    <h2>Search</h2>
+    <input id="searchbox" type="text" placeholder="Filter files… (press /)" autocomplete="off" />
+    <div class="hint" id="search-hint"></div>
+  </div>
+  <div class="section">
+    <h2>Layers <span class="count" id="layer-count"></span></h2>
+    <div id="layer-list"></div>
+  </div>
+  <div class="section">
+    <h2>Guided tour <span class="count" id="tour-count"></span></h2>
+    <div id="tour-title">Press Start to walk the architecture</div>
+    <div id="tour-desc"></div>
+    <div class="toolrow">
+      <button class="sbtn" id="tour-prev" disabled>‹ Prev</button>
+      <button class="sbtn primary" id="tour-play">Start</button>
+      <button class="sbtn" id="tour-next" disabled>Next ›</button>
+    </div>
+  </div>
+  <div class="section">
+    <h2>Path finder</h2>
+    <div class="pf-slot"><span class="role">From</span><span class="val empty" id="pf-from">click a node → Set</span></div>
+    <div class="pf-slot"><span class="role">To</span><span class="val empty" id="pf-to">click a node → Set</span></div>
+    <div class="toolrow">
+      <button class="sbtn" id="pf-set-from" disabled>Set From</button>
+      <button class="sbtn" id="pf-set-to" disabled>Set To</button>
+    </div>
+    <div class="toolrow">
+      <button class="sbtn primary" id="pf-find" disabled>Find path</button>
+      <button class="sbtn" id="pf-clear">Clear</button>
+    </div>
+  </div>
+  <div class="section">
+    <h2>Surprising edges <span class="count" id="surprise-count"></span></h2>
+    <div id="surprise-list"></div>
+  </div>
+</aside>
+<button id="sidebar-toggle" title="Toggle sidebar">‹</button>
+
 <canvas id="canvas"></canvas>
 <div id="tooltip"></div>
-<div id="legend">
-  <h3>Legend</h3>
-  <div id="community-legend"></div>
-  <div style="margin-top:8px; border-top:1px solid #333; padding-top:8px;">
-    <div class="legend-item"><div class="legend-line" style="border-top:2px solid rgba(200,200,200,0.8);"></div> Verified</div>
-    <div class="legend-item"><div class="legend-line" style="border-top:2px dashed rgba(200,200,200,0.6);"></div> High</div>
-    <div class="legend-item"><div class="legend-line" style="border-top:2px dotted rgba(200,200,200,0.4);"></div> Medium</div>
-    <div class="legend-item"><div class="legend-line" style="border-top:1px solid rgba(200,200,200,0.2);"></div> Low</div>
-    <div class="legend-item"><div class="legend-line" style="border-top:3px solid #e94560;"></div> Surprising</div>
-  </div>
-</div>
-<div id="stats"></div>
-<script>
-const DATA = {json_data};
+<div id="toast"></div>
+<div id="help-hint">scroll = zoom · drag = pan · click = inspect · / = search · esc = clear</div>
 
+<aside id="detail">
+  <div class="dhead">
+    <button class="dclose" id="detail-close">×</button>
+    <div class="dpath" id="d-path"></div>
+    <div class="dname" id="d-name"></div>
+    <div id="d-badges"></div>
+  </div>
+  <div class="metrics" id="d-metrics"></div>
+  <div class="rel"><h3>Depends on (callees) <span id="d-callee-n"></span></h3><div id="d-callees"></div></div>
+  <div class="rel"><h3>Depended on by (callers) <span id="d-caller-n"></span></h3><div id="d-callers"></div></div>
+</aside>
+
+<script>
+const DATA = __GRAPH_DATA_JSON__;
+
+// Distinct, perceptually-spaced palette for communities/languages/dirs.
 const COLORS = [
-  '#e94560','#0f3460','#16c79a','#f5a623','#8b5cf6',
-  '#06b6d4','#ec4899','#84cc16','#f97316','#6366f1',
-  '#14b8a6','#f43f5e','#a855f7','#22c55e','#eab308'
+  '#4f9cf9','#f0883e','#3fb950','#db61a2','#a371f7',
+  '#56d4dd','#f85149','#e3b341','#7ee787','#ff7b72',
+  '#79c0ff','#d2a8ff','#ffa657','#39c5cf','#bc8cff'
 ];
+function hashColor(s) {
+  let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return COLORS[Math.abs(h) % COLORS.length];
+}
+function emptyState(text) {
+  const d = document.createElement('div'); d.className = 'empty-state'; d.textContent = text; return d;
+}
 
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
-const searchInput = document.getElementById('search');
 const tooltip = document.getElementById('tooltip');
+const toast = document.getElementById('toast');
 
 let W, H;
-function resize() {{
-  W = window.innerWidth; H = window.innerHeight;
-  canvas.width = W * devicePixelRatio;
-  canvas.height = H * devicePixelRatio;
-  canvas.style.width = W + 'px';
-  canvas.style.height = H + 'px';
+function resize() {
+  const rect = canvas.getBoundingClientRect();
+  W = rect.width; H = rect.height;
+  canvas.width = W * devicePixelRatio; canvas.height = H * devicePixelRatio;
   ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
-}}
-resize();
-window.addEventListener('resize', resize);
+}
 
-// Initialize node positions randomly.
-const nodes = DATA.nodes.map(function(n, i) {{ return Object.assign({{}}, n, {{
-  x: W/2 + (Math.random()-0.5)*W*0.6,
-  y: H/2 + (Math.random()-0.5)*H*0.6, vx: 0, vy: 0
-}}); }});
+// --- Data prep -------------------------------------------------------------
+const nodes = DATA.nodes.map(function(n) {
+  return Object.assign({}, n, { x: 0, y: 0, vx: 0, vy: 0, hidden: false });
+});
 const edges = DATA.edges;
-const nodeMap = {{}};
-nodes.forEach(function(n, i) {{ nodeMap[n.id] = i; }});
+const nodeMap = {};
+nodes.forEach(function(n, i) { nodeMap[n.id] = i; });
+// Seed positions on a phyllotaxis spiral so the initial layout is non-degenerate.
+nodes.forEach(function(n, i) {
+  const a = i * 2.399963; const r = 16 * Math.sqrt(i);
+  n.x = Math.cos(a) * r; n.y = Math.sin(a) * r;
+});
 
-// Stats panel.
-const statsDiv = document.getElementById('stats');
-var statsHtml = '<h3>Graph Stats</h3>';
-statsHtml += '<div class="stat-row">Nodes: ' + DATA.stats.node_count + '</div>';
-statsHtml += '<div class="stat-row">Edges: ' + DATA.stats.edge_count + '</div>';
-statsHtml += '<div class="stat-row">Communities: ' + DATA.stats.community_count + '</div>';
-statsDiv.textContent = '';
-var tmpDiv = document.createElement('div');
-tmpDiv.textContent = '';
-statsDiv.appendChild(tmpDiv);
-// Use safe DOM construction for stats.
-(function() {{
-  var h = document.createElement('h3');
-  h.textContent = 'Graph Stats';
-  statsDiv.textContent = '';
-  statsDiv.appendChild(h);
-  var items = [
-    ['Nodes', DATA.stats.node_count],
-    ['Edges', DATA.stats.edge_count],
-    ['Communities', DATA.stats.community_count]
-  ];
-  items.forEach(function(item) {{
-    var d = document.createElement('div');
-    d.className = 'stat-row';
-    d.textContent = item[0] + ': ' + item[1];
-    statsDiv.appendChild(d);
-  }});
-}})();
+// Adjacency: callees[id] = files this file imports; callers[id] = reverse.
+const callees = {}, callers = {};
+edges.forEach(function(e) {
+  (callees[e.source] = callees[e.source] || []).push(e.target);
+  (callers[e.target] = callers[e.target] || []).push(e.source);
+});
 
-// Community legend (safe DOM construction).
-var commLegend = document.getElementById('community-legend');
-var comms = [];
-var commSeen = {{}};
-nodes.forEach(function(n) {{
-  if (n.community != null && !commSeen[n.community]) {{
-    commSeen[n.community] = true;
-    comms.push(n.community);
-  }}
-}});
-comms.sort(function(a,b) {{ return a - b; }});
-comms.forEach(function(c) {{
-  var div = document.createElement('div');
-  div.className = 'legend-item';
-  var swatch = document.createElement('div');
-  swatch.className = 'legend-swatch';
-  swatch.style.background = COLORS[c % COLORS.length];
-  div.appendChild(swatch);
-  var label = document.createTextNode(' Community ' + c);
-  div.appendChild(label);
-  commLegend.appendChild(div);
-}});
+const layerOf = {};      // node id -> community id
+const layerName = {};    // community id -> name
+DATA.layers.forEach(function(l) {
+  layerName[l.id] = l.name;
+  l.node_ids.forEach(function(id) { layerOf[id] = l.id; });
+});
+const diffChanged = {}, diffAffected = {};
+if (DATA.diff) {
+  DATA.diff.changed.forEach(function(id){ diffChanged[id] = true; });
+  DATA.diff.affected.forEach(function(id){ diffAffected[id] = true; });
+}
 
-// Zoom/pan state.
-var scale = 1, tx = 0, ty = 0;
-var dragging = null, dragOffX = 0, dragOffY = 0;
-var panning = false, panStartX = 0, panStartY = 0, panTx = 0, panTy = 0;
-var selectedNode = null, searchTerm = '';
+// --- State -----------------------------------------------------------------
+let scale = 0.9, tx = 0, ty = 0;
+let dragging = null, dragMoved = false, panning = false;
+let panStartX = 0, panStartY = 0, panTx = 0, panTy = 0, downX = 0, downY = 0;
+let selected = null, hoverNode = null, searchTerm = '';
+let colorMode = 'layer';
+const hiddenLayers = {};
+let diffMode = false;
+let tour = { active: false, idx: -1 };
+let pf = { from: null, to: null, path: null, pathEdges: {} };
+let alpha = 1.0;
 
-function screenToWorld(sx, sy) {{
-  return [(sx - tx) / scale, (sy - ty) / scale];
-}}
-
-canvas.addEventListener('wheel', function(e) {{
-  e.preventDefault();
-  var wc = screenToWorld(e.offsetX, e.offsetY);
-  var factor = e.deltaY < 0 ? 1.1 : 0.9;
-  scale *= factor;
-  tx = e.offsetX - wc[0] * scale;
-  ty = e.offsetY - wc[1] * scale;
-}});
-
-canvas.addEventListener('mousedown', function(e) {{
-  var wc = screenToWorld(e.offsetX, e.offsetY);
-  for (var i = 0; i < nodes.length; i++) {{
-    var n = nodes[i];
-    var r = nodeRadius(n);
-    if ((n.x-wc[0])*(n.x-wc[0]) + (n.y-wc[1])*(n.y-wc[1]) < (r+4)*(r+4)) {{
-      if (e.button === 0) {{
-        dragging = i;
-        dragOffX = n.x - wc[0];
-        dragOffY = n.y - wc[1];
-        selectedNode = i;
-        return;
-      }}
-    }}
-  }}
-  selectedNode = null;
-  if (e.button === 0) {{
-    panning = true;
-    panStartX = e.offsetX; panStartY = e.offsetY;
-    panTx = tx; panTy = ty;
-  }}
-}});
-
-canvas.addEventListener('mousemove', function(e) {{
-  var wc = screenToWorld(e.offsetX, e.offsetY);
-  if (dragging !== null) {{
-    nodes[dragging].x = wc[0] + dragOffX;
-    nodes[dragging].y = wc[1] + dragOffY;
-    nodes[dragging].vx = 0;
-    nodes[dragging].vy = 0;
-    return;
-  }}
-  if (panning) {{
-    tx = panTx + (e.offsetX - panStartX);
-    ty = panTy + (e.offsetY - panStartY);
-    return;
-  }}
-  // Tooltip (safe DOM construction).
-  var found = false;
-  for (var i = 0; i < nodes.length; i++) {{
-    var n = nodes[i];
-    var r = nodeRadius(n);
-    if ((n.x-wc[0])*(n.x-wc[0]) + (n.y-wc[1])*(n.y-wc[1]) < (r+4)*(r+4)) {{
-      tooltip.style.display = 'block';
-      tooltip.style.left = (e.offsetX + 14) + 'px';
-      tooltip.style.top = (e.offsetY + 14) + 'px';
-      // Build tooltip content safely.
-      tooltip.textContent = '';
-      var pathDiv = document.createElement('div');
-      pathDiv.className = 'tt-path';
-      pathDiv.textContent = n.id;
-      tooltip.appendChild(pathDiv);
-      var rows = [
-        'PageRank: ' + n.pagerank.toFixed(4),
-        'Community: ' + (n.community != null ? n.community : 'N/A'),
-        'In-degree: ' + n.in_degree + ' | Out-degree: ' + n.out_degree
-      ];
-      rows.forEach(function(txt) {{
-        var rd = document.createElement('div');
-        rd.className = 'tt-row';
-        rd.textContent = txt;
-        tooltip.appendChild(rd);
-      }});
-      found = true;
-      break;
-    }}
-  }}
-  if (!found) tooltip.style.display = 'none';
-}});
-
-canvas.addEventListener('mouseup', function() {{ dragging = null; panning = false; }});
-
-searchInput.addEventListener('input', function(e) {{ searchTerm = e.target.value.toLowerCase(); }});
-
-function nodeRadius(n) {{ return 3 + Math.sqrt(n.pagerank) * 12; }}
-function nodeColor(n) {{
+// --- Helpers ---------------------------------------------------------------
+function screenToWorld(sx, sy) { return [(sx - tx) / scale, (sy - ty) / scale]; }
+function nodeRadius(n) { return 4 + Math.sqrt(Math.max(n.pagerank, 0)) * 16; }
+function colorFor(n) {
+  if (colorMode === 'language') return hashColor(n.language);
+  if (colorMode === 'directory') return hashColor(n.dir);
   if (n.community != null) return COLORS[n.community % COLORS.length];
-  return '#888';
-}}
+  return '#6e7681';
+}
+function showToast(msg) {
+  toast.textContent = msg; toast.style.display = 'block';
+  clearTimeout(showToast._t); showToast._t = setTimeout(function(){ toast.style.display = 'none'; }, 3400);
+}
 
-// Simple force simulation.
-function simulate() {{
-  var alpha = 0.3;
-  var repulsion = 800;
-  var attraction = 0.005;
-  var centerForce = 0.01;
-  var damping = 0.85;
+// --- Top bar / chips -------------------------------------------------------
+document.getElementById('proj-name').textContent = DATA.project ? '· ' + DATA.project : '';
+(function(){
+  const chips = document.getElementById('chips');
+  [['files', DATA.stats.node_count], ['edges', DATA.stats.edge_count],
+   ['layers', DATA.stats.community_count], ['langs', DATA.stats.language_count]
+  ].forEach(function(c){
+    const el = document.createElement('span'); el.className = 'chip';
+    const b = document.createElement('b'); b.textContent = c[1];
+    el.appendChild(document.createTextNode(c[0] + ' ')); el.appendChild(b);
+    chips.appendChild(el);
+  });
+})();
 
-  for (var i = 0; i < nodes.length; i++) {{
-    nodes[i].vx += (W/2 - nodes[i].x) * centerForce;
-    nodes[i].vy += (H/2 - nodes[i].y) * centerForce;
-  }}
+// --- Layers list -----------------------------------------------------------
+(function(){
+  const list = document.getElementById('layer-list');
+  document.getElementById('layer-count').textContent = DATA.layers.length;
+  if (!DATA.layers.length) { list.appendChild(emptyState('No communities detected')); return; }
+  DATA.layers.slice().sort(function(a,b){ return b.node_ids.length - a.node_ids.length; }).forEach(function(l){
+    const row = document.createElement('div'); row.className = 'layer-row'; row.dataset.layer = l.id;
+    const sw = document.createElement('div'); sw.className = 'swatch'; sw.style.background = COLORS[l.id % COLORS.length];
+    const name = document.createElement('div'); name.className = 'lname'; name.textContent = l.name; name.title = l.name;
+    const count = document.createElement('div'); count.className = 'lcount'; count.textContent = l.node_ids.length;
+    const eye = document.createElement('div'); eye.className = 'eye'; eye.textContent = '👁';
+    row.appendChild(sw); row.appendChild(name); row.appendChild(count); row.appendChild(eye);
+    row.addEventListener('click', function(ev){
+      if (ev.shiftKey) { focusNodes(l.node_ids); return; }
+      const off = !hiddenLayers[l.id]; hiddenLayers[l.id] = off; row.classList.toggle('off', off);
+      nodes.forEach(function(n){ if (layerOf[n.id] === l.id) n.hidden = off; });
+      reheat();
+    });
+    list.appendChild(row);
+  });
+  const hint = document.createElement('div'); hint.className = 'hint'; hint.textContent = 'click = toggle · shift-click = focus';
+  list.appendChild(hint);
+})();
 
-  for (var i = 0; i < nodes.length; i++) {{
-    for (var j = i+1; j < nodes.length; j++) {{
-      var dx = nodes[j].x - nodes[i].x;
-      var dy = nodes[j].y - nodes[i].y;
-      var d2 = dx*dx + dy*dy + 1;
-      if (d2 > 500*500) continue;
-      var f = repulsion / d2;
-      var fx = dx * f, fy = dy * f;
-      nodes[i].vx -= fx; nodes[i].vy -= fy;
-      nodes[j].vx += fx; nodes[j].vy += fy;
-    }}
-  }}
+// --- Surprises list --------------------------------------------------------
+(function(){
+  const list = document.getElementById('surprise-list');
+  const surp = edges.filter(function(e){ return e.surprise > 0.3; })
+    .sort(function(a,b){ return b.surprise - a.surprise; }).slice(0, 12);
+  document.getElementById('surprise-count').textContent = surp.length;
+  if (!surp.length) { list.appendChild(emptyState('None — clean architecture')); return; }
+  surp.forEach(function(e){
+    const row = document.createElement('div'); row.className = 'surprise-row';
+    const sc = document.createElement('span'); sc.className = 'sscore'; sc.textContent = e.surprise.toFixed(2);
+    const p = document.createElement('span'); p.className = 'spath';
+    p.textContent = e.source.split('/').pop() + ' → ' + e.target.split('/').pop();
+    p.title = e.source + '  →  ' + e.target;
+    row.appendChild(sc); row.appendChild(p);
+    row.addEventListener('click', function(){ if (nodeMap[e.source] != null) selectNode(nodeMap[e.source]); });
+    list.appendChild(row);
+  });
+})();
 
-  for (var k = 0; k < edges.length; k++) {{
-    var e = edges[k];
-    var si = nodeMap[e.source], ti = nodeMap[e.target];
+// --- Detail panel ----------------------------------------------------------
+const detail = document.getElementById('detail');
+function relList(container, ids, nlabel) {
+  container.textContent = '';
+  document.getElementById(nlabel).textContent = ids ? '(' + ids.length + ')' : '(0)';
+  if (!ids || !ids.length) { const e = document.createElement('div'); e.className = 'rel-empty'; e.textContent = 'none'; container.appendChild(e); return; }
+  ids.slice(0, 40).forEach(function(id){
+    const b = document.createElement('button'); b.className = 'rel-item';
+    b.textContent = id.split('/').pop(); b.title = id;
+    b.addEventListener('click', function(){ if (nodeMap[id] != null) selectNode(nodeMap[id]); });
+    container.appendChild(b);
+  });
+}
+function renderDetail(n) {
+  document.getElementById('d-path').textContent = n.id;
+  document.getElementById('d-name').textContent = n.label;
+  const badges = document.getElementById('d-badges'); badges.textContent = '';
+  if (diffChanged[n.id]) { const b = document.createElement('span'); b.className = 'badge changed'; b.textContent = 'CHANGED'; badges.appendChild(b); }
+  if (diffAffected[n.id]) { const b = document.createElement('span'); b.className = 'badge affected'; b.textContent = 'IN BLAST RADIUS'; badges.appendChild(b); }
+  const m = document.getElementById('d-metrics'); m.textContent = '';
+  [['PageRank', n.pagerank.toFixed(4)], ['Language', n.language],
+   ['Callers in', String(n.in_degree)], ['Callees out', String(n.out_degree)],
+   ['Layer', n.community != null ? (layerName[n.community] || ('#' + n.community)) : '—']
+  ].forEach(function(p){
+    const cell = document.createElement('div'); cell.className = 'metric';
+    const l = document.createElement('div'); l.className = 'mlabel'; l.textContent = p[0];
+    const v = document.createElement('div'); v.className = 'mval'; v.textContent = p[1];
+    cell.appendChild(l); cell.appendChild(v); m.appendChild(cell);
+  });
+  relList(document.getElementById('d-callees'), callees[n.id], 'd-callee-n');
+  relList(document.getElementById('d-callers'), callers[n.id], 'd-caller-n');
+  detail.classList.add('open');
+  document.getElementById('pf-set-from').disabled = false;
+  document.getElementById('pf-set-to').disabled = false;
+}
+function selectNode(i) {
+  if (i == null) { selected = null; detail.classList.remove('open'); return; }
+  selected = i; renderDetail(nodes[i]); focusNodes([nodes[i].id], true);
+}
+document.getElementById('detail-close').addEventListener('click', function(){ selectNode(null); });
+
+// --- View / camera ---------------------------------------------------------
+function focusNodes(ids, keepScale) {
+  const pts = ids.map(function(id){ return nodes[nodeMap[id]]; }).filter(Boolean);
+  if (!pts.length) return;
+  let minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
+  pts.forEach(function(n){ minX=Math.min(minX,n.x); minY=Math.min(minY,n.y); maxX=Math.max(maxX,n.x); maxY=Math.max(maxY,n.y); });
+  const cx=(minX+maxX)/2, cy=(minY+maxY)/2;
+  if (!keepScale) {
+    const span = Math.max(maxX-minX, maxY-minY, 120);
+    scale = Math.min(2.2, Math.max(0.25, Math.min(W, H) / (span * 1.8)));
+  }
+  animateTo(W/2 - cx*scale, H/2 - cy*scale);
+}
+function animateTo(ntx, nty) {
+  const stx=tx, sty=ty, t0=performance.now();
+  (function step(t){
+    const k = Math.min(1, (t-t0)/280); const e = 1-Math.pow(1-k,3);
+    tx = stx+(ntx-stx)*e; ty = sty+(nty-sty)*e;
+    if (k<1) requestAnimationFrame(step);
+  })(t0);
+}
+function reheat() { alpha = Math.max(alpha, 0.7); }
+document.getElementById('reset-btn').addEventListener('click', function(){ scale=0.9; focusNodes(nodes.map(function(n){return n.id;})); });
+
+// --- Color-by --------------------------------------------------------------
+document.getElementById('colorby').addEventListener('change', function(e){ colorMode = e.target.value; });
+
+// --- Diff toggle -----------------------------------------------------------
+if (DATA.diff) {
+  const db = document.getElementById('diff-btn'); db.style.display = '';
+  db.addEventListener('click', function(){
+    diffMode = !diffMode; db.classList.toggle('on', diffMode);
+    if (diffMode) { const ids = DATA.diff.changed.concat(DATA.diff.affected); focusNodes(ids); showToast(DATA.diff.changed.length + ' changed · ' + DATA.diff.affected.length + ' in blast radius'); }
+  });
+}
+
+// --- Search ----------------------------------------------------------------
+const searchbox = document.getElementById('searchbox');
+searchbox.addEventListener('input', function(e){
+  searchTerm = e.target.value.toLowerCase().trim();
+  const hint = document.getElementById('search-hint');
+  if (!searchTerm) { hint.textContent = ''; return; }
+  const hits = nodes.filter(function(n){ return n.id.toLowerCase().indexOf(searchTerm) >= 0; });
+  hint.textContent = hits.length + ' match' + (hits.length===1?'':'es');
+  if (hits.length) focusNodes(hits.slice(0,30).map(function(n){return n.id;}));
+});
+
+// --- Tour ------------------------------------------------------------------
+const tourSteps = DATA.tour || [];
+document.getElementById('tour-count').textContent = tourSteps.length ? (tourSteps.length + ' steps') : '';
+function renderTour() {
+  const s = tourSteps[tour.idx];
+  document.getElementById('tour-title').textContent = s ? s.title : 'Press Start to walk the architecture';
+  document.getElementById('tour-desc').textContent = s ? s.description : '';
+  document.getElementById('tour-prev').disabled = tour.idx <= 0;
+  document.getElementById('tour-next').disabled = tour.idx >= tourSteps.length - 1;
+  document.getElementById('tour-play').textContent = tour.active ? 'Stop' : 'Start';
+  if (s) focusNodes(s.node_ids);
+}
+document.getElementById('tour-play').addEventListener('click', function(){
+  if (!tourSteps.length) { showToast('No tour available'); return; }
+  tour.active = !tour.active; tour.idx = tour.active ? 0 : -1; renderTour();
+});
+document.getElementById('tour-next').addEventListener('click', function(){ if (tour.idx < tourSteps.length-1){ tour.idx++; renderTour(); } });
+document.getElementById('tour-prev').addEventListener('click', function(){ if (tour.idx > 0){ tour.idx--; renderTour(); } });
+
+// --- Path finder -----------------------------------------------------------
+function setPF(slot) {
+  if (selected == null) return;
+  pf[slot] = nodes[selected].id;
+  const el = document.getElementById('pf-'+slot);
+  el.textContent = nodes[selected].label; el.classList.remove('empty');
+  document.getElementById('pf-find').disabled = !(pf.from && pf.to);
+}
+document.getElementById('pf-set-from').addEventListener('click', function(){ setPF('from'); });
+document.getElementById('pf-set-to').addEventListener('click', function(){ setPF('to'); });
+document.getElementById('pf-clear').addEventListener('click', function(){
+  pf = { from: null, to: null, path: null, pathEdges: {} };
+  ['from','to'].forEach(function(s){ const el=document.getElementById('pf-'+s); el.textContent='click a node → Set'; el.classList.add('empty'); });
+  document.getElementById('pf-find').disabled = true;
+});
+function bfs(adj, from, to) {
+  const q=[from], prev={}; prev[from]=null;
+  while (q.length) {
+    const cur=q.shift(); if (cur===to) break;
+    (adj[cur]||[]).forEach(function(nx){ if (!(nx in prev)){ prev[nx]=cur; q.push(nx); } });
+  }
+  if (!(to in prev)) return null;
+  const path=[]; let c=to; while (c!=null){ path.unshift(c); c=prev[c]; } return path;
+}
+document.getElementById('pf-find').addEventListener('click', function(){
+  let path = bfs(callees, pf.from, pf.to); let dir = 'imports';
+  if (!path) { path = bfs(callers, pf.from, pf.to); dir = 'reverse'; }
+  if (!path) {
+    const undirected = {};
+    edges.forEach(function(e){ (undirected[e.source]=undirected[e.source]||[]).push(e.target); (undirected[e.target]=undirected[e.target]||[]).push(e.source); });
+    path = bfs(undirected, pf.from, pf.to); dir = 'undirected';
+  }
+  if (!path) { showToast('No path between these files'); pf.path=null; pf.pathEdges={}; return; }
+  pf.path = path; pf.pathEdges = {};
+  for (let i=0;i<path.length-1;i++){ pf.pathEdges[path[i]+'|'+path[i+1]]=true; pf.pathEdges[path[i+1]+'|'+path[i]]=true; }
+  focusNodes(path);
+  showToast(path.length + ' hops (' + dir + '): ' + path.map(function(p){return p.split('/').pop();}).join(' → '));
+});
+
+// --- Sidebar toggle --------------------------------------------------------
+document.getElementById('sidebar-toggle').addEventListener('click', function(){
+  const sb = document.getElementById('sidebar'); sb.classList.toggle('collapsed');
+  this.style.left = sb.classList.contains('collapsed') ? '0px' : '296px';
+  this.textContent = sb.classList.contains('collapsed') ? '›' : '‹';
+});
+
+// --- Interaction -----------------------------------------------------------
+canvas.addEventListener('wheel', function(e){
+  e.preventDefault();
+  const wc = screenToWorld(e.offsetX, e.offsetY);
+  const factor = e.deltaY < 0 ? 1.12 : 0.89;
+  scale = Math.min(6, Math.max(0.08, scale*factor));
+  tx = e.offsetX - wc[0]*scale; ty = e.offsetY - wc[1]*scale;
+}, { passive: false });
+
+function pick(sx, sy) {
+  const wc = screenToWorld(sx, sy);
+  for (let i = nodes.length-1; i >= 0; i--) {
+    const n = nodes[i]; if (n.hidden) continue;
+    const r = nodeRadius(n) + 4;
+    if ((n.x-wc[0])*(n.x-wc[0]) + (n.y-wc[1])*(n.y-wc[1]) < r*r) return i;
+  }
+  return null;
+}
+canvas.addEventListener('mousedown', function(e){
+  downX = e.offsetX; downY = e.offsetY; dragMoved = false;
+  const i = pick(e.offsetX, e.offsetY);
+  if (i != null) { dragging = i; const wc = screenToWorld(e.offsetX, e.offsetY); nodes[i]._ox = nodes[i].x - wc[0]; nodes[i]._oy = nodes[i].y - wc[1]; }
+  else { panning = true; panStartX = e.offsetX; panStartY = e.offsetY; panTx = tx; panTy = ty; }
+});
+canvas.addEventListener('mousemove', function(e){
+  if (Math.abs(e.offsetX-downX)+Math.abs(e.offsetY-downY) > 4) dragMoved = true;
+  if (dragging != null) { const wc = screenToWorld(e.offsetX, e.offsetY); const n = nodes[dragging]; n.x = wc[0]+n._ox; n.y = wc[1]+n._oy; n.vx=0; n.vy=0; reheat(); return; }
+  if (panning) { tx = panTx + (e.offsetX-panStartX); ty = panTy + (e.offsetY-panStartY); return; }
+  const i = pick(e.offsetX, e.offsetY); hoverNode = i;
+  if (i != null) {
+    const n = nodes[i];
+    tooltip.style.display = 'block';
+    tooltip.style.left = Math.min(e.clientX+14, window.innerWidth-360) + 'px';
+    tooltip.style.top = (e.clientY+14) + 'px';
+    tooltip.textContent = '';
+    const nm = document.createElement('div'); nm.className='tt-name'; nm.textContent = n.label; tooltip.appendChild(nm);
+    [n.id, 'PageRank ' + n.pagerank.toFixed(4) + ' · in ' + n.in_degree + ' · out ' + n.out_degree,
+     (n.community!=null?('layer: '+(layerName[n.community]||('#'+n.community))):'') ].forEach(function(t){
+      if (!t) return; const r = document.createElement('div'); r.className='tt-row'; r.textContent = t; tooltip.appendChild(r);
+    });
+    canvas.style.cursor = 'pointer';
+  } else { tooltip.style.display='none'; canvas.style.cursor = 'default'; }
+});
+window.addEventListener('mouseup', function(){
+  if (dragging != null && !dragMoved) selectNode(dragging);
+  else if (panning && !dragMoved) selectNode(null);
+  dragging = null; panning = false;
+});
+
+document.addEventListener('keydown', function(e){
+  if (e.key === '/' && document.activeElement !== searchbox) { e.preventDefault(); searchbox.focus(); }
+  else if (e.key === 'Escape') { searchbox.value=''; searchTerm=''; document.getElementById('search-hint').textContent=''; selectNode(null); }
+  else if (e.key === 'ArrowRight' && tour.active) { document.getElementById('tour-next').click(); }
+  else if (e.key === 'ArrowLeft' && tour.active) { document.getElementById('tour-prev').click(); }
+});
+
+// --- Force simulation (capped O(n²) with distance cutoff) ------------------
+function simulate() {
+  if (alpha < 0.01) return;
+  const repulsion = 2600, attraction = 0.010, center = 0.009, damping = 0.86;
+  const cutoff2 = 1100*1100;
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i]; if (n.hidden) continue;
+    n.vx += (0 - n.x) * center; n.vy += (0 - n.y) * center;
+  }
+  for (let i = 0; i < nodes.length; i++) {
+    if (nodes[i].hidden) continue;
+    for (let j = i+1; j < nodes.length; j++) {
+      if (nodes[j].hidden) continue;
+      let dx = nodes[j].x - nodes[i].x, dy = nodes[j].y - nodes[i].y;
+      let d2 = dx*dx + dy*dy + 1; if (d2 > cutoff2) continue;
+      const f = repulsion / d2;
+      const fx = dx*f, fy = dy*f;
+      nodes[i].vx -= fx; nodes[i].vy -= fy; nodes[j].vx += fx; nodes[j].vy += fy;
+    }
+  }
+  for (let k = 0; k < edges.length; k++) {
+    const si = nodeMap[edges[k].source], ti = nodeMap[edges[k].target];
     if (si === undefined || ti === undefined) continue;
-    var dx = nodes[ti].x - nodes[si].x;
-    var dy = nodes[ti].y - nodes[si].y;
-    var fx = dx * attraction, fy = dy * attraction;
-    nodes[si].vx += fx; nodes[si].vy += fy;
-    nodes[ti].vx -= fx; nodes[ti].vy -= fy;
-  }}
+    if (nodes[si].hidden || nodes[ti].hidden) continue;
+    const dx = nodes[ti].x - nodes[si].x, dy = nodes[ti].y - nodes[si].y;
+    const fx = dx*attraction, fy = dy*attraction;
+    nodes[si].vx += fx; nodes[si].vy += fy; nodes[ti].vx -= fx; nodes[ti].vy -= fy;
+  }
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i]; if (n.hidden || i === dragging) continue;
+    n.vx *= damping; n.vy *= damping; n.x += n.vx * alpha; n.y += n.vy * alpha;
+  }
+  alpha *= 0.992;
+}
 
-  for (var i = 0; i < nodes.length; i++) {{
-    var n = nodes[i];
-    if (dragging !== null && i === dragging) continue;
-    n.vx *= damping; n.vy *= damping;
-    n.x += n.vx * alpha; n.y += n.vy * alpha;
-  }}
-}}
-
-function draw() {{
-  ctx.save();
+// --- Rendering -------------------------------------------------------------
+function draw() {
   ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
   ctx.clearRect(0, 0, W, H);
-  ctx.save();
-  ctx.translate(tx, ty);
-  ctx.scale(scale, scale);
+  ctx.save(); ctx.translate(tx, ty); ctx.scale(scale, scale);
 
-  var highlightSet = {{}};
-  if (selectedNode !== null) {{
-    highlightSet[nodes[selectedNode].id] = true;
-    for (var k = 0; k < edges.length; k++) {{
-      var e = edges[k];
-      if (e.source === nodes[selectedNode].id) highlightSet[e.target] = true;
-      if (e.target === nodes[selectedNode].id) highlightSet[e.source] = true;
-    }}
-  }}
+  const selId = selected != null ? nodes[selected].id : null;
+  const neigh = {};
+  if (selId) { neigh[selId] = true; (callees[selId]||[]).forEach(function(x){neigh[x]=true;}); (callers[selId]||[]).forEach(function(x){neigh[x]=true;}); }
+  const hasPath = pf.path && pf.path.length > 1;
 
-  for (var k = 0; k < edges.length; k++) {{
-    var e = edges[k];
-    var si = nodeMap[e.source], ti = nodeMap[e.target];
+  // Edges
+  for (let k = 0; k < edges.length; k++) {
+    const e = edges[k];
+    const si = nodeMap[e.source], ti = nodeMap[e.target];
     if (si === undefined || ti === undefined) continue;
+    if (nodes[si].hidden || nodes[ti].hidden) continue;
 
-    var isSurprising = e.surprise > 0.3;
-    var isHighlighted = selectedNode !== null &&
-      (e.source === nodes[selectedNode].id || e.target === nodes[selectedNode].id);
+    const onPath = hasPath && pf.pathEdges[e.source+'|'+e.target];
+    const onSel = selId && (e.source===selId || e.target===selId);
+    const surprising = e.surprise > 0.55;
 
-    var alpha = 0.15;
-    var lineWidth = 0.5;
-    var color = '200,200,200';
-
-    if (isSurprising) {{ color = '233,69,96'; alpha = 0.7; lineWidth = 2; }}
-    if (isHighlighted) {{ alpha = 0.8; lineWidth = 1.5; }}
-
-    switch(e.confidence) {{
-      case 'Verified': alpha = Math.max(alpha, 0.3); break;
-      case 'High': alpha = Math.max(alpha, 0.2); break;
-      case 'Medium': alpha *= 0.8; break;
-      case 'Low': alpha *= 0.5; break;
-    }}
-
-    if (selectedNode !== null && !isHighlighted) alpha *= 0.1;
+    let a = 0.06, lw = 0.5, col = '120,128,140';
+    if (e.confidence === 'Verified') a = 0.12;
+    else if (e.confidence === 'High') a = 0.085;
+    else if (e.confidence === 'Low') a = 0.035;
+    if (surprising) { col = '248,81,73'; a = 0.3; lw = 0.9; }
+    if (onSel) { a = 0.9; lw = 1.5; col = '79,156,249'; }
+    if (diffMode && (diffChanged[e.source]||diffChanged[e.target])) { col='240,136,62'; a=0.5; }
+    if (onPath) { col = '227,179,65'; a = 0.95; lw = 2.4; }
+    if (selId && !onSel && !onPath) a *= 0.12;
+    if (searchTerm && !onPath) a *= 0.5;
 
     ctx.beginPath();
-    ctx.strokeStyle = 'rgba(' + color + ',' + alpha + ')';
-    ctx.lineWidth = lineWidth / scale;
-
-    if (e.confidence === 'High') {{
-      ctx.setLineDash([6/scale, 3/scale]);
-    }} else if (e.confidence === 'Medium') {{
-      ctx.setLineDash([2/scale, 2/scale]);
-    }} else {{
-      ctx.setLineDash([]);
-    }}
-
-    ctx.moveTo(nodes[si].x, nodes[si].y);
-    ctx.lineTo(nodes[ti].x, nodes[ti].y);
-    ctx.stroke();
+    ctx.strokeStyle = 'rgba('+col+','+a+')';
+    ctx.lineWidth = lw / scale;
+    if (e.confidence === 'High') ctx.setLineDash([6/scale, 3/scale]);
+    else if (e.confidence === 'Medium') ctx.setLineDash([2/scale, 3/scale]);
+    else ctx.setLineDash([]);
+    ctx.moveTo(nodes[si].x, nodes[si].y); ctx.lineTo(nodes[ti].x, nodes[ti].y); ctx.stroke();
     ctx.setLineDash([]);
-  }}
+  }
 
-  for (var i = 0; i < nodes.length; i++) {{
-    var n = nodes[i];
-    var r = nodeRadius(n);
+  // Nodes
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i]; if (n.hidden) continue;
+    const r = nodeRadius(n);
+    let a = 1.0, ring = null;
 
-    var nodeAlpha = 1.0;
-    var strokeColor = null;
+    const searchHit = searchTerm && n.id.toLowerCase().indexOf(searchTerm) >= 0;
+    if (searchTerm && !searchHit) a = 0.15; else if (searchHit) ring = '#ffffff';
+    if (selId && !neigh[n.id]) a *= 0.16;
+    if (hasPath) { if (pf.path.indexOf(n.id) >= 0) ring = '#e3b341'; else a *= 0.18; }
+    if (diffMode) { if (diffChanged[n.id]) ring = '#f0883e'; else if (diffAffected[n.id]) ring = '#f85149'; else a *= 0.2; }
+    if (i === selected) ring = '#4f9cf9';
 
-    if (searchTerm && n.id.toLowerCase().indexOf(searchTerm) >= 0) {{
-      strokeColor = '#fff';
-    }} else if (searchTerm) {{
-      nodeAlpha = 0.2;
-    }}
-
-    if (selectedNode !== null && !highlightSet[n.id]) {{
-      nodeAlpha *= 0.15;
-    }}
-
-    ctx.beginPath();
-    ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
-    ctx.fillStyle = nodeColor(n);
-    ctx.globalAlpha = nodeAlpha;
-    ctx.fill();
-
-    if (strokeColor) {{
-      ctx.strokeStyle = strokeColor;
-      ctx.lineWidth = 2 / scale;
-      ctx.stroke();
-    }}
-
+    ctx.globalAlpha = a;
+    ctx.beginPath(); ctx.arc(n.x, n.y, r, 0, Math.PI*2);
+    ctx.fillStyle = colorFor(n); ctx.fill();
+    if (i === hoverNode) { ctx.shadowColor = colorFor(n); ctx.shadowBlur = 18; ctx.fill(); ctx.shadowBlur = 0; }
+    if (ring) { ctx.strokeStyle = ring; ctx.lineWidth = 2.5/scale; ctx.stroke(); }
     ctx.globalAlpha = 1.0;
-  }}
+  }
 
+  // Labels for the most important nodes (and selection/hover), zoom-gated.
+  ctx.fillStyle = 'rgba(214,221,232,0.92)';
+  ctx.font = (11/scale) + "px ui-sans-serif, system-ui, sans-serif";
+  ctx.textAlign = 'center';
+  const labelThreshold = scale > 1.4 ? 0 : (scale > 0.7 ? 0.012 : 0.03);
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i]; if (n.hidden) continue;
+    const show = n.pagerank >= labelThreshold || i === selected || i === hoverNode;
+    if (!show) continue;
+    if (selId && !neigh[n.id] && i !== hoverNode) continue;
+    ctx.fillText(n.label, n.x, n.y - nodeRadius(n) - 4/scale);
+  }
   ctx.restore();
-  ctx.restore();
-}}
+}
 
-function animLoop() {{
-  simulate();
-  draw();
-  requestAnimationFrame(animLoop);
-}}
-animLoop();
+function loop() { simulate(); draw(); requestAnimationFrame(loop); }
+resize(); window.addEventListener('resize', resize);
+// On narrow screens, start with the sidebar collapsed so the graph is visible.
+if (window.innerWidth <= 720) document.getElementById('sidebar-toggle').click();
+// Let the layout settle before the first painted frame.
+for (let i = 0; i < 120; i++) simulate();
+focusNodes(nodes.map(function(n){ return n.id; }));
+loop();
 </script>
 </body>
-</html>"##,
-        json_data = json_data
-    )
-}
+</html>"##;
 
 #[cfg(test)]
 mod tests {
@@ -562,6 +1151,8 @@ mod tests {
         assert!(content.contains("<!DOCTYPE html>"));
         assert!(content.contains("src/a.rs"));
         assert!(content.contains("src/b.rs"));
+        // Placeholder must be fully substituted.
+        assert!(!content.contains("__GRAPH_DATA_JSON__"));
     }
 
     #[test]
@@ -600,5 +1191,106 @@ mod tests {
             node_count <= 10,
             "expected at most 10 nodes, got {node_count}"
         );
+    }
+
+    #[test]
+    fn embeds_layers_languages_and_tour() {
+        let mut g = CodeGraph::new();
+        g.add_edge(
+            "crates/core/a.rs",
+            "crates/core/b.rs",
+            "b",
+            Language::Rust,
+            Language::Rust,
+        );
+        g.add_edge(
+            "crates/cli/main.rs",
+            "crates/core/a.rs",
+            "a",
+            Language::Rust,
+            Language::Rust,
+        );
+        g.detect_communities();
+
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("rich.html");
+        let opts = HtmlExportOptions {
+            output_path: out.clone(),
+            project_name: "TestProj".to_string(),
+            ..Default::default()
+        };
+        export_html(&g, &opts).unwrap();
+
+        let content = std::fs::read_to_string(&out).unwrap();
+        // Enriched schema fields are present.
+        assert!(content.contains("\"layers\":"));
+        assert!(content.contains("\"tour\":"));
+        assert!(content.contains("\"language\":"));
+        assert!(content.contains("\"label\":"));
+        assert!(content.contains("TestProj"));
+    }
+
+    #[test]
+    fn diff_overlay_included_when_requested() {
+        let mut g = CodeGraph::new();
+        g.add_edge("src/a.rs", "src/b.rs", "b", Language::Rust, Language::Rust);
+
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("diff.html");
+        let opts = HtmlExportOptions {
+            output_path: out.clone(),
+            changed_files: vec!["src/a.rs".to_string()],
+            affected_files: vec!["src/b.rs".to_string()],
+            ..Default::default()
+        };
+        export_html(&g, &opts).unwrap();
+
+        let content = std::fs::read_to_string(&out).unwrap();
+        assert!(content.contains("\"diff\":"));
+        assert!(content.contains("\"changed\":"));
+    }
+
+    #[test]
+    fn diff_files_kept_beyond_max_nodes_cap() {
+        // Regression for the codex-flagged P2: a changed file ranking below the
+        // `max_nodes` cap must still be force-included so the overlay can't
+        // silently vanish on large repos.
+        let mut g = CodeGraph::new();
+        g.add_edge("b.rs", "a.rs", "a", Language::Rust, Language::Rust);
+        g.add_edge("c.rs", "a.rs", "a", Language::Rust, Language::Rust);
+        g.add_edge("z_changed.rs", "a.rs", "a", Language::Rust, Language::Rust);
+
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("cap.html");
+        let opts = HtmlExportOptions {
+            output_path: out.clone(),
+            max_nodes: 1, // only one node fits the PageRank cap
+            changed_files: vec!["z_changed.rs".to_string()],
+            ..Default::default()
+        };
+        export_html(&g, &opts).unwrap();
+
+        let content = std::fs::read_to_string(&out).unwrap();
+        assert!(
+            content.contains("z_changed.rs"),
+            "changed file was dropped past the max_nodes cap"
+        );
+        assert!(content.contains("\"diff\":"));
+        assert!(content.contains("\"changed\":[\"z_changed.rs\"]"));
+    }
+
+    #[test]
+    fn no_diff_overlay_by_default() {
+        let mut g = CodeGraph::new();
+        g.add_edge("src/a.rs", "src/b.rs", "b", Language::Rust, Language::Rust);
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("nodiff.html");
+        let opts = HtmlExportOptions {
+            output_path: out.clone(),
+            ..Default::default()
+        };
+        export_html(&g, &opts).unwrap();
+        let content = std::fs::read_to_string(&out).unwrap();
+        assert!(content.contains("\"diff\":null"));
     }
 }

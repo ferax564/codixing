@@ -161,7 +161,8 @@ codixing callees src/engine.rs   # What this file imports
 codixing graph --map             # Architecture overview
 codixing graph --communities     # Louvain community detection
 codixing graph --surprises 10    # Top N surprising edges
-codixing graph --html graph.html # Interactive HTML visualization
+codixing graph --html graph.html # Interactive HTML dashboard
+codixing graph --html g.html --diff-base main  # Dashboard + diff-impact overlay
 codixing path src/a.rs src/b.rs  # Shortest import chain
 codixing impact src/engine.rs    # Blast radius analysis
 codixing api src/engine.rs       # Public API surface
@@ -288,7 +289,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Hybrid search** — BM25 + optional vector embeddings, fused with Reciprocal Rank Fusion
 - **Symbol-level call graph** — Function-to-function call edges extracted from AST, including Rust trait dispatch, Python class inheritance, and TypeScript interface implementations
 - **Dependency graph** — Import + call extraction, PageRank scoring, Personalized PageRank for focus-aware maps, Louvain community detection, shortest path queries, surprise/anomaly edge scoring
-- **Interactive graph visualization** — `codixing graph --html` generates a self-contained HTML file with force-directed layout, community coloring, confidence-styled edges, surprise highlights, search/filter, zoom/pan
+- **Interactive graph dashboard** — `codixing graph --html` generates a self-contained HTML dashboard (no CDN, no framework): force-directed layout, color-by layer/language/directory, a node detail panel (PageRank, language, callers/callees), named architectural layers with show/hide, a deterministic guided tour of the codebase, a client-side path finder, fuzzy search-to-focus, surprise/anomaly edges, and a `--diff-base <ref>` diff-impact overlay that highlights changed files and their blast radius
 - **Graph exports for external tools** — `codixing graph --graphml` (Gephi/yEd), `--cypher` (Neo4j), `--obsidian` (markdown vault with one note per community) for downstream analysis and knowledge-base integration
 - **Git hooks** — `codixing hook install` wires post-commit hooks for automatic index sync after every commit; `codixing hook status` / `uninstall` manage the lifecycle
 - **Caller cascade** — `codixing callers <file> --depth N` walks the import graph N hops to surface the full transitive caller cascade
@@ -380,7 +381,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 1261 tests
+cargo test --workspace        # 1255 tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```
