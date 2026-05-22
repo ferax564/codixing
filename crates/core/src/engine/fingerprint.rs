@@ -46,12 +46,13 @@ fn cosmetic_eligible(language: Language) -> bool {
 /// bodies.
 ///
 /// The hash is computed over the file with every function/method body span
-/// removed and the remaining bytes whitespace-normalized. Two files therefore
-/// fingerprint identically iff they differ only inside function bodies (or in
-/// pure formatting). Any other change — a renamed struct field, a changed
-/// `const` value, an added import, a modified signature, a reordered or
-/// re-commented declaration — alters the fingerprint and is classified
-/// STRUCTURAL.
+/// removed. Two files therefore fingerprint identically iff they differ only
+/// inside function bodies (body reformatting included, since the whole body is
+/// removed). Any change to the non-body bytes — a renamed struct field, a
+/// changed `const` value, an added import, a modified signature, a reordered or
+/// re-commented declaration, or reformatting of the non-body layout — alters the
+/// fingerprint and is classified STRUCTURAL. (Non-body reformatting re-embedding
+/// is the safe direction: it never reuses a stale vector.)
 ///
 /// This "exclude only bodies" formulation is the deliberate inverse of
 /// enumerating which constructs to include: it cannot miss a structural change
@@ -97,25 +98,54 @@ pub fn signature_fingerprint(
         }
     }
 
-    Some(xxhash_rust::xxh3::xxh3_64(&masked_normalized(
-        source, &merged,
-    )))
+    Some(xxhash_rust::xxh3::xxh3_64(&masked(source, &merged)))
 }
 
-/// Body span of a function/method: from its first `{` to the end of its range.
-/// `None` when the range contains no brace (a bodyless declaration).
+/// Body span of a function/method: the final brace-balanced block, found by
+/// matching backward from the entity's last `}`. Matching from the end (rather
+/// than taking the first `{`) skips braces that belong to the *signature* —
+/// const-generic bounds, `const { .. }` blocks in return types — so an edit
+/// inside those is correctly treated as STRUCTURAL.
+///
+/// `None` when the range contains no brace (a bodyless declaration such as a
+/// trait method signature `fn f();`).
+///
+/// Note: this is a byte-level brace match that does not track string/char
+/// literals or comments inside the signature. That is acceptable: an unbalanced
+/// brace inside a signature literal is exceedingly rare, and a mismatch only
+/// shifts the masked region, which the surrounding STRUCTURAL bytes still guard.
 fn body_span(source: &[u8], range: &std::ops::Range<usize>) -> Option<(usize, usize)> {
     let end = range.end.min(source.len());
     let start = range.start.min(end);
-    let brace = source[start..end].iter().position(|&b| b == b'{')?;
-    Some((start + brace, end))
+    let slice = &source[start..end];
+    let last_close = slice.iter().rposition(|&b| b == b'}')?;
+    let mut depth = 0i32;
+    let mut i = last_close as isize;
+    while i >= 0 {
+        match slice[i as usize] {
+            b'}' => depth += 1,
+            b'{' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((start + i as usize, end));
+                }
+            }
+            _ => {}
+        }
+        i -= 1;
+    }
+    None
 }
 
-/// `source` with the given (sorted, merged) byte spans removed and every run of
-/// ASCII whitespace collapsed to a single space. Whitespace folding makes pure
-/// reformatting (the canonical cosmetic edit) hash identically, while any real
-/// token change outside a function body still surfaces.
-fn masked_normalized(source: &[u8], remove: &[(usize, usize)]) -> Vec<u8> {
+/// `source` with the given (sorted, merged) byte spans removed.
+///
+/// No whitespace normalization: collapsing whitespace would also fold runs
+/// *inside string/char literals* outside function bodies, so a literal value
+/// change like `"foo  bar"` → `"foo bar"` would hash identically and be
+/// wrongly classified COSMETIC. The trade-off is that pure reformatting of the
+/// non-body parts (signatures, struct layout) re-embeds — the safe direction.
+/// Body reformatting stays COSMETIC because the entire body span is removed.
+fn masked(source: &[u8], remove: &[(usize, usize)]) -> Vec<u8> {
     let mut kept: Vec<u8> = Vec::with_capacity(source.len());
     let mut i = 0usize;
     for &(s, e) in remove {
@@ -127,21 +157,7 @@ fn masked_normalized(source: &[u8], remove: &[(usize, usize)]) -> Vec<u8> {
     if i < source.len() {
         kept.extend_from_slice(&source[i..]);
     }
-
-    let mut norm: Vec<u8> = Vec::with_capacity(kept.len());
-    let mut prev_ws = false;
-    for &b in &kept {
-        if b.is_ascii_whitespace() {
-            if !prev_ws {
-                norm.push(b' ');
-                prev_ws = true;
-            }
-        } else {
-            norm.push(b);
-            prev_ws = false;
-        }
-    }
-    norm
+    kept
 }
 #[cfg(test)]
 mod tests {
@@ -206,11 +222,50 @@ mod tests {
     }
 
     #[test]
-    fn reformatting_outside_body_is_cosmetic() {
-        // Differs only by whitespace runs outside the body → normalized away.
+    fn body_reformatting_is_cosmetic() {
+        // The whole body span is removed, so reformatting *inside* the body is
+        // cosmetic regardless of whitespace.
+        let a = b"fn f() {let x=1;x}";
+        let b = b"fn f() {\n    let x = 1;\n    x\n}";
+        assert_eq!(
+            fp(&[ent(EntityKind::Function, 0..a.len())], a),
+            fp(&[ent(EntityKind::Function, 0..b.len())], b),
+        );
+    }
+
+    #[test]
+    fn outside_body_whitespace_is_structural() {
+        // No whitespace normalization: a reformat of the non-body bytes re-embeds
+        // (safe direction). This is the deliberate trade for not corrupting
+        // whitespace inside string/char literals.
         let a = b"fn  f()   {x}";
         let b = b"fn f() {x}";
-        assert_eq!(
+        assert_ne!(
+            fp(&[ent(EntityKind::Function, 0..a.len())], a),
+            fp(&[ent(EntityKind::Function, 0..b.len())], b),
+        );
+    }
+
+    #[test]
+    fn string_literal_whitespace_change_is_structural() {
+        // Collapsing whitespace would fold runs inside string literals too; a
+        // const string value change must stay STRUCTURAL (codex round-4 P2).
+        let a = b"const H: &str = \"foo  bar\";";
+        let b = b"const H: &str = \"foo bar\";";
+        assert_ne!(
+            fp(&[ent(EntityKind::Constant, 0..a.len())], a),
+            fp(&[ent(EntityKind::Constant, 0..b.len())], b),
+        );
+    }
+
+    #[test]
+    fn signature_brace_change_is_structural() {
+        // The body brace is found by matching backward from the last `}`, so a
+        // brace in the *signature* (a const block in the return type) is not
+        // mistaken for the body; editing inside it is STRUCTURAL (codex round-4 P2).
+        let a = b"fn f() -> [u8; { 1 }] { body }";
+        let b = b"fn f() -> [u8; { 2 }] { body }";
+        assert_ne!(
             fp(&[ent(EntityKind::Function, 0..a.len())], a),
             fp(&[ent(EntityKind::Function, 0..b.len())], b),
         );

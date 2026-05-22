@@ -1806,10 +1806,31 @@ pub struct Config {
         fs::write(src.join("main.rs"), body).unwrap();
     }
 
+    /// True when the ONNX Runtime dylib is available to load.
+    ///
+    /// The `ort` crate **panics** (not `Err`) on a failed dylib load, so we must
+    /// probe *before* constructing an embedder. The project documents
+    /// `ORT_DYLIB_PATH` for embedder use; require it to point at an existing file.
+    /// When absent (e.g. Windows CI `--no-default-features`, or any box without
+    /// the runtime) the embedding-reuse tests skip instead of aborting.
+    fn onnx_available() -> bool {
+        std::env::var_os("ORT_DYLIB_PATH")
+            .map(std::path::PathBuf::from)
+            .is_some_and(|p| p.exists())
+    }
+
     /// Build an embedded engine over `src/main.rs`. Returns `None` (after printing
-    /// a skip note) when the embedder failed to load — vector-reuse assertions
+    /// a skip note) when the embedder is unavailable — vector-reuse assertions
     /// cannot run without it.
     fn build_embedded(root: &std::path::Path) -> Option<Engine> {
+        if !onnx_available() {
+            eprintln!(
+                "SKIP: ONNX runtime unavailable (set ORT_DYLIB_PATH to an existing \
+                 libonnxruntime) — cosmetic-reuse assertions skipped; classification \
+                 logic covered by fingerprint unit tests"
+            );
+            return None;
+        }
         let engine = Engine::init(root, embedded_config(root)).unwrap();
         if engine.embedder.is_none() {
             eprintln!(
