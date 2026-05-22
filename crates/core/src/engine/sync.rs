@@ -131,7 +131,30 @@ impl Engine {
         ) {
             warn!(error = %e, "failed to persist chunk trigram index");
         }
+        // This direct path persisted new content but not a new signature
+        // fingerprint, so drop the file's stale sidecar entry — otherwise a later
+        // `sync` could compare a reverted edit against the wrong baseline and
+        // wrongly reuse vectors. Self-healing: the next sync re-stores it.
+        self.invalidate_signature(path);
         Ok(())
+    }
+
+    /// Remove a single file's stored signature fingerprint so the next `sync`
+    /// recomputes it and treats the file as STRUCTURAL. Used by mutation paths
+    /// (direct `reindex_file`, `git_sync`) that persist new content without
+    /// recomputing the fingerprint, to avoid a stale COSMETIC baseline.
+    fn invalidate_signature(&self, path: &Path) {
+        let rel = self.config.normalize_path(path).unwrap_or_else(|| {
+            normalize_path(path.strip_prefix(&self.config.root).unwrap_or(path))
+        });
+        let key = std::path::PathBuf::from(&rel);
+        if let Ok(sigs) = self.store.load_tree_signatures() {
+            if sigs.iter().any(|(p, _)| *p == key) {
+                let kept: Vec<(std::path::PathBuf, u64)> =
+                    sigs.into_iter().filter(|(p, _)| *p != key).collect();
+                let _ = self.store.save_tree_signatures(&kept);
+            }
+        }
     }
 
     /// Re-index a single file.
@@ -2047,6 +2070,34 @@ pub struct Config {
         assert_eq!(
             second.cosmetic_skipped, 1,
             "body-only edit on the refreshed baseline must be COSMETIC"
+        );
+    }
+
+    #[test]
+    fn direct_reindex_invalidates_signature_sidecar() {
+        // BM25-only engine (no ONNX needed): init still records signature
+        // fingerprints. A direct `reindex_file` (CLI `update --file`, MCP/LSP/
+        // server writes) that changes a signature must drop the stale sidecar
+        // entry so a later sync can't reuse vectors against the wrong baseline.
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write_main(root, "pub fn f(a: u32) -> u32 { a + 1 }\n");
+        let mut engine = Engine::init(root, IndexConfig::new(root)).unwrap();
+
+        let key = std::path::PathBuf::from("src/main.rs");
+        let before = engine.store.load_tree_signatures().unwrap();
+        assert!(
+            before.iter().any(|(p, _)| *p == key),
+            "init should record a signature fingerprint for src/main.rs"
+        );
+
+        write_main(root, "pub fn f(a: u64) -> u64 { a + 1 }\n");
+        engine.reindex_file(&root.join("src/main.rs")).unwrap();
+
+        let after = engine.store.load_tree_signatures().unwrap();
+        assert!(
+            !after.iter().any(|(p, _)| *p == key),
+            "direct reindex must invalidate the stale signature fingerprint"
         );
     }
 }
