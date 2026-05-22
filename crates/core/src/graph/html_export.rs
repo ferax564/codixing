@@ -461,6 +461,25 @@ button { font-family: inherit; cursor: pointer; }
 .seg button { height: 30px; padding: 0 12px; background: transparent; border: none; color: var(--muted); font-size: 12px; transition: .12s; }
 .seg button:hover { color: var(--text); }
 .seg button.on { background: var(--accent-soft); color: #fff; }
+.exp-wrap { position: relative; }
+.exp-menu { position: absolute; top: 36px; right: 0; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); overflow: hidden; z-index: 60; min-width: 130px; }
+.exp-menu button { display: block; width: 100%; text-align: left; padding: 9px 13px; background: transparent; border: none; color: var(--text); font-size: 12px; }
+.exp-menu button:hover { background: var(--panel-2); color: var(--accent); }
+.ov-label { font-size: 10px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted-2); margin-bottom: 6px; }
+.ov-bar { display: flex; align-items: center; gap: 7px; margin: 3px 0; font-size: 11px; }
+.ov-bar-l { width: 62px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ov-bar-t { flex: 1; height: 7px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
+.ov-bar-f { display: block; height: 100%; border-radius: 4px; }
+.ov-bar-c { color: var(--muted-2); font-variant-numeric: tabular-nums; width: 24px; text-align: right; }
+#filetree { max-height: 240px; overflow-y: auto; font-size: 12px; }
+.ft-row { display: flex; align-items: center; gap: 5px; padding: 3px 4px; border-radius: 5px; cursor: pointer; white-space: nowrap; }
+.ft-row:hover { background: var(--panel-2); }
+.ft-row.ft-file { color: var(--text); }
+.ft-row.ft-file:hover { color: var(--accent); }
+.ft-dir { color: var(--text-secondary, #aab2bd); font-weight: 500; }
+.ft-tw { color: var(--muted-2); width: 10px; display: inline-block; }
+.ft-children { display: none; }
+.ft-children.open { display: block; }
 
 /* Sidebar */
 #sidebar {
@@ -563,6 +582,11 @@ button { font-family: inherit; cursor: pointer; }
 }
 .empty-state { color: var(--muted-2); font-size: 12px; text-align: center; padding: 14px 0; }
 #help-hint { position: fixed; bottom: 12px; right: 16px; z-index: 15; color: var(--muted-2); font-size: 11px; pointer-events: none; }
+#breadcrumb { position: fixed; top: 64px; left: 304px; z-index: 16; display: flex; align-items: center; gap: 8px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px; padding: 5px 13px; font-size: 12px; box-shadow: var(--shadow); }
+#breadcrumb .bc-home { background: transparent; border: none; color: var(--accent); font-size: 12px; padding: 0; }
+#breadcrumb .bc-home:hover { text-decoration: underline; }
+#breadcrumb .bc-sep { color: var(--muted-2); }
+#breadcrumb .bc-cur { color: var(--text); }
 @media (max-width: 720px) {
   #sidebar { width: 80vw; } #sidebar-toggle { left: 80vw; }
   #detail { width: 86vw; transform: translateX(86vw); }
@@ -590,10 +614,26 @@ button { font-family: inherit; cursor: pointer; }
     </select>
   </label>
   <button class="tbtn" id="diff-btn" style="display:none;">Diff impact</button>
+  <div class="exp-wrap">
+    <button class="tbtn" id="export-btn" title="Export the current view">Export ▾</button>
+    <div id="export-menu" class="exp-menu" style="display:none;">
+      <button data-fmt="png">PNG image</button>
+      <button data-fmt="svg">SVG vector</button>
+      <button data-fmt="json">JSON data</button>
+    </div>
+  </div>
   <button class="tbtn" id="reset-btn" title="Reset view">Reset</button>
 </div>
 
 <aside id="sidebar">
+  <div class="section" id="overview-section">
+    <h2>Overview</h2>
+    <div id="overview-body"></div>
+  </div>
+  <div class="section">
+    <h2>Files</h2>
+    <div id="filetree"></div>
+  </div>
   <div class="section">
     <h2>Search</h2>
     <input id="searchbox" type="text" placeholder="Filter files… (press /)" autocomplete="off" />
@@ -634,6 +674,7 @@ button { font-family: inherit; cursor: pointer; }
 <button id="sidebar-toggle" title="Toggle sidebar">‹</button>
 
 <canvas id="canvas"></canvas>
+<div id="breadcrumb" style="display:none;"></div>
 <div id="tooltip"></div>
 <div id="toast"></div>
 <div id="help-hint">scroll = zoom · drag = pan · click = inspect · / = search · esc = clear</div>
@@ -724,7 +765,8 @@ let tour = { active: false, idx: -1 };
 let pf = { from: null, to: null, path: null, pathEdges: {} };
 let alpha = 1.0;
 let viewMode = 'graph';   // 'graph' = force layout, 'blocks' = module boxes
-let blocks = [];          // [{name, dir, x, y, w, h, colorIdx, count}] in blocks mode
+let blocks = [];          // [{name, x, y, w, h, count, cx, cy}] in blocks mode
+let blockEdges = [];      // aggregated directed module->module edges in blocks mode
 
 // --- Helpers ---------------------------------------------------------------
 function screenToWorld(sx, sy) { return [(sx - tx) / scale, (sy - ty) / scale]; }
@@ -770,14 +812,14 @@ document.getElementById('proj-name').textContent = DATA.project ? '· ' + DATA.p
     const eye = document.createElement('div'); eye.className = 'eye'; eye.textContent = '👁';
     row.appendChild(sw); row.appendChild(name); row.appendChild(count); row.appendChild(eye);
     row.addEventListener('click', function(ev){
-      if (ev.shiftKey) { focusNodes(l.node_ids); return; }
+      if (ev.shiftKey) { drillIntoLayer(l.id); return; }
       const off = !hiddenLayers[l.id]; hiddenLayers[l.id] = off; row.classList.toggle('off', off);
       nodes.forEach(function(n){ if (layerOf[n.id] === l.id) n.hidden = off; });
       reheat();
     });
     list.appendChild(row);
   });
-  const hint = document.createElement('div'); hint.className = 'hint'; hint.textContent = 'click = toggle · shift-click = focus';
+  const hint = document.createElement('div'); hint.className = 'hint'; hint.textContent = 'click = toggle · shift-click = drill in';
   list.appendChild(hint);
 })();
 
@@ -798,6 +840,69 @@ document.getElementById('proj-name').textContent = DATA.project ? '· ' + DATA.p
     row.addEventListener('click', function(){ if (nodeMap[e.source] != null) selectNode(nodeMap[e.source]); });
     list.appendChild(row);
   });
+})();
+
+// --- Overview panel --------------------------------------------------------
+(function(){
+  const body = document.getElementById('overview-body');
+  const langCount = {};
+  nodes.forEach(function(n){ langCount[n.language] = (langCount[n.language]||0) + 1; });
+  const langs = Object.keys(langCount).sort(function(a,b){ return langCount[b]-langCount[a]; });
+  const maxLang = langCount[langs[0]] || 1;
+  const lh = document.createElement('div'); lh.className='ov-label'; lh.textContent='Languages'; body.appendChild(lh);
+  langs.slice(0,5).forEach(function(l){
+    const row=document.createElement('div'); row.className='ov-bar';
+    const lab=document.createElement('span'); lab.className='ov-bar-l'; lab.textContent=l; lab.title=l;
+    const track=document.createElement('span'); track.className='ov-bar-t';
+    const fill=document.createElement('span'); fill.className='ov-bar-f';
+    fill.style.width=Math.round(langCount[l]/maxLang*100)+'%'; fill.style.background=hashColor(l);
+    track.appendChild(fill);
+    const c=document.createElement('span'); c.className='ov-bar-c'; c.textContent=langCount[l];
+    row.appendChild(lab); row.appendChild(track); row.appendChild(c); body.appendChild(row);
+  });
+  const avg = nodes.length ? (edges.length*2/nodes.length).toFixed(1) : '0';
+  const th=document.createElement('div'); th.className='ov-label'; th.style.marginTop='11px';
+  th.textContent='Most connected · avg '+avg+'/file'; body.appendChild(th);
+  nodes.slice().sort(function(a,b){ return (b.in_degree+b.out_degree)-(a.in_degree+a.out_degree); }).slice(0,5).forEach(function(n){
+    const b2=document.createElement('button'); b2.className='rel-item';
+    b2.textContent=n.label+'  ('+(n.in_degree+n.out_degree)+')'; b2.title=n.id;
+    b2.addEventListener('click', function(){ if (nodeMap[n.id]!=null) selectNode(nodeMap[n.id]); });
+    body.appendChild(b2);
+  });
+})();
+
+// --- File explorer tree ----------------------------------------------------
+(function(){
+  const root = {};
+  // Build a nested folder/file tree from node file paths (guard traversal).
+  nodes.forEach(function(n){
+    const path = String(n.id).replace(/\\/g,'/');
+    if (path.indexOf('..') >= 0 || path.indexOf(' ') >= 0) return;
+    const parts = path.replace(/^\/+/, '').split('/').filter(Boolean);
+    let cur = root;
+    for (let i=0;i<parts.length-1;i++){ const seg=parts[i]; cur.dirs=cur.dirs||{}; cur.dirs[seg]=cur.dirs[seg]||{}; cur=cur.dirs[seg]; }
+    (cur.files = cur.files || []).push({ name: parts[parts.length-1], id: n.id });
+  });
+  const container = document.getElementById('filetree');
+  function render(node, parentEl, depth) {
+    const dirs = node.dirs ? Object.keys(node.dirs).sort() : [];
+    dirs.forEach(function(d){
+      const row=document.createElement('div'); row.className='ft-row ft-dir'; row.style.paddingLeft=(depth*10+4)+'px';
+      const tw=document.createElement('span'); tw.className='ft-tw'; tw.textContent='▸';
+      row.appendChild(tw); row.appendChild(document.createTextNode(d));
+      const kids=document.createElement('div'); kids.className='ft-children';
+      row.addEventListener('click', function(){ const open=kids.classList.toggle('open'); tw.textContent=open?'▾':'▸'; });
+      parentEl.appendChild(row); parentEl.appendChild(kids);
+      render(node.dirs[d], kids, depth+1);
+    });
+    (node.files||[]).sort(function(a,b){ return a.name<b.name?-1:1; }).forEach(function(f){
+      const row=document.createElement('div'); row.className='ft-row ft-file'; row.style.paddingLeft=(depth*10+16)+'px';
+      row.textContent=f.name; row.title=f.id;
+      row.addEventListener('click', function(){ if (nodeMap[f.id]!=null) selectNode(nodeMap[f.id]); });
+      parentEl.appendChild(row);
+    });
+  }
+  render(root, container, 0);
 })();
 
 // --- Detail panel ----------------------------------------------------------
@@ -903,8 +1008,24 @@ function layoutBlocks() {
   });
   // Re-center around the origin so the camera math stays stable.
   const ox = -targetW/2, oy = -(cy + rowH)/2;
-  blocks.forEach(function(b){ b.x += ox; b.y += oy; });
+  blocks.forEach(function(b){ b.x += ox; b.y += oy; b.cx = b.x + b.w/2; b.cy = b.y + b.h/2; });
   nodes.forEach(function(n){ if (!n.hidden) { n.x += ox; n.y += oy; } });
+
+  // Aggregate file edges into one directed arrow per (sourceModule, targetModule).
+  const byName = {};
+  blocks.forEach(function(b){ byName[b.name] = b; });
+  const agg = {};
+  edges.forEach(function(e){
+    const sn = nodes[nodeMap[e.source]], tn = nodes[nodeMap[e.target]];
+    if (!sn || !tn || sn.hidden || tn.hidden) return;
+    if (sn.dir === tn.dir) return;                 // skip intra-module edges
+    if (!byName[sn.dir] || !byName[tn.dir]) return;
+    const key = sn.dir.length + ':' + sn.dir + ' ' + tn.dir;
+    (agg[key] = agg[key] || { s: sn.dir, t: tn.dir, count: 0 }).count++;
+  });
+  blockEdges = Object.keys(agg).map(function(k){
+    const a = agg[k]; return { from: byName[a.s], to: byName[a.t], count: a.count };
+  });
 }
 function setViewMode(mode) {
   if (mode === viewMode) return;
@@ -923,8 +1044,86 @@ document.querySelectorAll('#viewmode button').forEach(function(b){
   b.addEventListener('click', function(){ setViewMode(b.dataset.mode); });
 });
 
+// --- Drill-down: Overview <-> Layer detail ---------------------------------
+let navLevel = 'overview', activeLayer = null, preDrillHidden = null;
+function updateBreadcrumb() {
+  const bc = document.getElementById('breadcrumb');
+  if (navLevel !== 'layer-detail') { bc.style.display = 'none'; return; }
+  bc.style.display = 'flex'; bc.textContent = '';
+  const home = document.createElement('button'); home.className = 'bc-home'; home.textContent = 'Project'; home.addEventListener('click', exitDrill);
+  const sep = document.createElement('span'); sep.className = 'bc-sep'; sep.textContent = '›';
+  const cur = document.createElement('span'); cur.className = 'bc-cur'; cur.textContent = (layerName[activeLayer] || ('#' + activeLayer)) + '  ·  esc to exit';
+  bc.appendChild(home); bc.appendChild(sep); bc.appendChild(cur);
+}
+function drillIntoLayer(layerId) {
+  if (navLevel === 'layer-detail') { if (preDrillHidden) nodes.forEach(function(n,i){ n.hidden = preDrillHidden[i]; }); }
+  preDrillHidden = nodes.map(function(n){ return n.hidden; });
+  nodes.forEach(function(n){ n.hidden = (layerOf[n.id] !== layerId); });
+  navLevel = 'layer-detail'; activeLayer = layerId; updateBreadcrumb();
+  if (viewMode === 'blocks') layoutBlocks(); else alpha = Math.max(alpha, 0.8);
+  focusNodes(nodes.filter(function(n){ return !n.hidden; }).map(function(n){ return n.id; }));
+}
+function exitDrill() {
+  if (navLevel !== 'layer-detail') return;
+  if (preDrillHidden) nodes.forEach(function(n,i){ n.hidden = preDrillHidden[i]; });
+  navLevel = 'overview'; activeLayer = null; preDrillHidden = null; updateBreadcrumb();
+  if (viewMode === 'blocks') layoutBlocks(); else alpha = Math.max(alpha, 0.6);
+  focusNodes(nodes.filter(function(n){ return !n.hidden; }).map(function(n){ return n.id; }));
+}
+
 // --- Color-by --------------------------------------------------------------
 document.getElementById('colorby').addEventListener('change', function(e){ colorMode = e.target.value; });
+
+// --- Export (PNG / SVG / JSON) ---------------------------------------------
+function downloadBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+}
+function escapeXml(s){ return String(s).replace(/[<>&'"]/g, function(c){ return {'<':'&lt;','>':'&gt;','&':'&amp;',"'":'&apos;','"':'&quot;'}[c]; }); }
+function visibleNodes(){ return nodes.filter(function(n){ return !n.hidden; }); }
+const projSlug = (DATA.project || 'graph').replace(/[^a-z0-9_-]+/gi, '-');
+function exportPNG(){ canvas.toBlob(function(b){ if (b) downloadBlob(b, projSlug + '.png'); }, 'image/png'); }
+function exportJSON(){
+  const vis = {}; visibleNodes().forEach(function(n){ vis[n.id] = true; });
+  const out = {
+    project: DATA.project,
+    nodes: visibleNodes().map(function(n){ return { id:n.id, label:n.label, dir:n.dir, language:n.language, pagerank:n.pagerank, community:n.community, in_degree:n.in_degree, out_degree:n.out_degree }; }),
+    edges: edges.filter(function(e){ return vis[e.source] && vis[e.target]; }).map(function(e){ return { source:e.source, target:e.target, confidence:e.confidence }; })
+  };
+  downloadBlob(new Blob([JSON.stringify(out, null, 2)], { type:'application/json' }), projSlug + '.json');
+}
+function exportSVG(){
+  const vis = visibleNodes(); if (!vis.length) return;
+  let minX=1e9,minY=1e9,maxX=-1e9,maxY=-1e9;
+  vis.forEach(function(n){ const r=nodeRadius(n)+24; minX=Math.min(minX,n.x-r); minY=Math.min(minY,n.y-r); maxX=Math.max(maxX,n.x+r); maxY=Math.max(maxY,n.y+r); });
+  if (viewMode==='blocks') blocks.forEach(function(b){ minX=Math.min(minX,b.x); minY=Math.min(minY,b.y); maxX=Math.max(maxX,b.x+b.w); maxY=Math.max(maxY,b.y+b.h); });
+  const w=Math.ceil(maxX-minX), h=Math.ceil(maxY-minY);
+  const visSet={}; vis.forEach(function(n){ visSet[n.id]=true; });
+  let s='<svg xmlns="http://www.w3.org/2000/svg" width="'+w+'" height="'+h+'" viewBox="0 0 '+w+' '+h+'"><rect width="'+w+'" height="'+h+'" fill="#0a0d13"/>';
+  if (viewMode==='blocks') {
+    blocks.forEach(function(b){ const c=hashColor(b.name);
+      s+='<rect x="'+(b.x-minX).toFixed(1)+'" y="'+(b.y-minY).toFixed(1)+'" width="'+b.w.toFixed(1)+'" height="'+b.h.toFixed(1)+'" rx="10" fill="#ffffff" fill-opacity="0.02" stroke="'+c+'" stroke-opacity="0.5"/>';
+      s+='<text x="'+(b.x-minX+13).toFixed(1)+'" y="'+(b.y-minY+19).toFixed(1)+'" fill="'+c+'" font-family="sans-serif" font-size="13">'+escapeXml(b.name)+'</text>';
+    });
+    blockEdges.forEach(function(be){ s+='<line x1="'+(be.from.cx-minX).toFixed(1)+'" y1="'+(be.from.cy-minY).toFixed(1)+'" x2="'+(be.to.cx-minX).toFixed(1)+'" y2="'+(be.to.cy-minY).toFixed(1)+'" stroke="#7d8694" stroke-opacity="0.45" stroke-width="'+Math.min(1+Math.log2(be.count+1),5).toFixed(1)+'"/>'; });
+  } else {
+    edges.forEach(function(e){ if(!visSet[e.source]||!visSet[e.target]) return; const a=nodes[nodeMap[e.source]], b=nodes[nodeMap[e.target]];
+      s+='<line x1="'+(a.x-minX).toFixed(1)+'" y1="'+(a.y-minY).toFixed(1)+'" x2="'+(b.x-minX).toFixed(1)+'" y2="'+(b.y-minY).toFixed(1)+'" stroke="#7d8694" stroke-opacity="0.15" stroke-width="0.6"/>'; });
+  }
+  vis.forEach(function(n){ s+='<circle cx="'+(n.x-minX).toFixed(1)+'" cy="'+(n.y-minY).toFixed(1)+'" r="'+Math.max(2,nodeRadius(n)).toFixed(1)+'" fill="'+colorFor(n)+'"/>'; });
+  s+='</svg>';
+  downloadBlob(new Blob([s], { type:'image/svg+xml' }), projSlug + '.svg');
+}
+const exportMenu = document.getElementById('export-menu');
+document.getElementById('export-btn').addEventListener('click', function(e){ e.stopPropagation(); exportMenu.style.display = exportMenu.style.display==='none' ? 'block' : 'none'; });
+document.addEventListener('click', function(){ exportMenu.style.display='none'; });
+exportMenu.querySelectorAll('button').forEach(function(b){
+  b.addEventListener('click', function(e){ e.stopPropagation(); exportMenu.style.display='none';
+    const f=b.dataset.fmt; if (f==='png') exportPNG(); else if (f==='svg') exportSVG(); else exportJSON();
+  });
+});
 
 // --- Diff toggle -----------------------------------------------------------
 if (DATA.diff) {
@@ -1062,7 +1261,10 @@ window.addEventListener('mouseup', function(){
 
 document.addEventListener('keydown', function(e){
   if (e.key === '/' && document.activeElement !== searchbox) { e.preventDefault(); searchbox.focus(); }
-  else if (e.key === 'Escape') { searchbox.value=''; searchTerm=''; document.getElementById('search-hint').textContent=''; selectNode(null); }
+  else if (e.key === 'Escape') {
+    if (navLevel === 'layer-detail') { exitDrill(); return; }
+    searchbox.value=''; searchTerm=''; document.getElementById('search-hint').textContent=''; selectNode(null);
+  }
   else if (e.key === 'ArrowRight' && tour.active) { document.getElementById('tour-next').click(); }
   else if (e.key === 'ArrowLeft' && tour.active) { document.getElementById('tour-prev').click(); }
 });
@@ -1131,6 +1333,30 @@ function draw() {
       ctx.textAlign = 'left';
       ctx.font = (13/scale) + "px ui-sans-serif, system-ui, sans-serif";
     });
+    // Aggregated module->module dependency arrows (one per directed pair).
+    ctx.textAlign = 'center';
+    ctx.font = (10/scale) + "px ui-sans-serif, system-ui, sans-serif";
+    blockEdges.forEach(function(be){
+      const x1 = be.from.cx, y1 = be.from.cy, x2 = be.to.cx, y2 = be.to.cy;
+      const ang = Math.atan2(y2 - y1, x2 - x1);
+      // Back endpoints off to the box edges so arrows connect borders, not centers.
+      const sx = x1 + Math.cos(ang) * (be.from.w/2 + 2/scale);
+      const sy = y1 + Math.sin(ang) * (be.from.h/2 + 2/scale);
+      const ex = x2 - Math.cos(ang) * (be.to.w/2 + 2/scale);
+      const ey = y2 - Math.sin(ang) * (be.to.h/2 + 2/scale);
+      ctx.strokeStyle = 'rgba(125,134,148,0.45)';
+      ctx.fillStyle = 'rgba(125,134,148,0.45)';
+      ctx.lineWidth = Math.min(1 + Math.log2(be.count + 1), 5) / scale;
+      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(ex, ey); ctx.stroke();
+      const ah = 9/scale;
+      ctx.beginPath();
+      ctx.moveTo(ex, ey);
+      ctx.lineTo(ex - Math.cos(ang - 0.4)*ah, ey - Math.sin(ang - 0.4)*ah);
+      ctx.lineTo(ex - Math.cos(ang + 0.4)*ah, ey - Math.sin(ang + 0.4)*ah);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = 'rgba(180,188,200,0.85)';
+      ctx.fillText(String(be.count), (sx + ex)/2, (sy + ey)/2 - 2/scale);
+    });
     ctx.textAlign = 'center';
   }
 
@@ -1148,6 +1374,9 @@ function draw() {
 
     const onPath = hasPath && pf.pathEdges[e.source+'|'+e.target];
     const onSel = selId && (e.source===selId || e.target===selId);
+    // In blocks mode the aggregated arrows carry the dependency story; only
+    // draw raw file edges for the selected node or an active path.
+    if (viewMode === 'blocks' && !onSel && !onPath) continue;
     const surprising = e.surprise > 0.55;
 
     let a = 0.06, lw = 0.5, col = '120,128,140';
@@ -1372,6 +1601,34 @@ mod tests {
         // The Graph/Blocks view toggle and its layout function must ship.
         assert!(content.contains("data-mode=\"blocks\""));
         assert!(content.contains("function layoutBlocks"));
+    }
+
+    #[test]
+    fn embeds_dashboard_panels() {
+        let mut g = CodeGraph::new();
+        g.add_edge(
+            "crates/core/a.rs",
+            "crates/cli/b.rs",
+            "b",
+            Language::Rust,
+            Language::Rust,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("panels.html");
+        let opts = HtmlExportOptions {
+            output_path: out.clone(),
+            ..Default::default()
+        };
+        export_html(&g, &opts).unwrap();
+        let content = std::fs::read_to_string(&out).unwrap();
+        // Overview, file tree, export menu, breadcrumb, and edge aggregation all ship.
+        assert!(content.contains("id=\"overview-body\""));
+        assert!(content.contains("id=\"filetree\""));
+        assert!(content.contains("id=\"export-menu\""));
+        assert!(content.contains("id=\"breadcrumb\""));
+        assert!(content.contains("function drillIntoLayer"));
+        assert!(content.contains("blockEdges"));
+        assert!(content.contains("function exportSVG"));
     }
 
     #[test]
