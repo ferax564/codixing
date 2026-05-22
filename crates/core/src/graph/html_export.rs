@@ -877,7 +877,7 @@ document.getElementById('proj-name').textContent = DATA.project ? '· ' + DATA.p
   // Build a nested folder/file tree from node file paths (guard traversal).
   nodes.forEach(function(n){
     const path = String(n.id).replace(/\\/g,'/');
-    if (path.indexOf('..') >= 0 || path.indexOf(' ') >= 0) return;
+    if (path.indexOf('..') >= 0 || path.indexOf('\u0000') >= 0) return;
     const parts = path.replace(/^\/+/, '').split('/').filter(Boolean);
     let cur = root;
     for (let i=0;i<parts.length-1;i++){ const seg=parts[i]; cur.dirs=cur.dirs||{}; cur.dirs[seg]=cur.dirs[seg]||{}; cur=cur.dirs[seg]; }
@@ -1020,7 +1020,7 @@ function layoutBlocks() {
     if (!sn || !tn || sn.hidden || tn.hidden) return;
     if (sn.dir === tn.dir) return;                 // skip intra-module edges
     if (!byName[sn.dir] || !byName[tn.dir]) return;
-    const key = sn.dir.length + ':' + sn.dir + ' ' + tn.dir;
+    const key = sn.dir.length + ':' + sn.dir + '\u0000' + tn.dir;
     (agg[key] = agg[key] || { s: sn.dir, t: tn.dir, count: 0 }).count++;
   });
   blockEdges = Object.keys(agg).map(function(k){
@@ -1483,6 +1483,12 @@ mod tests {
         assert!(content.contains("src/b.rs"));
         // Placeholder must be fully substituted.
         assert!(!content.contains("__GRAPH_DATA_JSON__"));
+        // No raw NUL bytes: they truncate the trigram index mid-file and break
+        // text tooling. JS null-byte literals must use the `\u{0000}` escape.
+        assert!(
+            !content.contains('\u{0}'),
+            "generated HTML contains a raw NUL byte"
+        );
     }
 
     #[test]
