@@ -3,12 +3,12 @@ use std::fs;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
-use crate::chunker::cast::CastChunker;
 use crate::chunker::Chunker;
+use crate::chunker::cast::CastChunker;
 use crate::error::{CodixingError, Result};
 use crate::graph::extract::{extract_definitions, extract_references};
 use crate::graph::types::{ReferenceKind, SymbolKind};
-use crate::graph::{compute_pagerank, CallExtractor, ImportExtractor, ImportResolver};
+use crate::graph::{CallExtractor, ImportExtractor, ImportResolver, compute_pagerank};
 use crate::language::detect_language;
 use crate::persistence::{FileHashEntry, IndexMeta};
 use crate::retriever::ChunkMeta;
@@ -19,7 +19,7 @@ use super::indexing::{
     make_embed_text, normalize_path, serialize_chunk_meta_compact, symbol_from_entity,
     unix_timestamp_string,
 };
-use super::{git_diff_since, git_head_commit, Engine, GitSyncStats, SyncStats};
+use super::{Engine, GitSyncStats, SyncStats, git_diff_since, git_head_commit};
 
 /// Options that modify how [`Engine::sync_with_options`] runs.
 #[derive(Debug, Clone, Copy, Default)]
@@ -82,10 +82,16 @@ fn merge_signatures(
     old: &std::collections::HashMap<std::path::PathBuf, u64>,
     new: &std::collections::HashMap<std::path::PathBuf, u64>,
     seen_rel: &std::collections::HashSet<std::path::PathBuf>,
+    modified_rel: &std::collections::HashSet<std::path::PathBuf>,
 ) -> Vec<(std::path::PathBuf, u64)> {
+    // Keep an old fingerprint only for files still present (`seen_rel`) AND not
+    // modified this sync. A modified file's old fingerprint is dropped here and
+    // re-added below only if a fresh one was computed — otherwise the file lost
+    // its fingerprint (e.g. it stopped producing AST entities) and must NOT keep
+    // a stale baseline that a later edit could be misclassified COSMETIC against.
     let mut merged: std::collections::HashMap<std::path::PathBuf, u64> = old
         .iter()
-        .filter(|(p, _)| seen_rel.contains(*p))
+        .filter(|(p, _)| seen_rel.contains(*p) && !modified_rel.contains(*p))
         .map(|(p, &h)| (p.clone(), h))
         .collect();
     for (p, &h) in new {
@@ -1075,7 +1081,14 @@ impl Engine {
             // Persist the refreshed signature sidecar for the next sync, keyed by
             // normalized relative path (root-invariant).
             let seen_rel = self.normalized_rel_set(&seen);
-            let sigs = merge_signatures(&old_signatures, &new_signatures, &seen_rel);
+            let modified_rel = self.normalized_rel_set(
+                &changes
+                    .iter()
+                    .filter(|c| matches!(c.kind, ChangeKind::Modified))
+                    .map(|c| c.path.clone())
+                    .collect::<std::collections::HashSet<_>>(),
+            );
+            let sigs = merge_signatures(&old_signatures, &new_signatures, &seen_rel, &modified_rel);
             if let Err(e) = self.store.save_tree_signatures(&sigs) {
                 warn!(error = %e, "failed to persist tree signatures");
             }
@@ -1423,7 +1436,14 @@ impl Engine {
             self.store.save_tree_hashes(&v1_hashes)?;
             self.store.save_tree_hashes_v2(&current_hashes)?;
             let seen_rel = self.normalized_rel_set(&seen);
-            let sigs = merge_signatures(&old_signatures, &new_signatures, &seen_rel);
+            let modified_rel = self.normalized_rel_set(
+                &changes
+                    .iter()
+                    .filter(|c| matches!(c.kind, ChangeKind::Modified))
+                    .map(|c| c.path.clone())
+                    .collect::<std::collections::HashSet<_>>(),
+            );
+            let sigs = merge_signatures(&old_signatures, &new_signatures, &seen_rel, &modified_rel);
             if let Err(e) = self.store.save_tree_signatures(&sigs) {
                 warn!(error = %e, "failed to persist tree signatures");
             }
