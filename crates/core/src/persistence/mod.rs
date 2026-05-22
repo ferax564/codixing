@@ -28,6 +28,12 @@ const CHUNK_TRIGRAM_FILE: &str = "chunk_trigram.bin";
 const SYMBOLS_V2_FILE: &str = "symbols_v2.bin";
 const CONCEPTS_FILE: &str = "concepts.bin";
 const REFORMULATIONS_FILE: &str = "reformulations.bin";
+/// Sidecar file mapping each indexed file to its signature fingerprint (a stable
+/// hash over symbol signatures / imports / exports). Stored separately from
+/// `tree_hashes_v2.bin` so the existing `FileHashEntry` bitcode layout is never
+/// touched — old indexes simply lack this file and are treated as STRUCTURAL on
+/// the first sync. See `engine::fingerprint` and `Engine::sync`.
+const TREE_SIGNATURES_FILE: &str = "tree_signatures.bin";
 
 /// Extended file hash entry storing content hash alongside filesystem metadata
 /// (mtime and size) for fast pre-filtering during sync.
@@ -355,6 +361,11 @@ impl IndexStore {
         self.codixing_dir().join(TREE_HASHES_V2_FILE)
     }
 
+    /// Path to the `tree_signatures.bin` sidecar (per-file signature fingerprints).
+    pub fn tree_signatures_path(&self) -> PathBuf {
+        self.codixing_dir().join(TREE_SIGNATURES_FILE)
+    }
+
     /// Path to the `vectors/` sub-directory.
     pub fn vectors_dir(&self) -> PathBuf {
         self.codixing_dir().join(VECTORS_DIR)
@@ -565,6 +576,40 @@ impl IndexStore {
                 )
             })
             .collect())
+    }
+
+    /// Save per-file signature fingerprints to the `tree_signatures.bin` sidecar.
+    ///
+    /// Stored as a bitcode-serialized `Vec<(PathBuf, u64)>`. This is a *separate*
+    /// file from the tree hashes so adding it never alters the existing hash-store
+    /// format — an index built before this feature simply has no sidecar.
+    pub fn save_tree_signatures(&self, sigs: &[(PathBuf, u64)]) -> Result<()> {
+        let bytes = bitcode::serialize(sigs).map_err(|e| {
+            CodixingError::Serialization(format!("failed to serialize tree signatures: {e}"))
+        })?;
+        fs::write(self.tree_signatures_path(), bytes)?;
+        Ok(())
+    }
+
+    /// Load per-file signature fingerprints from `tree_signatures.bin`.
+    ///
+    /// Returns an empty vector if the sidecar does not exist (an index built
+    /// before this feature) or fails to deserialize (forward/backward
+    /// incompatibility). In both cases the caller treats every changed file as
+    /// STRUCTURAL on the first sync — the conservative default — and the sidecar
+    /// is rewritten afterwards.
+    pub fn load_tree_signatures(&self) -> Result<Vec<(PathBuf, u64)>> {
+        let path = self.tree_signatures_path();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let bytes = fs::read(&path)?;
+        match bitcode::deserialize::<Vec<(PathBuf, u64)>>(&bytes) {
+            Ok(sigs) => Ok(sigs),
+            // A corrupt or incompatible sidecar must not corrupt the index:
+            // fall back to "no fingerprints", i.e. treat all changes as structural.
+            Err(_) => Ok(Vec::new()),
+        }
     }
 
     /// Save the chunk metadata map (bitcode-serialized `Vec<(u64, ChunkMeta)>`).

@@ -331,6 +331,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Federation auto-discovery** — Auto-detects Cargo, npm, pnpm, Go workspaces, git submodules, and nested projects
 - **Read-only concurrent access** — Multiple instances share the same index; periodic reload detects writer updates automatically
 - **Incremental embedding** — `sync` skips re-embedding unchanged chunks (content hash comparison)
+- **Cosmetic-edit embedding reuse** — `sync` computes a deterministic per-file *signature fingerprint* (symbol signatures, imports, exports) from the AST; when a file's content changed but its fingerprint did not (a comment/whitespace/internal-logic edit), it refreshes BM25/symbols but reuses the cached embedding vectors instead of recomputing them. Conservative: any file without a stable fingerprint re-embeds
 - **Progress notifications** — Long-running MCP tools emit `notifications/progress` with streaming partial results so agents see live status
 - **Windows support** — Named pipe daemon, brute-force vector fallback when usearch (POSIX-only) is unavailable
 - **GitHub Action** — Automated code review with impact analysis on PRs
@@ -381,7 +382,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 1257 tests
+cargo test --workspace        # 1270 tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```

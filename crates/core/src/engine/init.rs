@@ -118,6 +118,7 @@ impl Engine {
         let file_contents: DashMap<String, Vec<u8>> = DashMap::new();
         let pending_doc_refs: DashMap<String, Vec<crate::language::doc::SymbolRef>> =
             DashMap::new();
+        let pending_signatures: DashMap<String, u64> = DashMap::new();
 
         let ctx = IndexContext {
             root: &root,
@@ -133,6 +134,7 @@ impl Engine {
             pending_calls: &pending_calls,
             file_contents: &file_contents,
             pending_doc_refs: &pending_doc_refs,
+            pending_signatures: &pending_signatures,
         };
 
         // Process files in parallel: parse → chunk → index → extract symbols.
@@ -303,6 +305,17 @@ impl Engine {
             })
             .collect();
         store.save_tree_hashes_v2(&v2_hashes)?;
+
+        // Persist signature fingerprints (keyed by normalized relative path) so
+        // the first sync after init can classify cosmetic edits without
+        // re-parsing the whole tree.
+        let signatures: Vec<(std::path::PathBuf, u64)> = pending_signatures
+            .iter()
+            .map(|e| (std::path::PathBuf::from(e.key()), *e.value()))
+            .collect();
+        if let Err(e) = store.save_tree_signatures(&signatures) {
+            warn!(error = %e, "failed to persist tree signatures at init (non-fatal)");
+        }
 
         // Persist chunk_meta in compact format (without content — content lives in Tantivy).
         let meta_pairs: Vec<(u64, ChunkMetaCompact)> = chunk_meta_map

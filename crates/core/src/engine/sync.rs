@@ -52,6 +52,50 @@ pub struct SyncOptions {
     pub rebuild_graph: bool,
 }
 
+/// Compute a stable identity key for a chunk from its scope chain and entity
+/// names, used to map a chunk to its previous embedding vector across a COSMETIC
+/// edit (one that changes bodies/comments but not signatures).
+///
+/// Returns `None` for anonymous chunks that carry neither a scope nor any entity
+/// name — those have no stable identity, so the caller falls back to re-embedding
+/// them rather than risk reusing the wrong vector.
+fn chunk_stable_key(scope_chain: &[String], entity_names: &[String]) -> Option<u64> {
+    if scope_chain.is_empty() && entity_names.is_empty() {
+        return None;
+    }
+    // Sort entity names so a pure reordering within a chunk is treated as stable.
+    let mut names: Vec<&str> = entity_names.iter().map(String::as_str).collect();
+    names.sort_unstable();
+    let key_text = format!("{}\u{1f}{}", scope_chain.join("/"), names.join(","));
+    Some(xxhash_rust::xxh3::xxh3_64(key_text.as_bytes()))
+}
+
+/// Build the complete signature-sidecar contents for the files currently on
+/// disk (`seen_rel`, normalized relative paths): start from the previous sync's
+/// fingerprints, drop entries for files no longer present, and overlay the
+/// freshly-computed fingerprints for files that changed this sync. Files with no
+/// fingerprint (no AST entities) carry no entry — their absence makes the next
+/// sync treat them as STRUCTURAL.
+///
+/// All maps are keyed by normalized relative path (root-invariant).
+fn merge_signatures(
+    old: &std::collections::HashMap<std::path::PathBuf, u64>,
+    new: &std::collections::HashMap<std::path::PathBuf, u64>,
+    seen_rel: &std::collections::HashSet<std::path::PathBuf>,
+) -> Vec<(std::path::PathBuf, u64)> {
+    let mut merged: std::collections::HashMap<std::path::PathBuf, u64> = old
+        .iter()
+        .filter(|(p, _)| seen_rel.contains(*p))
+        .map(|(p, &h)| (p.clone(), h))
+        .collect();
+    for (p, &h) in new {
+        if seen_rel.contains(p) {
+            merged.insert(p.clone(), h);
+        }
+    }
+    merged.into_iter().collect()
+}
+
 impl Engine {
     /// Re-index a single file (after modification).
     ///
@@ -65,7 +109,7 @@ impl Engine {
         self.symbols.ensure_mutable();
         let _ = self.get_trigram();
         let _ = self.get_file_trigram();
-        self.reindex_file_impl(path, true)?;
+        self.reindex_file_impl(path, true, false)?;
         self.tantivy.commit()?;
         // file_trigram already updated incrementally in reindex_file_impl.
         if let Err(e) = self
@@ -84,7 +128,26 @@ impl Engine {
         Ok(())
     }
 
-    pub(super) fn reindex_file_impl(&mut self, path: &Path, do_graph_finalize: bool) -> Result<()> {
+    /// Re-index a single file.
+    ///
+    /// `cosmetic` is `true` when the caller has classified this file's change as
+    /// COSMETIC — its content changed but its signature fingerprint did not (see
+    /// [`crate::engine::fingerprint`]). For a COSMETIC file the embedding vectors
+    /// are reused via a stable per-chunk identity key (scope + entity names) even
+    /// when chunk *content* changed, since the structure is unchanged. This is
+    /// the broadened reuse that avoids the expensive dense-embedding round-trip
+    /// on body/comment/whitespace edits.
+    ///
+    /// Returns `true` when the file was COSMETIC **and** every chunk's vector was
+    /// successfully reused (no chunk needed re-embedding). The caller uses this to
+    /// increment `SyncStats::cosmetic_skipped` only when embed work was actually
+    /// avoided.
+    pub(super) fn reindex_file_impl(
+        &mut self,
+        path: &Path,
+        do_graph_finalize: bool,
+        cosmetic: bool,
+    ) -> Result<bool> {
         // Wait for any background embedding to complete before modifying the vector index.
         self.wait_for_embeddings();
 
@@ -101,8 +164,19 @@ impl Engine {
         // ── Collect old chunk content hashes before removing data ────────
         // Used for incremental vector updates: chunks whose content hash is
         // unchanged can reuse their existing embedding vector.
-        let old_chunk_hashes: std::collections::HashMap<u64, (u64, Vec<f32>)> = {
-            let mut map = std::collections::HashMap::new();
+        //
+        // For a COSMETIC change we additionally build a *stable-identity* map
+        // keyed on (scope chain + sorted entity names). A body/comment edit
+        // changes the chunk content hash but NOT this key, so it lets us reuse
+        // the vector even though the embed text shifted. The key is only trusted
+        // when it is unique within the file — duplicate keys are dropped so an
+        // ambiguous match never reuses the wrong vector (conservative).
+        let mut old_chunk_hashes: std::collections::HashMap<u64, (u64, Vec<f32>)> =
+            std::collections::HashMap::new();
+        let mut old_stable_keys: std::collections::HashMap<u64, Vec<f32>> =
+            std::collections::HashMap::new();
+        let mut stable_key_dupes: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        {
             let vec_guard = self.vector.read().unwrap_or_else(|e| e.into_inner());
             if vec_guard.is_some() {
                 for entry in self.chunk_meta.iter() {
@@ -112,14 +186,28 @@ impl Engine {
                         let existing_vec =
                             vec_guard.as_ref().and_then(|v| v.get_vector(meta.chunk_id));
                         if let Some(vec) = existing_vec {
-                            map.insert(meta.content_hash, (meta.chunk_id, vec));
+                            old_chunk_hashes
+                                .insert(meta.content_hash, (meta.chunk_id, vec.clone()));
+                            if cosmetic {
+                                if let Some(key) =
+                                    chunk_stable_key(&meta.scope_chain, &meta.entity_names)
+                                {
+                                    if old_stable_keys.insert(key, vec).is_some() {
+                                        // Two old chunks collide on this key — ambiguous.
+                                        stable_key_dupes.insert(key);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
             drop(vec_guard);
-            map
-        };
+        }
+        // Drop ambiguous keys so they are never used for reuse.
+        for k in &stable_key_dupes {
+            old_stable_keys.remove(k);
+        }
 
         // Remove old data.
         self.tantivy.remove_file(&rel_str)?;
@@ -158,7 +246,7 @@ impl Engine {
                 path = %rel_str,
                 "notebook incremental sync not supported — run `codixing init` to reindex"
             );
-            return Ok(());
+            return Ok(false);
         }
 
         let chunker = CastChunker;
@@ -206,10 +294,19 @@ impl Engine {
         // Compare new chunk content hashes against old ones.  Chunks whose
         // content is identical reuse the previous embedding vector, avoiding
         // an expensive re-embedding round-trip through the ONNX model.
+        //
+        // For a COSMETIC file we additionally try a stable-identity key
+        // (scope + entity names) so a body/comment edit reuses the vector even
+        // though the chunk content (and embed text) shifted. This is the
+        // intended cost/accuracy tradeoff: when the file's signature fingerprint
+        // is unchanged, reusing a vector whose embed text drifted is acceptable
+        // because the retrieval-relevant structure is identical.
+        let mut all_reused = false;
         let mut vec_guard = self.vector.write().unwrap_or_else(|e| e.into_inner());
         if let (Some(emb), Some(vec_idx)) = (self.embedder.as_ref(), vec_guard.as_mut()) {
             let contextual = self.config.embedding.contextual_embeddings;
             let mut reused = 0usize;
+            let mut reused_via_stable_key = 0usize;
             let mut needs_embed: Vec<usize> = Vec::new();
 
             for (i, chunk) in chunks.iter().enumerate() {
@@ -232,10 +329,36 @@ impl Engine {
                         warn!(error = %e, chunk_id = chunk.id, "failed to reuse vector");
                     }
                     reused += 1;
+                } else if cosmetic {
+                    // Content changed but the file is COSMETIC — try the stable
+                    // identity key. Only reuses when the key is unique on both
+                    // sides (ambiguous keys were dropped above).
+                    let stable = chunk_stable_key(&chunk.scope_chain, &chunk.entity_names)
+                        .and_then(|k| old_stable_keys.get(&k));
+                    if let Some(old_vec) = stable {
+                        if let Err(e) = vec_idx.add_mut(chunk.id, old_vec, &rel_str) {
+                            warn!(error = %e, chunk_id = chunk.id, "failed to reuse vector (cosmetic)");
+                        }
+                        reused += 1;
+                        reused_via_stable_key += 1;
+                    } else {
+                        // No stable match (anonymous chunk, new chunk, or chunk
+                        // count changed) — fall back to re-embedding it.
+                        needs_embed.push(i);
+                    }
                 } else {
                     needs_embed.push(i);
                 }
             }
+
+            // A file counts as a cosmetic-skip only when it was classified
+            // COSMETIC, at least one chunk was reused via the stable key (proving
+            // the broadened reuse actually fired), and NO chunk required
+            // re-embedding — i.e. the embed round-trip was fully avoided.
+            all_reused = cosmetic
+                && reused_via_stable_key > 0
+                && needs_embed.is_empty()
+                && !chunks.is_empty();
 
             if !needs_embed.is_empty() {
                 let texts: Vec<String> = needs_embed
@@ -266,7 +389,9 @@ impl Engine {
             if reused > 0 {
                 debug!(
                     reused,
+                    reused_via_stable_key,
                     re_embedded = needs_embed.len(),
+                    cosmetic,
                     "incremental vector update"
                 );
             }
@@ -379,7 +504,7 @@ impl Engine {
         }
 
         debug!(path = %abs_path.display(), chunks = chunks.len(), "reindexed file");
-        Ok(())
+        Ok(all_reused)
     }
 
     /// Inner removal: all index ops except `tantivy.commit()` and graph PageRank finalization.
@@ -478,6 +603,23 @@ impl Engine {
     /// Tantivy commit for the entire batch, then runs PageRank exactly once.
     /// For N-file batches (e.g. after `git pull`) this reduces N fsyncs to 1.
     pub fn apply_changes(&mut self, changes: &[crate::watcher::FileChange]) -> Result<()> {
+        // No cosmetic classification — every modified file re-embeds as usual.
+        self.apply_changes_classified(changes, &std::collections::HashSet::new())?;
+        Ok(())
+    }
+
+    /// Apply a batch of changes, treating the absolute paths in `cosmetic` as
+    /// COSMETIC (signature fingerprint unchanged → reuse embedding vectors).
+    ///
+    /// Returns the number of files that were classified COSMETIC **and** had all
+    /// chunk vectors successfully reused (the embed round-trip fully avoided).
+    /// Used by [`Engine::sync`] / [`Engine::sync_with_progress`] to populate
+    /// [`SyncStats::cosmetic_skipped`].
+    pub(super) fn apply_changes_classified(
+        &mut self,
+        changes: &[crate::watcher::FileChange],
+        cosmetic: &std::collections::HashSet<std::path::PathBuf>,
+    ) -> Result<usize> {
         if self.read_only {
             return Err(CodixingError::ReadOnly);
         }
@@ -485,20 +627,27 @@ impl Engine {
         use crate::watcher::ChangeKind;
 
         if changes.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
 
         // Force-init lazy trigram indexes so they're available for mutation.
         let _ = self.get_trigram();
         let _ = self.get_file_trigram();
 
+        let mut cosmetic_skipped = 0usize;
+
         for change in changes {
             match change.kind {
                 ChangeKind::Modified => {
                     // do_graph_finalize=false — accumulate edge updates but
                     // defer PageRank until after all files are processed.
-                    if let Err(e) = self.reindex_file_impl(&change.path, false) {
-                        warn!(path = %change.path.display(), error = %e, "failed to reindex");
+                    let is_cosmetic = cosmetic.contains(&change.path);
+                    match self.reindex_file_impl(&change.path, false, is_cosmetic) {
+                        Ok(true) => cosmetic_skipped += 1,
+                        Ok(false) => {}
+                        Err(e) => {
+                            warn!(path = %change.path.display(), error = %e, "failed to reindex")
+                        }
                     }
                 }
                 ChangeKind::Removed => {
@@ -545,7 +694,10 @@ impl Engine {
                 "cascading re-index to callers of changed files"
             );
             for path in &cascade_paths {
-                if let Err(e) = self.reindex_file_impl(path, false) {
+                // Cascade reindexes (callers of changed files) are never treated
+                // as cosmetic — their resolved import/call edges may shift even
+                // when their own signatures did not.
+                if let Err(e) = self.reindex_file_impl(path, false, false) {
                     warn!(path = %path.display(), error = %e, "cascade-reindex caller failed");
                 }
             }
@@ -586,7 +738,106 @@ impl Engine {
             }
         }
 
-        Ok(())
+        Ok(cosmetic_skipped)
+    }
+
+    /// Classify modified files as COSMETIC or STRUCTURAL by comparing each file's
+    /// freshly-computed signature fingerprint against the one stored last sync.
+    ///
+    /// Inputs:
+    /// - `changes`: the full change set; only [`ChangeKind::Modified`] files are
+    ///   candidates. A brand-new file has no prior fingerprint to compare against
+    ///   and is therefore always STRUCTURAL.
+    /// - `old_signatures`: per-file fingerprints from the previous sync, keyed by
+    ///   normalized relative path.
+    ///
+    /// Returns:
+    /// - `cosmetic`: **absolute** paths whose content changed but whose
+    ///   fingerprint did NOT — safe to reuse embeddings. Absolute so they match
+    ///   the `FileChange::path` keys used by [`Engine::apply_changes_classified`].
+    /// - `new_signatures`: freshly-computed fingerprints keyed by **normalized
+    ///   relative path** (root-invariant) for every changed file that has one.
+    ///   Files with no fingerprint (no AST entities) are omitted.
+    ///
+    /// Conservative by construction: any file that can't be parsed, has no AST
+    /// entities, or has no stored prior fingerprint is left out of `cosmetic`
+    /// (→ STRUCTURAL → full re-embed).
+    fn classify_changes(
+        &self,
+        changes: &[crate::watcher::FileChange],
+        old_signatures: &std::collections::HashMap<std::path::PathBuf, u64>,
+    ) -> (
+        std::collections::HashSet<std::path::PathBuf>,
+        std::collections::HashMap<std::path::PathBuf, u64>,
+    ) {
+        use super::fingerprint::signature_fingerprint;
+        use crate::watcher::ChangeKind;
+
+        let mut cosmetic = std::collections::HashSet::new();
+        let mut new_signatures = std::collections::HashMap::new();
+
+        for change in changes {
+            if !matches!(change.kind, ChangeKind::Modified) {
+                continue;
+            }
+            // Parse the file to extract its current entities. A read/parse failure
+            // is non-fatal here — we simply leave the file STRUCTURAL.
+            let source = match fs::read(&change.path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let result = match self.parser.parse_file(&change.path, &source) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let Some(fp) = signature_fingerprint(&result.entities) else {
+                // No AST entities (config/doc/unsupported) — STRUCTURAL.
+                continue;
+            };
+            // Key signatures by the normalized relative path so they match the
+            // sidecar written by `init` regardless of canonical-vs-config root.
+            let rel = self.config.normalize_path(&change.path).unwrap_or_else(|| {
+                normalize_path(
+                    change
+                        .path
+                        .strip_prefix(&self.config.root)
+                        .unwrap_or(&change.path),
+                )
+            });
+            let rel_key = std::path::PathBuf::from(&rel);
+            new_signatures.insert(rel_key.clone(), fp);
+
+            // A file is COSMETIC iff it has a stored prior fingerprint that
+            // matches the freshly-computed one. The presence of a stored
+            // fingerprint already implies the file was previously indexed, so we
+            // don't additionally gate on `old_hashes` (whose keys can differ in
+            // canonical-vs-config-root form between `init` and `sync`). A
+            // brand-new file simply has no stored fingerprint → STRUCTURAL.
+            if let Some(&old_fp) = old_signatures.get(&rel_key) {
+                if old_fp == fp {
+                    cosmetic.insert(change.path.clone());
+                }
+            }
+        }
+
+        (cosmetic, new_signatures)
+    }
+
+    /// Map a set of absolute file paths to their normalized relative paths,
+    /// matching the keys used in the signature sidecar.
+    fn normalized_rel_set(
+        &self,
+        abs_paths: &std::collections::HashSet<std::path::PathBuf>,
+    ) -> std::collections::HashSet<std::path::PathBuf> {
+        abs_paths
+            .iter()
+            .map(|p| {
+                let rel = self.config.normalize_path(p).unwrap_or_else(|| {
+                    normalize_path(p.strip_prefix(&self.config.root).unwrap_or(p))
+                });
+                std::path::PathBuf::from(rel)
+            })
+            .collect()
     }
 
     /// Embed all chunks that are in the BM25 index but not yet in the vector index.
@@ -698,6 +949,14 @@ impl Engine {
             .unwrap_or_default()
             .into_iter()
             .collect();
+        // Load stored signature fingerprints (empty for indexes built before this
+        // feature → every change classified STRUCTURAL on the first sync).
+        let old_signatures: HashMap<std::path::PathBuf, u64> = self
+            .store
+            .load_tree_signatures()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
 
         let current_files = super::indexing::walk_source_files(&self.config.root, &self.config)?;
 
@@ -779,8 +1038,14 @@ impl Engine {
             modified, removed, unchanged, skipped_by_mtime, "syncing index"
         );
 
+        // SIGFP: keep this classification + sidecar persistence in sync with the
+        // identical block in `sync_with_progress`.
+        let (cosmetic, new_signatures) = self.classify_changes(&changes, &old_signatures);
+        let cosmetic_count = cosmetic.len();
+
+        let mut cosmetic_skipped = 0usize;
         if !changes.is_empty() {
-            self.apply_changes(&changes)?;
+            cosmetic_skipped = self.apply_changes_classified(&changes, &cosmetic)?;
             self.save()?;
             // Override the hashes written by save() (which only covers files parsed
             // this session) with the complete current-file set computed here.
@@ -791,6 +1056,13 @@ impl Engine {
                 .collect();
             self.store.save_tree_hashes(&v1_hashes)?;
             self.store.save_tree_hashes_v2(&current_hashes)?;
+            // Persist the refreshed signature sidecar for the next sync, keyed by
+            // normalized relative path (root-invariant).
+            let seen_rel = self.normalized_rel_set(&seen);
+            let sigs = merge_signatures(&old_signatures, &new_signatures, &seen_rel);
+            if let Err(e) = self.store.save_tree_signatures(&sigs) {
+                warn!(error = %e, "failed to persist tree signatures");
+            }
         } else {
             // Even if nothing changed content-wise, update the v2 hashes
             // to capture any mtime+size updates (e.g. file was touched).
@@ -800,6 +1072,11 @@ impl Engine {
             info!("index already up-to-date");
         }
 
+        debug!(
+            cosmetic_classified = cosmetic_count,
+            cosmetic_skipped, "signature-fingerprint classification"
+        );
+
         self.filter_pipeline.cleanup();
 
         Ok(SyncStats {
@@ -807,6 +1084,7 @@ impl Engine {
             modified,
             removed,
             unchanged,
+            cosmetic_skipped,
         })
     }
 
@@ -1027,6 +1305,13 @@ impl Engine {
             .unwrap_or_default()
             .into_iter()
             .collect();
+        // Load stored signature fingerprints (empty for pre-feature indexes).
+        let old_signatures: HashMap<std::path::PathBuf, u64> = self
+            .store
+            .load_tree_signatures()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
 
         let current_files = super::indexing::walk_source_files(&self.config.root, &self.config)?;
 
@@ -1106,8 +1391,13 @@ impl Engine {
             total_changes, added, modified, removed,
         ));
 
+        // SIGFP: keep this classification + sidecar persistence in sync with the
+        // identical block in `sync`.
+        let (cosmetic, new_signatures) = self.classify_changes(&changes, &old_signatures);
+
+        let mut cosmetic_skipped = 0usize;
         if !changes.is_empty() {
-            self.apply_changes(&changes)?;
+            cosmetic_skipped = self.apply_changes_classified(&changes, &cosmetic)?;
             on_progress("persisting index");
             self.save()?;
             let v1_hashes: Vec<(std::path::PathBuf, u64)> = current_hashes
@@ -1116,6 +1406,11 @@ impl Engine {
                 .collect();
             self.store.save_tree_hashes(&v1_hashes)?;
             self.store.save_tree_hashes_v2(&current_hashes)?;
+            let seen_rel = self.normalized_rel_set(&seen);
+            let sigs = merge_signatures(&old_signatures, &new_signatures, &seen_rel);
+            if let Err(e) = self.store.save_tree_signatures(&sigs) {
+                warn!(error = %e, "failed to persist tree signatures");
+            }
         } else if skipped_by_mtime != unchanged || !current_hashes.is_empty() {
             self.store.save_tree_hashes_v2(&current_hashes)?;
         }
@@ -1129,6 +1424,7 @@ impl Engine {
             modified,
             removed,
             unchanged,
+            cosmetic_skipped,
         })
     }
 
@@ -1386,5 +1682,292 @@ impl Engine {
         };
         self.store.save_meta(&meta)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod sigfp_tests {
+    //! Tests for signature-fingerprint COSMETIC/STRUCTURAL sync classification.
+    //!
+    //! The embedding-reuse assertions need a working embedder (ONNX runtime).
+    //! When the model cannot be loaded (e.g. CI without `ORT_DYLIB_PATH`) the
+    //! engine runs BM25-only and these tests skip gracefully with a printed
+    //! note rather than failing — the deterministic classification logic itself
+    //! is covered by the unit tests in `engine::fingerprint`.
+
+    use super::*;
+    use crate::config::IndexConfig;
+    use std::collections::HashMap;
+    use std::fs;
+    use tempfile::tempdir;
+
+    const ORIGINAL: &str = r#"
+pub fn add(a: i32, b: i32) -> i32 {
+    // original comment
+    a + b
+}
+
+pub struct Config {
+    pub verbose: bool,
+}
+"#;
+
+    /// Same signatures, different body + comment (COSMETIC).
+    const BODY_ONLY: &str = r#"
+pub fn add(a: i32, b: i32) -> i32 {
+    // a completely different comment explaining the addition in detail
+    let sum = a + b;
+    sum
+}
+
+pub struct Config {
+    pub verbose: bool,
+}
+"#;
+
+    /// A new parameter on `add` (STRUCTURAL).
+    const SIGNATURE_CHANGE: &str = r#"
+pub fn add(a: i32, b: i32, c: i32) -> i32 {
+    a + b + c
+}
+
+pub struct Config {
+    pub verbose: bool,
+}
+"#;
+
+    fn embedded_config(root: &std::path::Path) -> IndexConfig {
+        let mut cfg = IndexConfig::new(root);
+        cfg.embedding.enabled = true;
+        cfg
+    }
+
+    fn write_main(root: &std::path::Path, body: &str) {
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("main.rs"), body).unwrap();
+    }
+
+    /// Build an embedded engine over `src/main.rs`. Returns `None` (after printing
+    /// a skip note) when the embedder failed to load — vector-reuse assertions
+    /// cannot run without it.
+    fn build_embedded(root: &std::path::Path) -> Option<Engine> {
+        let engine = Engine::init(root, embedded_config(root)).unwrap();
+        if engine.embedder.is_none() {
+            eprintln!(
+                "SKIP: embedder unavailable (set ORT_DYLIB_PATH) — cosmetic-reuse \
+                 assertions skipped; classification logic covered by fingerprint unit tests"
+            );
+            return None;
+        }
+        // init embeds in a background thread — block until vectors are populated
+        // so a snapshot taken immediately after build is complete.
+        engine.wait_for_embeddings();
+        Some(engine)
+    }
+
+    /// Snapshot every chunk vector for `src/main.rs` keyed by stable identity key.
+    fn vector_snapshot(engine: &Engine) -> HashMap<u64, Vec<f32>> {
+        let mut out = HashMap::new();
+        let vec_guard = engine.vector.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(v) = vec_guard.as_ref() {
+            for entry in engine.chunk_meta.iter() {
+                let meta = entry.value();
+                if meta.file_path == "src/main.rs" {
+                    if let Some(key) = chunk_stable_key(&meta.scope_chain, &meta.entity_names) {
+                        if let Some(vec) = v.get_vector(meta.chunk_id) {
+                            out.insert(key, vec);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn cosmetic_edit_reuses_embeddings() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write_main(root, ORIGINAL);
+
+        let mut engine = match build_embedded(root) {
+            Some(e) => e,
+            None => return,
+        };
+
+        let before = vector_snapshot(&engine);
+        assert!(!before.is_empty(), "expected at least one embedded chunk");
+
+        // Edit body + comment only — signatures unchanged.
+        write_main(root, BODY_ONLY);
+        let stats = engine.sync().unwrap();
+
+        assert_eq!(
+            stats.cosmetic_skipped, 1,
+            "body-only edit must be classified COSMETIC and reuse embeddings"
+        );
+
+        // The reused vectors must be (near-)identical to the pre-edit vectors.
+        // We use cosine similarity rather than byte equality because the HNSW
+        // backend may round-trip f32 with negligible noise; a genuine re-embed
+        // of the changed body would shift the vector far more than that.
+        let after = vector_snapshot(&engine);
+        let mut compared = 0usize;
+        for (key, old_vec) in &before {
+            if let Some(new_vec) = after.get(key) {
+                let sim = cosine(old_vec, new_vec);
+                // HNSW f32 round-trip introduces ~1e-3 noise; a real re-embed of
+                // the changed body drops cosine to ~0.98 (see signature test).
+                assert!(
+                    sim > 0.999,
+                    "COSMETIC reuse must keep the embedding vector; cosine={sim}"
+                );
+                compared += 1;
+            }
+        }
+        assert!(
+            compared > 0,
+            "expected to compare at least one reused vector"
+        );
+    }
+
+    /// Cosine similarity between two equal-length vectors.
+    fn cosine(a: &[f32], b: &[f32]) -> f32 {
+        let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+        let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if na == 0.0 || nb == 0.0 {
+            return 0.0;
+        }
+        dot / (na * nb)
+    }
+
+    #[test]
+    fn signature_change_reembeds() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write_main(root, ORIGINAL);
+
+        let mut engine = match build_embedded(root) {
+            Some(e) => e,
+            None => return,
+        };
+
+        let before = vector_snapshot(&engine);
+
+        // Add a parameter to `add` — STRUCTURAL.
+        write_main(root, SIGNATURE_CHANGE);
+        let stats = engine.sync().unwrap();
+
+        assert_eq!(
+            stats.cosmetic_skipped, 0,
+            "a parameter change must be classified STRUCTURAL (re-embed)"
+        );
+
+        // The function chunk's vector must have genuinely changed (re-embedded).
+        // Its stable key (entity name `add`) is identical across the edit, so a
+        // materially different vector proves a real re-embed, not reuse.
+        let after = vector_snapshot(&engine);
+        let mut any_reembedded = false;
+        let mut compared = 0usize;
+        for (key, old_vec) in &before {
+            if let Some(new_vec) = after.get(key) {
+                compared += 1;
+                // A genuine re-embed shifts cosine well below the HNSW noise
+                // floor (~0.98 measured vs ~0.9997 for pure round-trip).
+                if cosine(old_vec, new_vec) < 0.99 {
+                    any_reembedded = true;
+                }
+            }
+        }
+        // Guard against silent pass if no chunk was comparable across the edit.
+        assert!(compared > 0, "expected to compare at least one chunk");
+        assert!(
+            any_reembedded,
+            "STRUCTURAL change must re-embed at least one chunk (vector must differ)"
+        );
+    }
+
+    #[test]
+    fn old_index_without_signatures_is_structural() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write_main(root, ORIGINAL);
+
+        let mut engine = match build_embedded(root) {
+            Some(e) => e,
+            None => return,
+        };
+
+        // Simulate a pre-feature index: the signature sidecar does not exist.
+        // (init does not write it; sync writes it on the first run.) Ensure it
+        // is absent before the first sync.
+        let sig_path = engine.store.tree_signatures_path();
+        let _ = fs::remove_file(&sig_path);
+        assert!(
+            !sig_path.exists(),
+            "precondition: signature sidecar must be absent (old index)"
+        );
+
+        // A body-only edit on an index with no stored fingerprints must be
+        // treated as STRUCTURAL — there is nothing to compare against, so we
+        // must NOT reuse (which could otherwise reuse a stale vector).
+        write_main(root, BODY_ONLY);
+        let stats = engine.sync().unwrap();
+        assert_eq!(
+            stats.cosmetic_skipped, 0,
+            "first sync on a pre-feature index must be STRUCTURAL, not COSMETIC"
+        );
+
+        // The sidecar must now have been written, so the *next* equivalent edit
+        // can be classified COSMETIC.
+        assert!(
+            sig_path.exists(),
+            "sync must write the signature sidecar for subsequent syncs"
+        );
+    }
+
+    #[test]
+    fn structural_then_cosmetic_transition() {
+        // After a STRUCTURAL change (which rewrites the signature baseline), a
+        // subsequent body-only edit on the new structure must be COSMETIC.
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write_main(root, ORIGINAL);
+
+        let mut engine = match build_embedded(root) {
+            Some(e) => e,
+            None => return,
+        };
+
+        // A signature change: STRUCTURAL, and it refreshes the stored fingerprint
+        // to match the new (3-arg) signature.
+        write_main(root, SIGNATURE_CHANGE);
+        let first = engine.sync().unwrap();
+        assert_eq!(
+            first.cosmetic_skipped, 0,
+            "parameter change must be STRUCTURAL"
+        );
+
+        // Now edit only the body of the 3-arg `add` — signatures unchanged vs the
+        // new baseline → COSMETIC.
+        let body_edit_3arg = r#"
+pub fn add(a: i32, b: i32, c: i32) -> i32 {
+    // reworked body, identical signature
+    let total = a + b;
+    total + c
+}
+
+pub struct Config {
+    pub verbose: bool,
+}
+"#;
+        write_main(root, body_edit_3arg);
+        let second = engine.sync().unwrap();
+        assert_eq!(
+            second.cosmetic_skipped, 1,
+            "body-only edit on the refreshed baseline must be COSMETIC"
+        );
     }
 }

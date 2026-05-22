@@ -2511,6 +2511,12 @@ fn cmd_sync(
         stats.unchanged,
         start.elapsed().as_secs_f64(),
     );
+    if stats.cosmetic_skipped > 0 {
+        eprintln!(
+            "  {} cosmetic edit(s) reused cached embeddings (signatures unchanged)",
+            stats.cosmetic_skipped,
+        );
+    }
 
     Ok(())
 }
