@@ -36,7 +36,7 @@ use crate::language::{EntityKind, SemanticEntity, Visibility};
 ///
 /// The hash is stable across runs and platforms: entity descriptors are sorted
 /// before hashing so extraction order does not affect the result.
-pub fn signature_fingerprint(entities: &[SemanticEntity]) -> Option<u64> {
+pub fn signature_fingerprint(entities: &[SemanticEntity], source: &[u8]) -> Option<u64> {
     if entities.is_empty() {
         // No AST-derived structure to fingerprint (config, docs, plain text,
         // or unsupported language). Be conservative — let the caller re-embed.
@@ -46,8 +46,13 @@ pub fn signature_fingerprint(entities: &[SemanticEntity]) -> Option<u64> {
     // Build one canonical descriptor line per entity. We intentionally include
     // only signature-level information:
     //   kind | scope::name | signature | visibility | sorted type relations
-    // and exclude byte/line ranges, doc comments, and bodies.
-    let mut descriptors: Vec<String> = entities.iter().map(entity_descriptor).collect();
+    // and exclude byte/line ranges, doc comments, and function bodies — EXCEPT
+    // for aggregate kinds (struct/enum/interface) whose members are not emitted
+    // as separate entities (see `entity_descriptor`).
+    let mut descriptors: Vec<String> = entities
+        .iter()
+        .map(|e| entity_descriptor(e, source))
+        .collect();
 
     // Sort so the fingerprint is independent of extraction order. A reordering
     // of declarations within a file is itself a cosmetic change.
@@ -59,8 +64,17 @@ pub fn signature_fingerprint(entities: &[SemanticEntity]) -> Option<u64> {
     Some(xxhash_rust::xxh3::xxh3_64(joined.as_bytes()))
 }
 
-/// Render a single entity into a canonical, body-free descriptor string.
-fn entity_descriptor(e: &SemanticEntity) -> String {
+/// Render a single entity into a canonical descriptor string.
+///
+/// Function/method bodies are excluded (their `signature` stops at the body),
+/// so a body-only edit does not change the descriptor. But aggregate kinds —
+/// `struct`, `enum`, `interface` — keep their members (field/variant names and
+/// types) *inside* the braces, and those members are NOT emitted as separate
+/// entities, so the signature line alone (everything before `{`) would miss a
+/// field/variant rename. For those kinds we fold a hash of the entity's full
+/// source span into the descriptor. These kinds carry no executable body, so
+/// this does not reintroduce body-sensitivity for functions.
+fn entity_descriptor(e: &SemanticEntity, source: &[u8]) -> String {
     let scoped_name = if e.scope.is_empty() {
         e.name.clone()
     } else {
@@ -80,8 +94,18 @@ fn entity_descriptor(e: &SemanticEntity) -> String {
         .collect();
     relations.sort_unstable();
 
+    // Member-bearing aggregates: hash the full span so member renames/additions
+    // (invisible to the pre-brace signature) change the fingerprint.
+    let members = match e.kind {
+        EntityKind::Struct | EntityKind::Enum | EntityKind::Interface => source
+            .get(e.byte_range.clone())
+            .map(|b| xxhash_rust::xxh3::xxh3_64(b).to_string())
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
+
     format!(
-        "{kind}|{scoped_name}|{signature}|{visibility}|{relations}",
+        "{kind}|{scoped_name}|{signature}|{visibility}|{relations}|{members}",
         kind = entity_kind_tag(&e.kind),
         relations = relations.join(","),
     )
@@ -142,7 +166,7 @@ mod tests {
     fn empty_entities_yield_no_fingerprint() {
         // A file with no AST entities (config / docs) must not be fingerprinted —
         // the caller treats this as STRUCTURAL.
-        assert_eq!(signature_fingerprint(&[]), None);
+        assert_eq!(signature_fingerprint(&[], b""), None);
     }
 
     #[test]
@@ -162,8 +186,11 @@ mod tests {
             ),
         ];
         let b = a.clone();
-        assert_eq!(signature_fingerprint(&a), signature_fingerprint(&b));
-        assert!(signature_fingerprint(&a).is_some());
+        assert_eq!(
+            signature_fingerprint(&a, b""),
+            signature_fingerprint(&b, b"")
+        );
+        assert!(signature_fingerprint(&a, b"").is_some());
     }
 
     #[test]
@@ -185,7 +212,10 @@ mod tests {
         let mut b = a.clone();
         b.reverse();
         // Reordering declarations is a cosmetic change → same fingerprint.
-        assert_eq!(signature_fingerprint(&a), signature_fingerprint(&b));
+        assert_eq!(
+            signature_fingerprint(&a, b""),
+            signature_fingerprint(&b, b"")
+        );
     }
 
     #[test]
@@ -203,8 +233,8 @@ mod tests {
             Visibility::Public,
         )];
         assert_ne!(
-            signature_fingerprint(&before),
-            signature_fingerprint(&after)
+            signature_fingerprint(&before, b""),
+            signature_fingerprint(&after, b"")
         );
     }
 
@@ -223,8 +253,8 @@ mod tests {
             Visibility::Public,
         )];
         assert_ne!(
-            signature_fingerprint(&before),
-            signature_fingerprint(&after)
+            signature_fingerprint(&before, b""),
+            signature_fingerprint(&after, b"")
         );
     }
 
@@ -243,8 +273,8 @@ mod tests {
             Visibility::Public,
         )];
         assert_ne!(
-            signature_fingerprint(&before),
-            signature_fingerprint(&after)
+            signature_fingerprint(&before, b""),
+            signature_fingerprint(&after, b"")
         );
     }
 
@@ -263,8 +293,8 @@ mod tests {
             Visibility::Private,
         )];
         assert_ne!(
-            signature_fingerprint(&before),
-            signature_fingerprint(&after)
+            signature_fingerprint(&before, b""),
+            signature_fingerprint(&after, b"")
         );
     }
 
@@ -286,8 +316,8 @@ mod tests {
             target: "u64".to_string(),
         }];
         assert_ne!(
-            signature_fingerprint(&[before]),
-            signature_fingerprint(&[after])
+            signature_fingerprint(&[before], b""),
+            signature_fingerprint(&[after], b"")
         );
     }
 
@@ -308,6 +338,68 @@ mod tests {
             Visibility::Public,
         );
         b.scope = vec!["Bar".to_string()];
-        assert_ne!(signature_fingerprint(&[a]), signature_fingerprint(&[b]));
+        assert_ne!(
+            signature_fingerprint(&[a], b""),
+            signature_fingerprint(&[b], b"")
+        );
+    }
+
+    /// Helper: a struct entity whose `byte_range` spans the whole `src`.
+    fn struct_over(name: &str, src: &[u8]) -> SemanticEntity {
+        SemanticEntity {
+            kind: EntityKind::Struct,
+            name: name.to_string(),
+            signature: Some(format!("pub struct {name}")),
+            doc_comment: None,
+            byte_range: 0..src.len(),
+            line_range: 0..0,
+            scope: Vec::new(),
+            visibility: Visibility::Public,
+            type_relations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn struct_field_rename_changes_fingerprint() {
+        // Same pre-brace signature, renamed field with an unchanged type. Field
+        // names live inside the braces and are not separate entities, so without
+        // the member-span hash this would be misclassified COSMETIC and reuse a
+        // stale vector. Regression for the codex P2.
+        let a = b"pub struct Config { verbose: bool }";
+        let b = b"pub struct Config { debug: bool }";
+        assert_ne!(
+            signature_fingerprint(&[struct_over("Config", a)], a),
+            signature_fingerprint(&[struct_over("Config", b)], b),
+            "a struct field rename must change the fingerprint (STRUCTURAL)"
+        );
+    }
+
+    #[test]
+    fn struct_body_identical_keeps_fingerprint() {
+        // Identical struct text → identical fingerprint (the member hash is stable).
+        let s = b"pub struct Config { verbose: bool }";
+        assert_eq!(
+            signature_fingerprint(&[struct_over("Config", s)], s),
+            signature_fingerprint(&[struct_over("Config", s)], s),
+        );
+    }
+
+    #[test]
+    fn function_fingerprint_ignores_source_body() {
+        // Functions exclude bodies (only struct/enum/interface fold member text),
+        // so the same function signature fingerprints identically regardless of
+        // the surrounding source bytes — a body edit stays COSMETIC.
+        let f = || {
+            vec![entity(
+                EntityKind::Function,
+                "f",
+                Some("fn f(a: u32) -> u32"),
+                Visibility::Public,
+            )]
+        };
+        assert_eq!(
+            signature_fingerprint(&f(), b"fn f(a: u32) -> u32 { a + 1 }"),
+            signature_fingerprint(&f(), b"fn f(a: u32) -> u32 { a + 2 }"),
+        );
     }
 }

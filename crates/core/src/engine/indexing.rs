@@ -8,8 +8,8 @@ use dashmap::DashMap;
 use rayon::prelude::*;
 use tracing::{debug, info, warn};
 
-use crate::chunker::Chunker;
 use crate::chunker::cast::CastChunker;
+use crate::chunker::Chunker;
 use crate::config::IndexConfig;
 use crate::embedder::Embedder;
 use crate::error::{CodixingError, Result};
@@ -17,10 +17,10 @@ use crate::graph::extract::{extract_definitions, extract_references};
 use crate::graph::extractor::RawImport;
 use crate::graph::types::{ReferenceKind, SymbolKind};
 use crate::graph::{CallExtractor, CodeGraph, ImportExtractor, ImportResolver};
-use crate::index::TantivyIndex;
 use crate::index::trigram::FileTrigramIndex;
+use crate::index::TantivyIndex;
 use crate::language::ipynb::{self, CellKind};
-use crate::language::{Language, SemanticEntity, detect_language};
+use crate::language::{detect_language, Language, SemanticEntity};
 use crate::parser::Parser;
 use crate::retriever::{ChunkMeta, ChunkMetaCompact};
 use crate::symbols::{Symbol, SymbolTable};
@@ -176,7 +176,7 @@ pub(super) fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
     // Record the signature fingerprint so the first post-init sync can classify
     // a cosmetic edit. Absent when there are no AST entities (→ STRUCTURAL).
     // Keyed by the normalized relative path (root-invariant).
-    if let Some(fp) = super::fingerprint::signature_fingerprint(&result.entities) {
+    if let Some(fp) = super::fingerprint::signature_fingerprint(&result.entities, &source) {
         ctx.pending_signatures.insert(rel_str.clone(), fp);
     }
 

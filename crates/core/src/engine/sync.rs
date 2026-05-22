@@ -3,12 +3,12 @@ use std::fs;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
-use crate::chunker::Chunker;
 use crate::chunker::cast::CastChunker;
+use crate::chunker::Chunker;
 use crate::error::{CodixingError, Result};
 use crate::graph::extract::{extract_definitions, extract_references};
 use crate::graph::types::{ReferenceKind, SymbolKind};
-use crate::graph::{CallExtractor, ImportExtractor, ImportResolver, compute_pagerank};
+use crate::graph::{compute_pagerank, CallExtractor, ImportExtractor, ImportResolver};
 use crate::language::detect_language;
 use crate::persistence::{FileHashEntry, IndexMeta};
 use crate::retriever::ChunkMeta;
@@ -19,7 +19,7 @@ use super::indexing::{
     make_embed_text, normalize_path, serialize_chunk_meta_compact, symbol_from_entity,
     unix_timestamp_string,
 };
-use super::{Engine, GitSyncStats, SyncStats, git_diff_since, git_head_commit};
+use super::{git_diff_since, git_head_commit, Engine, GitSyncStats, SyncStats};
 
 /// Options that modify how [`Engine::sync_with_options`] runs.
 #[derive(Debug, Clone, Copy, Default)]
@@ -309,6 +309,20 @@ impl Engine {
             let mut reused_via_stable_key = 0usize;
             let mut needs_embed: Vec<usize> = Vec::new();
 
+            // Count stable keys among the NEW chunks. A cosmetic edit that pushes
+            // a body across a chunk boundary can produce two new chunks sharing
+            // one key; reusing the single old vector for both would duplicate a
+            // stale vector. Reuse therefore requires a one-to-one match: the key
+            // must be unique on the new side here AND on the old side (dupes were
+            // already dropped from `old_stable_keys`).
+            let mut new_key_counts: std::collections::HashMap<u64, usize> =
+                std::collections::HashMap::new();
+            for chunk in chunks.iter() {
+                if let Some(k) = chunk_stable_key(&chunk.scope_chain, &chunk.entity_names) {
+                    *new_key_counts.entry(k).or_insert(0) += 1;
+                }
+            }
+
             for (i, chunk) in chunks.iter().enumerate() {
                 // Hash the full embed text (including context metadata like scope,
                 // file path, entities) so that moving a block to a different scope
@@ -331,9 +345,11 @@ impl Engine {
                     reused += 1;
                 } else if cosmetic {
                     // Content changed but the file is COSMETIC — try the stable
-                    // identity key. Only reuses when the key is unique on both
-                    // sides (ambiguous keys were dropped above).
+                    // identity key. Reuse only on a one-to-one match: the key must
+                    // be unique among the new chunks AND present (already unique)
+                    // in the old map. Ambiguous keys on either side re-embed.
                     let stable = chunk_stable_key(&chunk.scope_chain, &chunk.entity_names)
+                        .filter(|k| new_key_counts.get(k).copied() == Some(1))
                         .and_then(|k| old_stable_keys.get(&k));
                     if let Some(old_vec) = stable {
                         if let Err(e) = vec_idx.add_mut(chunk.id, old_vec, &rel_str) {
@@ -790,7 +806,7 @@ impl Engine {
                 Ok(r) => r,
                 Err(_) => continue,
             };
-            let Some(fp) = signature_fingerprint(&result.entities) else {
+            let Some(fp) = signature_fingerprint(&result.entities, &source) else {
                 // No AST entities (config/doc/unsupported) — STRUCTURAL.
                 continue;
             };
