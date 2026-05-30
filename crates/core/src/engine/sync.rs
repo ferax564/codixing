@@ -241,7 +241,15 @@ impl Engine {
         // Remove old data.
         self.tantivy.remove_file(&rel_str)?;
         self.symbols.remove_file(&rel_str);
-        {
+        // Only remove this file's vectors when we will actually re-embed (the
+        // re-add/reuse path below is gated on `self.embedder.is_some()`). Under
+        // `skip_embed` (sync --no-embed) the embedder is stashed but
+        // `self.vector` stays `Some`; removing here without re-adding would leave
+        // the changed file with ZERO vectors — the opposite of the documented
+        // `SyncOptions::skip_embed` contract ("the vector index stays stale").
+        // With this guard the existing vectors are left in place (genuinely
+        // stale) when embedding is skipped.
+        if self.embedder.is_some() {
             let mut vec_guard = self.vector.write().unwrap_or_else(|e| e.into_inner());
             if let Some(ref mut vec_idx) = *vec_guard {
                 vec_idx.remove_file(&rel_str)?;
