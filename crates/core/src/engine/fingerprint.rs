@@ -98,6 +98,21 @@ pub fn signature_fingerprint(
         }
     }
 
+    // Local items: Rust indexes items declared *inside* a function body (e.g.
+    // `fn outer() { fn inner(a: u32) {} }`) as their own entities, with their
+    // own chunks/vectors. Masking the outer body would hide a nested item's
+    // signature, so a change to it could be wrongly classified COSMETIC. If any
+    // entity begins inside a body span, bail to STRUCTURAL (re-embed the file) —
+    // we can only safely mask bodies that contain no indexed structure.
+    let has_nested_item = entities.iter().any(|e| {
+        merged
+            .iter()
+            .any(|&(bs, be)| e.byte_range.start > bs && e.byte_range.start < be)
+    });
+    if has_nested_item {
+        return None;
+    }
+
     Some(xxhash_rust::xxh3::xxh3_64(&masked(source, &merged)))
 }
 
@@ -314,5 +329,16 @@ mod tests {
             fp(&[ent(EntityKind::Function, 0..a.len())], a),
             fp(&[ent(EntityKind::Function, 0..b.len())], b),
         );
+    }
+
+    #[test]
+    fn nested_local_item_forces_structural() {
+        // A function with a local item: the inner fn is indexed as its own
+        // entity but sits inside the outer body. Masking the outer body would
+        // hide inner's signature, so the file must be STRUCTURAL (codex round-6).
+        let s = b"fn outer() { fn inner(a: u32) {} }";
+        let outer = ent(EntityKind::Function, 0..s.len());
+        let inner = ent(EntityKind::Function, 13..32); // `fn inner...` inside outer body
+        assert_eq!(fp(&[outer, inner], s), None);
     }
 }
