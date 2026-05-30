@@ -35,12 +35,15 @@ pub fn compute_pagerank(
     let mut rank: HashMap<&str, f32> = nodes.iter().map(|&p| (p, init)).collect();
 
     // Pre-compute out-edges per node (to real nodes only).
+    // `node_set` gives O(1) membership instead of an O(N) linear scan per
+    // callee, dropping the whole adjacency build from O(N^2 * d) to O(E).
+    let node_set: std::collections::HashSet<&str> = nodes.iter().copied().collect();
     let mut out_edges: HashMap<&str, Vec<&str>> = HashMap::new();
     for &path in &nodes {
         let callees: Vec<&str> = graph
             .callees(path)
             .iter()
-            .filter_map(|c| nodes.iter().find(|&&n| n == c.as_str()).copied())
+            .filter_map(|c| node_set.get(c.as_str()).copied())
             .collect();
         out_edges.insert(path, callees);
     }
@@ -157,12 +160,14 @@ pub fn compute_personalized_pagerank(
     let init = 1.0 / n as f32;
     let mut rank: HashMap<&str, f32> = nodes.iter().map(|&p| (p, init)).collect();
 
+    // O(1) membership via node_set (see compute_pagerank) — O(E) adjacency build.
+    let node_set: std::collections::HashSet<&str> = nodes.iter().copied().collect();
     let mut out_edges: HashMap<&str, Vec<&str>> = HashMap::new();
     for &path in &nodes {
         let callees: Vec<&str> = graph
             .callees(path)
             .iter()
-            .filter_map(|c| nodes.iter().find(|&&n| n == c.as_str()).copied())
+            .filter_map(|c| node_set.get(c.as_str()).copied())
             .collect();
         out_edges.insert(path, callees);
     }
@@ -275,12 +280,15 @@ pub fn compute_weighted_personalized_pagerank(
     let mut rank: HashMap<&str, f32> = nodes.iter().map(|&p| (p, init)).collect();
 
     // Pre-compute out-edges per node (to real nodes only).
+    // `node_set` gives O(1) membership instead of an O(N) linear scan per
+    // callee, dropping the whole adjacency build from O(N^2 * d) to O(E).
+    let node_set: std::collections::HashSet<&str> = nodes.iter().copied().collect();
     let mut out_edges: HashMap<&str, Vec<&str>> = HashMap::new();
     for &path in &nodes {
         let callees: Vec<&str> = graph
             .callees(path)
             .iter()
-            .filter_map(|c| nodes.iter().find(|&&n| n == c.as_str()).copied())
+            .filter_map(|c| node_set.get(c.as_str()).copied())
             .collect();
         out_edges.insert(path, callees);
     }
