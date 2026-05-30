@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
@@ -7,6 +8,39 @@ use serde::{Deserialize, Serialize};
 use crate::config::IndexConfig;
 use crate::error::{CodixingError, Result};
 use crate::graph::GraphData;
+
+/// Process-global counter making atomic-write temp filenames unique across threads.
+static ATOMIC_WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Atomically write `contents` to `path`: write a sibling temp file, fsync it,
+/// then rename it over the destination. A crash, SIGKILL, OOM, or power loss
+/// mid-write leaves either the previous file or the complete new file intact —
+/// never a truncated or zero-length one. The rename is an atomic same-filesystem
+/// replace on both Unix and Windows.
+///
+/// This replaces the bare `fs::write` (truncate-then-write) previously used by
+/// every `save_*` helper, which could corrupt `config.json` / `meta.json` /
+/// `graph.bin` / `symbols.bin` into an unloadable state on an ill-timed crash.
+fn atomic_write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    use std::io::Write;
+    let path = path.as_ref();
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("tmp");
+    let seq = ATOMIC_WRITE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".{stem}.tmp.{}.{seq}", std::process::id()));
+    {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(contents.as_ref())?;
+        f.sync_all()?;
+    }
+    match fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
 
 /// Directory name for the Codixing index store.
 const CODEFORGE_DIR: &str = ".codixing";
@@ -417,7 +451,7 @@ impl IndexStore {
         let json = serde_json::to_string_pretty(config).map_err(|e| {
             CodixingError::Serialization(format!("failed to serialize config: {e}"))
         })?;
-        fs::write(&path, json)?;
+        atomic_write(&path, json)?;
         Ok(())
     }
 
@@ -436,7 +470,7 @@ impl IndexStore {
         let path = self.codixing_dir().join(META_FILE);
         let json = serde_json::to_string_pretty(meta)
             .map_err(|e| CodixingError::Serialization(format!("failed to serialize meta: {e}")))?;
-        fs::write(&path, json)?;
+        atomic_write(&path, json)?;
         Ok(())
     }
 
@@ -466,7 +500,7 @@ impl IndexStore {
         fs::create_dir_all(self.graph_dir())?;
         let bytes = bitcode::serialize(data)
             .map_err(|e| CodixingError::Serialization(format!("failed to serialize graph: {e}")))?;
-        fs::write(self.graph_path(), bytes)?;
+        atomic_write(self.graph_path(), bytes)?;
         Ok(())
     }
 
@@ -505,7 +539,7 @@ impl IndexStore {
 
     /// Save raw bytes to the `symbols.bin` file.
     pub fn save_symbols_bytes(&self, bytes: &[u8]) -> Result<()> {
-        fs::write(self.symbols_path(), bytes)?;
+        atomic_write(self.symbols_path(), bytes)?;
         Ok(())
     }
 
@@ -520,7 +554,7 @@ impl IndexStore {
         let bytes = bitcode::serialize(hashes).map_err(|e| {
             CodixingError::Serialization(format!("failed to serialize tree hashes: {e}"))
         })?;
-        fs::write(self.tree_hashes_path(), bytes)?;
+        atomic_write(self.tree_hashes_path(), bytes)?;
         Ok(())
     }
 
@@ -538,7 +572,7 @@ impl IndexStore {
         let bytes = bitcode::serialize(hashes).map_err(|e| {
             CodixingError::Serialization(format!("failed to serialize tree hashes v2: {e}"))
         })?;
-        fs::write(self.tree_hashes_v2_path(), bytes)?;
+        atomic_write(self.tree_hashes_v2_path(), bytes)?;
         Ok(())
     }
 
@@ -587,7 +621,7 @@ impl IndexStore {
         let bytes = bitcode::serialize(sigs).map_err(|e| {
             CodixingError::Serialization(format!("failed to serialize tree signatures: {e}"))
         })?;
-        fs::write(self.tree_signatures_path(), bytes)?;
+        atomic_write(self.tree_signatures_path(), bytes)?;
         Ok(())
     }
 
@@ -617,7 +651,7 @@ impl IndexStore {
     /// Accepts a flat list of `(chunk_id, meta)` pairs rather than the DashMap
     /// directly to avoid depending on DashMap in persistence.
     pub fn save_chunk_meta_bytes(&self, bytes: &[u8]) -> Result<()> {
-        fs::write(self.chunk_meta_path(), bytes)?;
+        atomic_write(self.chunk_meta_path(), bytes)?;
         Ok(())
     }
 
