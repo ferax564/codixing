@@ -89,6 +89,13 @@ pub fn detect_communities(graph: &CodeGraph) -> CommunityResult {
     let mut community: Vec<usize> = (0..n).collect();
     let next_community_id = n;
 
+    // Total degree per community, maintained incrementally so the per-node move
+    // evaluation is O(neighbor communities) instead of an O(n) full scan to
+    // recompute sigma_tot. Community ids stay in 0..n (nodes only move to an
+    // existing node's id), so a Vec indexed by community id is sufficient.
+    // Initially each node is its own community, so its total degree is its own.
+    let mut community_degree: Vec<f64> = degree.clone();
+
     // Phase 1: Iteratively move nodes to maximize modularity gain.
     let mut improved = true;
     let max_iterations = 100;
@@ -109,11 +116,9 @@ pub fn detect_communities(graph: &CodeGraph) -> CommunityResult {
                 *comm_weights.entry(cj).or_insert(0.0) += w;
             }
 
-            // Compute sigma_tot and sigma_in for current community (excluding node i).
-            let sigma_tot_current: f64 = (0..n)
-                .filter(|&j| j != i && community[j] == current_comm)
-                .map(|j| degree[j])
-                .sum();
+            // sigma_tot of the current community excluding node i: the running
+            // community-degree total minus this node's own degree.
+            let sigma_tot_current = community_degree[current_comm] - ki;
 
             let ki_in_current = comm_weights.get(&current_comm).copied().unwrap_or(0.0);
 
@@ -129,10 +134,8 @@ pub fn detect_communities(graph: &CodeGraph) -> CommunityResult {
                     continue;
                 }
 
-                let sigma_tot_target: f64 = (0..n)
-                    .filter(|&j| community[j] == target_comm)
-                    .map(|j| degree[j])
-                    .sum();
+                // sigma_tot of the target community (node i is not in it).
+                let sigma_tot_target = community_degree[target_comm];
 
                 // Insert gain (benefit of adding i to target community).
                 let insert_gain = ki_in_target / two_m - (sigma_tot_target * ki) / (two_m * two_m);
@@ -145,6 +148,9 @@ pub fn detect_communities(graph: &CodeGraph) -> CommunityResult {
             }
 
             if best_comm != current_comm && best_gain > 1e-10 {
+                // Keep the incremental community-degree totals in sync with the move.
+                community_degree[current_comm] -= ki;
+                community_degree[best_comm] += ki;
                 community[i] = best_comm;
                 improved = true;
             }
@@ -194,19 +200,32 @@ fn compute_modularity(
     }
 
     let n = community.len();
-    let mut q = 0.0_f64;
 
-    for i in 0..n {
-        for j in 0..n {
-            if community[i] != community[j] {
-                continue;
+    // Q = (1/2m) * sum_{(i,j) same community} [A_ij - k_i*k_j/2m].
+    // Computed in O(E + N + C) instead of the original O(N^2) all-pairs scan
+    // (~4B+ HashMap lookups at 63K nodes), preserving the exact value:
+    //   A term  = sum of edge WEIGHTS adj[i][j] over same-community pairs
+    //             (self-loops are absent from adj, matching the i==j diagonal,
+    //             where the original added adj[i].get(&i)=0).
+    //   deg term= sum over same-community ordered pairs of k_i*k_j/2m
+    //           = (1/2m) * sum_c (sum of degrees in community c)^2, which
+    //             includes the i==j diagonal k_i^2 exactly as the original did.
+    let mut a_term = 0.0_f64;
+    for (i, adj_i) in adj.iter().enumerate() {
+        for (&j, &w) in adj_i {
+            if community[i] == community[j] {
+                a_term += w;
             }
-            let a_ij = adj[i].get(&j).copied().unwrap_or(0.0);
-            q += a_ij - (degree[i] * degree[j]) / two_m;
         }
     }
 
-    q / two_m
+    let mut comm_degree: HashMap<usize, f64> = HashMap::new();
+    for i in 0..n {
+        *comm_degree.entry(community[i]).or_insert(0.0) += degree[i];
+    }
+    let deg_term: f64 = comm_degree.values().map(|&s| s * s / two_m).sum();
+
+    (a_term - deg_term) / two_m
 }
 
 #[cfg(test)]
