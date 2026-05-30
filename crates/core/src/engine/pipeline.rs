@@ -215,7 +215,18 @@ impl SearchStage for PersonalizedGraphBoostStage {
 
         // Cache hit: reuse the previously-computed PPR scores. Cache miss:
         // run the 20-iteration PPR loop then insert.
-        let cache_key = seed_cache_key(&seeds, graph.node_count());
+        //
+        // The structural id folds in BOTH node and edge counts. node_count
+        // alone misses the common refactor that rewires edges without
+        // adding/removing files: the key would stay identical and the cache
+        // would return a pre-edit PPR vector for the whole TTL while the graph
+        // has actually changed. Mixing edge_count in (hash-combined so the two
+        // counts don't trivially alias) invalidates on edge-only changes too.
+        let structural_id = graph
+            .node_count()
+            .wrapping_mul(0x9E37_79B1)
+            .wrapping_add(graph.edge_count());
+        let cache_key = seed_cache_key(&seeds, structural_id);
         let ppr = if let Some(hit) = ppr_cache_get(cache_key) {
             hit
         } else {
