@@ -239,17 +239,22 @@ impl FederatedEngine {
     /// engine.
     fn maybe_evict(&self) {
         let mut lru = self.lru_order.lock().unwrap_or_else(|e| e.into_inner());
-        while lru.len() >= self.config.max_resident {
-            if let Some(victim) = lru.pop_front() {
-                let slot = &self.slots[victim];
-                let mut guard = slot.engine.write().unwrap_or_else(|e| e.into_inner());
-                if guard.is_some() {
-                    info!(
-                        project = %slot.name,
-                        "federation: evicting engine (LRU)"
-                    );
-                    *guard = None;
-                }
+        // `max_resident` is clamped to >= 1 at construction. Use a defensive
+        // `cap.max(1)` and break when the deque empties so an out-of-range
+        // value can never spin this loop while holding the LRU mutex.
+        let cap = self.config.max_resident.max(1);
+        while lru.len() >= cap {
+            let Some(victim) = lru.pop_front() else {
+                break;
+            };
+            let slot = &self.slots[victim];
+            let mut guard = slot.engine.write().unwrap_or_else(|e| e.into_inner());
+            if guard.is_some() {
+                info!(
+                    project = %slot.name,
+                    "federation: evicting engine (LRU)"
+                );
+                *guard = None;
             }
         }
     }

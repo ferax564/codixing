@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '/Users/andreaferrarelli/code/codixing/.codex/hooks/pretool-codixing.sh'",
+            "timeout": 5,
+            "statusMessage": "Codixing dogfooding check..."
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '/Users/andreaferrarelli/code/codixing/.codex/hooks/pretool-bash-codixing.sh'",
+            "timeout": 5,
+            "statusMessage": "Codixing dogfooding check (Bash)..."
+          }
+        ]
+      }
+    ]
+  }
+}
