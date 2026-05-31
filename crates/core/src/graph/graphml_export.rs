@@ -15,9 +15,18 @@ pub struct GraphmlExportOptions {
 }
 
 /// XML-escape a string for safe embedding in GraphML attributes/data.
+///
+/// Skips characters that are illegal in XML 1.0 even when numeric-escaped (the
+/// C0 control set except tab/LF/CR) — a raw control byte in a path would
+/// otherwise make the GraphML unparseable in Gephi/yEd. Then escapes the
+/// markup-significant characters.
 fn xml_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
+        // Drop XML-1.0-illegal control chars (keep tab, LF, CR).
+        if (c as u32) < 0x20 && c != '\t' && c != '\n' && c != '\r' {
+            continue;
+        }
         match c {
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),

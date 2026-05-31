@@ -15,9 +15,20 @@ pub struct CypherExportOptions {
     pub output_path: PathBuf,
 }
 
-/// Escape single quotes in strings for Cypher string literals.
+/// Escape special characters for a Cypher single-quoted string literal.
+///
+/// Backslash is escaped first (so escapes inserted afterwards aren't
+/// double-escaped), then the single quote, then the control characters that
+/// would otherwise break a `;\n`-terminated statement: a raw newline or CR in a
+/// path (legal on Unix) would split one MERGE/MATCH across lines and silently
+/// corrupt the script. NUL is dropped — it can't appear in a Cypher literal.
 fn cypher_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('\'', "\\'")
+    s.replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+        .replace('\0', "")
 }
 
 /// Map an EdgeKind to a Neo4j relationship type.
