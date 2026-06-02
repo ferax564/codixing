@@ -4,9 +4,9 @@
 //! named pipes and are not available on Unix.
 //!
 //! Named pipes are the Windows equivalent of Unix domain sockets. The daemon
-//! listens on `\\.\pipe\codixing-<hash>` (where `<hash>` is derived from the
-//! project root) and serves multiple clients concurrently. The JSON-RPC loop
-//! is shared with the Unix daemon via `run_jsonrpc_loop()`.
+//! listens on `\\.\pipe\codixing-<hash>-<profile>` (where `<hash>` is derived
+//! from the project root) and serves multiple clients concurrently. The
+//! JSON-RPC loop is shared with the Unix daemon via `run_jsonrpc_loop()`.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,16 +28,21 @@ use crate::jsonrpc::{McpProfile, run_jsonrpc_loop};
 
 /// Derive a unique pipe name from the project root path.
 ///
-/// Uses a hash of the canonicalized root path to avoid collisions between
-/// multiple project daemons. Format: `\\.\pipe\codixing-<hex_hash>`.
+/// Uses a stable hash of the canonicalized root path to avoid collisions between
+/// multiple project daemons. Format: `\\.\pipe\codixing-<hex_hash>-<profile>`.
 pub(crate) fn pipe_name_for_root(root: &Path, profile: McpProfile) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    root.hash(&mut hasher);
-    let hash = hasher.finish();
+    let hash = stable_root_hash(root);
     format!(r"\\.\pipe\codixing-{hash:016x}-{}", profile.as_str())
+}
+
+fn stable_root_hash(root: &Path) -> u64 {
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in canonical.to_string_lossy().to_ascii_lowercase().bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 // ---------------------------------------------------------------------------

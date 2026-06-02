@@ -85,11 +85,12 @@ pub fn chunk_doc(
             // Section is oversized — split at paragraph boundaries.
             let paragraphs: Vec<&str> = content.split("\n\n").collect();
             let mut acc = String::new();
-            let mut acc_byte_start = byte_start;
+            let mut acc_start_in_content = 0usize;
             // Track byte offset within the section content.
             let mut offset_in_content: usize = 0;
 
             for (i, para) in paragraphs.iter().enumerate() {
+                let para_start = offset_in_content;
                 let para_bytes = para.len();
                 let separator = if i + 1 < paragraphs.len() { 2 } else { 0 }; // "\n\n"
 
@@ -98,17 +99,16 @@ pub fn chunk_doc(
 
                 if !acc.is_empty() && combined_nws > config.max_chars {
                     // Flush accumulator.
-                    let acc_byte_end = byte_start + offset_in_content;
-                    let acc_prefix_start = clamp_to_char_boundary(
-                        content,
-                        offset_in_content.saturating_sub(acc.len()),
-                    );
+                    let acc_prefix_start = clamp_to_char_boundary(content, acc_start_in_content);
+                    let acc_byte_start = byte_start + acc_prefix_start;
+                    let acc_byte_end = acc_byte_start + acc.len();
                     let acc_line_start = section.line_range.start
                         + content[..acc_prefix_start]
                             .chars()
                             .filter(|&c| c == '\n')
                             .count();
-                    let acc_line_end = acc_line_start + acc.chars().filter(|&c| c == '\n').count();
+                    let acc_line_end =
+                        acc_line_start + acc.chars().filter(|&c| c == '\n').count() + 1;
                     raw.push(RawChunk {
                         content: acc.clone(),
                         byte_start: acc_byte_start,
@@ -117,11 +117,12 @@ pub fn chunk_doc(
                         line_end: acc_line_end,
                         scope_chain: section.section_path.clone(),
                     });
-                    acc_byte_start = acc_byte_end;
                     acc.clear();
                 }
 
-                if !acc.is_empty() {
+                if acc.is_empty() {
+                    acc_start_in_content = para_start;
+                } else {
                     acc.push_str("\n\n");
                 }
                 acc.push_str(para);
@@ -130,15 +131,15 @@ pub fn chunk_doc(
 
             // Flush remaining.
             if !acc.is_empty() {
-                let acc_byte_end = section.byte_range.end;
-                let acc_prefix_start =
-                    clamp_to_char_boundary(content, content.len().saturating_sub(acc.len()));
+                let acc_prefix_start = clamp_to_char_boundary(content, acc_start_in_content);
+                let acc_byte_start = byte_start + acc_prefix_start;
+                let acc_byte_end = acc_byte_start + acc.len();
                 let acc_line_start = section.line_range.start
                     + content[..acc_prefix_start]
                         .chars()
                         .filter(|&c| c == '\n')
                         .count();
-                let acc_line_end = section.line_range.end;
+                let acc_line_end = acc_line_start + acc.chars().filter(|&c| c == '\n').count() + 1;
                 raw.push(RawChunk {
                     content: acc,
                     byte_start: acc_byte_start,
@@ -266,6 +267,43 @@ mod tests {
             "Expected split, got {} chunks",
             chunks.len()
         );
+    }
+
+    #[test]
+    fn paragraph_split_chunks_have_exact_byte_and_line_ranges() {
+        let source = b"xx\n\nalpha\n\nbeta\n\ngamma";
+        let content = "alpha\n\nbeta\n\ngamma".to_string();
+        let sections = vec![DocSection {
+            heading: "Body".to_string(),
+            level: 1,
+            section_path: vec!["Body".to_string()],
+            content,
+            byte_range: 4..source.len(),
+            line_range: 2..7,
+            element_types: vec![DocElement::Paragraph],
+        }];
+        let config = ChunkConfig {
+            max_chars: 5,
+            min_chars: 1,
+            overlap_ratio: 0.0,
+        };
+
+        let chunks = chunk_doc("doc.md", source, &sections, Language::Markdown, &config);
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|c| (c.byte_start, c.byte_end, c.line_start, c.line_end))
+                .collect::<Vec<_>>(),
+            vec![(4, 9, 2, 3), (11, 15, 4, 5), (17, 22, 6, 7)]
+        );
+        for chunk in &chunks {
+            assert_eq!(
+                chunk.content.as_bytes(),
+                &source[chunk.byte_start..chunk.byte_end]
+            );
+        }
     }
 
     #[test]

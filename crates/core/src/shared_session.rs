@@ -16,7 +16,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -38,10 +38,9 @@ pub enum SharedEventType {
 
 /// On-disk representation of a single event in the JSONL append log.
 ///
-/// Differs from [`SharedSessionEvent`] in two ways: the monotonic [`Instant`]
-/// is replaced by an absolute UNIX timestamp (Instants don't survive
-/// serialization), and the `query` field carries free-text query strings for
-/// session-mining consumers (the in-memory event type tracks file paths only).
+/// Differs from [`SharedSessionEvent`] by replacing the monotonic [`Instant`]
+/// with an absolute UNIX timestamp, since Instants do not survive
+/// serialization.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedSessionEvent {
     /// UNIX seconds at the moment the event was recorded.
@@ -85,6 +84,7 @@ const FILE_READ_BOOST: f32 = 0.12;
 const FILE_WRITE_BOOST: f32 = 0.20;
 const SYMBOL_LOOKUP_BOOST: f32 = 0.10;
 const NAVIGATION_BOOST: f32 = 0.06;
+const APPEND_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ---------------------------------------------------------------------------
 // SharedSession
@@ -100,8 +100,14 @@ pub struct SharedSession {
     decay_minutes: f32,
     /// Optional JSONL append log handle. When set, every `record()` writes
     /// a `PersistedSessionEvent` line. Wrapped in `Arc<Mutex<>>` so clones
-    /// share the same file descriptor and writes are serialized.
-    persistence: Option<Arc<Mutex<std::fs::File>>>,
+    /// share the same file descriptor, plus a sidecar lock so separate
+    /// processes serialize appends too.
+    persistence: Option<Arc<SharedSessionPersistence>>,
+}
+
+struct SharedSessionPersistence {
+    file: Mutex<std::fs::File>,
+    lock_path: PathBuf,
 }
 
 impl SharedSession {
@@ -160,7 +166,10 @@ impl SharedSession {
             .create(true)
             .append(true)
             .open(path)?;
-        session.persistence = Some(Arc::new(Mutex::new(file)));
+        session.persistence = Some(Arc::new(SharedSessionPersistence {
+            file: Mutex::new(file),
+            lock_path: append_lock_path(path),
+        }));
         Ok(session)
     }
 
@@ -281,11 +290,22 @@ impl SharedSession {
                 symbol: event.symbol,
                 agent_id: event.agent_id,
             };
-            if let Ok(line) = serde_json::to_string(&persisted)
-                && let Ok(mut f) = file.lock()
-                && let Err(e) = writeln!(f, "{line}")
-            {
-                tracing::debug!("shared_session persistence write failed: {e}");
+            match serde_json::to_string(&persisted) {
+                Ok(mut line) => {
+                    line.push('\n');
+                    let _append_lock = match acquire_append_lock(&file.lock_path) {
+                        Ok(lock) => lock,
+                        Err(e) => {
+                            tracing::debug!("shared_session persistence lock failed: {e}");
+                            return;
+                        }
+                    };
+                    let mut f = file.file.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Err(e) = f.write_all(line.as_bytes()) {
+                        tracing::debug!("shared_session persistence write failed: {e}");
+                    }
+                }
+                Err(e) => tracing::debug!("shared_session persistence serialization failed: {e}"),
             }
         }
     }
@@ -395,6 +415,51 @@ impl SharedSession {
     /// Total number of events currently stored.
     pub fn event_count(&self) -> usize {
         self.events.read().unwrap_or_else(|e| e.into_inner()).len()
+    }
+}
+
+fn append_lock_path(path: &Path) -> PathBuf {
+    let mut lock_name = path.as_os_str().to_os_string();
+    lock_name.push(".lock");
+    PathBuf::from(lock_name)
+}
+
+struct AppendLock {
+    path: PathBuf,
+    _file: std::fs::File,
+}
+
+impl Drop for AppendLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn acquire_append_lock(path: &Path) -> std::io::Result<AppendLock> {
+    let start = Instant::now();
+    loop {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(file) => {
+                return Ok(AppendLock {
+                    path: path.to_path_buf(),
+                    _file: file,
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if start.elapsed() >= APPEND_LOCK_TIMEOUT {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        format!("timed out waiting for append lock {}", path.display()),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) => return Err(e),
+        }
     }
 }
 
@@ -806,6 +871,15 @@ mod tests {
         let path = dir.path().join("does_not_exist.jsonl");
         let events = SharedSession::read_persisted(&path).expect("missing file → empty");
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn append_lock_path_sits_next_to_log() {
+        let path = Path::new("/tmp/shared_session.jsonl");
+        assert_eq!(
+            append_lock_path(path),
+            PathBuf::from("/tmp/shared_session.jsonl.lock")
+        );
     }
 
     #[test]

@@ -366,12 +366,20 @@ mod tests {
     #[test]
     fn sanitize_filename_replaces_special_chars() {
         assert_eq!(sanitize_filename("src/main.rs"), "src-main.rs");
-        assert_eq!(sanitize_filename("a:b*c?d"), "a_b_c_d");
-        assert_eq!(sanitize_filename("path/to/[file]"), "path-to-_file_");
-        // Collision-safe: these produce different filenames
+        let special = sanitize_filename("a:b*c?d");
+        assert!(special.starts_with("a_b_c_d-"));
+        assert_eq!(special.len(), "a_b_c_d-".len() + 16);
+
+        let bracketed = sanitize_filename("path/to/[file]");
+        assert!(bracketed.starts_with("path-to-_file_-"));
+        assert_eq!(bracketed.len(), "path-to-_file_-".len() + 16);
+
+        // Collision-safe: these produce different filenames.
         assert_ne!(
-            sanitize_filename("src/foo_bar.rs"),
+            sanitize_filename("src/foo-bar.rs"),
             sanitize_filename("src/foo/bar.rs")
         );
+        assert_eq!(sanitize_filename("src/foo/bar.rs"), "src-foo-bar.rs");
+        assert!(sanitize_filename("src/foo-bar.rs").starts_with("src-foo-bar.rs-"));
     }
 }

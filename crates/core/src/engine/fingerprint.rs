@@ -76,15 +76,18 @@ pub fn signature_fingerprint(
         return None;
     }
 
+    let rust_body_spans = rust_function_body_spans(source)?;
+
     // Collect the body spans of functions/methods — the only regions a COSMETIC
-    // edit is allowed to touch. A function's `byte_range` ends at its closing
-    // brace, so its body is `[first '{' .. range end]`. Bodyless declarations
-    // (e.g. a trait method signature `fn f();`) have no brace and contribute
-    // nothing, so a change to them stays STRUCTURAL.
+    // edit is allowed to touch. Body spans come from tree-sitter `body` nodes,
+    // not byte-level brace matching, so braces inside strings/comments cannot
+    // shift the masked range. Bodyless declarations (e.g. a trait method
+    // signature `fn f();`) have no body and contribute nothing, so a change to
+    // them stays STRUCTURAL.
     let mut bodies: Vec<(usize, usize)> = entities
         .iter()
         .filter(|e| matches!(e.kind, EntityKind::Function | EntityKind::Method))
-        .filter_map(|e| body_span(source, &e.byte_range))
+        .filter_map(|e| body_span(&rust_body_spans, &e.byte_range))
         .collect();
     bodies.sort_unstable();
 
@@ -116,40 +119,49 @@ pub fn signature_fingerprint(
     Some(xxhash_rust::xxh3::xxh3_64(&masked(source, &merged)))
 }
 
-/// Body span of a function/method: the final brace-balanced block, found by
-/// matching backward from the entity's last `}`. Matching from the end (rather
-/// than taking the first `{`) skips braces that belong to the *signature* —
-/// const-generic bounds, `const { .. }` blocks in return types — so an edit
-/// inside those is correctly treated as STRUCTURAL.
-///
-/// `None` when the range contains no brace (a bodyless declaration such as a
-/// trait method signature `fn f();`).
-///
-/// Note: this is a byte-level brace match that does not track string/char
-/// literals or comments inside the signature. That is acceptable: an unbalanced
-/// brace inside a signature literal is exceedingly rare, and a mismatch only
-/// shifts the masked region, which the surrounding STRUCTURAL bytes still guard.
-fn body_span(source: &[u8], range: &std::ops::Range<usize>) -> Option<(usize, usize)> {
-    let end = range.end.min(source.len());
-    let start = range.start.min(end);
-    let slice = &source[start..end];
-    let last_close = slice.iter().rposition(|&b| b == b'}')?;
-    let mut depth = 0i32;
-    let mut i = last_close as isize;
-    while i >= 0 {
-        match slice[i as usize] {
-            b'}' => depth += 1,
-            b'{' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some((start + i as usize, end));
-                }
-            }
-            _ => {}
-        }
-        i -= 1;
+fn rust_function_body_spans(
+    source: &[u8],
+) -> Option<Vec<(std::ops::Range<usize>, std::ops::Range<usize>)>> {
+    let mut parser = tree_sitter::Parser::new();
+    let language = tree_sitter_rust::LANGUAGE.into();
+    parser.set_language(&language).ok()?;
+    let tree = parser.parse(source, None)?;
+    if tree.root_node().has_error() {
+        return None;
     }
-    None
+
+    let mut spans = Vec::new();
+    collect_rust_function_body_spans(tree.root_node(), &mut spans);
+    Some(spans)
+}
+
+fn collect_rust_function_body_spans(
+    node: tree_sitter::Node<'_>,
+    spans: &mut Vec<(std::ops::Range<usize>, std::ops::Range<usize>)>,
+) {
+    if node.kind() == "function_item"
+        && let Some(body) = node.child_by_field_name("body")
+    {
+        spans.push((
+            node.start_byte()..node.end_byte(),
+            body.start_byte()..body.end_byte(),
+        ));
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_rust_function_body_spans(child, spans);
+    }
+}
+
+fn body_span(
+    spans: &[(std::ops::Range<usize>, std::ops::Range<usize>)],
+    range: &std::ops::Range<usize>,
+) -> Option<(usize, usize)> {
+    spans
+        .iter()
+        .find(|(node_range, _)| node_range.start == range.start && node_range.end == range.end)
+        .map(|(_, body_range)| (body_range.start, body_range.end))
 }
 
 /// `source` with the given (sorted, merged) byte spans removed.
@@ -208,10 +220,16 @@ mod tests {
     fn non_allowlisted_language_is_structural() {
         // Even with entities and identical source, a non-allowlisted language is
         // never fingerprinted — always STRUCTURAL.
-        let s = b"def f(): pass";
-        let e = [ent(EntityKind::Function, 0..s.len())];
-        assert_eq!(signature_fingerprint(&e, s, Language::Python), None);
-        assert!(signature_fingerprint(&e, s, Language::Rust).is_some());
+        let python = b"def f(): pass";
+        let python_entity = [ent(EntityKind::Function, 0..python.len())];
+        assert_eq!(
+            signature_fingerprint(&python_entity, python, Language::Python),
+            None
+        );
+
+        let rust = b"fn f() {}";
+        let rust_entity = [ent(EntityKind::Function, 0..rust.len())];
+        assert!(signature_fingerprint(&rust_entity, rust, Language::Rust).is_some());
     }
 
     #[test]
@@ -242,6 +260,19 @@ mod tests {
         // cosmetic regardless of whitespace.
         let a = b"fn f() {let x=1;x}";
         let b = b"fn f() {\n    let x = 1;\n    x\n}";
+        assert_eq!(
+            fp(&[ent(EntityKind::Function, 0..a.len())], a),
+            fp(&[ent(EntityKind::Function, 0..b.len())], b),
+        );
+    }
+
+    #[test]
+    fn body_edit_with_closing_brace_literal_is_cosmetic() {
+        // Tree-sitter body nodes keep string-literal braces from confusing the
+        // masked span. Byte-level backward matching used to treat this as
+        // STRUCTURAL by failing to find the real body start.
+        let a = br#"fn f() { let s = "}"; old_call(); }"#;
+        let b = br#"fn f() { let s = "}"; new_call(); }"#;
         assert_eq!(
             fp(&[ent(EntityKind::Function, 0..a.len())], a),
             fp(&[ent(EntityKind::Function, 0..b.len())], b),

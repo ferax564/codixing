@@ -7,6 +7,7 @@ use crate::embedder::Embedder;
 use crate::error::Result;
 use crate::index::TantivyIndex;
 use crate::vector::VectorIndex;
+use tracing::warn;
 
 use super::{ChunkMeta, Retriever, SearchQuery, SearchResult};
 
@@ -54,23 +55,31 @@ impl<'a> VectorRetriever<'a> {
     }
 
     /// Resolve content for a chunk: prefer in-memory, fall back to Tantivy.
-    fn resolve_content(&self, chunk_id: u64, meta_content: &str) -> String {
+    fn resolve_content(&self, chunk_id: u64, meta_content: &str) -> Option<String> {
         if !meta_content.is_empty() {
-            return meta_content.to_string();
+            return Some(meta_content.to_string());
         }
         // Fall back to Tantivy stored fields.
         if let Some(tantivy) = self.tantivy {
             let ids: std::collections::HashSet<u64> = [chunk_id].into_iter().collect();
-            if let Ok(docs) = tantivy.lookup_chunks_by_ids(&ids) {
-                let fields = tantivy.fields();
-                if let Some(doc) = docs.into_iter().next() {
-                    if let Some(content) = doc.get_first(fields.content).and_then(|v| v.as_str()) {
-                        return content.to_string();
-                    }
+            let docs = match tantivy.lookup_chunks_by_ids(&ids) {
+                Ok(docs) => docs,
+                Err(e) => {
+                    warn!(chunk_id, error = %e, "failed to hydrate vector hit content");
+                    return None;
                 }
+            };
+            let fields = tantivy.fields();
+            if let Some(content) = docs.into_iter().find_map(|doc| {
+                doc.get_first(fields.content)
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned)
+            }) {
+                return Some(content);
             }
         }
-        String::new()
+        warn!(chunk_id, "dropping vector hit with empty content");
+        None
     }
 }
 
@@ -102,7 +111,9 @@ impl Retriever for VectorRetriever<'_> {
             // Convert cosine distance to a similarity score (higher = better).
             let score = 1.0 - distance;
 
-            let content = self.resolve_content(chunk_id, &meta.content);
+            let Some(content) = self.resolve_content(chunk_id, &meta.content) else {
+                continue;
+            };
 
             results.push(SearchResult {
                 chunk_id: chunk_id.to_string(),

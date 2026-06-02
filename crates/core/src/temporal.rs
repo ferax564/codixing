@@ -56,7 +56,7 @@ pub struct BlameLine {
 pub fn get_hotspots(root: &Path, limit: usize, days: u64) -> Vec<Hotspot> {
     let since = format!("--since={days} days ago");
     let out = Command::new("git")
-        .args(["log", "--format=%H %an", "--name-only", &since])
+        .args(["log", "--format=%x00%H %an", "--name-only", &since])
         .current_dir(root)
         .output();
 
@@ -67,34 +67,7 @@ pub fn get_hotspots(root: &Path, limit: usize, days: u64) -> Vec<Hotspot> {
 
     let text = String::from_utf8_lossy(&out.stdout);
 
-    // Parse git log output: alternating "hash author" and file name lines.
-    let mut file_commits: HashMap<String, Vec<String>> = HashMap::new();
-    let mut file_authors: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
-    let mut current_author = String::new();
-
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        // Lines with a space and 40-char hex prefix are commit headers.
-        if line.len() > 41 && line.chars().take(40).all(|c| c.is_ascii_hexdigit()) {
-            let parts: Vec<&str> = line.splitn(2, ' ').collect();
-            if parts.len() == 2 {
-                current_author = parts[1].to_string();
-            }
-        } else if !current_author.is_empty() {
-            // File path line.
-            file_commits
-                .entry(line.to_string())
-                .or_default()
-                .push(current_author.clone());
-            file_authors
-                .entry(line.to_string())
-                .or_default()
-                .insert(current_author.clone());
-        }
-    }
+    let (file_commits, file_authors) = parse_hotspot_log(&text);
 
     // Get total commit count to normalize recency.
     let total_commits_out = Command::new("git")
@@ -133,6 +106,44 @@ pub fn get_hotspots(root: &Path, limit: usize, days: u64) -> Vec<Hotspot> {
     });
     hotspots.truncate(limit);
     hotspots
+}
+
+fn parse_hotspot_log(
+    text: &str,
+) -> (
+    HashMap<String, Vec<String>>,
+    HashMap<String, std::collections::HashSet<String>>,
+) {
+    // Parse git log output: alternating NUL-prefixed "hash author" headers and
+    // file name lines. The explicit prefix prevents 40-hex-leading file paths
+    // from being mistaken for commit headers.
+    let mut file_commits: HashMap<String, Vec<String>> = HashMap::new();
+    let mut file_authors: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+    let mut current_author = String::new();
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(header) = line.strip_prefix('\0') {
+            let parts: Vec<&str> = header.splitn(2, ' ').collect();
+            if parts.len() == 2 && parts[0].chars().all(|c| c.is_ascii_hexdigit()) {
+                current_author = parts[1].to_string();
+            }
+        } else if !current_author.is_empty() {
+            file_commits
+                .entry(line.to_string())
+                .or_default()
+                .push(current_author.clone());
+            file_authors
+                .entry(line.to_string())
+                .or_default()
+                .insert(current_author.clone());
+        }
+    }
+
+    (file_commits, file_authors)
 }
 
 /// Search recent changes using git log.
@@ -395,6 +406,23 @@ mod tests {
         // main.rs should be the top hotspot (2 commits vs 1 for lib.rs).
         assert_eq!(hotspots[0].file_path, "main.rs");
         assert!(hotspots[0].commit_count >= 2);
+    }
+
+    #[test]
+    fn parse_hotspot_log_does_not_treat_hex_path_as_header() {
+        let text = concat!(
+            "\0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa Ada\n",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.rs\n"
+        );
+        let (commits, authors) = parse_hotspot_log(text);
+
+        assert_eq!(
+            commits
+                .get("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.rs")
+                .map(Vec::len),
+            Some(1)
+        );
+        assert!(authors["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.rs"].contains("Ada"));
     }
 
     #[test]

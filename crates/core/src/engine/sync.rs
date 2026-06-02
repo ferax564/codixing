@@ -148,12 +148,11 @@ impl Engine {
             normalize_path(path.strip_prefix(&self.config.root).unwrap_or(path))
         });
         let key = std::path::PathBuf::from(&rel);
-        if let Ok(sigs) = self.store.load_tree_signatures() {
-            if sigs.iter().any(|(p, _)| *p == key) {
-                let kept: Vec<(std::path::PathBuf, u64)> =
-                    sigs.into_iter().filter(|(p, _)| *p != key).collect();
-                let _ = self.store.save_tree_signatures(&kept);
-            }
+        if let Err(e) = self
+            .store
+            .update_tree_signatures(|sigs| sigs.into_iter().filter(|(p, _)| *p != key).collect())
+        {
+            warn!(error = %e, "failed to invalidate tree signature");
         }
     }
 
@@ -238,6 +237,23 @@ impl Engine {
             old_stable_keys.remove(k);
         }
 
+        // Read and parse before mutating the live indexes. If the file vanishes
+        // or becomes unreadable mid-sync, the existing in-memory entries remain
+        // intact and a later sync can retry cleanly.
+        let source = fs::read(&abs_path)?;
+        let result = self.parser.parse_file(&abs_path, &source)?;
+
+        // Jupyter notebooks need per-cell dispatch — the incremental sync path
+        // does not implement that yet. Leave old chunks in place so this path
+        // does not partially de-index a notebook it cannot re-add.
+        if result.language.is_notebook() {
+            warn!(
+                path = %rel_str,
+                "notebook incremental sync not supported — run `codixing init` to reindex"
+            );
+            return Ok(false);
+        }
+
         // Remove old data.
         self.tantivy.remove_file(&rel_str)?;
         self.symbols.remove_file(&rel_str);
@@ -268,22 +284,6 @@ impl Engine {
         });
         for (id, content) in &removed {
             self.trigram.get_mut().unwrap().remove(*id, content);
-        }
-
-        // Read and re-process.
-        let source = fs::read(&abs_path)?;
-        let result = self.parser.parse_file(&abs_path, &source)?;
-
-        // Jupyter notebooks need per-cell dispatch — the incremental sync
-        // path does not implement that yet. Old chunks have already been
-        // removed above; a subsequent `codixing init` or full reindex will
-        // repopulate the notebook via `process_jupyter_file`.
-        if result.language.is_notebook() {
-            warn!(
-                path = %rel_str,
-                "notebook incremental sync not supported — run `codixing init` to reindex"
-            );
-            return Ok(false);
         }
 
         let chunker = CastChunker;
@@ -404,14 +404,10 @@ impl Engine {
                 }
             }
 
-            // A file counts as a cosmetic-skip only when it was classified
-            // COSMETIC, at least one chunk was reused via the stable key (proving
-            // the broadened reuse actually fired), and NO chunk required
-            // re-embedding — i.e. the embed round-trip was fully avoided.
-            all_reused = cosmetic
-                && reused_via_stable_key > 0
-                && needs_embed.is_empty()
-                && !chunks.is_empty();
+            // A file counts as a cosmetic-skip when it was classified COSMETIC
+            // and every new chunk reused an existing vector, regardless of
+            // whether the match came from identical content or a stable key.
+            all_reused = cosmetic && reused > 0 && needs_embed.is_empty() && !chunks.is_empty();
 
             if !needs_embed.is_empty() {
                 let texts: Vec<String> = needs_embed
@@ -1119,14 +1115,17 @@ impl Engine {
                     .map(|c| c.path.clone())
                     .collect::<std::collections::HashSet<_>>(),
             );
-            let sigs = merge_signatures(&old_signatures, &new_signatures, &seen_rel, &modified_rel);
-            if let Err(e) = self.store.save_tree_signatures(&sigs) {
+            if let Err(e) = self.store.update_tree_signatures(|latest| {
+                let latest: std::collections::HashMap<std::path::PathBuf, u64> =
+                    latest.into_iter().collect();
+                merge_signatures(&latest, &new_signatures, &seen_rel, &modified_rel)
+            }) {
                 warn!(error = %e, "failed to persist tree signatures");
             }
         } else {
             // Even if nothing changed content-wise, update the v2 hashes
             // to capture any mtime+size updates (e.g. file was touched).
-            if skipped_by_mtime != unchanged || !current_hashes.is_empty() {
+            if skipped_by_mtime != unchanged {
                 self.store.save_tree_hashes_v2(&current_hashes)?;
             }
             info!("index already up-to-date");
@@ -1474,11 +1473,14 @@ impl Engine {
                     .map(|c| c.path.clone())
                     .collect::<std::collections::HashSet<_>>(),
             );
-            let sigs = merge_signatures(&old_signatures, &new_signatures, &seen_rel, &modified_rel);
-            if let Err(e) = self.store.save_tree_signatures(&sigs) {
+            if let Err(e) = self.store.update_tree_signatures(|latest| {
+                let latest: std::collections::HashMap<std::path::PathBuf, u64> =
+                    latest.into_iter().collect();
+                merge_signatures(&latest, &new_signatures, &seen_rel, &modified_rel)
+            }) {
                 warn!(error = %e, "failed to persist tree signatures");
             }
-        } else if skipped_by_mtime != unchanged || !current_hashes.is_empty() {
+        } else if skipped_by_mtime != unchanged {
             self.store.save_tree_hashes_v2(&current_hashes)?;
         }
 
@@ -1619,12 +1621,12 @@ impl Engine {
                     std::path::PathBuf::from(&rel)
                 })
                 .collect();
-            if let Ok(sigs) = self.store.load_tree_signatures() {
-                let kept: Vec<(std::path::PathBuf, u64)> = sigs
-                    .into_iter()
+            if let Err(e) = self.store.update_tree_signatures(|sigs| {
+                sigs.into_iter()
                     .filter(|(p, _)| !touched.contains(p))
-                    .collect();
-                let _ = self.store.save_tree_signatures(&kept);
+                    .collect()
+            }) {
+                warn!(error = %e, "failed to invalidate git-sync tree signatures");
             }
             self.save()?;
         } else {

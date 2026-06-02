@@ -576,12 +576,44 @@ pub fn detect_language(path: &Path) -> Option<Language> {
         return Some(Language::Matlab);
     }
 
+    // Disambiguate `.h` headers: plain C is the fallback, but many C++ codebases
+    // put classes/templates/namespaces in `.h` files.
+    if ext == "h" {
+        if let Ok(bytes) = std::fs::read(path) {
+            let peek = String::from_utf8_lossy(&bytes[..bytes.len().min(2048)]);
+            if c_header_looks_like_cpp(&peek) {
+                return Some(Language::Cpp);
+            }
+        }
+        return Some(Language::C);
+    }
+
     for lang in ALL_LANGUAGES {
         if lang.extensions().contains(&ext) {
             return Some(*lang);
         }
     }
     None
+}
+
+fn c_header_looks_like_cpp(peek: &str) -> bool {
+    [
+        "namespace ",
+        "class ",
+        "template <",
+        "template<",
+        "public:",
+        "private:",
+        "protected:",
+        "std::",
+        "virtual ",
+        "constexpr ",
+        "typename ",
+        "using namespace ",
+        "operator ",
+    ]
+    .iter()
+    .any(|marker| peek.contains(marker))
 }
 
 /// Helper: get node text from source bytes.
@@ -722,6 +754,18 @@ mod tests {
     #[test]
     fn detect_unknown_extension() {
         assert_eq!(detect_language(Path::new("foo.xyz")), None);
+    }
+
+    #[test]
+    fn detect_header_language_by_content() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cpp_header = dir.path().join("widget.h");
+        std::fs::write(&cpp_header, "namespace app { class Widget {}; }\n").unwrap();
+        assert_eq!(detect_language(&cpp_header), Some(Language::Cpp));
+
+        let c_header = dir.path().join("widget_c.h");
+        std::fs::write(&c_header, "#define WIDGET_H\nint widget_create(void);\n").unwrap();
+        assert_eq!(detect_language(&c_header), Some(Language::C));
     }
 
     #[test]

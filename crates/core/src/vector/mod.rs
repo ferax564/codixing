@@ -56,6 +56,17 @@ mod usearch_impl {
     }
 
     impl VectorIndex {
+        fn validate_dims(&self, vector: &[f32]) -> Result<()> {
+            if vector.len() != self.dims {
+                return Err(CodixingError::VectorIndex(format!(
+                    "vector dimension mismatch: expected {}, got {}",
+                    self.dims,
+                    vector.len()
+                )));
+            }
+            Ok(())
+        }
+
         /// Create a new empty index with the given vector dimensionality.
         ///
         /// When `quantize` is `true` the HNSW graph stores vectors as int8 instead
@@ -89,6 +100,7 @@ mod usearch_impl {
         /// `file_path` is tracked so the chunk can be removed when the file
         /// is removed from the index.
         pub fn add(&self, chunk_id: u64, vector: &[f32], file_path: &str) -> Result<()> {
+            self.validate_dims(vector)?;
             // Reserve additional capacity if needed (usearch grows, but an explicit
             // reserve of +1 keeps performance predictable).
             let needed = self.inner.size() + 1;
@@ -105,6 +117,7 @@ mod usearch_impl {
 
         /// Add a vector and record the file->chunk mapping (requires `&mut self`).
         pub fn add_mut(&mut self, chunk_id: u64, vector: &[f32], file_path: &str) -> Result<()> {
+            self.validate_dims(vector)?;
             let needed = self.inner.size() + 1;
             self.inner
                 .reserve(needed)
@@ -218,6 +231,7 @@ mod usearch_impl {
     impl VectorBackend for VectorIndex {
         fn add(&self, chunk_id: u64, vector: &[f32], _file_path: &str) -> Result<()> {
             // Shared-reference add (no file_chunks tracking). Use add_mut for full tracking.
+            self.validate_dims(vector)?;
             let needed = self.inner.size() + 1;
             self.inner
                 .reserve(needed)
@@ -553,6 +567,18 @@ mod tests {
         let idx = VectorIndex::new(4, false).unwrap();
         let results = idx.search(&unit_vec(4, 0), 5).unwrap();
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn add_mut_rejects_wrong_dimensions() {
+        let mut idx = VectorIndex::new(4, false).unwrap();
+        let err = idx.add_mut(1, &[1.0, 0.0, 0.0], "a.rs").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("vector dimension mismatch: expected 4, got 3"),
+            "unexpected error: {msg}"
+        );
+        assert_eq!(idx.len(), 0);
     }
 
     #[test]
