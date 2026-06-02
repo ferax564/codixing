@@ -1,11 +1,7 @@
 [mcp_servers.codixing]
 args = [
     "--root",
-    "/Users/andreaferrarelli/code/codixing",
+    ".",
     "--no-daemon-fork",
 ]
-command = "/Users/andreaferrarelli/code/codixing/target/release/codixing-mcp"
-
-[mcp_servers.codixing.env]
-DYLD_LIBRARY_PATH = "/Users/andreaferrarelli/.local/lib"
-ORT_DYLIB_PATH = "/Users/andreaferrarelli/.local/lib/libonnxruntime.dylib"
+command = "./target/release/codixing-mcp"
