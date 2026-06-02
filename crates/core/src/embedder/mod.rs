@@ -364,6 +364,35 @@ pub struct Embedder {
     query_prefix: Option<&'static str>,
 }
 
+fn late_chunk_token_range(
+    token_offsets: &[(usize, usize)],
+    special_mask: &[u32],
+    chunk_start: usize,
+    chunk_end: usize,
+    seq_len: usize,
+) -> Option<(usize, usize)> {
+    let tok_start = token_offsets
+        .iter()
+        .zip(special_mask.iter())
+        .position(|(&(ts, _te), &sp)| sp == 0 && ts >= chunk_start)?;
+
+    let tok_end_inclusive = token_offsets
+        .iter()
+        .zip(special_mask.iter())
+        .enumerate()
+        .rev()
+        .find(|(_, ((_, te), sp))| **sp == 0 && *te <= chunk_end)
+        .map(|(i, _)| i)?;
+
+    if tok_end_inclusive < tok_start {
+        return None;
+    }
+
+    let tok_start = tok_start.min(seq_len);
+    let tok_end = (tok_end_inclusive + 1).min(seq_len);
+    (tok_start < tok_end).then_some((tok_start, tok_end))
+}
+
 impl Embedder {
     /// Load the embedding model specified by `model_cfg`.
     ///
@@ -1069,38 +1098,17 @@ impl Embedder {
         let mut chunk_embeddings = Vec::with_capacity(chunk_byte_ranges.len());
 
         for &(chunk_start, chunk_end) in chunk_byte_ranges {
-            // Find the token range that overlaps this chunk.
-            let tok_start = token_offsets
-                .iter()
-                .zip(special_mask.iter())
-                .position(|(&(ts, _te), &sp)| sp == 0 && ts >= chunk_start)
-                .unwrap_or(0);
-
-            // Find the last overlapping token (inclusive).
-            let tok_end_inclusive = token_offsets
-                .iter()
-                .zip(special_mask.iter())
-                .enumerate()
-                .rev()
-                .find(|(_, ((_, te), sp))| **sp == 0 && *te <= chunk_end)
-                .map(|(i, _)| i);
-
-            let tok_end = match tok_end_inclusive {
-                Some(end) if end >= tok_start => end + 1,
-                _ => {
-                    // No tokens map to this chunk -- produce a zero vector.
-                    chunk_embeddings.push(vec![0.0f32; dims]);
-                    continue;
-                }
-            };
-
-            // Ensure we don't exceed the actual sequence length.
-            let tok_start = tok_start.min(seq_len);
-            let tok_end = tok_end.min(seq_len);
-            if tok_start >= tok_end {
+            let Some((tok_start, tok_end)) = late_chunk_token_range(
+                token_offsets,
+                special_mask,
+                chunk_start,
+                chunk_end,
+                seq_len,
+            ) else {
+                // No tokens map to this chunk -- produce a zero vector.
                 chunk_embeddings.push(vec![0.0f32; dims]);
                 continue;
-            }
+            };
 
             // Mean pool the token range.
             let count = (tok_end - tok_start) as f32;
@@ -1201,6 +1209,26 @@ mod tests {
             .embed_file_late_chunking("fn main() {}", &[(0, 12)])
             .unwrap();
         assert!(result.is_none(), "Qwen3 backend should return None");
+    }
+
+    #[test]
+    fn late_chunk_token_range_returns_none_when_chunk_starts_after_tokens() {
+        let offsets = [(0, 0), (0, 4), (5, 9)];
+        let special = [1, 0, 0];
+        assert_eq!(
+            late_chunk_token_range(&offsets, &special, 100, 120, offsets.len()),
+            None
+        );
+    }
+
+    #[test]
+    fn late_chunk_token_range_maps_regular_chunk() {
+        let offsets = [(0, 0), (0, 4), (5, 9), (10, 14), (0, 0)];
+        let special = [1, 0, 0, 0, 1];
+        assert_eq!(
+            late_chunk_token_range(&offsets, &special, 5, 14, offsets.len()),
+            Some((2, 4))
+        );
     }
 
     #[test]

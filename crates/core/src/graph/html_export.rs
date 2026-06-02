@@ -784,6 +784,20 @@ function showToast(msg) {
   toast.textContent = msg; toast.style.display = 'block';
   clearTimeout(showToast._t); showToast._t = setTimeout(function(){ toast.style.display = 'none'; }, 3400);
 }
+function syncLayerRows() {
+  document.querySelectorAll('.layer-row').forEach(function(row){
+    row.classList.toggle('off', !!hiddenLayers[row.dataset.layer]);
+  });
+}
+function applyLayerVisibility() {
+  nodes.forEach(function(n){
+    const layerHidden = !!hiddenLayers[layerOf[n.id]];
+    n.hidden = navLevel === 'layer-detail'
+      ? (layerOf[n.id] !== activeLayer || layerHidden)
+      : layerHidden;
+  });
+  syncLayerRows();
+}
 
 // --- Top bar / chips -------------------------------------------------------
 document.getElementById('proj-name').textContent = DATA.project ? '· ' + DATA.project : '';
@@ -813,8 +827,8 @@ document.getElementById('proj-name').textContent = DATA.project ? '· ' + DATA.p
     row.appendChild(sw); row.appendChild(name); row.appendChild(count); row.appendChild(eye);
     row.addEventListener('click', function(ev){
       if (ev.shiftKey) { drillIntoLayer(l.id); return; }
-      const off = !hiddenLayers[l.id]; hiddenLayers[l.id] = off; row.classList.toggle('off', off);
-      nodes.forEach(function(n){ if (layerOf[n.id] === l.id) n.hidden = off; });
+      hiddenLayers[l.id] = !hiddenLayers[l.id];
+      applyLayerVisibility();
       reheat();
     });
     list.appendChild(row);
@@ -1045,7 +1059,7 @@ document.querySelectorAll('#viewmode button').forEach(function(b){
 });
 
 // --- Drill-down: Overview <-> Layer detail ---------------------------------
-let navLevel = 'overview', activeLayer = null, preDrillHidden = null;
+let navLevel = 'overview', activeLayer = null;
 function updateBreadcrumb() {
   const bc = document.getElementById('breadcrumb');
   if (navLevel !== 'layer-detail') { bc.style.display = 'none'; return; }
@@ -1056,17 +1070,15 @@ function updateBreadcrumb() {
   bc.appendChild(home); bc.appendChild(sep); bc.appendChild(cur);
 }
 function drillIntoLayer(layerId) {
-  if (navLevel === 'layer-detail') { if (preDrillHidden) nodes.forEach(function(n,i){ n.hidden = preDrillHidden[i]; }); }
-  preDrillHidden = nodes.map(function(n){ return n.hidden; });
-  nodes.forEach(function(n){ n.hidden = (layerOf[n.id] !== layerId); });
   navLevel = 'layer-detail'; activeLayer = layerId; updateBreadcrumb();
+  applyLayerVisibility();
   if (viewMode === 'blocks') layoutBlocks(); else alpha = Math.max(alpha, 0.8);
   focusNodes(nodes.filter(function(n){ return !n.hidden; }).map(function(n){ return n.id; }));
 }
 function exitDrill() {
   if (navLevel !== 'layer-detail') return;
-  if (preDrillHidden) nodes.forEach(function(n,i){ n.hidden = preDrillHidden[i]; });
-  navLevel = 'overview'; activeLayer = null; preDrillHidden = null; updateBreadcrumb();
+  navLevel = 'overview'; activeLayer = null; updateBreadcrumb();
+  applyLayerVisibility();
   if (viewMode === 'blocks') layoutBlocks(); else alpha = Math.max(alpha, 0.6);
   focusNodes(nodes.filter(function(n){ return !n.hidden; }).map(function(n){ return n.id; }));
 }
@@ -1269,24 +1281,35 @@ document.addEventListener('keydown', function(e){
   else if (e.key === 'ArrowLeft' && tour.active) { document.getElementById('tour-prev').click(); }
 });
 
-// --- Force simulation (capped O(n²) with distance cutoff) ------------------
+// --- Force simulation (spatial-grid repulsion with distance cutoff) ---------
 function simulate() {
   if (alpha < 0.01) return;
   const repulsion = 2600, attraction = 0.010, center = 0.009, damping = 0.86;
-  const cutoff2 = 1100*1100;
+  const cutoff = 1100, cutoff2 = cutoff*cutoff, cellSize = cutoff;
+  const visible = [], grid = {};
   for (let i = 0; i < nodes.length; i++) {
     const n = nodes[i]; if (n.hidden) continue;
     n.vx += (0 - n.x) * center; n.vy += (0 - n.y) * center;
+    visible.push(i);
+    const cx = Math.floor(n.x / cellSize), cy = Math.floor(n.y / cellSize);
+    const key = cx + ',' + cy;
+    (grid[key] = grid[key] || []).push(i);
   }
-  for (let i = 0; i < nodes.length; i++) {
-    if (nodes[i].hidden) continue;
-    for (let j = i+1; j < nodes.length; j++) {
-      if (nodes[j].hidden) continue;
+  for (let vi = 0; vi < visible.length; vi++) {
+    const i = visible[vi], ni = nodes[i];
+    const cx = Math.floor(ni.x / cellSize), cy = Math.floor(ni.y / cellSize);
+    for (let gx = cx - 1; gx <= cx + 1; gx++) {
+      for (let gy = cy - 1; gy <= cy + 1; gy++) {
+        const bucket = grid[gx + ',' + gy]; if (!bucket) continue;
+        for (let bi = 0; bi < bucket.length; bi++) {
+          const j = bucket[bi]; if (j <= i) continue;
       let dx = nodes[j].x - nodes[i].x, dy = nodes[j].y - nodes[i].y;
       let d2 = dx*dx + dy*dy + 1; if (d2 > cutoff2) continue;
       const f = repulsion / d2;
       const fx = dx*f, fy = dy*f;
       nodes[i].vx -= fx; nodes[i].vy -= fy; nodes[j].vx += fx; nodes[j].vy += fy;
+        }
+      }
     }
   }
   for (let k = 0; k < edges.length; k++) {
@@ -1440,12 +1463,17 @@ function draw() {
   ctx.restore();
 }
 
-function loop() { simulate(); draw(); requestAnimationFrame(loop); }
+let warmupTicks = Math.min(120, Math.max(12, Math.ceil(nodes.length / 8)));
+function loop() {
+  const steps = warmupTicks > 0 ? Math.min(4, warmupTicks) : 1;
+  for (let i = 0; i < steps; i++) { simulate(); }
+  warmupTicks = Math.max(0, warmupTicks - steps);
+  draw();
+  requestAnimationFrame(loop);
+}
 resize(); window.addEventListener('resize', resize);
 // On narrow screens, start with the sidebar collapsed so the graph is visible.
 if (window.innerWidth <= 720) document.getElementById('sidebar-toggle').click();
-// Let the layout settle before the first painted frame.
-for (let i = 0; i < 120; i++) simulate();
 focusNodes(nodes.map(function(n){ return n.id; }));
 loop();
 </script>
@@ -1633,8 +1661,12 @@ mod tests {
         assert!(content.contains("id=\"export-menu\""));
         assert!(content.contains("id=\"breadcrumb\""));
         assert!(content.contains("function drillIntoLayer"));
+        assert!(content.contains("function applyLayerVisibility"));
         assert!(content.contains("blockEdges"));
         assert!(content.contains("function exportSVG"));
+        assert!(content.contains("spatial-grid repulsion"));
+        assert!(content.contains("let warmupTicks"));
+        assert!(!content.contains("for (let i = 0; i < 120; i++) simulate();"));
     }
 
     #[test]

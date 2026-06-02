@@ -1,5 +1,7 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
@@ -7,6 +9,39 @@ use serde::{Deserialize, Serialize};
 use crate::config::IndexConfig;
 use crate::error::{CodixingError, Result};
 use crate::graph::GraphData;
+
+/// Process-global counter making atomic-write temp filenames unique across threads.
+static ATOMIC_WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Atomically write `contents` to `path`: write a sibling temp file, fsync it,
+/// then rename it over the destination. A crash, SIGKILL, OOM, or power loss
+/// mid-write leaves either the previous file or the complete new file intact —
+/// never a truncated or zero-length one. The rename is an atomic same-filesystem
+/// replace on both Unix and Windows.
+///
+/// This replaces the bare `fs::write` (truncate-then-write) previously used by
+/// every `save_*` helper, which could corrupt `config.json` / `meta.json` /
+/// `graph.bin` / `symbols.bin` into an unloadable state on an ill-timed crash.
+fn atomic_write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    use std::io::Write;
+    let path = path.as_ref();
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("tmp");
+    let seq = ATOMIC_WRITE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".{stem}.tmp.{}.{seq}", std::process::id()));
+    {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(contents.as_ref())?;
+        f.sync_all()?;
+    }
+    match fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
 
 /// Directory name for the Codixing index store.
 const CODEFORGE_DIR: &str = ".codixing";
@@ -28,6 +63,23 @@ const CHUNK_TRIGRAM_FILE: &str = "chunk_trigram.bin";
 const SYMBOLS_V2_FILE: &str = "symbols_v2.bin";
 const CONCEPTS_FILE: &str = "concepts.bin";
 const REFORMULATIONS_FILE: &str = "reformulations.bin";
+/// Sidecar file mapping each indexed file to its signature fingerprint (a stable
+/// hash over symbol signatures / imports / exports). Stored separately from
+/// `tree_hashes_v2.bin` so the existing `FileHashEntry` bitcode layout is never
+/// touched — old indexes simply lack this file and are treated as STRUCTURAL on
+/// the first sync. See `engine::fingerprint` and `Engine::sync`.
+const TREE_SIGNATURES_FILE: &str = "tree_signatures.bin";
+const TREE_SIGNATURES_LOCK_FILE: &str = "tree_signatures.lock";
+
+struct TreeSignaturesLock {
+    path: PathBuf,
+}
+
+impl Drop for TreeSignaturesLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
 
 /// Extended file hash entry storing content hash alongside filesystem metadata
 /// (mtime and size) for fast pre-filtering during sync.
@@ -355,6 +407,51 @@ impl IndexStore {
         self.codixing_dir().join(TREE_HASHES_V2_FILE)
     }
 
+    /// Path to the `tree_signatures.bin` sidecar (per-file signature fingerprints).
+    pub fn tree_signatures_path(&self) -> PathBuf {
+        self.codixing_dir().join(TREE_SIGNATURES_FILE)
+    }
+
+    fn tree_signatures_lock_path(&self) -> PathBuf {
+        self.codixing_dir().join(TREE_SIGNATURES_LOCK_FILE)
+    }
+
+    fn acquire_tree_signatures_lock(&self) -> Result<TreeSignaturesLock> {
+        use std::io::ErrorKind;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        fs::create_dir_all(self.codixing_dir())?;
+        let lock_path = self.tree_signatures_lock_path();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(mut file) => {
+                    writeln!(file, "pid={}", std::process::id())?;
+                    file.sync_all()?;
+                    return Ok(TreeSignaturesLock { path: lock_path });
+                }
+                Err(e) if e.kind() == ErrorKind::AlreadyExists && Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                    return Err(CodixingError::Io(std::io::Error::new(
+                        ErrorKind::TimedOut,
+                        format!(
+                            "timed out waiting for tree signature sidecar lock at {}",
+                            lock_path.display()
+                        ),
+                    )));
+                }
+                Err(e) => return Err(CodixingError::Io(e)),
+            }
+        }
+    }
+
     /// Path to the `vectors/` sub-directory.
     pub fn vectors_dir(&self) -> PathBuf {
         self.codixing_dir().join(VECTORS_DIR)
@@ -406,7 +503,7 @@ impl IndexStore {
         let json = serde_json::to_string_pretty(config).map_err(|e| {
             CodixingError::Serialization(format!("failed to serialize config: {e}"))
         })?;
-        fs::write(&path, json)?;
+        atomic_write(&path, json)?;
         Ok(())
     }
 
@@ -425,7 +522,7 @@ impl IndexStore {
         let path = self.codixing_dir().join(META_FILE);
         let json = serde_json::to_string_pretty(meta)
             .map_err(|e| CodixingError::Serialization(format!("failed to serialize meta: {e}")))?;
-        fs::write(&path, json)?;
+        atomic_write(&path, json)?;
         Ok(())
     }
 
@@ -455,7 +552,7 @@ impl IndexStore {
         fs::create_dir_all(self.graph_dir())?;
         let bytes = bitcode::serialize(data)
             .map_err(|e| CodixingError::Serialization(format!("failed to serialize graph: {e}")))?;
-        fs::write(self.graph_path(), bytes)?;
+        atomic_write(self.graph_path(), bytes)?;
         Ok(())
     }
 
@@ -494,7 +591,7 @@ impl IndexStore {
 
     /// Save raw bytes to the `symbols.bin` file.
     pub fn save_symbols_bytes(&self, bytes: &[u8]) -> Result<()> {
-        fs::write(self.symbols_path(), bytes)?;
+        atomic_write(self.symbols_path(), bytes)?;
         Ok(())
     }
 
@@ -509,7 +606,7 @@ impl IndexStore {
         let bytes = bitcode::serialize(hashes).map_err(|e| {
             CodixingError::Serialization(format!("failed to serialize tree hashes: {e}"))
         })?;
-        fs::write(self.tree_hashes_path(), bytes)?;
+        atomic_write(self.tree_hashes_path(), bytes)?;
         Ok(())
     }
 
@@ -527,7 +624,7 @@ impl IndexStore {
         let bytes = bitcode::serialize(hashes).map_err(|e| {
             CodixingError::Serialization(format!("failed to serialize tree hashes v2: {e}"))
         })?;
-        fs::write(self.tree_hashes_v2_path(), bytes)?;
+        atomic_write(self.tree_hashes_v2_path(), bytes)?;
         Ok(())
     }
 
@@ -567,12 +664,70 @@ impl IndexStore {
             .collect())
     }
 
+    /// Save per-file signature fingerprints to the `tree_signatures.bin` sidecar.
+    ///
+    /// Stored as a bitcode-serialized `Vec<(PathBuf, u64)>`. This is a *separate*
+    /// file from the tree hashes so adding it never alters the existing hash-store
+    /// format — an index built before this feature simply has no sidecar.
+    pub fn save_tree_signatures(&self, sigs: &[(PathBuf, u64)]) -> Result<()> {
+        let _lock = self.acquire_tree_signatures_lock()?;
+        self.save_tree_signatures_unlocked(sigs)
+    }
+
+    fn save_tree_signatures_unlocked(&self, sigs: &[(PathBuf, u64)]) -> Result<()> {
+        let bytes = bitcode::serialize(sigs).map_err(|e| {
+            CodixingError::Serialization(format!("failed to serialize tree signatures: {e}"))
+        })?;
+        atomic_write(self.tree_signatures_path(), bytes)?;
+        Ok(())
+    }
+
+    /// Load per-file signature fingerprints from `tree_signatures.bin`.
+    ///
+    /// Returns an empty vector if the sidecar does not exist (an index built
+    /// before this feature) or fails to deserialize (forward/backward
+    /// incompatibility). In both cases the caller treats every changed file as
+    /// STRUCTURAL on the first sync — the conservative default — and the sidecar
+    /// is rewritten afterwards.
+    pub fn load_tree_signatures(&self) -> Result<Vec<(PathBuf, u64)>> {
+        self.load_tree_signatures_unlocked()
+    }
+
+    fn load_tree_signatures_unlocked(&self) -> Result<Vec<(PathBuf, u64)>> {
+        let path = self.tree_signatures_path();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let bytes = fs::read(&path)?;
+        match bitcode::deserialize::<Vec<(PathBuf, u64)>>(&bytes) {
+            Ok(sigs) => Ok(sigs),
+            // A corrupt or incompatible sidecar must not corrupt the index:
+            // fall back to "no fingerprints", i.e. treat all changes as structural.
+            Err(_) => Ok(Vec::new()),
+        }
+    }
+
+    /// Atomically update the signature sidecar under a cross-process lock.
+    ///
+    /// Mutators that perform read-modify-write must use this instead of doing
+    /// load/filter/save themselves; otherwise a concurrent sync can resurrect a
+    /// fingerprint that another process deliberately invalidated.
+    pub fn update_tree_signatures<F>(&self, update: F) -> Result<()>
+    where
+        F: FnOnce(Vec<(PathBuf, u64)>) -> Vec<(PathBuf, u64)>,
+    {
+        let _lock = self.acquire_tree_signatures_lock()?;
+        let current = self.load_tree_signatures_unlocked()?;
+        let next = update(current);
+        self.save_tree_signatures_unlocked(&next)
+    }
+
     /// Save the chunk metadata map (bitcode-serialized `Vec<(u64, ChunkMeta)>`).
     ///
     /// Accepts a flat list of `(chunk_id, meta)` pairs rather than the DashMap
     /// directly to avoid depending on DashMap in persistence.
     pub fn save_chunk_meta_bytes(&self, bytes: &[u8]) -> Result<()> {
-        fs::write(self.chunk_meta_path(), bytes)?;
+        atomic_write(self.chunk_meta_path(), bytes)?;
         Ok(())
     }
 
@@ -855,6 +1010,40 @@ mod tests {
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].1.content_hash, hashes[0].1.content_hash);
         assert_eq!(loaded[1].1.size, 2048);
+    }
+
+    #[test]
+    fn tree_signatures_update_reloads_and_rewrites_under_lock() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let config = IndexConfig::new(root);
+
+        let store = IndexStore::init(root, &config).unwrap();
+        store
+            .save_tree_signatures(&[
+                (PathBuf::from("src/a.rs"), 1),
+                (PathBuf::from("src/b.rs"), 2),
+            ])
+            .unwrap();
+
+        store
+            .update_tree_signatures(|sigs| {
+                sigs.into_iter()
+                    .filter(|(path, _)| path != Path::new("src/a.rs"))
+                    .chain(std::iter::once((PathBuf::from("src/c.rs"), 3)))
+                    .collect()
+            })
+            .unwrap();
+
+        let loaded = store.load_tree_signatures().unwrap();
+        assert_eq!(
+            loaded,
+            vec![
+                (PathBuf::from("src/b.rs"), 2),
+                (PathBuf::from("src/c.rs"), 3)
+            ]
+        );
+        assert!(!store.tree_signatures_lock_path().exists());
     }
 
     #[test]

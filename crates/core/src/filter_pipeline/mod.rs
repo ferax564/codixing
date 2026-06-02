@@ -62,7 +62,7 @@ impl FilterPipeline {
         }
     }
 
-    /// Apply first matching rule. Write tee if output is reduced.
+    /// Apply first matching rule. Write tee if output is changed.
     pub fn apply(&self, output: &str, tool_name: &str) -> FilterResult {
         let rule = match self.rules.iter().find(|r| r.matches(tool_name, output)) {
             Some(r) => r,
@@ -78,8 +78,7 @@ impl FilterPipeline {
 
         let filtered = apply_stages(&rule.stages, output);
 
-        // Use byte length as a cheap proxy for "did filtering reduce the output?"
-        let tee_path = if filtered.len() < output.len() {
+        let tee_path = if filtered != output {
             write_tee(&self.tee_dir, tool_name, output)
         } else {
             None
@@ -253,6 +252,28 @@ type = "strip_ansi"
         assert!(result.was_filtered);
         assert!(result.tee_path.is_none());
         assert!(!result.output.contains("<!-- full output:"));
+    }
+
+    #[test]
+    fn tee_when_rewrite_grows_output() {
+        let dir = make_tee_dir();
+        let toml = r#"
+schema_version = 1
+[[rules]]
+name = "rewrite"
+match_tool = "build"
+[[rules.stages]]
+type = "replace"
+pattern = "x"
+replacement = "expanded"
+"#;
+        let pipeline = FilterPipeline::from_toml(toml, dir.path().to_path_buf()).unwrap();
+
+        let result = pipeline.apply("x", "build");
+
+        assert!(result.was_filtered);
+        assert!(result.tee_path.is_some());
+        assert!(result.output.contains("<!-- full output:"));
     }
 
     #[test]

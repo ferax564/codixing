@@ -1,6 +1,6 @@
 //! File I/O tool handlers: read, list, grep, outline, write, edit, delete, apply_patch, run_tests.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde_json::Value;
@@ -48,7 +48,7 @@ pub(crate) fn call_read_file(engine: &Engine, args: &Value) -> (String, bool) {
                 String::new()
             };
             let (body, truncated) = if content.len() > max_chars {
-                (&content[..max_chars], true)
+                (truncate_chars(&content, max_chars), true)
             } else {
                 (content.as_str(), false)
             };
@@ -298,8 +298,10 @@ pub(crate) fn call_outline_file(engine: &Engine, args: &Value) -> (String, bool)
 // Write tools
 // ---------------------------------------------------------------------------
 
-fn resolve_safe_path(engine: &Engine, rel: &str) -> Result<PathBuf, String> {
-    let root = engine.config().root.clone();
+/// Resolve `rel` against `root`, collapsing `.`/`..` lexically, and reject any
+/// path that escapes `root`. Pure (no `Engine`) so it is unit-testable and so
+/// every write tool — including `apply_patch` — can share one chokepoint.
+fn normalize_within_root(root: &Path, rel: &str) -> Result<PathBuf, String> {
     let candidate = root.join(rel);
 
     let mut normalized = PathBuf::new();
@@ -313,13 +315,46 @@ fn resolve_safe_path(engine: &Engine, rel: &str) -> Result<PathBuf, String> {
         }
     }
 
-    if !normalized.starts_with(&root) {
+    if !normalized.starts_with(root) {
         return Err(format!(
             "Path '{rel}' escapes the project root \u{2014} operation denied."
         ));
     }
 
     Ok(normalized)
+}
+
+fn resolve_safe_path(engine: &Engine, rel: &str) -> Result<PathBuf, String> {
+    let root = engine.config().root.clone();
+    normalize_within_root(&root, rel)
+}
+
+/// Truncate `s` to at most `max_bytes`, snapping the cut **down** to the nearest
+/// UTF-8 char boundary. Unlike `&s[..max_bytes]`, this never panics when the cut
+/// lands inside a multibyte sequence (accented identifiers, CJK, emoji, the
+/// 3-byte U+FFFD that `from_utf8_lossy` injects).
+fn truncate_chars(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut i = max_bytes;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    &s[..i]
+}
+
+/// Keep the **last** `max_bytes` of `s`, snapping the cut **up** to the nearest
+/// UTF-8 char boundary so the tail is always valid UTF-8.
+fn truncate_chars_end(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut i = s.len() - max_bytes;
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    &s[i..]
 }
 
 pub(crate) fn call_write_file(engine: &mut Engine, args: &Value) -> (String, bool) {
@@ -592,7 +627,7 @@ pub(crate) fn call_git_diff(engine: &Engine, args: &Value) -> (String, bool) {
                     (
                         format!(
                             "{}\n\n... (truncated, {} bytes total){tee_hint}",
-                            &stdout[..max],
+                            truncate_chars(&stdout, max),
                             stdout.len()
                         ),
                         false,
@@ -636,7 +671,21 @@ pub(crate) fn call_apply_patch(engine: &mut Engine, args: &Value) -> (String, bo
     }
 
     for fp in &file_patches {
-        let abs_path = root.join(&fp.path);
+        // Route the diff-supplied path through the same escape guard every other
+        // write tool uses. The `+++ b/...` header is attacker-controllable, and
+        // `root.join("../..")` does NOT collapse `..`, so a bare join would let a
+        // patch read+rewrite files outside the repo root.
+        if fp.path.trim().is_empty() {
+            errors.push("Patch contains an empty target path \u{2014} skipped.".to_string());
+            continue;
+        }
+        let abs_path = match normalize_within_root(&root, &fp.path) {
+            Ok(p) => p,
+            Err(e) => {
+                errors.push(e);
+                continue;
+            }
+        };
 
         // Read the original file content.
         let original = match std::fs::read_to_string(&abs_path) {
@@ -697,7 +746,15 @@ pub(crate) fn call_apply_patch(engine: &mut Engine, args: &Value) -> (String, bo
         );
     }
 
-    let _ = engine.persist_incremental();
+    if let Err(e) = engine.persist_incremental() {
+        return (
+            format!(
+                "Patch applied and re-indexed in memory, but persisting the index failed: {e}\n\
+                 Run `codixing sync .` to recover."
+            ),
+            true,
+        );
+    }
     (
         format!(
             "Patch applied: {reindexed} file(s) modified and reindexed.\n\
@@ -930,19 +987,30 @@ pub(crate) fn call_run_tests(engine: &mut Engine, args: &Value) -> (String, bool
 
     let root = engine.config().root.clone();
 
-    let output = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(&root)
-        .output();
+    // Portable shell selection: `cmd /C` on Windows, `sh -c` elsewhere.
+    let (shell, flag) = if cfg!(windows) {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
 
-    match output {
+    match run_with_timeout(shell, flag, command, &root, timeout_secs) {
         Err(e) => (format!("Failed to execute command: {e}"), true),
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let status = out.status.code().unwrap_or(-1);
-            let success = out.status.success();
+        Ok(RunOutcome::TimedOut) => (
+            format!(
+                "Command: {command}\nTimeout: {timeout_secs}s\nStatus: \u{2717} TIMED OUT\n\n\
+                 The command exceeded its {timeout_secs}s timeout and was killed."
+            ),
+            true,
+        ),
+        Ok(RunOutcome::Completed {
+            stdout,
+            stderr,
+            status,
+            success,
+        }) => {
+            let stdout = String::from_utf8_lossy(&stdout);
+            let stderr = String::from_utf8_lossy(&stderr);
 
             let combined = format!("{stdout}{stderr}");
             let tee_hint = if combined.len() > 8000 {
@@ -953,7 +1021,7 @@ pub(crate) fn call_run_tests(engine: &mut Engine, args: &Value) -> (String, bool
             let truncated = if combined.len() > 8000 {
                 format!(
                     "[output truncated to last 8000 chars]\n...{}{}",
-                    &combined[combined.len() - 8000..],
+                    truncate_chars_end(&combined, 8000),
                     tee_hint
                 )
             } else {
@@ -970,6 +1038,203 @@ pub(crate) fn call_run_tests(engine: &mut Engine, args: &Value) -> (String, bool
                 }
             );
             (format!("{header}{truncated}"), !success)
+        }
+    }
+}
+
+/// Result of running a child command under a wall-clock timeout.
+enum RunOutcome {
+    Completed {
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        status: i32,
+        success: bool,
+    },
+    TimedOut,
+}
+
+/// Spawn `shell flag command` in `root` and enforce `timeout_secs`. Stdout and
+/// stderr are drained by dedicated reader threads so a chatty command can't
+/// deadlock on a full pipe buffer while we poll for exit. On expiry the child is
+/// killed and reaped so it can't wedge the worker thread (which holds
+/// `&mut Engine`). `timeout_secs == 0` means no limit.
+fn run_with_timeout(
+    shell: &str,
+    flag: &str,
+    command: &str,
+    root: &Path,
+    timeout_secs: u64,
+) -> std::io::Result<RunOutcome> {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let mut child = std::process::Command::new(shell)
+        .arg(flag)
+        .arg(command)
+        .current_dir(root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    // Drain both pipes concurrently: without this a command that writes more
+    // than the OS pipe buffer (~64KB) before exiting would block on write
+    // forever, and our `try_wait` loop would never see it finish.
+    let drain = |pipe: Option<std::process::ChildStdout>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let drain_err = |pipe: Option<std::process::ChildStderr>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let out_handle = drain(child.stdout.take());
+    let err_handle = drain_err(child.stderr.take());
+
+    let collect = |child: &mut std::process::Child,
+                   status: std::process::ExitStatus,
+                   out_handle: std::thread::JoinHandle<Vec<u8>>,
+                   err_handle: std::thread::JoinHandle<Vec<u8>>| {
+        let _ = child;
+        let stdout = out_handle.join().unwrap_or_default();
+        let stderr = err_handle.join().unwrap_or_default();
+        RunOutcome::Completed {
+            stdout,
+            stderr,
+            status: status.code().unwrap_or(-1),
+            success: status.success(),
+        }
+    };
+
+    if timeout_secs == 0 {
+        let status = child.wait()?;
+        return Ok(collect(&mut child, status, out_handle, err_handle));
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        match child.try_wait()? {
+            Some(status) => {
+                return Ok(collect(&mut child, status, out_handle, err_handle));
+            }
+            None => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    // Reader threads unblock at EOF once the child is gone.
+                    let _ = out_handle.join();
+                    let _ = err_handle.join();
+                    return Ok(RunOutcome::TimedOut);
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn truncate_chars_snaps_below_multibyte_boundary() {
+        // "héllo": h=1B, é=2B (bytes 1..3), so byte index 2 is mid-char.
+        let s = "héllo";
+        // A naive &s[..2] would panic; truncate_chars snaps down to 1.
+        assert_eq!(truncate_chars(s, 2), "h");
+        // A boundary that lands exactly after é (byte 3) keeps "hé".
+        assert_eq!(truncate_chars(s, 3), "hé");
+        // max >= len returns the whole string.
+        assert_eq!(truncate_chars(s, 999), s);
+    }
+
+    #[test]
+    fn truncate_chars_handles_emoji_and_cjk() {
+        let s = "a😀中"; // a=1, 😀=4 (1..5), 中=3 (5..8)
+        assert_eq!(truncate_chars(s, 3), "a"); // mid-emoji -> snap to 1
+        assert_eq!(truncate_chars(s, 5), "a😀"); // exact boundary
+        assert_eq!(truncate_chars(s, 6), "a😀"); // mid-中 -> snap back to 5
+    }
+
+    #[test]
+    fn truncate_chars_end_snaps_up_to_boundary() {
+        let s = "héllo"; // bytes: h(0) é(1..3) l(3) l(4) o(5), len 6
+        // Keep last 6 bytes => whole string (len == max).
+        assert_eq!(truncate_chars_end(s, 6), s);
+        // Keep last 5 bytes: cut at byte 1 (start of é) — valid boundary.
+        assert_eq!(truncate_chars_end(s, 5), "éllo");
+        // Keep last 4 bytes: raw cut at byte 2 is mid-é; snap up to 3 -> "llo".
+        assert_eq!(truncate_chars_end(s, 4), "llo");
+    }
+
+    #[test]
+    fn normalize_within_root_collapses_and_rejects_escapes() {
+        let root = Path::new("/repo");
+        // Normal relative path resolves under root.
+        assert_eq!(
+            normalize_within_root(root, "src/main.rs").unwrap(),
+            Path::new("/repo/src/main.rs")
+        );
+        // Interior `..` that stays within root is fine.
+        assert_eq!(
+            normalize_within_root(root, "src/../lib.rs").unwrap(),
+            Path::new("/repo/lib.rs")
+        );
+        // Escaping `..` is rejected — this is the apply_patch traversal guard.
+        assert!(normalize_within_root(root, "../../etc/passwd").is_err());
+        assert!(normalize_within_root(root, "src/../../escape").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_with_timeout_kills_overrunning_command() {
+        let dir = std::env::temp_dir();
+        let outcome = run_with_timeout("sh", "-c", "sleep 30", &dir, 1).unwrap();
+        assert!(
+            matches!(outcome, RunOutcome::TimedOut),
+            "a 30s sleep under a 1s timeout must time out"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_with_timeout_completes_fast_command() {
+        let dir = std::env::temp_dir();
+        let outcome = run_with_timeout("sh", "-c", "echo hello", &dir, 10).unwrap();
+        match outcome {
+            RunOutcome::Completed {
+                stdout, success, ..
+            } => {
+                assert!(success);
+                assert_eq!(String::from_utf8_lossy(&stdout).trim(), "hello");
+            }
+            RunOutcome::TimedOut => panic!("a fast command must not time out"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_with_timeout_drains_large_output() {
+        // Emit >64KB (past the pipe buffer) then exit — must not deadlock.
+        let dir = std::env::temp_dir();
+        let outcome =
+            run_with_timeout("sh", "-c", "yes abcdefgh | head -n 20000", &dir, 30).unwrap();
+        match outcome {
+            RunOutcome::Completed { stdout, .. } => {
+                assert!(stdout.len() > 64 * 1024, "expected >64KB of drained output");
+            }
+            RunOutcome::TimedOut => panic!("draining large output must not time out"),
         }
     }
 }

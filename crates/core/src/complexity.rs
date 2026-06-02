@@ -18,8 +18,9 @@ pub fn count_cyclomatic_complexity(lines: &[&str], start: usize, end: usize) -> 
         .take(end.saturating_sub(start) + 1)
     {
         let t = line.trim();
-        cc += t.matches("if ").count();
-        cc += t.matches("else if").count();
+        let else_ifs = t.matches("else if").count();
+        cc += t.matches("if ").count().saturating_sub(else_ifs);
+        cc += else_ifs;
         cc += t.matches("for ").count();
         cc += t.matches("while ").count();
         if t.contains("loop {") || t.trim() == "loop" {
@@ -66,6 +67,16 @@ mod tests {
             "}",
         ];
         assert_eq!(count_cyclomatic_complexity(&lines, 1, 6), 3);
+    }
+
+    #[test]
+    fn else_if_counts_as_one_branch() {
+        let lines = vec![
+            "fn classify(x: i32) -> i32 {",
+            "    if x == 1 { 1 } else if x == 2 { 2 } else { 3 }",
+            "}",
+        ];
+        assert_eq!(count_cyclomatic_complexity(&lines, 1, 3), 3);
     }
 
     #[test]

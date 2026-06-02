@@ -196,6 +196,7 @@ pub fn is_identifier_query(query: &str) -> bool {
         return false;
     }
     !query.is_empty()
+        && query.chars().any(|c| c.is_alphanumeric())
         && query
             .chars()
             .all(|c| c.is_alphanumeric() || matches!(c, '_' | ':' | '.' | '-' | '>' | '/'))
@@ -387,6 +388,15 @@ mod tests {
         let fused = rrf_fuse(&list, &[], 60.0);
         assert_eq!(fused.len(), 1);
         assert_eq!(fused[0].chunk_id, "z");
+    }
+
+    #[test]
+    fn identifier_query_requires_alphanumeric_content() {
+        assert!(is_identifier_query("Engine::open"));
+        assert!(is_identifier_query("foo/bar-baz"));
+        assert!(!is_identifier_query("->"));
+        assert!(!is_identifier_query("::"));
+        assert!(!is_identifier_query("/"));
     }
 
     #[test]

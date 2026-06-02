@@ -25,6 +25,8 @@ pub struct SearchContext<'a> {
     pub recency_map: Option<&'a std::collections::HashMap<String, i64>>,
     /// Chunk metadata table for hydrating injected results (graph propagation).
     pub chunk_meta: Option<&'a dashmap::DashMap<u64, crate::retriever::ChunkMeta>>,
+    /// Tantivy index for hydrating compact chunk metadata after persisted loads.
+    pub tantivy: Option<&'a crate::index::TantivyIndex>,
     /// The concept index (if available) for concept-based boosting.
     pub concepts: Option<&'a crate::engine::concepts::ConceptIndex>,
 }
@@ -215,7 +217,18 @@ impl SearchStage for PersonalizedGraphBoostStage {
 
         // Cache hit: reuse the previously-computed PPR scores. Cache miss:
         // run the 20-iteration PPR loop then insert.
-        let cache_key = seed_cache_key(&seeds, graph.node_count());
+        //
+        // The structural id folds in BOTH node and edge counts. node_count
+        // alone misses the common refactor that rewires edges without
+        // adding/removing files: the key would stay identical and the cache
+        // would return a pre-edit PPR vector for the whole TTL while the graph
+        // has actually changed. Mixing edge_count in (hash-combined so the two
+        // counts don't trivially alias) invalidates on edge-only changes too.
+        let structural_id = graph
+            .node_count()
+            .wrapping_mul(0x9E37_79B1)
+            .wrapping_add(graph.edge_count());
+        let cache_key = seed_cache_key(&seeds, structural_id);
         let ppr = if let Some(hit) = ppr_cache_get(cache_key) {
             hit
         } else {
@@ -390,6 +403,27 @@ impl GraphPropagationStage {
     const MAX_INJECTED: usize = 3;
     const CALLEE_DAMPING: f32 = 0.25;
     const CALLER_DAMPING: f32 = 0.15;
+
+    fn resolve_content(ctx: &SearchContext<'_>, chunk_id: u64, meta_content: &str) -> String {
+        if !meta_content.is_empty() {
+            return meta_content.to_string();
+        }
+        let Some(tantivy) = ctx.tantivy else {
+            return String::new();
+        };
+        let ids: std::collections::HashSet<u64> = [chunk_id].into_iter().collect();
+        let Ok(docs) = tantivy.lookup_chunks_by_ids(&ids) else {
+            return String::new();
+        };
+        let fields = tantivy.fields();
+        docs.into_iter()
+            .find_map(|doc| {
+                doc.get_first(fields.content)
+                    .and_then(|v| tantivy::schema::Value::as_str(&v))
+                    .map(ToString::to_string)
+            })
+            .unwrap_or_default()
+    }
 }
 
 impl SearchStage for GraphPropagationStage {
@@ -451,7 +485,7 @@ impl SearchStage for GraphPropagationStage {
                     line_end: meta.line_end,
                     signature: meta.signature.clone(),
                     scope_chain: meta.scope_chain.clone(),
-                    content: meta.content.clone(),
+                    content: Self::resolve_content(ctx, meta.chunk_id, &meta.content),
                 });
             }
         }
@@ -481,11 +515,12 @@ impl SearchStage for ConceptBoostStage {
             return Ok(());
         }
 
-        // Collect file boosts from matching clusters
+        // Collect file boosts from matching clusters. Keep the multiplier
+        // bounded so repeated concept-label hits cannot swamp structural boosts.
         let mut file_boosts: std::collections::HashMap<&str, f32> =
             std::collections::HashMap::new();
         for (cluster, hit_count) in &matches {
-            let boost = 0.3 * cluster.score * (*hit_count as f32);
+            let boost = (0.3 * cluster.score * (*hit_count).min(5) as f32).min(1.5);
             for file in &cluster.files {
                 let entry = file_boosts.entry(file.as_str()).or_insert(0.0);
                 *entry = entry.max(boost);
@@ -495,7 +530,7 @@ impl SearchStage for ConceptBoostStage {
         let mut boosted = false;
         for r in results.iter_mut() {
             if let Some(&boost) = file_boosts.get(r.file_path.as_str()) {
-                r.score *= 1.0 + boost;
+                r.score *= (1.0 + boost).min(2.5);
                 boosted = true;
             }
         }
@@ -669,11 +704,11 @@ pub fn fast_pipeline() -> SearchPipeline {
         .add(RecencyBoostStage)
         .add(PathMatchBoostStage)
         .add(TestDemotionStage)
-        .add(GraphPropagationStage)
         .add(TruncationStage {
             min_results: 3,
             cliff_threshold: 0.35,
         })
+        .add(GraphPropagationStage)
         .add(FileDedupStage)
 }
 
@@ -688,11 +723,11 @@ pub fn thorough_pipeline() -> SearchPipeline {
         .add(RecencyBoostStage)
         .add(PathMatchBoostStage)
         .add(TestDemotionStage)
-        .add(GraphPropagationStage)
         .add(TruncationStage {
             min_results: 3,
             cliff_threshold: 0.35,
         })
+        .add(GraphPropagationStage)
         .add(FileDedupStage)
 }
 
@@ -735,6 +770,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            tantivy: None,
             concepts: None,
         };
         let mut results = vec![make_result("a", 10.0, "src/a.rs")];
@@ -754,6 +790,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            tantivy: None,
             concepts: None,
         };
         let mut results = vec![
@@ -776,6 +813,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            tantivy: None,
             concepts: None,
         };
         let mut results = vec![
@@ -821,6 +859,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            tantivy: None,
             concepts: None,
         };
         let mut results = vec![
@@ -847,6 +886,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            tantivy: None,
             concepts: None,
         };
         let mut results = vec![
@@ -871,6 +911,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            tantivy: None,
             concepts: None,
         };
         let mut results = vec![make_result("a", 10.0, "src/engine.rs")];
@@ -889,6 +930,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            tantivy: None,
             concepts: None,
         };
         let mut results = vec![make_result("a", 10.0, "src/engine.rs")];
@@ -920,6 +962,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: Some(&recency),
             chunk_meta: None,
+            tantivy: None,
             concepts: None,
         };
 
@@ -992,6 +1035,7 @@ mod tests {
             graph_boost_weight: 0.5,
             recency_map: None,
             chunk_meta: Some(&chunk_meta),
+            tantivy: None,
             concepts: None,
         };
 
@@ -1014,6 +1058,75 @@ mod tests {
     }
 
     #[test]
+    fn graph_propagation_hydrates_empty_compact_content_from_tantivy() {
+        use crate::chunker::Chunk;
+        use crate::graph::CodeGraph;
+        use crate::index::TantivyIndex;
+        use crate::language::Language;
+
+        let mut graph = CodeGraph::new();
+        graph.add_edge("src/a.rs", "src/b.rs", "b", Language::Rust, Language::Rust);
+
+        let tantivy = TantivyIndex::create_in_ram().unwrap();
+        tantivy
+            .add_chunk(&Chunk {
+                id: 100,
+                file_path: "src/b.rs".into(),
+                language: Language::Rust,
+                content: "fn helper() {}".into(),
+                byte_start: 0,
+                byte_end: 14,
+                line_start: 0,
+                line_end: 1,
+                scope_chain: vec![],
+                signatures: vec!["fn helper()".into()],
+                entity_names: vec!["helper".into()],
+                doc_comments: String::new(),
+            })
+            .unwrap();
+        tantivy.commit().unwrap();
+
+        let chunk_meta = dashmap::DashMap::new();
+        chunk_meta.insert(
+            100,
+            crate::retriever::ChunkMeta {
+                chunk_id: 100,
+                file_path: "src/b.rs".into(),
+                language: "Rust".into(),
+                line_start: 0,
+                line_end: 1,
+                signature: "fn helper()".into(),
+                scope_chain: vec![],
+                entity_names: vec!["helper".into()],
+                content: String::new(),
+                content_hash: 0,
+            },
+        );
+
+        let stage = GraphPropagationStage;
+        let symbols = crate::symbols::SymbolTable::new();
+        let ctx = SearchContext {
+            query: "test",
+            symbols: &symbols,
+            graph: Some(&graph),
+            graph_boost_weight: 0.5,
+            recency_map: None,
+            chunk_meta: Some(&chunk_meta),
+            tantivy: Some(&tantivy),
+            concepts: None,
+        };
+
+        let mut results = vec![make_result("a", 10.0, "src/a.rs")];
+        stage.apply(&mut results, &ctx).unwrap();
+
+        let injected = results
+            .iter()
+            .find(|r| r.file_path == "src/b.rs")
+            .expect("graph propagation should inject b.rs");
+        assert_eq!(injected.content, "fn helper() {}");
+    }
+
+    #[test]
     fn file_dedup_keeps_best_per_file() {
         let stage = FileDedupStage;
         let symbols = crate::symbols::SymbolTable::new();
@@ -1024,6 +1137,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            tantivy: None,
             concepts: None,
         };
         let mut results = vec![
@@ -1078,6 +1192,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            tantivy: None,
             concepts: None,
         };
         let mut results = vec![
@@ -1119,6 +1234,7 @@ mod tests {
             graph_boost_weight: 0.0,
             recency_map: None,
             chunk_meta: None,
+            tantivy: None,
             concepts: None,
         };
         let mut results = vec![
@@ -1186,6 +1302,7 @@ mod tests {
             graph_boost_weight: 0.5,
             recency_map: None,
             chunk_meta: Some(&chunk_meta),
+            tantivy: None,
             concepts: None,
         };
 
@@ -1225,6 +1342,7 @@ mod tests {
             graph_boost_weight: 0.5,
             recency_map: None,
             chunk_meta: None,
+            tantivy: None,
             concepts: None,
         };
 
@@ -1293,6 +1411,7 @@ mod tests {
             graph_boost_weight: 0.5,
             recency_map: None,
             chunk_meta: None,
+            tantivy: None,
             concepts: None,
         };
 

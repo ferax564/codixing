@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{info, warn};
@@ -45,9 +45,20 @@ pub(crate) async fn run_daemon(
     federation: Option<Arc<FederatedEngine>>,
     profile: McpProfile,
 ) -> Result<()> {
-    // Remove stale socket file if it exists.
+    // Remove stale socket file if it exists, but never unlink a live daemon.
     if socket_path.exists() {
-        std::fs::remove_file(socket_path).ok();
+        if socket_alive(socket_path).await {
+            bail!("daemon socket already in use at {}", socket_path.display());
+        }
+        match std::fs::remove_file(socket_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!("failed to remove stale socket at {}", socket_path.display())
+                });
+            }
+        }
     }
 
     let listener = UnixListener::bind(socket_path)
@@ -95,7 +106,7 @@ pub(crate) async fn run_daemon(
     tokio::task::spawn_blocking(move || {
         let config = engine_for_watch
             .read()
-            .expect("engine lock poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .config()
             .clone();
 
@@ -147,7 +158,7 @@ pub(crate) async fn run_daemon(
                 count = all_changes.len(),
                 "daemon: file changes detected, updating index"
             );
-            let mut eng = engine_for_watch.write().expect("engine lock poisoned");
+            let mut eng = engine_for_watch.write().unwrap_or_else(|e| e.into_inner());
             if let Err(e) = eng.apply_changes(&all_changes) {
                 warn!(error = %e, "daemon: apply_changes failed");
             }

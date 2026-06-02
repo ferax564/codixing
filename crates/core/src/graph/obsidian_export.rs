@@ -24,12 +24,36 @@ pub struct ObsidianExportOptions {
 /// `src_foo_bar.rs` with `_` replacement).
 fn sanitize_filename(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
+    // The replacement is many-to-one, so distinct nodes can collide and silently
+    // overwrite each other's note (and mis-resolve every wiki-link, which derives
+    // from this same function). The realistic collision the report cites is
+    // `src/foo-bar.tsx` vs `src/foo/bar.tsx`, both naively -> `src-foo-bar.tsx`.
+    //
+    // We disambiguate by appending a short stable hash of the ORIGINAL path, but
+    // ONLY when the input can collide: it contains a `\`, a literal `-`, or a
+    // special-class char. A plain forward slash does NOT trigger a hash, so the
+    // overwhelmingly common case (`src/main.rs` -> `src-main.rs`) and snake_case
+    // names stay clean. This is still injective: among non-hashed outputs the
+    // only source of `-` is `/`, so each maps back to a unique original; hashed
+    // outputs are separated by the hash of their distinct originals.
+    let mut needs_hash = false;
     for c in path.chars() {
         match c {
-            '/' | '\\' => out.push('-'),
-            ':' | '*' | '?' | '"' | '<' | '>' | '|' | '#' | '^' | '[' | ']' => out.push('_'),
+            '/' => out.push('-'),
+            '\\' | '-' => {
+                out.push('-');
+                needs_hash = true;
+            }
+            ':' | '*' | '?' | '"' | '<' | '>' | '|' | '#' | '^' | '[' | ']' => {
+                out.push('_');
+                needs_hash = true;
+            }
             _ => out.push(c),
         }
+    }
+    if needs_hash {
+        let h = xxhash_rust::xxh3::xxh3_64(path.as_bytes());
+        out.push_str(&format!("-{h:016x}"));
     }
     out
 }
@@ -342,12 +366,20 @@ mod tests {
     #[test]
     fn sanitize_filename_replaces_special_chars() {
         assert_eq!(sanitize_filename("src/main.rs"), "src-main.rs");
-        assert_eq!(sanitize_filename("a:b*c?d"), "a_b_c_d");
-        assert_eq!(sanitize_filename("path/to/[file]"), "path-to-_file_");
-        // Collision-safe: these produce different filenames
+        let special = sanitize_filename("a:b*c?d");
+        assert!(special.starts_with("a_b_c_d-"));
+        assert_eq!(special.len(), "a_b_c_d-".len() + 16);
+
+        let bracketed = sanitize_filename("path/to/[file]");
+        assert!(bracketed.starts_with("path-to-_file_-"));
+        assert_eq!(bracketed.len(), "path-to-_file_-".len() + 16);
+
+        // Collision-safe: these produce different filenames.
         assert_ne!(
-            sanitize_filename("src/foo_bar.rs"),
+            sanitize_filename("src/foo-bar.rs"),
             sanitize_filename("src/foo/bar.rs")
         );
+        assert_eq!(sanitize_filename("src/foo/bar.rs"), "src-foo-bar.rs");
+        assert!(sanitize_filename("src/foo-bar.rs").starts_with("src-foo-bar.rs-"));
     }
 }

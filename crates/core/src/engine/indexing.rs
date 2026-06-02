@@ -50,6 +50,13 @@ pub(super) struct IndexContext<'a> {
     /// Symbol references extracted from doc files, keyed by relative path.
     /// Resolved into `EdgeKind::DocumentedBy` edges after the symbol table is built.
     pub(super) pending_doc_refs: &'a DashMap<String, Vec<crate::language::doc::SymbolRef>>,
+    /// Per-file signature fingerprints (normalized relative path → fingerprint)
+    /// for files that have AST entities. Persisted to `tree_signatures.bin` so
+    /// the first sync after `init` can classify cosmetic edits. Keyed by the
+    /// **normalized relative path** (`config.normalize_path`) so lookups are
+    /// invariant to canonical/non-canonical root differences between `init` and
+    /// `sync`. Files with no fingerprint are simply absent (→ STRUCTURAL).
+    pub(super) pending_signatures: &'a DashMap<String, u64>,
 }
 
 /// Build a [`FileTrigramIndex`] from full file content.
@@ -164,6 +171,15 @@ pub(super) fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
     for entity in &result.entities {
         ctx.symbols
             .insert(symbol_from_entity(entity, &rel_str, result.language));
+    }
+
+    // Record the signature fingerprint so the first post-init sync can classify
+    // a cosmetic edit. Absent when there are no AST entities (→ STRUCTURAL).
+    // Keyed by the normalized relative path (root-invariant).
+    if let Some(fp) =
+        super::fingerprint::signature_fingerprint(&result.entities, &source, result.language)
+    {
+        ctx.pending_signatures.insert(rel_str.clone(), fp);
     }
 
     // Extract imports now — we already have the tree in memory, so this

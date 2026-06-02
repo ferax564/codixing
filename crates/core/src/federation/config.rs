@@ -72,13 +72,24 @@ impl FederationConfig {
                 path.display()
             ))
         })?;
-        let config: Self = serde_json::from_str(&content).map_err(|e| {
+        let mut config: Self = serde_json::from_str(&content).map_err(|e| {
             CodixingError::Config(format!(
                 "failed to parse federation config at {}: {e}",
                 path.display()
             ))
         })?;
+        config.normalize();
         Ok(config)
+    }
+
+    /// Clamp deserialized fields into safe ranges.
+    ///
+    /// A user-supplied config can carry `max_resident: 0`, which would drive
+    /// the LRU eviction loop in [`crate::federation::FederatedEngine`] into an
+    /// infinite spin while holding the LRU mutex. Clamp it to at least 1 so at
+    /// least one engine can stay resident.
+    pub fn normalize(&mut self) {
+        self.max_resident = self.max_resident.max(1);
     }
 
     /// Derive a `project_name -> weight` mapping.
@@ -165,6 +176,34 @@ mod tests {
         assert_eq!(cfg.max_resident, 3);
         assert!((cfg.projects[0].weight - 1.0).abs() < f32::EPSILON); // default
         assert!((cfg.projects[1].weight - 1.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_max_resident_zero_is_clamped_on_load() {
+        // A hand-edited config with max_resident: 0 must not survive load():
+        // an unclamped 0 drives maybe_evict into an infinite spin (see
+        // federation::mod::maybe_evict). load() normalizes it up to 1.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("federation.json");
+        std::fs::write(
+            &path,
+            r#"{ "projects": [{ "root": "/a" }], "max_resident": 0 }"#,
+        )
+        .unwrap();
+        let cfg = FederationConfig::load(&path).unwrap();
+        assert_eq!(cfg.max_resident, 1, "max_resident must be clamped to >= 1");
+    }
+
+    #[test]
+    fn test_normalize_clamps_max_resident() {
+        let mut cfg = FederationConfig {
+            projects: Vec::new(),
+            rrf_k: 60.0,
+            lazy_load: true,
+            max_resident: 0,
+        };
+        cfg.normalize();
+        assert_eq!(cfg.max_resident, 1);
     }
 
     #[test]

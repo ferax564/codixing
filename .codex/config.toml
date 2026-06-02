@@ -1,0 +1,7 @@
+[mcp_servers.codixing]
+args = [
+    "--root",
+    ".",
+    "--no-daemon-fork",
+]
+command = "./target/release/codixing-mcp"

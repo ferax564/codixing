@@ -251,6 +251,7 @@ impl Engine {
             graph_boost_weight: self.config.graph.boost_weight,
             recency_map: Some(self.get_recency_map()),
             chunk_meta: Some(&self.chunk_meta),
+            tantivy: Some(&self.tantivy),
             concepts,
         }
     }

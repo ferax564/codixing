@@ -6,6 +6,7 @@ pub(super) mod embed_state;
 pub(super) mod embed_stats;
 pub mod examples;
 mod files;
+pub(crate) mod fingerprint;
 mod focus_map;
 pub mod freshness;
 mod graph;
@@ -87,6 +88,13 @@ pub struct SyncStats {
     pub removed: usize,
     /// Files that are unchanged and were skipped.
     pub unchanged: usize,
+    /// Files whose content changed but whose *signature fingerprint* did not
+    /// (a COSMETIC change — body/comment/whitespace only). For these the BM25,
+    /// symbol, and trigram indexes were refreshed but the cached embedding
+    /// vectors were reused instead of being recomputed, avoiding the expensive
+    /// dense-embedding round-trip. Counted only when every chunk's vector was
+    /// successfully reused.
+    pub cosmetic_skipped: usize,
 }
 
 /// Statistics returned by [`Engine::git_sync`].

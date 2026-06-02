@@ -2,8 +2,8 @@
 //!
 //! The MCP server (`codixing-mcp`) can run as a background daemon that holds
 //! the engine in memory, serving JSON-RPC requests over:
-//! - a Unix domain socket at `<root>/.codixing/daemon.sock` (Unix)
-//! - a named pipe at `\\.\pipe\codixing-<hash>` (Windows)
+//! - a Unix domain socket at `<root>/.codixing/daemon-reviewer.sock` (Unix)
+//! - a named pipe at `\\.\pipe\codixing-<hash>-reviewer` (Windows)
 //!
 //! Once the daemon is warm, tool calls cost ~5-40 ms instead of ~4 s cold
 //! process startup on a 2 GB hybrid index (measured on the Linux kernel).
@@ -43,6 +43,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 /// take seconds even warm.
 #[allow(dead_code)]
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+const DEFAULT_DAEMON_PROFILE: &str = "reviewer";
 
 /// Attempt to call an MCP tool through the running daemon.
 ///
@@ -113,14 +115,16 @@ fn parse_response<R: BufRead>(mut reader: R) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Unix: connect via domain socket at `<root>/.codixing/daemon.sock`
+// Unix: connect via domain socket at `<root>/.codixing/daemon-<profile>.sock`
 // ---------------------------------------------------------------------------
 
 #[cfg(unix)]
 fn send_jsonrpc(root: &Path, request: &[u8]) -> Option<Box<dyn BufRead + Send>> {
     use std::os::unix::net::UnixStream;
 
-    let socket_path = root.join(".codixing").join("daemon.sock");
+    let socket_path = root
+        .join(".codixing")
+        .join(format!("daemon-{DEFAULT_DAEMON_PROFILE}.sock"));
     if !socket_path.exists() {
         return None;
     }
@@ -140,7 +144,7 @@ fn send_jsonrpc(root: &Path, request: &[u8]) -> Option<Box<dyn BufRead + Send>> 
 }
 
 // ---------------------------------------------------------------------------
-// Windows: connect via named pipe at `\\.\pipe\codixing-<hash>`
+// Windows: connect via named pipe at `\\.\pipe\codixing-<hash>-<profile>`
 // ---------------------------------------------------------------------------
 
 /// Derive the named-pipe name from the project root, mirroring
@@ -149,13 +153,19 @@ fn send_jsonrpc(root: &Path, request: &[u8]) -> Option<Box<dyn BufRead + Send>> 
 /// Must match the server-side hashing or connections silently fail.
 #[cfg(windows)]
 fn pipe_name_for_root(root: &Path) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    let hash = stable_root_hash(root);
+    format!(r"\\.\pipe\codixing-{hash:016x}-{DEFAULT_DAEMON_PROFILE}")
+}
 
-    let mut hasher = DefaultHasher::new();
-    root.hash(&mut hasher);
-    let hash = hasher.finish();
-    format!(r"\\.\pipe\codixing-{hash:016x}")
+#[cfg(windows)]
+fn stable_root_hash(root: &Path) -> u64 {
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in canonical.to_string_lossy().to_ascii_lowercase().bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 #[cfg(windows)]
