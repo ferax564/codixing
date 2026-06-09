@@ -290,8 +290,33 @@ impl Engine {
             }
         }
 
-        let hashes: Vec<(std::path::PathBuf, u64)> =
+        // The parser cache only holds AST-parsed files. Doc/config files
+        // (Markdown, TOML, HTML, LICENSE, …) never enter it, so hash them
+        // here too — otherwise the first sync after init re-classifies every
+        // doc file as "added" and re-indexes (and re-embeds) all of them.
+        let mut hashes: Vec<(std::path::PathBuf, u64)> =
             parser.cache().content_hashes().into_iter().collect();
+        {
+            let cached: std::collections::HashSet<&std::path::PathBuf> =
+                hashes.iter().map(|(p, _)| p).collect();
+            let uncached: Vec<std::path::PathBuf> = files
+                .iter()
+                .filter(|f| !cached.contains(f))
+                .cloned()
+                .collect();
+            drop(cached);
+            for path in uncached {
+                match std::fs::read(&path) {
+                    Ok(content) => {
+                        hashes.push((path, xxhash_rust::xxh3::xxh3_64(&content)));
+                    }
+                    Err(e) => {
+                        debug!(path = %path.display(), error = %e,
+                            "skipping baseline hash for unreadable file");
+                    }
+                }
+            }
+        }
         store.save_tree_hashes(&hashes)?;
 
         // Also write v2 hashes with mtime+size for fast sync pre-filtering.

@@ -15,7 +15,7 @@ README="$ROOT/README.md"
 CODIXING="${1:-${CODIXING:-$ROOT/target/release/codixing}}"
 if [ ! -x "$CODIXING" ]; then
   echo "error: codixing binary not found at $CODIXING" >&2
-  echo "hint: build it first with: cargo build --release -p codixing-cli" >&2
+  echo "hint: build it first with: cargo build --release -p codixing" >&2
   exit 2
 fi
 

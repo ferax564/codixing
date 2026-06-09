@@ -100,6 +100,10 @@ pub fn is_entry_point(path: &str) -> bool {
         "manage.py",
         "wsgi.py",
         "asgi.py",
+        // VS Code extension activation entry — referenced from package.json's
+        // `main` field, never imported by other source files.
+        "extension.ts",
+        "extension.js",
     ];
     entry_names.contains(&filename)
         || filename.starts_with("main")
@@ -151,6 +155,11 @@ mod tests {
     #[test]
     fn is_entry_point_detects_scripts_dir() {
         assert!(is_entry_point("scripts/deploy.py"));
+    }
+
+    #[test]
+    fn is_entry_point_detects_vscode_extension_entry() {
+        assert!(is_entry_point("editors/vscode/src/extension.ts"));
     }
 
     #[test]

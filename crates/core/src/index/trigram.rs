@@ -547,12 +547,34 @@ impl TrigramIndex {
         Ok(())
     }
 
+    /// Whether any chunk ID in this index exceeds `u32::MAX`. The v2 format
+    /// stores u32 IDs, so the v2 writer falls back to v1 when this is true.
+    /// Chunk IDs are not dense ordinals — hash-derived u64 IDs are routine —
+    /// so this is a real, common case, not a 4-billion-chunk corner.
+    fn max_id_exceeds_u32(&self) -> bool {
+        const U32_MAX: u64 = u32::MAX as u64;
+        if let Some(backing) = self.mmap.as_ref() {
+            if backing.version != MMAP_VERSION_V1 {
+                // v2 postings are u32 by construction.
+                return false;
+            }
+            let postings = &backing.mmap[backing.postings_offset..];
+            postings
+                .chunks_exact(8)
+                .any(|c| u64::from_le_bytes(c.try_into().unwrap()) > U32_MAX)
+        } else {
+            self.index.values().flatten().any(|&id| id > U32_MAX)
+        }
+    }
+
     /// Save the trigram index in the **v2** mmap-friendly binary format with
     /// the chosen posting [`PostingCodec`].
     ///
-    /// v2 stores chunk IDs as `u32` (verified to fit on the Linux kernel:
-    /// 881K chunks ≪ 2³²) and replaces the fixed-stride 8-bytes-per-id
-    /// posting layout with a variable-length, codec-tagged blob per trigram.
+    /// v2 stores chunk IDs as `u32` and replaces the fixed-stride
+    /// 8-bytes-per-id posting layout with a variable-length, codec-tagged
+    /// blob per trigram. Indexes whose chunk IDs exceed `u32::MAX`
+    /// (hash-derived IDs) are written in the v1 format instead — the loader
+    /// dispatches on the version header, so readers are unaffected.
     ///
     /// ## Binary format
     ///
@@ -583,19 +605,13 @@ impl TrigramIndex {
         // the file wasn't mutated, not its format. The previous v1 fast-path
         // assumed the file matched the writer; for the v2 transition we always
         // re-write so a v1 file on disk gets upgraded.
-        // Fallible narrowing helper. v2 stores u32 IDs; reject any index whose
-        // logical chunk ID space overflows u32 instead of silently truncating.
-        fn narrow_ids(ids: &[u64]) -> Result<Vec<u32>> {
-            ids.iter()
-                .map(|&id| {
-                    u32::try_from(id).map_err(|_| {
-                        CodixingError::Serialization(format!(
-                            "trigram v2 format cannot represent chunk ID {id} — exceeds u32::MAX; \
-                             this index has > 4B chunks and must stay on v1 or wait for a 64-bit codec"
-                        ))
-                    })
-                })
-                .collect()
+        //
+        // v2 stores u32 IDs, but chunk IDs are not guaranteed to be dense
+        // ordinals — hash-derived u64 IDs are routine. When any ID exceeds
+        // u32::MAX, fall back to the v1 format (raw u64 postings) instead of
+        // failing: the loader handles both versions transparently.
+        if self.max_id_exceeds_u32() {
+            return self.save_mmap_binary(path);
         }
 
         let entries: Vec<([u8; 3], Vec<u32>)> = if let Some(backing) = self.mmap.as_ref() {
@@ -642,16 +658,16 @@ impl TrigramIndex {
             let mut entries: Vec<([u8; 3], Vec<u32>)> = tmp
                 .index
                 .iter()
-                .map(|(k, v)| narrow_ids(v).map(|ids| (*k, ids)))
-                .collect::<Result<Vec<_>>>()?;
+                .map(|(k, v)| (*k, v.iter().map(|&id| id as u32).collect()))
+                .collect();
             entries.sort_by_key(|(k, _)| *k);
             entries
         } else {
             let mut entries: Vec<([u8; 3], Vec<u32>)> = self
                 .index
                 .iter()
-                .map(|(k, v)| narrow_ids(v).map(|ids| (*k, ids)))
-                .collect::<Result<Vec<_>>>()?;
+                .map(|(k, v)| (*k, v.iter().map(|&id| id as u32).collect()))
+                .collect();
             entries.sort_by_key(|(k, _)| *k);
             entries
         };
@@ -1638,6 +1654,55 @@ mod tests {
     fn load_nonexistent_file_returns_error() {
         let result = TrigramIndex::load_binary(std::path::Path::new("/nonexistent/trigram.bin"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn v2_save_with_u64_hash_ids_falls_back_to_v1_round_trip() {
+        // Chunk IDs are hash-derived u64s in production — far above u32::MAX.
+        // save_mmap_binary_v2 must persist them (via the v1 fallback) instead
+        // of erroring with a misleading "> 4B chunks" diagnosis.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trigram_hash_ids.bin");
+
+        let big_a: u64 = 14_034_699_640_371_163_533; // > u32::MAX
+        let big_b: u64 = u64::from(u32::MAX) + 1;
+        let mut idx = TrigramIndex::new();
+        idx.add(big_a, "fn process_batch(items: &[Item]) { todo!() }");
+        idx.add(big_b, "fn main() { process_batch(&items); }");
+        idx.add(7, "fn unrelated_function() {}");
+
+        idx.save_mmap_binary_v2(&path, PostingCodec::DeltaVarint)
+            .expect("u64 hash IDs must persist via the v1 fallback");
+        let loaded = TrigramIndex::load_binary(&path).unwrap();
+
+        let mut hits = loaded.search("process_batch");
+        hits.sort_unstable();
+        let mut expected = vec![big_a, big_b];
+        expected.sort_unstable();
+        assert_eq!(hits, expected);
+        assert!(!loaded.search("unrelated_function").contains(&big_a));
+    }
+
+    #[test]
+    fn v2_save_with_small_ids_still_writes_v2() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("trigram_small_ids.bin");
+
+        let mut idx = TrigramIndex::new();
+        idx.add(1, "fn process_batch() {}");
+        idx.add(2, "fn other_batch() {}");
+        idx.save_mmap_binary_v2(&path, PostingCodec::DeltaVarint)
+            .unwrap();
+
+        // Version field in the header must read 2 (no fallback for u32 IDs).
+        let bytes = std::fs::read(&path).unwrap();
+        let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        assert_eq!(version, MMAP_VERSION_V2);
+
+        let loaded = TrigramIndex::load_binary(&path).unwrap();
+        let mut hits = loaded.search("batch");
+        hits.sort_unstable();
+        assert_eq!(hits, vec![1, 2]);
     }
 
     // ── FileTrigramIndex tests ────────────────────────────────────────────────

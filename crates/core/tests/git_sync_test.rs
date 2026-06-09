@@ -14,15 +14,25 @@ use codixing_core::{Engine, IndexConfig, SearchQuery, Strategy};
 use serial_test::serial;
 use tempfile::tempdir;
 
-/// Helper: run a git command in `cwd`; panics on failure.
+/// Helper: run a git command in `cwd` with host configuration isolated;
+/// panics on failure. Global/system config (commit signing, hooks, init
+/// templates) must not leak into the fixture repo — a host with
+/// `commit.gpgsign=true` would otherwise fail every fixture commit.
 fn git(cwd: &std::path::Path, args: &[&str]) {
-    let status = std::process::Command::new("git")
+    let out = std::process::Command::new("git")
         .args(args)
         .current_dir(cwd)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
-        .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"))
-        .status;
-    assert!(status.success(), "git {args:?} failed in {}", cwd.display());
+        .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
+    assert!(
+        out.status.success(),
+        "git {args:?} failed in {}: {}",
+        cwd.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// Returns `false` if git is not in `PATH` (CI / minimal environments).

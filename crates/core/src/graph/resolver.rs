@@ -98,9 +98,13 @@ impl ImportResolver {
         }
         prefixes.push(String::new()); // bare path (no prefix) last
 
-        // Try each prefix length (shortest first) — `crate::parser::Parser` should match
-        // `src/parser.rs` before trying `src/parser/Parser.rs`.
-        for len in 1..=parts.len() {
+        // Try each prefix length, longest first — `crate::retriever::bm25::BM25Retriever`
+        // must match `src/retriever/bm25.rs` before the shorter `src/retriever/mod.rs`,
+        // otherwise every deep-module import gets credited to the parent `mod.rs` and
+        // the submodule looks like an orphan. Item-named candidates from the longest
+        // prefix (`src/retriever/bm25/BM25Retriever.rs`) don't exist on disk, so the
+        // scan falls through to the correct module file.
+        for len in (1..=parts.len()).rev() {
             let seg = parts[..len].join("/");
             for prefix in &prefixes {
                 let base = if prefix.is_empty() {
@@ -838,6 +842,44 @@ mod tests {
         };
         let resolved = resolver.resolve(&raw, "src/main.rs");
         assert_eq!(resolved, Some("src/parser.rs".to_string()));
+    }
+
+    #[test]
+    fn rust_deep_module_import_resolves_to_submodule_not_parent_mod() {
+        // `use crate::retriever::bm25::BM25Retriever` must credit the edge to
+        // `retriever/bm25.rs`, not `retriever/mod.rs` — shortest-prefix-first
+        // resolution made every deep submodule look like an orphan.
+        let resolver = make_resolver(&[
+            "crates/core/src/retriever/mod.rs",
+            "crates/core/src/retriever/bm25.rs",
+        ]);
+        let raw = RawImport {
+            path: "crate::retriever::bm25::BM25Retriever".to_string(),
+            language: Language::Rust,
+            is_relative: true,
+        };
+        let resolved = resolver.resolve(&raw, "crates/core/src/engine/search.rs");
+        assert_eq!(
+            resolved,
+            Some("crates/core/src/retriever/bm25.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn rust_module_import_still_resolves_to_parent_mod_when_no_submodule_file() {
+        // When the trailing segment is an item (no matching file on disk), the
+        // longest-first scan must fall through to the module's own file.
+        let resolver = make_resolver(&["crates/core/src/retriever/mod.rs"]);
+        let raw = RawImport {
+            path: "crate::retriever::SearchQuery".to_string(),
+            language: Language::Rust,
+            is_relative: true,
+        };
+        let resolved = resolver.resolve(&raw, "crates/core/src/engine/search.rs");
+        assert_eq!(
+            resolved,
+            Some("crates/core/src/retriever/mod.rs".to_string())
+        );
     }
 
     #[test]

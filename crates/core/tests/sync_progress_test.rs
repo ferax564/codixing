@@ -50,3 +50,37 @@ fn sync_with_progress_reports_messages() {
         "expected sync to process files: {stats:?}"
     );
 }
+
+#[test]
+fn first_sync_after_init_is_a_no_op_for_doc_and_config_files() {
+    // init's change baseline must cover doc/config files (Markdown, TOML,
+    // LICENSE, …), not just AST-parsed code — otherwise the first sync after
+    // every init re-classifies all of them as "added" and re-indexes them.
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    let src = root.join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(root.join("README.md"), "# Title\n\nSome docs.\n").unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("LICENSE"), "MIT License\n").unwrap();
+
+    let config = IndexConfig::new(root);
+    let mut engine = Engine::init(root, config).unwrap();
+
+    let stats = engine.sync().unwrap();
+    assert_eq!(
+        (stats.added, stats.modified, stats.removed),
+        (0, 0, 0),
+        "first sync after init must be a no-op, got: {stats:?}"
+    );
+    assert!(
+        stats.unchanged >= 4,
+        "all indexed files should report unchanged: {stats:?}"
+    );
+}

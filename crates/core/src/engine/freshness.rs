@@ -84,8 +84,34 @@ fn extension_is(path: &str, candidates: &[&str]) -> bool {
     candidates.iter().any(|c| c == &ext)
 }
 
+/// Extension-less plain-text project metadata files the indexer treats as
+/// documentation (mirrors `language::detect_language`'s PlainText filename
+/// route). Without this, a bare `LICENSE` or `NOTICE` gets classified as
+/// "likely dead code" because nothing imports it.
+const DOC_BARE_FILENAMES: &[&str] = &[
+    "readme",
+    "authors",
+    "license",
+    "licence",
+    "notice",
+    "contributors",
+    "changelog",
+    "history",
+    "releases",
+    "copying",
+    "install",
+];
+
 fn is_doc_file(path: &str) -> bool {
-    extension_is(path, DOC_EXTS)
+    if extension_is(path, DOC_EXTS) {
+        return true;
+    }
+    let file_name = path
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(path)
+        .to_ascii_lowercase();
+    !file_name.contains('.') && DOC_BARE_FILENAMES.iter().any(|c| *c == file_name)
 }
 
 fn is_asset_file(path: &str) -> bool {
@@ -719,5 +745,24 @@ mod tests {
             "reason should mention Go embed: {}",
             embed_entry.reason
         );
+    }
+
+    #[test]
+    fn bare_metadata_filenames_classify_as_docs() {
+        // LICENSE-style files have no extension and no importers; they must
+        // be treated as documentation, never "likely dead code".
+        for path in [
+            "LICENSE",
+            "npm/LICENSE",
+            "docs/NOTICE",
+            "COPYING",
+            "vendor\\AUTHORS",
+            "ChangeLog",
+        ] {
+            assert!(is_doc_file(path), "{path} should classify as a doc file");
+        }
+        for path in ["src/license.rs", "license.py", "LICENSE.spec.ts"] {
+            assert!(!is_doc_file(path), "{path} should NOT classify as a doc");
+        }
     }
 }
