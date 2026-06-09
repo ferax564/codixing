@@ -60,6 +60,43 @@ The remaining issues are operational, not correctness:
 The only failures encountered were the 5 `temporal::tests` under a
 signing-enforced global git config — see §3.5; they pass with config isolated.
 
+### Hands-on testing (this review, 2026-06-09 follow-up)
+
+Exercised the release binary against this repo (BM25-only, no ONNX in the
+container): `init` 3.0s / 325 files / 3,046 chunks; `search` 45ms; `grep`
+47ms; `symbols`, `usages`, `impact`, `callers`, `graph --map`, `doctor`,
+`audit`, `context`, `examples`, `types`, `agent-context-pack`, and
+`scripts/check_readme_commands.sh` all functional with clean, bounded output.
+Repeat `sync` is a proper 0.03s no-op. Three bugs found by running, not reading:
+
+1. **Chunk-trigram v2 persistence fails on every init/sync of this repo.**
+   `save_mmap_binary_v2` narrows chunk IDs to u32
+   (`crates/core/src/index/trigram.rs:588-599`), but actual chunk IDs are
+   64-bit hash values (observed: `14034699640371163533`), so persistence
+   errors out and `init`/`sync` log
+   `failed to persist chunk trigram index` every run
+   (`engine/init.rs:268`, `engine/sync.rs:132,623`). The error text blames
+   "> 4B chunks" — wrong diagnosis; the index has 3,046 chunks. The chunk
+   trigram index silently never persists. Fix: remap IDs to dense ordinals in
+   the v2 writer (id↔ordinal table) or add a 64-bit codec; correct the message.
+2. **`init` doesn't register doc/config files in the change baseline.** The
+   first `sync` after every fresh `init` reports `91 added` and re-indexes
+   every Markdown/TOML/HTML/LICENSE file (28% of this repo; repeatable;
+   36.7s in a debug build). The second sync is a clean no-op, so the baseline
+   write works in sync but is skipped for the doc path in init. On hybrid
+   indexes this also means a pointless re-embed of all docs after init.
+3. **`codixing audit` severity is misleading on its own repo**: 47 of 325
+   files flagged CRITICAL "likely dead code", including
+   `crates/core/src/retriever/bm25.rs`, `index/hnsw.rs`,
+   `editors/vscode/src/extension.ts`, and even `npm/LICENSE`. The heuristic
+   (no importers + 64 days unmodified) needs an allowlist for non-code files
+   and ought to downgrade when the file is reachable via `mod`/build wiring.
+
+Minor: there is no `codixing --version` / `-V` (only `doctor` reveals the
+binary version) — awkward for an install.sh-distributed binary; and the
+top hit for a natural-language query in BM25-only mode was a test file
+rather than `pipeline.rs` (expected without embeddings, worth a docs note).
+
 ## 2. What already works (credit where due)
 
 The repo has more automation than most projects its size, and it composes well:
