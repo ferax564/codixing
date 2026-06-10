@@ -84,3 +84,30 @@ fn first_sync_after_init_is_a_no_op_for_doc_and_config_files() {
         "all indexed files should report unchanged: {stats:?}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn sync_is_a_no_op_when_init_root_was_a_symlinked_path() {
+    // Reproduces the macOS CI failure: tempdirs live under /var -> /private/var,
+    // so the init root is non-canonical. init walked the canonical root but kept
+    // the caller's config.root, making every subsequent sync see all files as
+    // added+removed. Engine::init must canonicalize config.root.
+    let dir = tempdir().unwrap();
+    let real_root = dir.path().join("real");
+    std::fs::create_dir_all(real_root.join("src")).unwrap();
+    std::fs::write(real_root.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(real_root.join("README.md"), "# Docs\n").unwrap();
+
+    let link_root = dir.path().join("link");
+    std::os::unix::fs::symlink(&real_root, &link_root).unwrap();
+
+    let config = IndexConfig::new(&link_root);
+    let mut engine = Engine::init(&link_root, config).unwrap();
+
+    let stats = engine.sync().unwrap();
+    assert_eq!(
+        (stats.added, stats.modified, stats.removed),
+        (0, 0, 0),
+        "sync after init via a symlinked root must be a no-op, got: {stats:?}"
+    );
+}
