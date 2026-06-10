@@ -111,7 +111,7 @@ memmap2.workspace = true
 roaring.workspace = true
 half = "2.7.1"
 comrak = { version = "0.37", default-features = false }
-scraper = "0.22"
+scraper = "0.27"
 
 [dev-dependencies]
 # Enable the test-only `Engine::__test_*` probes for the lazy_load_test
