@@ -196,10 +196,10 @@ When launching multiple feature branches in parallel (e.g. via worktree agents):
 
 The CI workflow (`.github/workflows/ci.yml`) has the following jobs:
 
-- **test** — builds and tests on Ubuntu, macOS, and Windows (matrix); runs clippy and fmt check
+- **test** — builds and tests on Ubuntu, macOS, and Windows (matrix); runs clippy and fmt check. The Ubuntu leg also runs the README ↔ CLI drift check and the **self-audit** (`scripts/self_audit.sh`): fresh `init` with zero warnings, first `sync` must be a strict no-op, `doctor` must report `Index: ok`, search smoke test must hit. If the self-audit fails, an index-integrity regression slipped in — do not weaken the script to get green.
 - **vscode** — compiles the VS Code extension on Ubuntu
 - **release-build** — builds optimized release binaries for `x86_64-linux`, `aarch64-darwin`, and `x86_64-windows-msvc` (no-default-features). Runs only on `main` pushes and `v*` tag pushes — never on PRs. Uploads artifacts named `binaries-<suffix>` with 14-day retention. `needs: test` so broken code never produces binaries. Artifacts are downloaded by `release.yml` on tag push instead of rebuilding from scratch (saves ~25 min per release).
-- **audit** — runs `cargo-audit` on Ubuntu only; `continue-on-error: true` (non-blocking while advisories are triaged)
+- **audit** — runs `cargo-audit` on Ubuntu only; **blocking**, with per-advisory `--ignore` flags justified in `audit.toml` (an earlier `continue-on-error` setup was removed — new advisories must be triaged, not silently scrolled past)
 - **coverage** — runs `cargo-llvm-cov` on Ubuntu only; uploads `lcov.info` as the `coverage-report` artifact
 - **benchmarks** — runs `cargo bench` on Ubuntu only; uploads `bench-results.txt` as the `benchmark-results` artifact; depends on `test` (only runs after tests pass)
 
@@ -219,6 +219,7 @@ Before merging any PR:
 Before tagging a release:
 - [ ] All pending PRs merged to main (`gh pr list --state open --base main` must be empty)
 - [ ] All 5 version locations updated (see above)
+- [ ] CHANGELOG.md has a `## [X.Y.Z]` entry for the release version (the auto-tag workflow refuses to tag without one)
 - [ ] `cargo test --workspace` passes locally
 - [ ] `cargo clippy --workspace -- -D warnings` passes
 - [ ] `cargo fmt --check` passes

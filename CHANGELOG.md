@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.45.0] — 2026-06-10
+
+Integrity + autonomy release. Fixes every bug found by the 2026-06-09
+hands-on review (all of which printed their evidence on every run with
+nobody watching), then makes that class of failure structurally impossible
+to miss: CI now runs Codixing against its own repository and fails on any
+integrity warning.
+
+### Added
+
+- **CI self-audit job** — `scripts/self_audit.sh` runs on every PR/push:
+  fresh `init` must emit zero warnings, the first `sync` after `init` must be
+  a strict no-op (`0 added, 0 modified, 0 removed`), `doctor` must report
+  `Index: ok`, and a search smoke test must return relevant hits. Both bugs
+  fixed in this release (trigram persistence warning, 91-file sync baseline
+  gap) would have been caught by this job on the day they were introduced.
+- **Dependabot** — weekly grouped Cargo updates, weekly GitHub Actions
+  updates, monthly npm updates (`.github/dependabot.yml`).
+- **Changelog gate on auto-tag** — the auto-tag workflow now refuses to tag a
+  release whose version has no `## [X.Y.Z]` heading in CHANGELOG.md
+  (v0.43 and v0.44 shipped without changelog entries; backfilled below).
+
 ### Fixed
 
 - **Chunk trigram index now persists when chunk IDs exceed `u32::MAX`** — chunk IDs are hash-derived u64s, so `save_mmap_binary_v2`'s u32 narrowing failed on every `init`/`sync` with a misleading "> 4B chunks" diagnosis, and the chunk trigram index silently never reached disk. The v2 writer now detects ID overflow and writes the v1 format (raw u64 postings) instead; the loader already dispatches on the version header. 2 new regression tests (u64-ID round-trip + small-ID v2 header pin).

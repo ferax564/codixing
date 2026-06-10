@@ -88,6 +88,11 @@ jobs:
           cargo build --release -p codixing
           scripts/check_readme_commands.sh ./target/release/codixing
 
+      - name: Self-audit (index integrity on this repo)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: scripts/self_audit.sh ./target/release/codixing
+
   vscode:
     name: VS Code Extension
     runs-on: ubuntu-latest
