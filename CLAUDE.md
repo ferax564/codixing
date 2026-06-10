@@ -73,7 +73,7 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 
 ```bash
 cargo build --release --workspace          # build all binaries
-cargo test --workspace                      # run all tests (1317)
+cargo test --workspace                      # run all tests (1325)
 cargo clippy --workspace -- -D warnings     # lint (must pass)
 cargo fmt --check                           # format check (must pass)
 
@@ -138,7 +138,7 @@ Both are covered by `scripts/bump_version.py`; edit by hand only if you know why
 Every commit MUST pass all 3 checks. No exceptions:
 
 ```bash
-cargo test --workspace                      # ALL tests must pass (1317)
+cargo test --workspace                      # ALL tests must pass (1325)
 cargo clippy --workspace -- -D warnings     # zero warnings
 cargo fmt --check                           # zero diffs
 ```
@@ -259,6 +259,14 @@ When adding a new crate that depends on `codixing-core`, ALWAYS:
 The `.mcp.json` configures the Codixing MCP server for Claude Code. **Required flags:**
 
 - `--no-daemon-fork` — prevents stale daemon socket issues that silently kill the MCP connection
+
+Servers on read-only profiles (`minimal`/`reviewer`, the default) open the
+engine read-only and do NOT hold the Tantivy write lock — `codixing sync .`
+works alongside them. Switching to `editor`/`dangerous` via `set_mcp_profile`
+acquires the writer on the spot (if free). Sync-relevant graph fixes also
+migrate automatically: the graph stamps `graph/schema.version`, and any sync
+auto-rebuilds the graph once when the binary ships a newer edge-extraction
+schema.
 
 The `--medium` flag was removed in v0.38. `codixing-mcp` now always advertises
 the full 67-tool set on `tools/list`. The April 2026 agent benchmark found

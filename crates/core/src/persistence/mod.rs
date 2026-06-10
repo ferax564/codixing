@@ -57,6 +57,7 @@ const FILE_CHUNKS_FILE: &str = "file_chunks.bin";
 const CHUNK_META_FILE: &str = "chunk_meta.bin";
 const GRAPH_DIR: &str = "graph";
 const GRAPH_FILE: &str = "graph.bin";
+const SCHEMA_VERSION_FILE: &str = "schema.version";
 const MMAP_VECTOR_FILE: &str = "vectors.mmap";
 const FILE_TRIGRAM_FILE: &str = "file_trigram.bin";
 const CHUNK_TRIGRAM_FILE: &str = "chunk_trigram.bin";
@@ -546,6 +547,23 @@ impl IndexStore {
         self.graph_dir().join(GRAPH_FILE)
     }
 
+    /// Path to the `graph/schema.version` stamp file.
+    pub fn graph_schema_version_path(&self) -> PathBuf {
+        self.graph_dir().join(SCHEMA_VERSION_FILE)
+    }
+
+    /// Read the graph schema version this index's graph was built with.
+    ///
+    /// Indexes that predate the stamp (or with an unreadable stamp) report 1,
+    /// which is always older than the current [`crate::graph::GRAPH_SCHEMA_VERSION`]
+    /// and therefore triggers a one-time rebuild on the next sync.
+    pub fn load_graph_schema_version(&self) -> u32 {
+        fs::read_to_string(self.graph_schema_version_path())
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(1)
+    }
+
     /// Serialize and persist the dependency graph.
     pub fn save_graph(&self, data: &GraphData) -> Result<()> {
         // Ensure the directory exists (may not on older indexes opened before Phase 3).
@@ -553,6 +571,12 @@ impl IndexStore {
         let bytes = bitcode::serialize(data)
             .map_err(|e| CodixingError::Serialization(format!("failed to serialize graph: {e}")))?;
         atomic_write(self.graph_path(), bytes)?;
+        // Stamp the schema version the edges were extracted with, so syncs can
+        // detect graphs built by an older extractor/resolver and auto-rebuild.
+        atomic_write(
+            self.graph_schema_version_path(),
+            crate::graph::GRAPH_SCHEMA_VERSION.to_string().into_bytes(),
+        )?;
         Ok(())
     }
 

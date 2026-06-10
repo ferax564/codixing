@@ -127,7 +127,20 @@ pub(crate) fn call_check_staleness(engine: &Engine) -> (String, bool) {
     );
 
     if report.is_stale {
-        out.push_str(&format!("\n**Suggestion:** {}\n", report.suggestion));
+        // The core suggestion says `codixing sync .` — but when THIS server
+        // holds the Tantivy writer, that command fails with a lock error.
+        // Point the agent at the path that actually works from here.
+        let suggestion = if engine.is_read_only() {
+            report.suggestion.clone()
+        } else {
+            format!(
+                "{} file(s) changed. Call the sync_index tool (or git_sync_index \
+                 after a git pull) — this server holds the index write lock, so \
+                 `codixing sync .` from a shell would fail until it exits.",
+                report.modified_files + report.new_files + report.deleted_files
+            )
+        };
+        out.push_str(&format!("\n**Suggestion:** {suggestion}\n"));
     }
 
     (out, false)

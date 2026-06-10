@@ -6,6 +6,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mod foo;` declarations now produce dependency-graph edges** — the Rust
+  import extractor only handled `use` declarations, so files wired into a
+  crate purely via `mod` declarations (every language plugin, MCP tool module,
+  and server route in this repo — 37 files) had no importers in the graph.
+  `codixing audit` flagged them all as `[CRITICAL] No importers (certain) —
+  likely dead code`, and `callers`, PageRank, and `impact` were equally blind.
+  Declarations are emitted as `self::<name>` imports and resolved against the
+  declaring file's module directory (`name.rs` or `name/mod.rs`). Inline
+  `mod foo { ... }` still produces no edge. 2 new extractor tests, 3 new
+  resolver tests.
+- **`use super::x::Item` and `use self::x::Item` resolve to the right file** —
+  the resolver stripped the `super::` prefix and then scanned from the crate
+  root, so sibling-module imports (e.g. `use super::bm25::BM25Retriever` in
+  `retriever/hybrid.rs`) silently produced no edge. `self::`/`super::` paths
+  now anchor at the importing file's module directory, walking one directory
+  up per `super`. 3 new resolver tests.
+- **Graph schema version migration** — extractor/resolver fixes change which
+  edges exist, but incremental sync only re-extracts changed files, so
+  existing indexes kept stale edges forever (the only cure was knowing to run
+  `sync --rebuild-graph`). The index now stamps `graph/schema.version` when the
+  graph is persisted; every sync flavor (`sync`, `sync --no-embed`, MCP
+  `sync_index`, `git_sync`) checks the stamp first and auto-rebuilds the graph
+  once when the binary's schema is newer. Indexes without a stamp count as
+  version 1. 3 new integration tests.
+- **Read-only MCP profiles no longer hold the index write lock** — a server
+  started with `--profile minimal`/`reviewer` (the default) exposes no
+  mutating tools but still opened the engine with the Tantivy writer, so
+  `codixing sync .` in a shell always failed with a lock error while the
+  advice loop pointed back at tools the profile didn't expose. Read-only
+  profiles now open the engine via `open_read_only`; switching to
+  `editor`/`dangerous` with `set_mcp_profile` upgrades to a writer on the
+  spot when the lock is free (and says so in the response if it isn't).
+  `check_staleness` now suggests the sync path that actually works from the
+  caller's position, and the CLI lock error explains the profile switch.
+  7 new tests.
+
 ## [0.45.0] — 2026-06-10
 
 Integrity + autonomy release. Fixes every bug found by the 2026-06-09

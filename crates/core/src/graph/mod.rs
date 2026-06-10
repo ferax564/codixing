@@ -35,6 +35,19 @@ pub use resolver::ImportResolver;
 pub use surprise::SurprisingEdge;
 pub use types::{ReferenceKind, SymbolKind, SymbolNode};
 
+/// Version of the graph edge-extraction schema.
+///
+/// Bump this whenever the import extractor or resolver changes which edges it
+/// produces (new import forms, resolution fixes). Persisted indexes stamp the
+/// version they were built with; on mismatch the next sync auto-rebuilds the
+/// graph so fixes reach existing installs without a manual
+/// `sync --rebuild-graph`.
+///
+/// History: 1 = implicit pre-v0.46 (no stamp on disk); 2 = `mod foo;`
+/// declarations emit edges + `self::`/`super::` imports anchor to the
+/// importing file's module.
+pub const GRAPH_SCHEMA_VERSION: u32 = 2;
+
 /// Confidence level of a dependency edge, auto-derived from [`EdgeKind`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EdgeConfidence {

@@ -75,6 +75,15 @@ impl ImportResolver {
     // -------------------------------------------------------------------------
 
     fn resolve_rust(&self, import: &str, source_file: &str) -> Option<String> {
+        // `self::` and `super::` are anchored at the importing file's module,
+        // not the crate root — resolve them precisely before falling back to
+        // the crate-root prefix scan.
+        if import.starts_with("self::") || import.starts_with("super::") {
+            if let Some(resolved) = self.resolve_rust_anchored(import, source_file) {
+                return Some(resolved);
+            }
+        }
+
         // Strip leading `crate::` or `super::` to get a module path.
         let module_path = import
             .strip_prefix("crate::")
@@ -124,6 +133,52 @@ impl ImportResolver {
                 if self.indexed_files.contains(&as_mod) {
                     return Some(as_mod);
                 }
+            }
+        }
+
+        None
+    }
+
+    /// Resolve a `self::`/`super::`-anchored Rust import relative to the
+    /// importing file's module directory.
+    ///
+    /// The module directory of `dir/foo.rs` is `dir/foo` (its child modules
+    /// live there); for `dir/mod.rs`, `dir/lib.rs`, and `dir/main.rs` it is
+    /// `dir` itself. Each `super::` segment walks one directory up from there.
+    fn resolve_rust_anchored(&self, import: &str, source_file: &str) -> Option<String> {
+        let mut anchor = rust_module_dir(source_file);
+        let mut rest = import;
+        if let Some(stripped) = rest.strip_prefix("self::") {
+            rest = stripped;
+        } else {
+            while let Some(stripped) = rest.strip_prefix("super::") {
+                anchor = parent_dir(&anchor);
+                rest = stripped;
+            }
+        }
+        if rest.is_empty() {
+            return None;
+        }
+
+        // Longest-first, same as the crate-root scan: `super::bm25::BM25Retriever`
+        // must match `bm25.rs` with the trailing item segment trimmed off.
+        let parts: Vec<&str> = rest.split("::").collect();
+        for len in (1..=parts.len()).rev() {
+            let seg = parts[..len].join("/");
+            let base = if anchor.is_empty() {
+                seg
+            } else {
+                format!("{anchor}/{seg}")
+            };
+
+            let as_file = format!("{base}.rs");
+            if self.indexed_files.contains(&as_file) {
+                return Some(as_file);
+            }
+
+            let as_mod = format!("{base}/mod.rs");
+            if self.indexed_files.contains(&as_mod) {
+                return Some(as_mod);
             }
         }
 
@@ -748,6 +803,25 @@ fn crate_src_root(source_file: &str) -> Option<String> {
     }
 }
 
+/// Return the module directory of a Rust source file — the directory its
+/// child modules live in. `dir/foo.rs` → `dir/foo`; `dir/mod.rs`, `dir/lib.rs`,
+/// and `dir/main.rs` → `dir`.
+fn rust_module_dir(source_file: &str) -> String {
+    let dir = parent_dir(source_file);
+    let stem = source_file
+        .rsplit('/')
+        .next()
+        .unwrap_or(source_file)
+        .trim_end_matches(".rs");
+    if stem == "mod" || stem == "lib" || stem == "main" {
+        dir
+    } else if dir.is_empty() {
+        stem.to_string()
+    } else {
+        format!("{dir}/{stem}")
+    }
+}
+
 /// Return the directory component of a relative file path (always uses `/`).
 fn parent_dir(file: &str) -> String {
     match file.rfind('/') {
@@ -892,6 +966,84 @@ mod tests {
         };
         let resolved = resolver.resolve(&raw, "src/main.rs");
         assert_eq!(resolved, Some("src/parser/mod.rs".to_string()));
+    }
+
+    fn rust_raw(path: &str) -> RawImport {
+        RawImport {
+            path: path.to_string(),
+            language: Language::Rust,
+            is_relative: true,
+        }
+    }
+
+    #[test]
+    fn rust_mod_declaration_resolves_to_sibling_file() {
+        // `pub mod go;` in language/mod.rs (emitted as `self::go`) must edge to
+        // language/go.rs.
+        let resolver = make_resolver(&[
+            "crates/core/src/language/mod.rs",
+            "crates/core/src/language/go.rs",
+        ]);
+        let resolved = resolver.resolve(&rust_raw("self::go"), "crates/core/src/language/mod.rs");
+        assert_eq!(resolved, Some("crates/core/src/language/go.rs".to_string()));
+    }
+
+    #[test]
+    fn rust_mod_declaration_in_named_file_resolves_to_subdir() {
+        // `mod plan;` inside src/parser.rs → src/parser/plan.rs (2018-style child).
+        let resolver = make_resolver(&["src/parser.rs", "src/parser/plan.rs"]);
+        let resolved = resolver.resolve(&rust_raw("self::plan"), "src/parser.rs");
+        assert_eq!(resolved, Some("src/parser/plan.rs".to_string()));
+    }
+
+    #[test]
+    fn rust_mod_declaration_in_lib_rs_resolves_to_mod_dir() {
+        // `mod engine;` in src/lib.rs → src/engine/mod.rs.
+        let resolver = make_resolver(&["src/lib.rs", "src/engine/mod.rs"]);
+        let resolved = resolver.resolve(&rust_raw("self::engine"), "src/lib.rs");
+        assert_eq!(resolved, Some("src/engine/mod.rs".to_string()));
+    }
+
+    #[test]
+    fn rust_super_import_resolves_to_sibling_module() {
+        // `use super::bm25::BM25Retriever` in retriever/hybrid.rs must edge to
+        // retriever/bm25.rs — anchored at the importing file's module, not the
+        // crate root.
+        let resolver = make_resolver(&[
+            "crates/core/src/retriever/mod.rs",
+            "crates/core/src/retriever/bm25.rs",
+            "crates/core/src/retriever/hybrid.rs",
+        ]);
+        let resolved = resolver.resolve(
+            &rust_raw("super::bm25::BM25Retriever"),
+            "crates/core/src/retriever/hybrid.rs",
+        );
+        assert_eq!(
+            resolved,
+            Some("crates/core/src/retriever/bm25.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn rust_super_import_from_mod_rs_resolves_above_module_dir() {
+        // From graph/mod.rs, `super::` is the crate src root: super::engine::Engine
+        // → engine/mod.rs.
+        let resolver = make_resolver(&[
+            "crates/core/src/graph/mod.rs",
+            "crates/core/src/engine/mod.rs",
+        ]);
+        let resolved = resolver.resolve(
+            &rust_raw("super::engine::Engine"),
+            "crates/core/src/graph/mod.rs",
+        );
+        assert_eq!(resolved, Some("crates/core/src/engine/mod.rs".to_string()));
+    }
+
+    #[test]
+    fn rust_double_super_import_walks_two_levels() {
+        let resolver = make_resolver(&["src/a/b/c.rs", "src/a/util.rs"]);
+        let resolved = resolver.resolve(&rust_raw("super::super::util::helper"), "src/a/b/c.rs");
+        assert_eq!(resolved, Some("src/a/util.rs".to_string()));
     }
 
     #[test]

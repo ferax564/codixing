@@ -988,6 +988,7 @@ impl Engine {
             return Err(CodixingError::ReadOnly);
         }
         self.symbols.ensure_mutable();
+        self.migrate_graph_schema_if_outdated()?;
         use crate::watcher::{ChangeKind, FileChange};
         use std::collections::{HashMap, HashSet};
 
@@ -1210,6 +1211,33 @@ impl Engine {
         result
     }
 
+    /// Auto-rebuild the graph when it was persisted by an older edge-extraction
+    /// schema (see [`crate::graph::GRAPH_SCHEMA_VERSION`]).
+    ///
+    /// Extractor/resolver fixes change which edges exist, but incremental sync
+    /// only re-extracts edges for changed files — unchanged files keep edges
+    /// resolved by the old code forever. This check runs at the start of every
+    /// sync flavor so upgraded binaries heal existing indexes exactly once.
+    ///
+    /// Returns `true` if a rebuild ran.
+    fn migrate_graph_schema_if_outdated(&mut self) -> Result<bool> {
+        if self.graph.is_none() {
+            // No graph to migrate — the missing-graph warning path handles this.
+            return Ok(false);
+        }
+        let stored = self.store.load_graph_schema_version();
+        let current = crate::graph::GRAPH_SCHEMA_VERSION;
+        if stored >= current {
+            return Ok(false);
+        }
+        info!(
+            stored,
+            current, "graph built by an older edge-extraction schema — rebuilding"
+        );
+        self.rebuild_graph_from_disk()?;
+        Ok(true)
+    }
+
     /// Rebuild the dependency graph from scratch by re-parsing all indexed files.
     ///
     /// This re-extracts import and call edges for every file currently in the
@@ -1352,6 +1380,7 @@ impl Engine {
         if self.read_only {
             return Err(CodixingError::ReadOnly);
         }
+        self.migrate_graph_schema_if_outdated()?;
         use crate::watcher::{ChangeKind, FileChange};
         use std::collections::{HashMap, HashSet};
 
@@ -1523,6 +1552,7 @@ impl Engine {
             return Err(CodixingError::ReadOnly);
         }
         self.symbols.ensure_mutable();
+        self.migrate_graph_schema_if_outdated()?;
         use crate::watcher::{ChangeKind, FileChange};
 
         // Load stored git commit from the persisted meta.
