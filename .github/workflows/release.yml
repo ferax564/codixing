@@ -3,6 +3,14 @@ on:
   push:
     tags:
       - 'v*'
+  # Manual re-trigger for a tag whose automatic run failed or never fired.
+  # The auto-tag workflow pushes tags with the default GITHUB_TOKEN, which
+  # does NOT trigger this workflow (GitHub suppresses workflow-from-workflow
+  # events) — and the git proxy used by remote agent sessions cannot delete
+  # tags for the re-push workaround. Dispatch with the tag as the ref
+  # (e.g. ref: v0.45.0) once ci.yml's release-build artifacts exist for the
+  # tagged commit.
+  workflow_dispatch:
 
 jobs:
   release:
