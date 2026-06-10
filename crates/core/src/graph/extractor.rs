@@ -86,6 +86,23 @@ fn walk_all<F: FnMut(Node)>(node: Node, visit: &mut F) {
 fn extract_rust(tree: &Tree, source: &[u8]) -> Vec<RawImport> {
     let mut imports = Vec::new();
     walk_all(tree.root_node(), &mut |node| {
+        // `mod foo;` (no body) pulls the child module file into the crate —
+        // emit it as `self::foo` so the resolver can anchor it to the declaring
+        // file's module directory. Inline `mod foo { ... }` defines the module
+        // in-place and produces no file edge.
+        if node.kind() == "mod_item" && node.child_by_field_name("body").is_none() {
+            if let Some(name) = node.child_by_field_name("name") {
+                let name = node_text(&name, source);
+                if !name.is_empty() {
+                    imports.push(RawImport {
+                        path: format!("self::{name}"),
+                        language: Language::Rust,
+                        is_relative: true,
+                    });
+                }
+            }
+            return;
+        }
         if node.kind() != "use_declaration" {
             return;
         }
@@ -1261,6 +1278,44 @@ mod tests {
         let crate_import = imports.iter().find(|i| i.path.contains("crate"));
         assert!(crate_import.is_some());
         assert!(crate_import.unwrap().is_relative);
+    }
+
+    #[test]
+    fn rust_mod_declaration_emits_self_import() {
+        // `mod foo;` declarations pull a child module file into the crate —
+        // they must produce an edge or every mod-only file looks like an orphan.
+        let src = "pub mod go;\nmod temporal;\n#[cfg(feature = \"qdrant\")]\npub mod qdrant;";
+        let tree = parse_rust(src);
+        let imports = ImportExtractor::extract(&tree, src.as_bytes(), Language::Rust);
+        let paths: Vec<&str> = imports.iter().map(|i| i.path.as_str()).collect();
+        assert!(paths.contains(&"self::go"), "missing self::go in {paths:?}");
+        assert!(
+            paths.contains(&"self::temporal"),
+            "missing self::temporal in {paths:?}"
+        );
+        assert!(
+            paths.contains(&"self::qdrant"),
+            "cfg-gated mod must still be extracted: {paths:?}"
+        );
+        assert!(
+            imports
+                .iter()
+                .filter(|i| i.path.starts_with("self::"))
+                .all(|i| i.is_relative),
+            "mod-declaration imports must be flagged relative"
+        );
+    }
+
+    #[test]
+    fn rust_inline_mod_emits_no_import() {
+        // `mod inline { ... }` defines the module in-place — no file edge.
+        let src = "mod inline { pub fn x() {} }";
+        let tree = parse_rust(src);
+        let imports = ImportExtractor::extract(&tree, src.as_bytes(), Language::Rust);
+        assert!(
+            imports.is_empty(),
+            "inline mod must not emit imports: {imports:?}"
+        );
     }
 
     #[test]

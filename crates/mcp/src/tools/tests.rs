@@ -1583,3 +1583,42 @@ fn meta_tools_are_read_only() {
     assert!(is_read_only_tool("search_tools"));
     assert!(is_read_only_tool("get_tool_schema"));
 }
+
+// -------------------------------------------------------------------------
+// check_staleness suggestion routing
+// -------------------------------------------------------------------------
+
+#[test]
+fn check_staleness_suggests_sync_index_tool_when_engine_holds_writer() {
+    let dir = tempdir().unwrap();
+    let engine = make_engine(dir.path());
+    // Make the index stale: a file the index has never seen.
+    fs::write(dir.path().join("src/late_arrival.rs"), "pub fn n() {}\n").unwrap();
+
+    let (out, is_err) = analysis::call_check_staleness(&engine);
+
+    assert!(!is_err);
+    assert!(out.contains("STALE"), "expected stale report, got: {out}");
+    assert!(
+        out.contains("sync_index"),
+        "a writer-holding server blocks `codixing sync` — it must point at its own \
+         sync_index tool, got: {out}"
+    );
+}
+
+#[test]
+fn check_staleness_suggests_cli_sync_when_engine_read_only() {
+    let dir = tempdir().unwrap();
+    drop(make_engine(dir.path()));
+    let engine = Engine::open_read_only(dir.path()).unwrap();
+    fs::write(dir.path().join("src/late_arrival.rs"), "pub fn n() {}\n").unwrap();
+
+    let (out, is_err) = analysis::call_check_staleness(&engine);
+
+    assert!(!is_err);
+    assert!(
+        out.contains("codixing sync"),
+        "a read-only server holds no writer lock — the CLI sync works and is the \
+         right suggestion, got: {out}"
+    );
+}

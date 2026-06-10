@@ -1144,7 +1144,9 @@ fn check_write_lock_error(err: &anyhow::Error) -> bool {
         eprintln!();
         eprintln!("Options:");
         eprintln!("  1. Use the sync_index or git_sync_index MCP tool");
-        eprintln!("     (the running server can sync for you)");
+        eprintln!("     (the running server can sync for you; if those tools are not");
+        eprintln!("      listed, switch it to the editor profile first with");
+        eprintln!("      set_mcp_profile {{\"profile\": \"editor\"}})");
         eprintln!("  2. Stop the MCP server, sync, then restart");
         true
     } else {

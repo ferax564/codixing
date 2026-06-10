@@ -141,7 +141,7 @@ async fn main() -> Result<()> {
 
     if args.daemon {
         // ── Daemon mode ───────────────────────────────────────────────────
-        let mut engine = load_engine(&root).await?;
+        let mut engine = load_engine(&root, profile).await?;
         if args.no_session {
             engine.set_session(Arc::new(SessionState::new(false)));
         }
@@ -275,7 +275,7 @@ async fn main() -> Result<()> {
 
         // No daemon available — run directly on stdin/stdout.
         {
-            let mut engine = load_engine(&root).await?;
+            let mut engine = load_engine(&root, profile).await?;
             if args.no_session {
                 engine.set_session(Arc::new(SessionState::new(false)));
             }
@@ -321,8 +321,25 @@ fn default_socket_path(root: &Path, profile: jsonrpc::McpProfile) -> PathBuf {
 // Engine loader (shared by daemon + direct modes)
 // ---------------------------------------------------------------------------
 
-async fn load_engine(root: &Path) -> Result<Engine> {
+async fn load_engine(root: &Path, profile: jsonrpc::McpProfile) -> Result<Engine> {
     if Engine::index_exists(root) {
+        // Read-only profiles expose no mutating tools — open without the
+        // writer so the Tantivy write lock stays free for CLI syncs running
+        // alongside. A later set_mcp_profile upgrade re-acquires the writer.
+        if profile.is_read_only_profile() {
+            info!(
+                root = %root.display(),
+                profile = profile.as_str(),
+                "opening existing Codixing index read-only (read-only profile)"
+            );
+            return Engine::open_read_only(root).with_context(|| {
+                format!(
+                    "failed to open index at {} — index may be corrupt; \
+                     delete .codixing/ and restart to rebuild",
+                    root.display()
+                )
+            });
+        }
         info!(root = %root.display(), "opening existing Codixing index");
         let engine = Engine::open(root).with_context(|| {
             format!(
@@ -348,11 +365,70 @@ async fn load_engine(root: &Path) -> Result<Engine> {
             enabled: false,
             ..EmbeddingConfig::default()
         };
-        Engine::init(root, config).with_context(|| {
+        let engine = Engine::init(root, config).with_context(|| {
             format!(
                 "auto-init failed at {} — ensure the directory exists and contains source files",
                 root.display()
             )
-        })
+        })?;
+        if profile.is_read_only_profile() {
+            // Init needed the writer; hand the index back read-only so the
+            // server matches its profile and frees the write lock.
+            drop(engine);
+            return Engine::open_read_only(root)
+                .with_context(|| format!("failed to reopen fresh index at {}", root.display()));
+        }
+        Ok(engine)
+    }
+}
+
+#[cfg(test)]
+mod load_engine_tests {
+    use super::*;
+
+    fn make_index(dir: &Path) {
+        std::fs::write(
+            dir.join("lib.rs"),
+            "pub fn hello() -> &'static str { \"world\" }\n",
+        )
+        .unwrap();
+        let mut config = IndexConfig::new(dir);
+        config.embedding = EmbeddingConfig {
+            enabled: false,
+            ..EmbeddingConfig::default()
+        };
+        drop(Engine::init(dir, config).expect("engine init should succeed"));
+    }
+
+    #[tokio::test]
+    async fn read_only_profile_opens_engine_without_writer_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        make_index(dir.path());
+
+        let engine = load_engine(dir.path(), jsonrpc::McpProfile::Reviewer)
+            .await
+            .unwrap();
+        assert!(
+            engine.is_read_only(),
+            "reviewer profile must open the engine read-only"
+        );
+
+        // The writer lock must remain free so a CLI sync can run alongside.
+        let writer = Engine::open(dir.path()).unwrap();
+        assert!(
+            !writer.is_read_only(),
+            "CLI must be able to acquire the writer while a read-only-profile server is up"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_profile_keeps_writer_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        make_index(dir.path());
+
+        let engine = load_engine(dir.path(), jsonrpc::McpProfile::Editor)
+            .await
+            .unwrap();
+        assert!(!engine.is_read_only(), "editor profile keeps the writer");
     }
 }

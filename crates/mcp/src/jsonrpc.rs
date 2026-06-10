@@ -54,6 +54,13 @@ impl McpProfile {
         }
     }
 
+    /// Profiles that expose no mutating tools. Servers running these never
+    /// need the Tantivy writer, so they open the engine read-only and leave
+    /// the write lock free for CLI syncs running alongside.
+    pub(crate) fn is_read_only_profile(self) -> bool {
+        matches!(self, Self::Minimal | Self::Reviewer)
+    }
+
     fn allows_tool(self, name: &str) -> bool {
         if is_profile_management_tool(name) {
             return true;
@@ -261,7 +268,8 @@ where
         .unwrap_or(Value::Object(serde_json::Map::new()));
 
     if is_profile_management_tool(&tool_name) {
-        return handle_profile_management_tool(id, &tool_name, &args, profile, writer).await;
+        return handle_profile_management_tool(id, &tool_name, &args, profile, engine, writer)
+            .await;
     }
 
     if !profile.allows_tool(&tool_name) {
@@ -327,11 +335,48 @@ where
     build_tool_response(id, tool_name, call_result)
 }
 
+/// When switching to a write-capable profile, swap a read-only engine for a
+/// writer if the Tantivy write lock is free.
+///
+/// Read-only-profile servers open the engine without the writer (see
+/// [`McpProfile::is_read_only_profile`]); once the agent upgrades to
+/// `editor`/`dangerous`, the write tools need a real writer. Returns a note
+/// for the profile-switch response when the engine state is worth mentioning.
+pub(crate) fn upgrade_engine_for_profile(
+    engine: &Arc<RwLock<Engine>>,
+    next: McpProfile,
+) -> Option<String> {
+    if next.is_read_only_profile() {
+        return None;
+    }
+    let root = {
+        let guard = engine.read().unwrap_or_else(|e| e.into_inner());
+        if !guard.is_read_only() {
+            return None;
+        }
+        guard.root().to_path_buf()
+    };
+    match Engine::open(&root) {
+        Ok(writer) if !writer.is_read_only() => {
+            *engine.write().unwrap_or_else(|e| e.into_inner()) = writer;
+            info!("engine upgraded to read-write for profile switch");
+            Some("Engine upgraded to read-write; mutation tools are fully functional.".to_string())
+        }
+        Ok(_) => Some(
+            "Engine remains read-only — another process holds the write lock; \
+             mutation tools will return errors until it exits."
+                .to_string(),
+        ),
+        Err(err) => Some(format!("Engine remains read-only — reopen failed: {err}")),
+    }
+}
+
 async fn handle_profile_management_tool<W>(
     id: Value,
     tool_name: &str,
     args: &Value,
     profile: &mut McpProfile,
+    engine: &Arc<RwLock<Engine>>,
     writer: &mut BufWriter<W>,
 ) -> Value
 where
@@ -391,6 +436,20 @@ where
             let changed = previous != next_profile;
             *profile = next_profile;
 
+            // A read-only-profile server opened the engine without the writer;
+            // moving to a write-capable profile needs a real writer for the
+            // mutation tools. Run in spawn_blocking — Engine::open does I/O.
+            let engine_note = if changed {
+                let engine_clone = Arc::clone(engine);
+                tokio::task::spawn_blocking(move || {
+                    upgrade_engine_for_profile(&engine_clone, next_profile)
+                })
+                .await
+                .unwrap_or(None)
+            } else {
+                None
+            };
+
             if changed {
                 let notification = json!({
                     "jsonrpc": "2.0",
@@ -405,7 +464,12 @@ where
                 id,
                 tool_name.to_string(),
                 Ok((
-                    profile_status_json(*profile, Some(previous), changed),
+                    profile_status_json_with_note(
+                        *profile,
+                        Some(previous),
+                        changed,
+                        engine_note.as_deref(),
+                    ),
                     false,
                 )),
             )
@@ -426,10 +490,23 @@ fn profile_status_json(
     previous_profile: Option<McpProfile>,
     changed: bool,
 ) -> String {
-    let message = if changed {
+    profile_status_json_with_note(active_profile, previous_profile, changed, None)
+}
+
+fn profile_status_json_with_note(
+    active_profile: McpProfile,
+    previous_profile: Option<McpProfile>,
+    changed: bool,
+    engine_note: Option<&str>,
+) -> String {
+    let base_message = if changed {
         "MCP profile updated. Clients should refresh tools/list; a notifications/tools/list_changed event was emitted."
     } else {
         "MCP profile unchanged."
+    };
+    let message = match engine_note {
+        Some(note) => format!("{base_message} {note}"),
+        None => base_message.to_string(),
     };
 
     let payload = json!({
@@ -540,6 +617,47 @@ mod tests {
             ..EmbeddingConfig::default()
         };
         Engine::init(dir, config).expect("engine init should succeed")
+    }
+
+    #[test]
+    fn read_only_profiles_classified() {
+        assert!(McpProfile::Minimal.is_read_only_profile());
+        assert!(McpProfile::Reviewer.is_read_only_profile());
+        assert!(!McpProfile::Editor.is_read_only_profile());
+        assert!(!McpProfile::Dangerous.is_read_only_profile());
+    }
+
+    #[test]
+    fn upgrade_to_write_profile_swaps_read_only_engine_for_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(make_test_engine(dir.path()));
+
+        let ro = Engine::open_read_only(dir.path()).unwrap();
+        assert!(ro.is_read_only());
+        let engine = Arc::new(RwLock::new(ro));
+
+        upgrade_engine_for_profile(&engine, McpProfile::Editor);
+
+        assert!(
+            !engine.read().unwrap().is_read_only(),
+            "switching to a write-capable profile must acquire the writer when the lock is free"
+        );
+    }
+
+    #[test]
+    fn upgrade_skipped_when_target_profile_is_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(make_test_engine(dir.path()));
+
+        let ro = Engine::open_read_only(dir.path()).unwrap();
+        let engine = Arc::new(RwLock::new(ro));
+
+        upgrade_engine_for_profile(&engine, McpProfile::Minimal);
+
+        assert!(
+            engine.read().unwrap().is_read_only(),
+            "read-only target profiles must not grab the writer lock"
+        );
     }
 
     /// Send JSON-RPC request lines into the loop and collect all response lines.
