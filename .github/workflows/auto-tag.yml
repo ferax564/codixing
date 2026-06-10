@@ -54,6 +54,17 @@ jobs:
           fi
           echo "All version locations consistent: $EXPECTED"
 
+      - name: Verify CHANGELOG has an entry for this version
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          EXPECTED="${VERSION#v}"
+          if ! grep -qE "^## \[$EXPECTED\]" CHANGELOG.md; then
+            echo "ERROR: CHANGELOG.md has no '## [$EXPECTED]' entry — aborting tag creation."
+            echo "Releases must ship with their changelog (v0.43/v0.44 shipped without one)."
+            exit 1
+          fi
+          echo "CHANGELOG entry found for $EXPECTED"
+
       - name: Check tag doesn't already exist
         id: check
         run: |

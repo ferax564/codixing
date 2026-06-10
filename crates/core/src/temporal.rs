@@ -334,66 +334,51 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
+    /// Run a git command in `root` with host configuration fully isolated.
+    /// Global/system config (commit signing, hooks, init templates) must not
+    /// leak into the fixture repo — a host with `commit.gpgsign=true` would
+    /// otherwise fail every commit and zero out the history these tests
+    /// assert on.
+    fn git(root: &std::path::Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
     fn setup_git_repo() -> tempfile::TempDir {
         let dir = tempdir().unwrap();
         let root = dir.path();
 
-        Command::new("git")
-            .args(["init"])
-            .current_dir(root)
-            .output()
-            .unwrap();
+        git(root, &["init"]);
 
-        // Configure git user for commits.
-        Command::new("git")
-            .args(["config", "user.email", "test@test.com"])
-            .current_dir(root)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["config", "user.name", "Test"])
-            .current_dir(root)
-            .output()
-            .unwrap();
+        // Configure git user for commits (local config only).
+        git(root, &["config", "user.email", "test@test.com"]);
+        git(root, &["config", "user.name", "Test"]);
 
         // Create initial file and commit.
         fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(root)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "initial commit"])
-            .current_dir(root)
-            .output()
-            .unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-m", "initial commit"]);
 
         // Second commit touching main.rs.
         fs::write(root.join("main.rs"), "fn main() { println!(\"hello\"); }\n").unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(root)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "update main"])
-            .current_dir(root)
-            .output()
-            .unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-m", "update main"]);
 
         // Third commit adding a new file.
         fs::write(root.join("lib.rs"), "pub fn helper() {}\n").unwrap();
-        Command::new("git")
-            .args(["add", "."])
-            .current_dir(root)
-            .output()
-            .unwrap();
-        Command::new("git")
-            .args(["commit", "-m", "add helper"])
-            .current_dir(root)
-            .output()
-            .unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-m", "add helper"]);
 
         dir
     }

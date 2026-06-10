@@ -42,11 +42,16 @@ impl Engine {
     /// using rayon, chunks them with the cAST algorithm, indexes chunks in
     /// Tantivy, optionally embeds them into the HNSW index, and populates the
     /// symbol table. All state is persisted to the `.codixing/` directory.
-    pub fn init(root: impl AsRef<Path>, config: IndexConfig) -> Result<Self> {
+    pub fn init(root: impl AsRef<Path>, mut config: IndexConfig) -> Result<Self> {
         let root = root
             .as_ref()
             .canonicalize()
             .map_err(|e| CodixingError::Config(format!("cannot resolve root path: {e}")))?;
+        // Keep config.root in lockstep with the canonicalized root. Indexing
+        // walks the canonical root, so a non-canonical config.root (e.g.
+        // macOS `/var` vs `/private/var`, or any symlinked project dir)
+        // would make every later sync see all paths as added+removed.
+        config.root = root.clone();
 
         let store = IndexStore::init(&root, &config)?;
         let tantivy =
@@ -290,8 +295,33 @@ impl Engine {
             }
         }
 
-        let hashes: Vec<(std::path::PathBuf, u64)> =
+        // The parser cache only holds AST-parsed files. Doc/config files
+        // (Markdown, TOML, HTML, LICENSE, …) never enter it, so hash them
+        // here too — otherwise the first sync after init re-classifies every
+        // doc file as "added" and re-indexes (and re-embeds) all of them.
+        let mut hashes: Vec<(std::path::PathBuf, u64)> =
             parser.cache().content_hashes().into_iter().collect();
+        {
+            let cached: std::collections::HashSet<&std::path::PathBuf> =
+                hashes.iter().map(|(p, _)| p).collect();
+            let uncached: Vec<std::path::PathBuf> = files
+                .iter()
+                .filter(|f| !cached.contains(f))
+                .cloned()
+                .collect();
+            drop(cached);
+            for path in uncached {
+                match std::fs::read(&path) {
+                    Ok(content) => {
+                        hashes.push((path, xxhash_rust::xxh3::xxh3_64(&content)));
+                    }
+                    Err(e) => {
+                        debug!(path = %path.display(), error = %e,
+                            "skipping baseline hash for unreadable file");
+                    }
+                }
+            }
+        }
         store.save_tree_hashes(&hashes)?;
 
         // Also write v2 hashes with mtime+size for fast sync pre-filtering.
@@ -540,7 +570,11 @@ impl Engine {
             .map_err(|e| CodixingError::Config(format!("cannot resolve root path: {e}")))?;
 
         let store = IndexStore::open(&root)?;
-        let config = store.load_config()?;
+        let mut config = store.load_config()?;
+        // The persisted root may be stale (index dir moved/cloned) or
+        // non-canonical (symlinked path at init time); the canonical open
+        // root is the truth.
+        config.root = root.clone();
 
         // Try read-write first, retrying briefly on lock conflict to absorb
         // the common intra-process drop-then-reopen race. Fall back to
@@ -830,7 +864,9 @@ impl Engine {
             .map_err(|e| CodixingError::Config(format!("cannot resolve root path: {e}")))?;
 
         let store = IndexStore::open(&root)?;
-        let config = store.load_config()?;
+        let mut config = store.load_config()?;
+        // Same canonicalization rule as open(): the canonical root is the truth.
+        config.root = root.clone();
         let tantivy = match TantivyIndex::open_read_only_with_config(
             &store.tantivy_dir(),
             config.bm25.clone(),

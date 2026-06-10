@@ -416,6 +416,24 @@ impl IndexConfig {
     ///
     /// Returns `None` if the path does not fall under any known root.
     pub fn normalize_path(&self, abs_path: &Path) -> Option<String> {
+        if let Some(rel) = self.normalize_path_exact(abs_path) {
+            return Some(rel);
+        }
+        // The roots are canonicalized at Engine construction, but callers
+        // (CLI `update --file`, MCP/LSP writes, tests) may pass a
+        // non-canonical path — e.g. through a symlinked project dir, or
+        // macOS `/var` vs `/private/var`. Retry with the canonical form
+        // before giving up. Canonicalization fails for deleted files; those
+        // keep the exact-match-only behavior.
+        let canonical = abs_path.canonicalize().ok()?;
+        if canonical != abs_path {
+            self.normalize_path_exact(&canonical)
+        } else {
+            None
+        }
+    }
+
+    fn normalize_path_exact(&self, abs_path: &Path) -> Option<String> {
         // Try primary root first (no prefix — backwards-compatible).
         if let Ok(rel) = abs_path.strip_prefix(&self.root) {
             return Some(rel.to_string_lossy().replace('\\', "/"));

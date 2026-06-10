@@ -15,7 +15,11 @@ use codixing_core::{
 };
 
 #[derive(Parser)]
-#[command(name = "codixing", about = "Code retrieval engine for AI agents")]
+#[command(
+    name = "codixing",
+    version,
+    about = "Code retrieval engine for AI agents"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

@@ -6,6 +6,63 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.45.0] — 2026-06-10
+
+Integrity + autonomy release. Fixes every bug found by the 2026-06-09
+hands-on review (all of which printed their evidence on every run with
+nobody watching), then makes that class of failure structurally impossible
+to miss: CI now runs Codixing against its own repository and fails on any
+integrity warning.
+
+### Added
+
+- **CI self-audit job** — `scripts/self_audit.sh` runs on every PR/push:
+  fresh `init` must emit zero warnings, the first `sync` after `init` must be
+  a strict no-op (`0 added, 0 modified, 0 removed`), `doctor` must report
+  `Index: ok`, and a search smoke test must return relevant hits. Both bugs
+  fixed in this release (trigram persistence warning, 91-file sync baseline
+  gap) would have been caught by this job on the day they were introduced.
+- **Dependabot** — weekly grouped Cargo updates, weekly GitHub Actions
+  updates, monthly npm updates (`.github/dependabot.yml`).
+- **Changelog gate on auto-tag** — the auto-tag workflow now refuses to tag a
+  release whose version has no `## [X.Y.Z]` heading in CHANGELOG.md
+  (v0.43 and v0.44 shipped without changelog entries; backfilled below).
+
+### Fixed
+
+- **Chunk trigram index now persists when chunk IDs exceed `u32::MAX`** — chunk IDs are hash-derived u64s, so `save_mmap_binary_v2`'s u32 narrowing failed on every `init`/`sync` with a misleading "> 4B chunks" diagnosis, and the chunk trigram index silently never reached disk. The v2 writer now detects ID overflow and writes the v1 format (raw u64 postings) instead; the loader already dispatches on the version header. 2 new regression tests (u64-ID round-trip + small-ID v2 header pin).
+- **First `sync` after `init` is a true no-op** — `init` built its change baseline from the parser cache, which only holds AST-parsed files, so every doc/config file (Markdown, TOML, HTML, LICENSE, …) was re-classified as "added" and fully re-indexed (and re-embedded, on hybrid indexes) by the first sync. `init` now hashes all walked files into the baseline. On this repo: first sync went from `91 added` to `0 added`. 1 new integration test.
+- **Rust import resolution prefers the deepest module file** — `resolve_rust` tried the *shortest* module prefix first, so `use crate::retriever::bm25::BM25Retriever` resolved to `retriever/mod.rs` instead of `retriever/bm25.rs`. Every deep-module import was credited to the parent `mod.rs`, making submodules look like orphans (`codixing audit` flagged `bm25.rs` as "likely dead code" while `search.rs` imports it). The prefix scan now runs longest-first. 2 new resolver tests.
+- **`codixing audit` no longer flags LICENSE files and VS Code extension entries as dead code** — extension-less plain-text metadata files (LICENSE, NOTICE, COPYING, AUTHORS, …) now classify as documentation (Info tier), mirroring the indexer's PlainText filename route, and `extension.ts`/`extension.js` count as entry points (they're referenced from `package.json`'s `main`, never imported). 2 new tests.
+- **`Engine` keeps `config.root` canonicalized + `normalize_path` retries with the canonical path** — `init` canonicalizes the root and indexes canonical paths, but stored the caller's `config.root` verbatim; with a symlinked project root (macOS `/var` → `/private/var`, any symlinked dir, Windows `\\?\` verbatim paths) every subsequent `sync` saw all files as added+removed. `init`/`open`/`open_read_only` now overwrite `config.root` with the canonical root (which also heals indexes whose directory moved since init), and `IndexConfig::normalize_path` falls back to the canonicalized input path on a prefix miss, so direct mutation entry points (`codixing update --file`, MCP/LSP writes) accept symlinked/non-canonical paths too. Found by the new first-sync no-op test failing on macOS/Windows CI. 2 new Unix symlink regression tests.
+- **`codixing --version` / `-V`** — the CLI previously had no version flag; only `codixing doctor` revealed the binary version.
+- **`temporal` unit tests are hermetic against host git config** — the fixture helper now isolates `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` and asserts each git command succeeds; previously a host with enforced commit signing (`commit.gpgsign=true`) failed every fixture commit and all 5 tests.
+- `scripts/check_readme_commands.sh` build hint referenced the nonexistent package name `codixing-cli` (the CLI package is `codixing`).
+
+### Added
+
+- **Interactive graph dashboard** — `codixing graph --html` rebuilt into an interactive dashboard with Graph/Blocks views, edge aggregation, PNG/SVG export, module drill-down, overview mode, and a file tree (#115, #116).
+- **Review backlog remediation** — verified fixes across MCP write safety (path-escape + Unicode-safe truncation), federation residency clamp, graph scaling (PageRank/Louvain), atomic persistence, `sync --no-embed` vector reuse, export hardening, and shared-session durability. See `codixing-full-review-2026-05-30.md`.
+
+## [0.44.0] — 2026-05-15
+
+### Added
+
+- **Agent context pack** — `codixing agent-context-pack "<task>"` (+ matching MCP tool) emits a stable-schema JSON bundle for agent consumption: task summary, mode, token budget, repo orientation entries with evidence handles, and changed-file context. Designed as a single-call context primer for coding agents.
+- **Runtime MCP profile switching** — agents can promote the active tool profile at runtime instead of restarting the server.
+
+## [0.43.0] — 2026-05-14
+
+### Added
+
+- **`codixing doctor`** — one-screen environment/index health check: binary version, index presence and disk size, git staleness (HEAD vs indexed commit), daemon endpoint state, ONNX runtime configuration, and index counts.
+- **MCP profile gating** — tool-profile system for the MCP server with profile-isolated daemon endpoints (a daemon serving one profile no longer answers for another).
+- **Cargo-derived MCP server version** — `codixing-mcp` reports the workspace version from build metadata instead of a hardcoded string.
+
+### Fixed
+
+- CI cache-key hardening for the Rust build caches.
+
 ## [0.42.0] — 2026-05-01
 
 Tier 1 partial bundle plus the Windows indexing fix that briefly carried a

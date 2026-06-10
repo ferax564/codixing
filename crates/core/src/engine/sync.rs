@@ -2110,4 +2110,33 @@ pub struct Config {
             "direct reindex must invalidate the stale signature fingerprint"
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn direct_reindex_through_symlinked_root_invalidates_sidecar() {
+        // Engine roots are canonicalized, but callers may address files
+        // through a symlinked project path (macOS tempdirs live under
+        // /var -> /private/var). normalize_path must canonicalize on miss so
+        // the sidecar key still resolves to the relative path.
+        let dir = tempfile::tempdir().unwrap();
+        let real_root = dir.path().join("real");
+        fs::create_dir_all(&real_root).unwrap();
+        write_main(&real_root, "pub fn f(a: u32) -> u32 { a + 1 }\n");
+
+        let link_root = dir.path().join("link");
+        std::os::unix::fs::symlink(&real_root, &link_root).unwrap();
+
+        let mut engine = Engine::init(&link_root, IndexConfig::new(&link_root)).unwrap();
+
+        let key = std::path::PathBuf::from("src/main.rs");
+        write_main(&real_root, "pub fn f(a: u64) -> u64 { a + 1 }\n");
+        // Address the file through the symlinked (non-canonical) root.
+        engine.reindex_file(&link_root.join("src/main.rs")).unwrap();
+
+        let after = engine.store.load_tree_signatures().unwrap();
+        assert!(
+            !after.iter().any(|(p, _)| *p == key),
+            "reindex via a symlinked path must still invalidate the sidecar entry"
+        );
+    }
 }
