@@ -48,7 +48,7 @@ SYNC_OUT=$("$CODIXING" sync . 2>&1) || {
   exit 1
 }
 echo "$SYNC_OUT" | tail -1
-if ! echo "$SYNC_OUT" | grep -q "0 added, 0 modified, 0 removed"; then
+if ! echo "$SYNC_OUT" | grep -q "sync complete: 0 added, 0 modified, 0 removed"; then
   echo "FAIL: first sync after init re-indexed files (baseline gap):"
   echo "$SYNC_OUT" | tail -3
   FAILURES=$((FAILURES + 1))
@@ -82,8 +82,14 @@ SEARCH_OUT=$("$CODIXING" search "trigram index" 2>&1) || {
   echo "$SEARCH_OUT"
   exit 1
 }
-if ! echo "$SEARCH_OUT" | grep -q "trigram"; then
-  echo "FAIL: search for 'trigram index' returned nothing relevant:"
+# Result lines look like `1. path/to/file.rs [L97-L130] (Rust) score=186.252`.
+# Matching the query word alone is not enough — the CLI echoes the query in
+# its "No results for …" message, which would make an empty result pass.
+if echo "$SEARCH_OUT" | grep -q "No results for"; then
+  echo "FAIL: search for 'trigram index' returned no results"
+  FAILURES=$((FAILURES + 1))
+elif ! echo "$SEARCH_OUT" | grep -qE '^\s*[0-9]+\. .*trigram.*score='; then
+  echo "FAIL: no search hit for 'trigram index' is trigram-related:"
   echo "$SEARCH_OUT" | head -5
   FAILURES=$((FAILURES + 1))
 fi
