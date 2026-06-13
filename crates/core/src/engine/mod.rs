@@ -11,6 +11,7 @@ mod focus_map;
 pub mod freshness;
 mod graph;
 pub mod impact;
+mod import;
 pub(crate) mod indexing;
 mod init;
 mod orphans;
@@ -30,6 +31,7 @@ mod validation;
 pub use embed_stats::EmbedTimingStats;
 pub use focus_map::{FocusMapEntry, FocusMapOptions};
 pub use impact::{ChangeImpact, compute_change_impact};
+pub use import::ImportStats;
 pub use symbol_graph::{ReferenceOptions, SymbolReference};
 
 use std::collections::HashMap;

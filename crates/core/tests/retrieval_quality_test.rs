@@ -205,6 +205,7 @@ fn assert_recall(engine: &Engine, query: &str, expected_file: &str, k: usize) {
             token_budget: None,
             queries: None,
             doc_filter: None,
+            source_filter: None,
         })
         .unwrap_or_default();
 
@@ -285,6 +286,7 @@ fn top1_parser_is_parser_file() {
             token_budget: None,
             queries: None,
             doc_filter: None,
+            source_filter: None,
         })
         .unwrap_or_default();
 
@@ -308,6 +310,7 @@ fn field_boost_ranks_signature_match_high() {
             token_budget: None,
             queries: None,
             doc_filter: None,
+            source_filter: None,
         })
         .unwrap_or_default();
 

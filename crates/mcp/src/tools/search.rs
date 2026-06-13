@@ -81,6 +81,17 @@ fn build_search_query(parsed: &SearchArgs, args: &Value) -> SearchQuery {
         query = query.with_file_filter(filter);
     }
 
+    // Scope to imported external context when requested.
+    if let Some(source) = args.get("source").and_then(|v| v.as_str()) {
+        if !source.is_empty() {
+            let filter = match source.to_ascii_lowercase().as_str() {
+                "external" | "all" | "any" => codixing_core::SourceFilter::ExternalOnly,
+                other => codixing_core::SourceFilter::Named(other.to_string()),
+            };
+            query = query.with_source_filter(filter);
+        }
+    }
+
     // Extract optional multi-query reformulations for RRF fusion.
     let queries: Option<Vec<String>> = args.get("queries").and_then(|v| v.as_array()).map(|arr| {
         arr.iter()

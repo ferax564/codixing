@@ -1,0 +1,16 @@
+[[tools]]
+name = "import_external"
+description = "Import external project context (GitHub issues/PRs, ADRs, Jira or Linear issues) into the index as searchable documents linked to code. Use this to make tracker tickets and architecture decisions retrievable alongside source: imported items are chunked like docs, linked to the code symbols they mention (so find_callers/change_impact surface the tickets discussing a file), and tagged so code_search can scope to them via the 'source' parameter. Fully local — reads an exported file, no network or API key. Re-importing a source replaces its prior documents; imports survive sync_index but a fresh init must be followed by re-import."
+handler = "files::call_import_external"
+calling_convention = "engine_mut_args"
+read_only = false
+
+[tools.params.source]
+type = "string"
+description = "Source type: 'github' (JSON from `gh issue/pr list --json …` or the GitHub REST API), 'adr' (a Markdown file or directory of architecture decision records), 'jira' (CSV issue-navigator export or REST search JSON), or 'linear' (CSV or API JSON). CSV vs JSON is auto-detected for jira/linear."
+required = true
+
+[tools.params.path]
+type = "string"
+description = "Path to the export file or directory. Relative paths resolve against the indexed project root."
+required = true
