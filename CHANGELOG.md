@@ -8,31 +8,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- **External-context import** — `codixing import github <issues.json>` and
-  `codixing import adr <file|dir>` ingest project context that lives outside the
-  source tree as first-class, searchable documents. The GitHub importer accepts
-  both `gh issue list --json …` / `gh pr list` output and GitHub REST API JSON
-  arrays (PRs are detected and tagged; comments, labels, author, state, and URL
-  are preserved). The ADR importer reads Nygard- and MADR-style records from a
-  Markdown file or directory, extracting the record number, title, and status.
-  Imported items are rendered to Markdown and indexed under a reserved virtual
-  path namespace (`_external/<source>/<id>.md`) through the existing document
-  pipeline, so they flow through BM25, trigram, vector search, persistence, and
-  the doc→code symbol graph with no parallel store: a backticked symbol in an
-  issue body (e.g. `add_chunk`) becomes a `DocumentedBy` edge to the defining
-  file, so `codixing callers <file>` and `impact` surface the issues that
-  discuss it. New `codixing search --source <github|adr|external>` filter (and
+- **External-context import** — `codixing import <source> <path>` ingests project
+  context that lives outside the source tree as first-class, searchable
+  documents, across four sources:
+  - **github** — `gh issue list --json …` / `gh pr list` output or GitHub REST
+    API JSON arrays (PRs detected and tagged; comments, labels, author, state,
+    URL preserved).
+  - **adr** — Nygard- and MADR-style architecture decision records from a
+    Markdown file or directory (record number, title, status extracted).
+  - **jira** — issue-navigator CSV (repeated `Labels` columns handled) or REST
+    `/search` JSON (Atlassian Document Format descriptions flattened to text).
+  - **linear** — "Export issues" CSV or API JSON (bare array, `issues`, or
+    GraphQL `data.issues.nodes`).
+
+  CSV vs JSON is auto-detected for jira/linear. Imported items are rendered to
+  Markdown and indexed under a reserved virtual path namespace
+  (`_external/<source>/<id>.md`) through the existing document pipeline, so they
+  flow through BM25, trigram, vector search, persistence, and the doc→code
+  symbol graph with no parallel store: a backticked symbol in an issue body
+  (e.g. `add_chunk`) becomes a `DocumentedBy` edge to the defining file, so
+  `codixing callers <file>` and `impact` surface the tickets that discuss it.
+  New `codixing search --source <github|adr|jira|linear|external>` filter (and
   `SearchQuery::with_source_filter`, `SearchResult::is_external` /
-  `external_source`) scopes results to imported context. Re-importing a source
+  `external_source`) scopes results to imported context; the same `source`
+  parameter is exposed on the MCP `code_search` tool. Re-importing a source
   replaces its prior documents (idempotent at source granularity); because the
   virtual paths are never produced by the filesystem walk, imports are invisible
   to `sync`'s deletion detection and survive incremental syncs (a full
   `codixing init` rebuilds from disk only — re-run imports afterward). Fully
-  local: no SaaS connector, network call, or API key. New `Engine::import_external`
-  + `ImportStats`, `codixing_core::external` module, and `--dry-run` / `--json`
-  on the CLI. 20 new tests (5 importer/model unit suites + 5 end-to-end:
-  search, doc→code linking, source filtering, idempotent re-import, and
-  persistence across sync + reopen).
+  local: no SaaS connector, network call, or API key. New `import_external` MCP
+  tool (write-profile gated), `Engine::import_external` + `ImportStats`,
+  `codixing_core::external` module (with a dependency-free CSV reader), and
+  `--dry-run` / `--json` on the CLI. 32 new tests (importer/model/CSV unit
+  suites + 6 end-to-end: search, doc→code linking, source filtering, idempotent
+  re-import, persistence across sync + reopen, and Jira/Linear scoping).
 
 ### Fixed
 

@@ -232,3 +232,46 @@ fn imported_docs_survive_sync_and_persist_across_reopen() {
             .contains("Rust")
     );
 }
+
+#[test]
+fn imports_jira_and_linear_and_scopes_by_source() {
+    let (_dir, mut engine) = init_repo();
+
+    // Jira REST JSON with an ADF description referencing code.
+    let jira = r#"{"issues":[{"key":"OPS-3","fields":{
+        "summary":"Throttle add_chunk","description":{"type":"doc","content":[
+        {"type":"paragraph","content":[{"type":"text","text":"`add_chunk` is too eager."}]}]},
+        "status":{"name":"Open"},"labels":["perf"]}}]}"#;
+    let jdocs = codixing_core::external::jira::parse_str(jira).unwrap();
+    let js = engine.import_external(jdocs).unwrap();
+    assert_eq!(js.documents, 1);
+    assert_eq!(js.doc_edges, 1, "jira issue should link to add_chunk");
+
+    // Linear CSV.
+    let linear = "ID,Title,Description,Status,Labels\nENG-4,Cache add_chunk results,\"memoize `add_chunk`\",Todo,perf\n";
+    let ldocs = codixing_core::external::linear::parse_str(linear).unwrap();
+    let ls = engine.import_external(ldocs).unwrap();
+    assert_eq!(ls.documents, 1);
+
+    // Each source is independently searchable and scoped.
+    // Virtual-path ids are slugified to lowercase.
+    for (src, expect_path) in [
+        ("jira", "_external/jira/ops-3.md"),
+        ("linear", "_external/linear/eng-4.md"),
+    ] {
+        let res = engine
+            .search(
+                SearchQuery::new("add_chunk")
+                    .with_limit(10)
+                    .with_strategy(Strategy::Instant)
+                    .with_source_filter(SourceFilter::Named(src.to_string())),
+            )
+            .unwrap();
+        assert!(
+            res.iter().any(|r| r.file_path == expect_path),
+            "expected {expect_path} for --source {src}, got: {:?}",
+            res.iter().map(|r| &r.file_path).collect::<Vec<_>>()
+        );
+        assert!(res.iter().all(|r| r.external_source() == Some(src)));
+    }
+}

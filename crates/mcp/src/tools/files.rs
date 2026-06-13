@@ -975,6 +975,52 @@ pub(crate) fn call_git_sync_index(engine: &mut Engine) -> (String, bool) {
     }
 }
 
+pub(crate) fn call_import_external(engine: &mut Engine, args: &Value) -> (String, bool) {
+    let source = match args.get("source").and_then(|v| v.as_str()) {
+        Some(s) if !s.is_empty() => s.to_string(),
+        _ => return ("Missing required argument: source".to_string(), true),
+    };
+    let path_arg = match args.get("path").and_then(|v| v.as_str()) {
+        Some(p) if !p.is_empty() => p,
+        _ => return ("Missing required argument: path".to_string(), true),
+    };
+
+    // Resolve relative paths against the indexed project root.
+    let path = {
+        let p = Path::new(path_arg);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            engine.config().root.join(p)
+        }
+    };
+
+    let docs = match codixing_core::parse_source(&source, &path) {
+        Ok(d) => d,
+        Err(e) => return (format!("Import parse failed: {e}"), true),
+    };
+    if docs.is_empty() {
+        return (format!("No documents found in {}", path.display()), false);
+    }
+
+    match engine.import_external(docs) {
+        Ok(stats) => {
+            let mut out = format!(
+                "Imported {} {} document(s): {} chunk(s), {} code link(s)",
+                stats.documents, source, stats.chunks, stats.doc_edges
+            );
+            if stats.replaced > 0 {
+                out.push_str(&format!(", replaced {} prior", stats.replaced));
+            }
+            out.push_str(&format!(
+                "\nSearch them with code_search using source=\"{source}\" (or source=\"external\")."
+            ));
+            (out, false)
+        }
+        Err(e) => (format!("Import failed: {e}"), true),
+    }
+}
+
 pub(crate) fn call_run_tests(engine: &mut Engine, args: &Value) -> (String, bool) {
     let command = match args.get("command").and_then(|v| v.as_str()) {
         Some(c) => c,

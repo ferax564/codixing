@@ -33,6 +33,10 @@ type = "array"
 items_type = "string"
 description = "Optional list of query reformulations for multi-query RRF fusion. When provided, each query is searched independently and results are fused. Overrides auto-reformulation."
 
+[tools.params.source]
+type = "string"
+description = "Restrict results to imported external context (see import_external). Use 'external' for any import, or a specific source namespace: 'github', 'adr', 'jira', 'linear'."
+
 [[tools]]
 name = "find_symbol"
 description = "Look up symbols (functions, structs, classes, traits, methods, etc.) in the indexed codebase by name. Performs case-insensitive substring matching. Use when you already know the symbol name and need its definition file/line \u2014 prefer `code_search` for concept queries, `read_symbol` to read the full source."

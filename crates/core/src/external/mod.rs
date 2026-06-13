@@ -23,13 +23,18 @@
 //!   GitHub REST API JSON array.
 //! - [`adr`] — a folder (or single file) of Markdown architecture decision
 //!   records.
+//! - [`jira`] — a Jira issue export, either CSV (issue navigator export) or
+//!   JSON (REST API search response).
+//! - [`linear`] — a Linear issue export, either CSV or JSON (API response).
 //!
-//! Jira/Linear CSV/JSON exports are a planned follow-up; the
-//! [`ExternalDocument`] shape and [`parse_source`] dispatch are designed so a
-//! new parser slots in without touching the engine.
+//! Both [`jira`] and [`linear`] auto-detect CSV vs JSON from the file content.
+//! New parsers slot into [`parse_source`] without touching the engine.
 
 pub mod adr;
+pub mod csv;
 pub mod github;
+pub mod jira;
+pub mod linear;
 
 use std::path::Path;
 
@@ -137,8 +142,10 @@ pub fn parse_source(source: &str, path: &Path) -> Result<Vec<ExternalDocument>> 
     match source.to_ascii_lowercase().as_str() {
         "github" | "github-issues" | "gh" => github::parse(path),
         "adr" | "adrs" => adr::parse(path),
+        "jira" => jira::parse(path),
+        "linear" => linear::parse(path),
         other => Err(CodixingError::Import(format!(
-            "unknown import source '{other}' (supported: github, adr)"
+            "unknown import source '{other}' (supported: github, adr, jira, linear)"
         ))),
     }
 }
