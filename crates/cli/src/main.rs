@@ -129,6 +129,12 @@ enum Command {
         #[arg(long)]
         docs_only: bool,
 
+        /// Only return imported external-context results. Pass a bare `--source`
+        /// (or `--source external`) for any import, or a namespace like
+        /// `--source github` / `--source adr` to filter to one source.
+        #[arg(long, value_name = "SOURCE", num_args = 0..=1, default_missing_value = "external")]
+        source: Option<String>,
+
         /// Print only the result count, not the full results.
         #[arg(long)]
         count: bool,
@@ -453,6 +459,37 @@ enum Command {
         /// see issue #107).
         #[arg(long, value_name = "N")]
         threads: Option<usize>,
+    },
+
+    /// Import external project context (GitHub issues/PRs, ADRs) into the index.
+    ///
+    /// Imported documents become searchable alongside code and docs, are linked
+    /// to the code symbols they mention (doc→code graph edges), and are tagged
+    /// so `codixing search --source <name>` can filter to them.
+    ///
+    /// Sources:
+    ///   github  PATH is a JSON file from `gh issue list --json …` (or the
+    ///           GitHub REST API). PRs are detected and tagged automatically.
+    ///   adr     PATH is a Markdown file or a directory of ADR records.
+    ///
+    /// Re-importing a source replaces its previously imported documents. A full
+    /// `codixing init` rebuilds from disk only — re-run imports afterward.
+    Import {
+        /// Source type: `github` or `adr`.
+        #[arg(value_name = "SOURCE")]
+        source: String,
+
+        /// Path to the export file or directory.
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+
+        /// Parse and report what would be imported without writing to the index.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Output the import summary as JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Fast git-aware sync: re-indexes only files changed since the last indexed git commit.
@@ -943,6 +980,7 @@ async fn async_main() -> Result<()> {
             token_budget,
             code_only,
             docs_only,
+            source,
             count,
         } => {
             let doc_filter = if code_only {
@@ -952,6 +990,10 @@ async fn async_main() -> Result<()> {
             } else {
                 None
             };
+            let source_filter = source.map(|s| match s.to_ascii_lowercase().as_str() {
+                "external" | "all" | "any" => codixing_core::SourceFilter::ExternalOnly,
+                _ => codixing_core::SourceFilter::Named(s),
+            });
             cmd_search(
                 query,
                 limit,
@@ -961,6 +1003,7 @@ async fn async_main() -> Result<()> {
                 json,
                 token_budget,
                 doc_filter,
+                source_filter,
                 count,
             )
         }
@@ -1053,6 +1096,12 @@ async fn async_main() -> Result<()> {
             rebuild_graph,
             threads,
         } => cmd_sync(path, no_embed, rebuild_graph, threads),
+        Command::Import {
+            source,
+            path,
+            dry_run,
+            json,
+        } => cmd_import(source, path, dry_run, json),
         Command::GitSync { path } => cmd_git_sync(path),
         Command::Embed { path } => cmd_embed(path),
         Command::BenchEmbed { path, force, json } => cmd_bench_embed(path, force, json),
@@ -1352,6 +1401,7 @@ fn cmd_search(
     json: bool,
     token_budget: Option<usize>,
     doc_filter: Option<codixing_core::DocFilter>,
+    source_filter: Option<codixing_core::SourceFilter>,
     count: bool,
 ) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
@@ -1378,6 +1428,7 @@ fn cmd_search(
             && file.is_none()
             && token_budget.is_none()
             && doc_filter.is_none()
+            && source_filter.is_none()
             && matches!(strategy, StrategyArg::Auto);
         if can_use_daemon {
             if let Some(text) = daemon_proxy::try_search(&root, &query, limit) {
@@ -1406,6 +1457,9 @@ fn cmd_search(
     }
     if let Some(f) = doc_filter {
         sq = sq.with_doc_filter(f);
+    }
+    if let Some(f) = source_filter {
+        sq = sq.with_source_filter(f);
     }
 
     let results = engine.search(sq).context("search failed")?;
@@ -2522,6 +2576,87 @@ fn cmd_sync(
             "  {} cosmetic edit(s) reused cached embeddings (signatures unchanged)",
             stats.cosmetic_skipped,
         );
+    }
+
+    Ok(())
+}
+
+fn cmd_import(source: String, path: PathBuf, dry_run: bool, json: bool) -> Result<()> {
+    // Parse the export first so a bad file fails before we open the index.
+    let docs = codixing_core::parse_source(&source, &path)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .with_context(|| format!("failed to parse {} import from {}", source, path.display()))?;
+
+    if docs.is_empty() {
+        eprintln!("No documents found in {}", path.display());
+        return Ok(());
+    }
+
+    if dry_run {
+        if json {
+            let preview: Vec<serde_json::Value> = docs
+                .iter()
+                .map(|d| {
+                    serde_json::json!({
+                        "source": d.source,
+                        "id": d.id,
+                        "title": d.title,
+                        "virtual_path": d.virtual_path(),
+                    })
+                })
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&preview)?);
+        } else {
+            eprintln!("[dry-run] would import {} document(s):", docs.len());
+            for d in &docs {
+                eprintln!("  {}  {}", d.virtual_path(), d.title);
+            }
+        }
+        return Ok(());
+    }
+
+    let root = std::env::current_dir().context("cannot determine current directory")?;
+    let mut engine =
+        Engine::open(&root).with_context(|| "no index found — run `codixing init` first")?;
+
+    let start = Instant::now();
+    let stats = match engine.import_external(docs) {
+        Ok(s) => s,
+        Err(e) => {
+            let anyhow_err = anyhow::anyhow!("{e}");
+            if check_write_lock_error(&anyhow_err) {
+                std::process::exit(1);
+            }
+            return Err(anyhow_err).context("import failed");
+        }
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "source": source,
+                "documents": stats.documents,
+                "chunks": stats.chunks,
+                "doc_edges": stats.doc_edges,
+                "replaced": stats.replaced,
+            })
+        );
+    } else {
+        eprintln!(
+            "imported {} document(s) from {}: {} chunk(s), {} code link(s){} ({:.2}s)",
+            stats.documents,
+            source,
+            stats.chunks,
+            stats.doc_edges,
+            if stats.replaced > 0 {
+                format!(", replaced {} prior", stats.replaced)
+            } else {
+                String::new()
+            },
+            start.elapsed().as_secs_f64(),
+        );
+        eprintln!("  search with: codixing search \"<query>\" --source {source}");
     }
 
     Ok(())

@@ -62,6 +62,9 @@ pub enum CodixingError {
 
     #[error("index is open in read-only mode (another instance holds the write lock)")]
     ReadOnly,
+
+    #[error("external import error: {0}")]
+    Import(String),
 }
 
 /// Convenience alias used throughout the crate.

@@ -48,6 +48,19 @@ pub enum DocFilter {
     DocsOnly,
 }
 
+/// Hard filter for imported external-context documents in search results.
+///
+/// External documents are indexed under the [`crate::external::EXTERNAL_PATH_PREFIX`]
+/// path namespace (`_external/<source>/…`), so this filter matches on the
+/// result's `file_path`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceFilter {
+    /// Only results from external imports (any source).
+    ExternalOnly,
+    /// Only results from a specific external source namespace (e.g. `"github"`).
+    Named(String),
+}
+
 /// A search query against the code index.
 #[derive(Debug, Clone)]
 pub struct SearchQuery {
@@ -67,6 +80,8 @@ pub struct SearchQuery {
     pub queries: Option<Vec<String>>,
     /// Filter results by document type.
     pub doc_filter: Option<DocFilter>,
+    /// Filter results by external-context source.
+    pub source_filter: Option<SourceFilter>,
 }
 
 impl SearchQuery {
@@ -80,6 +95,7 @@ impl SearchQuery {
             token_budget: None,
             queries: None,
             doc_filter: None,
+            source_filter: None,
         }
     }
 
@@ -110,6 +126,12 @@ impl SearchQuery {
     /// Filter results by document type.
     pub fn with_doc_filter(mut self, filter: DocFilter) -> Self {
         self.doc_filter = Some(filter);
+        self
+    }
+
+    /// Filter results by external-context source.
+    pub fn with_source_filter(mut self, filter: SourceFilter) -> Self {
+        self.source_filter = Some(filter);
         self
     }
 }
@@ -146,6 +168,21 @@ impl SearchResult {
             self.language.as_str(),
             "Markdown" | "HTML" | "reStructuredText" | "AsciiDoc" | "Plain text"
         )
+    }
+
+    /// Whether this result is an imported external-context document
+    /// (GitHub issue/PR, ADR, …), identified by its virtual path namespace.
+    pub fn is_external(&self) -> bool {
+        self.file_path
+            .starts_with(crate::external::EXTERNAL_PATH_PREFIX)
+    }
+
+    /// The external source namespace (`"github"`, `"adr"`, …) when this result
+    /// is an imported document, else `None`.
+    pub fn external_source(&self) -> Option<&str> {
+        self.file_path
+            .strip_prefix(crate::external::EXTERNAL_PATH_PREFIX)
+            .and_then(|rest| rest.split('/').next())
     }
 }
 

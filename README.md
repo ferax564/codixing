@@ -172,6 +172,9 @@ codixing context src/engine.rs   # Cross-file context assembly
 codixing agent-context-pack "task" # Stable JSON context pack for agents
 codixing init .                  # Index a project
 codixing sync                    # Incremental re-index
+codixing import github issues.json  # Import GitHub issues/PRs as searchable context
+codixing import adr docs/adr/    # Import architecture decision records
+codixing search "auth bug" --source github  # Search only imported context
 codixing audit                   # Find stale files
 ```
 
@@ -305,6 +308,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Usage example mining** — `codixing examples` finds real usage from tests, callers, and doc blocks
 - **Cross-file context assembly** — `codixing context` follows import chains and callees to assemble understanding context
 - **Agent context pack** — `codixing agent-context-pack` and MCP `agent_context_pack` compile a versioned JSON pack with repo orientation, must-read evidence handles, related symbols, likely tests, docs, risks, and recommended next tools
+- **External-context import** — `codixing import github <issues.json>` and `codixing import adr <dir>` ingest GitHub issues/PRs (from `gh issue list --json …` or the REST API) and architecture decision records as first-class searchable documents. Imported context is chunked like docs, linked to the code symbols it mentions (doc→code graph edges), and tagged so `codixing search --source github` (or `--source adr` / `--source external`) scopes results. Fully local — no SaaS connector or API key. Re-importing a source replaces it; imports survive `sync` (a full `init` rebuilds from disk, so re-run imports after)
 - **Query-personalized PageRank** — Query-time graph boost seeds PageRank from query-relevant nodes for context-aware ranking
 - **Learned query reformulation** — Project-specific vocabulary expansion learns from codebase patterns
 - **CLI + MCP** — Full CLI surface for direct use (run `codixing --help`); 70 MCP tools for editor integration (search, graph traversal, file operations, code review, git analysis, session memory, federation discovery)
@@ -382,7 +386,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 1325 tests
+cargo test --workspace        # 1345 tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```

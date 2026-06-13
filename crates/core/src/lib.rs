@@ -26,6 +26,7 @@ pub mod context_assembly;
 pub mod embedder;
 pub mod engine;
 pub mod error;
+pub mod external;
 pub mod federation;
 pub mod filter_pipeline;
 pub mod formatter;
@@ -58,10 +59,11 @@ pub use engine::freshness::{
 pub use engine::sync::SyncOptions;
 pub use engine::{
     ChangeImpact, ConflictKind, EmbedTimingStats, Engine, FocusMapEntry, FocusMapOptions,
-    GitSyncStats, GrepMatch, GrepOptions, IndexStats, ReferenceOptions, RenameConflict,
-    RenameValidation, StaleReport, SymbolReference, SyncStats,
+    GitSyncStats, GrepMatch, GrepOptions, ImportStats, IndexStats, ReferenceOptions,
+    RenameConflict, RenameValidation, StaleReport, SymbolReference, SyncStats,
 };
 pub use error::{CodixingError, Result};
+pub use external::{ExternalDocument, parse_source};
 pub use federation::{
     FederatedEngine, FederatedResult, FederatedStats, FederationConfig, ProjectInfo,
     discover::{DiscoveredProject, ProjectType, discover_projects, to_federation_config},
@@ -74,7 +76,7 @@ pub use graph::{
 };
 pub use language::{EntityKind, TypeRelation, TypeRelationKind, Visibility};
 pub use orphans::{OrphanConfidence, OrphanFile, OrphanOptions};
-pub use retriever::{ChunkMeta, DocFilter, SearchQuery, SearchResult, Strategy};
+pub use retriever::{ChunkMeta, DocFilter, SearchQuery, SearchResult, SourceFilter, Strategy};
 pub use session::{SessionEvent, SessionEventKind, SessionState};
 pub use shared_session::{SharedEventType, SharedSession, SharedSessionEvent};
 pub use symbols::Symbol;

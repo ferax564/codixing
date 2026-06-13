@@ -179,6 +179,7 @@ fn assert_recall_at_k(engine: &Engine, query: &str, expected_file: &str, k: usiz
             token_budget: None,
             queries: None,
             doc_filter: None,
+            source_filter: None,
         })
         .expect("search should succeed on the operational fixture");
     let found: HashSet<&str> = results.iter().map(|r| r.file_path.as_str()).collect();
