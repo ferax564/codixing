@@ -1989,8 +1989,11 @@ mod tests {
         std::fs::write(&extra_file, "pub fn shared() {}\n").unwrap();
         std::fs::write(&outside, "fn outside() {}\n").unwrap();
 
-        let mut config = IndexConfig::new(&root);
-        config.extra_roots.push(extra.clone());
+        // Engine construction canonicalizes configured roots. Mirror that
+        // invariant here so macOS's /var -> /private/var alias does not make
+        // this unit-only configuration differ from production behavior.
+        let mut config = IndexConfig::new(root.canonicalize().unwrap());
+        config.extra_roots.push(extra.canonicalize().unwrap());
 
         let primary_uri = Url::from_file_path(&primary_file).unwrap();
         let (resolved_primary, primary_rel) =
