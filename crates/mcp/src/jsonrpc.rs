@@ -7,7 +7,7 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use tokio::io::{AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufWriter};
 use tracing::{debug, error, info, warn};
 
 use codixing_core::{Engine, FederatedEngine};
@@ -16,22 +16,46 @@ use crate::progress;
 use crate::protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use crate::tools;
 
+/// Maximum newline-delimited JSON-RPC request size. This accommodates the
+/// 1 MiB MCP patch limit even when every scalar needs four UTF-8 bytes, while
+/// preventing an untrusted client from growing `read_line` without bound.
+const MAX_JSONRPC_FRAME_BYTES: usize = 8 * 1024 * 1024;
+const MAX_JSONRPC_METHOD_BYTES: usize = 256;
+const MAX_JSONRPC_ID_BYTES: usize = 256;
+const MAX_MCP_TOOL_NAME_BYTES: usize = 128;
+
 // ---------------------------------------------------------------------------
 // MCP profiles
 // ---------------------------------------------------------------------------
 
 /// Tool exposure and mutation policy for an MCP server instance.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
 pub(crate) enum McpProfile {
     /// Narrow discovery profile: search, symbols, repo map, and meta-tools only.
+    #[default]
     Minimal,
     /// Read-only review profile: all read-only tools, no mutation.
-    #[default]
     Reviewer,
     /// Editing profile: read-only tools plus non-destructive write helpers.
     Editor,
     /// Full tool profile, including destructive filesystem and shell tools.
     Dangerous,
+}
+
+/// Resolve the highest profile a connection may select at runtime.
+///
+/// Read-only startup profiles may move between `minimal` and `reviewer` for
+/// context-efficient discovery, but cannot silently acquire mutation or shell
+/// capabilities. Starting explicitly in editor/dangerous keeps that level as
+/// the ceiling. `--allow-profile-escalation` is the explicit escape hatch.
+pub(crate) fn profile_ceiling(startup: McpProfile, allow_profile_escalation: bool) -> McpProfile {
+    if allow_profile_escalation {
+        McpProfile::Dangerous
+    } else if startup <= McpProfile::Reviewer {
+        McpProfile::Reviewer
+    } else {
+        startup
+    }
 }
 
 impl McpProfile {
@@ -84,10 +108,10 @@ impl McpProfile {
                 "Tool '{name}' is not available in MCP profile 'minimal'. Call set_mcp_profile with profile='reviewer' to enable the full read-only tool set without restarting the MCP server."
             ),
             Self::Reviewer => format!(
-                "Tool '{name}' is blocked by MCP profile 'reviewer' because it can mutate project state. Call set_mcp_profile with profile='editor' to enable non-destructive write tools without restarting the MCP server."
+                "Tool '{name}' is blocked by MCP profile 'reviewer' because it can mutate project state. Start codixing-mcp with --profile editor, or explicitly opt into runtime write-profile upgrades with --allow-profile-escalation."
             ),
             Self::Editor => format!(
-                "Tool '{name}' is blocked by MCP profile 'editor' because it is destructive or can execute shell commands. Call set_mcp_profile with profile='dangerous' and confirm_dangerous=true to expose it without restarting the MCP server."
+                "Tool '{name}' is blocked by MCP profile 'editor' because it is destructive or can execute shell commands. Start with --profile dangerous, or use an escalation-enabled server and set_mcp_profile with profile='dangerous' and confirm_dangerous=true."
             ),
             Self::Dangerous => format!("Tool '{name}' is unexpectedly blocked."),
         }
@@ -124,51 +148,115 @@ fn is_dangerous_write_tool(name: &str) -> bool {
 
 pub(crate) async fn run_jsonrpc_loop<R, W>(
     engine: Arc<RwLock<Engine>>,
-    mut reader: tokio::io::Lines<BufReader<R>>,
+    mut reader: R,
     mut writer: BufWriter<W>,
     federation: Option<Arc<FederatedEngine>>,
     profile: McpProfile,
+    profile_ceiling: McpProfile,
 ) -> Result<()>
 where
-    R: tokio::io::AsyncRead + Unpin,
+    R: AsyncBufRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
     let mut active_profile = profile;
 
-    while let Some(line) = reader.next_line().await? {
-        let line = line.trim().to_string();
+    while let Some(frame) = read_bounded_frame(&mut reader).await? {
+        let line = match frame {
+            BoundedFrame::Text(line) => line,
+            BoundedFrame::TooLarge => {
+                let error = JsonRpcError::invalid_request(
+                    Value::Null,
+                    &format!(
+                        "JSON-RPC request exceeds the {MAX_JSONRPC_FRAME_BYTES}-byte frame limit"
+                    ),
+                );
+                write_line(&mut writer, &error).await?;
+                continue;
+            }
+            BoundedFrame::InvalidUtf8 => {
+                let error = JsonRpcError::parse_error("Parse error: request is not valid UTF-8");
+                write_line(&mut writer, &error).await?;
+                continue;
+            }
+        };
+        let frame_bytes = line.len();
+        let line = line.trim();
         if line.is_empty() {
             continue;
         }
 
-        debug!(line = %line, "received request");
-
-        let req: JsonRpcRequest = match serde_json::from_str(&line) {
-            Ok(r) => r,
+        let raw: Value = match serde_json::from_str(line) {
+            Ok(value) => value,
             Err(e) => {
                 warn!(error = %e, "failed to parse JSON-RPC request");
-                let err = JsonRpcError::internal_error(Value::Null, &format!("Parse error: {e}"));
+                let err = JsonRpcError::parse_error(&format!("Parse error: {e}"));
                 write_line(&mut writer, &err).await?;
                 continue;
             }
         };
+        if !raw.get("id").is_none_or(is_valid_bounded_jsonrpc_id) {
+            let err = JsonRpcError::invalid_request(
+                Value::Null,
+                &format!(
+                    "Invalid JSON-RPC id: expected null, a number, or a string of at most {MAX_JSONRPC_ID_BYTES} bytes"
+                ),
+            );
+            write_line(&mut writer, &err).await?;
+            continue;
+        }
+        let request_id = raw.get("id").cloned().unwrap_or(Value::Null);
+        let req: JsonRpcRequest = match serde_json::from_value(raw) {
+            Ok(request) => request,
+            Err(error) => {
+                let err = JsonRpcError::invalid_request(
+                    request_id,
+                    &format!("Invalid JSON-RPC request: {error}"),
+                );
+                write_line(&mut writer, &err).await?;
+                continue;
+            }
+        };
+        if req.jsonrpc != "2.0" {
+            let err = JsonRpcError::invalid_request(
+                req.id.clone().unwrap_or(Value::Null),
+                "Invalid JSON-RPC version: expected '2.0'",
+            );
+            write_line(&mut writer, &err).await?;
+            continue;
+        }
+        if req.method.len() > MAX_JSONRPC_METHOD_BYTES {
+            let err = JsonRpcError::invalid_request(
+                req.id.clone().unwrap_or(Value::Null),
+                &format!(
+                    "Invalid JSON-RPC method: maximum length is {MAX_JSONRPC_METHOD_BYTES} bytes"
+                ),
+            );
+            write_line(&mut writer, &err).await?;
+            continue;
+        }
+        let method_summary = bounded_log_text(&req.method, 128);
+        let id_summary = jsonrpc_id_summary(req.id.as_ref());
+        debug!(method = %method_summary, id = %id_summary, frame_bytes, "received JSON-RPC request");
 
         let id = match req.id.clone() {
             Some(id) => id,
             None => {
-                debug!(method = %req.method, "ignoring notification");
+                debug!(method = %method_summary, "ignoring notification");
                 continue;
             }
         };
 
         let response = dispatch(
-            &engine,
+            DispatchContext {
+                engine: &engine,
+                federation: &federation,
+                writer: &mut writer,
+                profile: &mut active_profile,
+                profile_ceiling,
+            },
             id,
             &req.method,
             req.params,
-            &federation,
-            &mut writer,
-            &mut active_profile,
         )
         .await;
         write_line(&mut writer, &response).await?;
@@ -184,18 +272,113 @@ where
     Ok(())
 }
 
+fn bounded_log_text(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let suffix = if max_bytes >= '…'.len_utf8() {
+        "…"
+    } else {
+        ""
+    };
+    let mut end = max_bytes.saturating_sub(suffix.len());
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{suffix}", &value[..end])
+}
+
+fn jsonrpc_id_summary(id: Option<&Value>) -> String {
+    match id {
+        None => "notification".to_string(),
+        Some(Value::Null) => "null".to_string(),
+        Some(Value::Number(number)) => number.to_string(),
+        Some(Value::String(value)) => bounded_log_text(value, 64),
+        Some(Value::Bool(_)) => "<boolean>".to_string(),
+        Some(Value::Array(_)) => "<array>".to_string(),
+        Some(Value::Object(_)) => "<object>".to_string(),
+    }
+}
+
+fn is_valid_bounded_jsonrpc_id(id: &Value) -> bool {
+    match id {
+        Value::Null | Value::Number(_) => true,
+        Value::String(value) => value.len() <= MAX_JSONRPC_ID_BYTES,
+        Value::Bool(_) | Value::Array(_) | Value::Object(_) => false,
+    }
+}
+
+enum BoundedFrame {
+    Text(String),
+    TooLarge,
+    InvalidUtf8,
+}
+
+/// Read and drain one LF-delimited frame while retaining at most the configured
+/// limit. Oversized frames are discarded through the newline without growing
+/// memory further, keeping the next request aligned.
+async fn read_bounded_frame<R>(reader: &mut R) -> Result<Option<BoundedFrame>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut bytes = Vec::with_capacity(8 * 1024);
+    let mut saw_input = false;
+    let mut too_large = false;
+
+    loop {
+        let buffer = reader.fill_buf().await?;
+        if buffer.is_empty() {
+            if !saw_input {
+                return Ok(None);
+            }
+            break;
+        }
+        saw_input = true;
+
+        let newline = buffer.iter().position(|byte| *byte == b'\n');
+        let segment_len = newline.unwrap_or(buffer.len());
+        let consumed = newline.map_or(segment_len, |position| position + 1);
+
+        if !too_large {
+            if bytes.len().saturating_add(segment_len) > MAX_JSONRPC_FRAME_BYTES {
+                too_large = true;
+                bytes.clear();
+            } else {
+                bytes.extend_from_slice(&buffer[..segment_len]);
+            }
+        }
+        reader.consume(consumed);
+        if newline.is_some() {
+            break;
+        }
+    }
+
+    if too_large {
+        return Ok(Some(BoundedFrame::TooLarge));
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) => Ok(Some(BoundedFrame::Text(text))),
+        Err(_) => Ok(Some(BoundedFrame::InvalidUtf8)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
 
+struct DispatchContext<'a, W> {
+    engine: &'a Arc<RwLock<Engine>>,
+    federation: &'a Option<Arc<FederatedEngine>>,
+    writer: &'a mut BufWriter<W>,
+    profile: &'a mut McpProfile,
+    profile_ceiling: McpProfile,
+}
+
 async fn dispatch<W>(
-    engine: &Arc<RwLock<Engine>>,
+    context: DispatchContext<'_, W>,
     id: Value,
     method: &str,
     params: Option<Value>,
-    federation: &Option<Arc<FederatedEngine>>,
-    writer: &mut BufWriter<W>,
-    profile: &mut McpProfile,
 ) -> Value
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -203,10 +386,21 @@ where
     match method {
         "initialize" => handle_initialize(id, params),
         "initialized" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
-        "tools/list" => handle_tools_list(id, federation.is_some(), *profile),
-        "tools/call" => handle_tools_call(engine, id, params, federation, writer, profile).await,
+        "tools/list" => handle_tools_list(id, context.federation.is_some(), *context.profile),
+        "tools/call" => {
+            handle_tools_call(
+                context.engine,
+                id,
+                params,
+                context.federation,
+                context.writer,
+                context.profile,
+                context.profile_ceiling,
+            )
+            .await
+        }
         _ => {
-            let err = JsonRpcError::method_not_found(id, method);
+            let err = JsonRpcError::method_not_found(id, &bounded_log_text(method, 128));
             serde_json::to_value(err).unwrap_or(Value::Null)
         }
     }
@@ -242,6 +436,7 @@ async fn handle_tools_call<W>(
     federation: &Option<Arc<FederatedEngine>>,
     writer: &mut BufWriter<W>,
     profile: &mut McpProfile,
+    profile_ceiling: McpProfile,
 ) -> Value
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -255,7 +450,14 @@ where
     };
 
     let tool_name = match params.get("name").and_then(|v| v.as_str()) {
-        Some(n) => n.to_string(),
+        Some(n) if n.len() <= MAX_MCP_TOOL_NAME_BYTES => n.to_string(),
+        Some(_) => {
+            let err = JsonRpcError::invalid_params(
+                id,
+                &format!("tools/call name exceeds {MAX_MCP_TOOL_NAME_BYTES} bytes"),
+            );
+            return serde_json::to_value(err).unwrap_or(Value::Null);
+        }
         None => {
             let err = JsonRpcError::invalid_params(id, "missing 'name' in tools/call params");
             return serde_json::to_value(err).unwrap_or(Value::Null);
@@ -268,8 +470,16 @@ where
         .unwrap_or(Value::Object(serde_json::Map::new()));
 
     if is_profile_management_tool(&tool_name) {
-        return handle_profile_management_tool(id, &tool_name, &args, profile, engine, writer)
-            .await;
+        return handle_profile_management_tool(
+            id,
+            &tool_name,
+            &args,
+            profile,
+            profile_ceiling,
+            engine,
+            writer,
+        )
+        .await;
     }
 
     if !profile.allows_tool(&tool_name) {
@@ -376,6 +586,7 @@ async fn handle_profile_management_tool<W>(
     tool_name: &str,
     args: &Value,
     profile: &mut McpProfile,
+    profile_ceiling: McpProfile,
     engine: &Arc<RwLock<Engine>>,
     writer: &mut BufWriter<W>,
 ) -> Value
@@ -386,11 +597,21 @@ where
         "get_mcp_profile" => build_tool_response(
             id,
             tool_name.to_string(),
-            Ok((profile_status_json(*profile, None, false), false)),
+            Ok((
+                profile_status_json(*profile, None, false, profile_ceiling),
+                false,
+            )),
         ),
         "set_mcp_profile" => {
             let requested = match args.get("profile").and_then(|v| v.as_str()) {
-                Some(profile) => profile,
+                Some(profile) if profile.len() <= 32 => profile,
+                Some(_) => {
+                    return build_tool_response(
+                        id,
+                        tool_name.to_string(),
+                        Ok(("Profile name exceeds 32 bytes.".to_string(), true)),
+                    );
+                }
                 None => {
                     return build_tool_response(
                         id,
@@ -427,6 +648,21 @@ where
                     tool_name.to_string(),
                     Ok((
                         "Switching to MCP profile 'dangerous' exposes destructive filesystem and shell tools. Re-run with confirm_dangerous=true to confirm.".to_string(),
+                        true,
+                    )),
+                );
+            }
+
+            if next_profile > profile_ceiling {
+                return build_tool_response(
+                    id,
+                    tool_name.to_string(),
+                    Ok((
+                        format!(
+                            "MCP profile '{}' exceeds this server's '{}' runtime ceiling. Restart codixing-mcp with --allow-profile-escalation to permit write-profile upgrades.",
+                            next_profile.as_str(),
+                            profile_ceiling.as_str(),
+                        ),
                         true,
                     )),
                 );
@@ -469,6 +705,7 @@ where
                         Some(previous),
                         changed,
                         engine_note.as_deref(),
+                        profile_ceiling,
                     ),
                     false,
                 )),
@@ -489,8 +726,15 @@ fn profile_status_json(
     active_profile: McpProfile,
     previous_profile: Option<McpProfile>,
     changed: bool,
+    profile_ceiling: McpProfile,
 ) -> String {
-    profile_status_json_with_note(active_profile, previous_profile, changed, None)
+    profile_status_json_with_note(
+        active_profile,
+        previous_profile,
+        changed,
+        None,
+        profile_ceiling,
+    )
 }
 
 fn profile_status_json_with_note(
@@ -498,6 +742,7 @@ fn profile_status_json_with_note(
     previous_profile: Option<McpProfile>,
     changed: bool,
     engine_note: Option<&str>,
+    profile_ceiling: McpProfile,
 ) -> String {
     let base_message = if changed {
         "MCP profile updated. Clients should refresh tools/list; a notifications/tools/list_changed event was emitted."
@@ -512,6 +757,8 @@ fn profile_status_json_with_note(
     let payload = json!({
         "schema_version": 1,
         "active_profile": active_profile.as_str(),
+        "maximum_profile": profile_ceiling.as_str(),
+        "write_profile_escalation_enabled": profile_ceiling == McpProfile::Dangerous,
         "previous_profile": previous_profile.map(McpProfile::as_str),
         "changed": changed,
         "tool_list_changed": changed,
@@ -594,7 +841,7 @@ mod tests {
     use std::path::Path;
 
     use serde_json::json;
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+    use tokio::io::{AsyncReadExt, BufReader};
 
     use codixing_core::{EmbeddingConfig, IndexConfig};
 
@@ -625,6 +872,112 @@ mod tests {
         assert!(McpProfile::Reviewer.is_read_only_profile());
         assert!(!McpProfile::Editor.is_read_only_profile());
         assert!(!McpProfile::Dangerous.is_read_only_profile());
+    }
+
+    #[test]
+    fn minimal_profile_is_the_library_default() {
+        assert_eq!(McpProfile::default(), McpProfile::Minimal);
+    }
+
+    #[test]
+    fn read_only_startup_profiles_have_a_read_only_runtime_ceiling() {
+        assert_eq!(
+            profile_ceiling(McpProfile::Minimal, false),
+            McpProfile::Reviewer
+        );
+        assert_eq!(
+            profile_ceiling(McpProfile::Reviewer, false),
+            McpProfile::Reviewer
+        );
+        assert_eq!(
+            profile_ceiling(McpProfile::Editor, false),
+            McpProfile::Editor
+        );
+        assert_eq!(
+            profile_ceiling(McpProfile::Minimal, true),
+            McpProfile::Dangerous
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_frame_discards_oversized_input_and_realigns() {
+        let mut input = vec![b'x'; MAX_JSONRPC_FRAME_BYTES + 1];
+        input.extend_from_slice(b"\n{}\n");
+        let mut reader = BufReader::new(input.as_slice());
+
+        assert!(matches!(
+            read_bounded_frame(&mut reader).await.unwrap(),
+            Some(BoundedFrame::TooLarge)
+        ));
+        match read_bounded_frame(&mut reader).await.unwrap() {
+            Some(BoundedFrame::Text(frame)) => assert_eq!(frame, "{}"),
+            _ => panic!("reader did not realign after oversized frame"),
+        }
+    }
+
+    #[test]
+    fn debug_summaries_are_utf8_safe_and_strictly_bounded() {
+        let summary = bounded_log_text(&"é".repeat(100), 64);
+        assert!(summary.len() <= 64);
+        assert!(summary.ends_with('…'));
+        assert_eq!(
+            jsonrpc_id_summary(Some(&json!({"large": "secret"}))),
+            "<object>"
+        );
+    }
+
+    #[test]
+    fn reviewer_profile_allows_every_cli_daemon_proxy_tool() {
+        // Keep this list aligned with crates/cli/src/daemon_proxy.rs. The CLI
+        // upgrades only its connection from minimal to reviewer before using
+        // these wrappers, so every target must remain read-only and available
+        // in that profile.
+        const CLI_PROXY_TOOLS: [&str; 8] = [
+            "code_search",
+            "find_symbol",
+            "search_usages",
+            "change_impact",
+            "get_repo_map",
+            "file_callers",
+            "file_callees",
+            "grep_code",
+        ];
+
+        for tool in CLI_PROXY_TOOLS {
+            assert!(
+                tools::is_read_only_tool(tool),
+                "CLI daemon proxy target {tool} must remain read-only"
+            );
+            assert!(
+                McpProfile::Reviewer.allows_tool(tool),
+                "reviewer must allow CLI daemon proxy target {tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn federation_config_mutators_require_at_least_editor_profile() {
+        const FEDERATION_MUTATORS: [&str; 4] = [
+            "federation_init",
+            "federation_add_project",
+            "federation_remove_project",
+            "federation_discover",
+        ];
+
+        for tool in FEDERATION_MUTATORS {
+            assert!(
+                !tools::is_read_only_tool(tool),
+                "{tool} writes config state"
+            );
+            assert!(
+                !McpProfile::Reviewer.allows_tool(tool),
+                "reviewer must block federation mutator {tool}"
+            );
+            assert!(
+                McpProfile::Editor.allows_tool(tool),
+                "editor should allow federation mutator {tool}"
+            );
+        }
     }
 
     #[test]
@@ -670,6 +1023,15 @@ mod tests {
         requests: &[Value],
         profile: McpProfile,
     ) -> Vec<Value> {
+        run_requests_with_ceiling(engine, requests, profile, profile_ceiling(profile, false)).await
+    }
+
+    async fn run_requests_with_ceiling(
+        engine: Engine,
+        requests: &[Value],
+        profile: McpProfile,
+        ceiling: McpProfile,
+    ) -> Vec<Value> {
         // Build the request payload (one JSON line per request).
         let mut input = Vec::new();
         for req in requests {
@@ -694,10 +1056,11 @@ mod tests {
         let loop_handle = tokio::spawn(async move {
             run_jsonrpc_loop(
                 engine,
-                BufReader::new(server_read).lines(),
+                BufReader::new(server_read),
                 BufWriter::new(server_write),
                 None,
                 profile,
+                ceiling,
             )
             .await
             .unwrap();
@@ -939,6 +1302,133 @@ mod tests {
             .collect();
         assert!(after_names.contains(&"read_file"));
         assert!(!after_names.contains(&"write_file"));
+    }
+
+    #[tokio::test]
+    async fn read_only_runtime_ceiling_blocks_write_profile_escalation() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_test_engine(dir.path());
+        let responses = run_requests_with_profile(
+            engine,
+            &[json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "set_mcp_profile",
+                    "arguments": { "profile": "editor" }
+                }
+            })],
+            McpProfile::Minimal,
+        )
+        .await;
+
+        assert_eq!(responses[0]["result"]["isError"], true);
+        let text = responses[0]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("runtime ceiling"), "unexpected: {text}");
+    }
+
+    #[tokio::test]
+    async fn explicit_escalation_policy_allows_editor_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_test_engine(dir.path());
+        let responses = run_requests_with_ceiling(
+            engine,
+            &[json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "set_mcp_profile",
+                    "arguments": { "profile": "editor" }
+                }
+            })],
+            McpProfile::Minimal,
+            McpProfile::Dangerous,
+        )
+        .await;
+
+        let response = responses
+            .iter()
+            .find(|response| response["id"] == 1)
+            .expect("missing profile escalation response");
+        assert_eq!(response["result"]["isError"], false);
+    }
+
+    #[tokio::test]
+    async fn invalid_jsonrpc_version_returns_invalid_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_test_engine(dir.path());
+        let responses = run_requests(
+            engine,
+            &[json!({
+                "jsonrpc": "1.0",
+                "id": 7,
+                "method": "tools/list"
+            })],
+        )
+        .await;
+
+        assert_eq!(responses[0]["error"]["code"], -32600);
+        assert_eq!(responses[0]["id"], 7);
+    }
+
+    #[tokio::test]
+    async fn invalid_jsonrpc_identifier_type_is_not_echoed() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = make_test_engine(dir.path());
+        let responses = run_requests(
+            engine,
+            &[json!({
+                "jsonrpc": "2.0",
+                "id": {"attacker": "controlled"},
+                "method": "tools/list"
+            })],
+        )
+        .await;
+
+        assert_eq!(responses[0]["error"]["code"], -32600);
+        assert_eq!(responses[0]["id"], Value::Null);
+        assert!(!responses[0].to_string().contains("attacker"));
+    }
+
+    #[tokio::test]
+    async fn malformed_json_returns_parse_error_and_null_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Arc::new(RwLock::new(make_test_engine(dir.path())));
+        let (client_stream, server_stream) = tokio::io::duplex(4096);
+        let (server_read, server_write) = tokio::io::split(server_stream);
+        let (mut client_read, mut client_write) = tokio::io::split(client_stream);
+
+        client_write.write_all(b"{not-json}\n").await.unwrap();
+        client_write.shutdown().await.unwrap();
+        let loop_handle = tokio::spawn(async move {
+            run_jsonrpc_loop(
+                engine,
+                BufReader::new(server_read),
+                BufWriter::new(server_write),
+                None,
+                McpProfile::Minimal,
+                McpProfile::Reviewer,
+            )
+            .await
+            .unwrap();
+        });
+
+        let mut output = Vec::new();
+        client_read.read_to_end(&mut output).await.unwrap();
+        loop_handle.await.unwrap();
+        let response: Value = serde_json::from_slice(
+            output
+                .split(|byte| *byte == b'\n')
+                .find(|line| !line.is_empty())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(response["error"]["code"], -32700);
+        assert_eq!(response["id"], Value::Null);
     }
 
     #[tokio::test]
@@ -1189,6 +1679,7 @@ mod tests {
                 engine_clone,
                 None,
                 McpProfile::default(),
+                profile_ceiling(McpProfile::default(), false),
             )
             .await
             .unwrap();
@@ -1265,10 +1756,11 @@ mod tests {
         let loop_handle = tokio::spawn(async move {
             run_jsonrpc_loop(
                 engine,
-                BufReader::new(server_read).lines(),
+                BufReader::new(server_read),
                 BufWriter::new(server_write),
                 None,
                 McpProfile::default(),
+                profile_ceiling(McpProfile::default(), false),
             )
             .await
             .unwrap();

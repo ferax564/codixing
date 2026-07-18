@@ -13,6 +13,9 @@ use tracing::debug;
 use crate::protocol::ProgressNotification;
 use crate::tools::ProgressReporter;
 
+const MAX_PROGRESS_TOKEN_BYTES: usize = 256;
+const PROGRESS_CHANNEL_CAPACITY: usize = 8;
+
 // ---------------------------------------------------------------------------
 // Bridge channel
 // ---------------------------------------------------------------------------
@@ -21,25 +24,27 @@ use crate::tools::ProgressReporter;
 /// values that were sent from the sync `ProgressReporter`.
 pub(crate) struct ProgressBridge {
     pub reporter: ProgressReporter,
-    pub rx: tokio::sync::mpsc::UnboundedReceiver<ProgressNotification>,
+    pub rx: tokio::sync::mpsc::Receiver<ProgressNotification>,
 }
 
 /// Create a progress bridge for the given `token`.
 ///
 /// Returns `None` if `token` is `None` (i.e. the caller didn't request
 /// progress).
-pub(crate) fn bridge_channel(token: Option<String>) -> Option<ProgressBridge> {
+pub(crate) fn bridge_channel(token: Option<Value>) -> Option<ProgressBridge> {
     let token = token?;
 
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = std::sync::mpsc::sync_channel(PROGRESS_CHANNEL_CAPACITY);
     let reporter = ProgressReporter::new(token, tx, 100);
 
     // Spawn a background OS thread that drains the sync receiver and
-    // forwards each notification into the async unbounded channel.
-    let (bridge_tx, bridge_rx) = tokio::sync::mpsc::unbounded_channel();
+    // forwards each notification into a bounded async channel. If the client
+    // stops reading, this thread blocks and the bounded sync channel drops new
+    // best-effort updates rather than accumulating them indefinitely.
+    let (bridge_tx, bridge_rx) = tokio::sync::mpsc::channel(PROGRESS_CHANNEL_CAPACITY);
     std::thread::spawn(move || {
         while let Ok(notification) = rx.recv() {
-            if bridge_tx.send(notification).is_err() {
+            if bridge_tx.blocking_send(notification).is_err() {
                 break;
             }
         }
@@ -106,10 +111,11 @@ where
 {
     tokio::pin!(call_result);
 
+    let mut progress_open = true;
     let result = loop {
         tokio::select! {
             result = &mut call_result => break result,
-            msg = bridge.rx.recv() => {
+            msg = bridge.rx.recv(), if progress_open => {
                 match msg {
                     Some(notification) => {
                         if let Err(e) = write_progress(writer, &notification).await {
@@ -117,7 +123,7 @@ where
                         }
                     }
                     None => {
-                        // Sender dropped — drain branch completed normally.
+                        progress_open = false;
                     }
                 }
             }
@@ -134,10 +140,45 @@ where
 }
 
 /// Extract the progress token from `params._meta.progressToken`.
-pub(crate) fn extract_progress_token(params: &Value) -> Option<String> {
-    params
-        .get("_meta")
-        .and_then(|m| m.get("progressToken"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+pub(crate) fn extract_progress_token(params: &Value) -> Option<Value> {
+    let token = params.get("_meta").and_then(|m| m.get("progressToken"))?;
+    match token {
+        Value::String(value) if value.len() <= MAX_PROGRESS_TOKEN_BYTES => Some(token.clone()),
+        Value::Number(_) => Some(token.clone()),
+        Value::Null | Value::Bool(_) | Value::Array(_) | Value::Object(_) | Value::String(_) => {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn progress_tokens_accept_bounded_strings_and_numbers() {
+        assert_eq!(
+            extract_progress_token(&json!({"_meta": {"progressToken": "request-1"}})),
+            Some(json!("request-1"))
+        );
+        assert_eq!(
+            extract_progress_token(&json!({"_meta": {"progressToken": 42}})),
+            Some(json!(42))
+        );
+    }
+
+    #[test]
+    fn oversized_or_structured_progress_tokens_are_rejected() {
+        assert_eq!(
+            extract_progress_token(&json!({
+                "_meta": {"progressToken": "x".repeat(MAX_PROGRESS_TOKEN_BYTES + 1)}
+            })),
+            None
+        );
+        assert_eq!(
+            extract_progress_token(&json!({"_meta": {"progressToken": {"secret": true}}})),
+            None
+        );
+    }
 }

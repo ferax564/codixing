@@ -1,9 +1,13 @@
 # Codixing MCP server for OpenAI Codex CLI
 # Copy to ~/.codex/config.toml (global) or .codex/config.toml (project)
 #
-# Requires: install codixing-mcp first via
-#   curl -fsSL https://codixing.com/install.sh | sh
+# Pre-index large repositories so MCP startup stays within the client timeout:
+#   codixing init .
+#
+# npx is supported. To use a preinstalled binary instead, set
+# command = "codixing-mcp" and remove "-y", "codixing-mcp" from args.
 
 [mcp_servers.codixing]
-command = "codixing-mcp"
-args = ["--root", "."]
+command = "npx"
+args = ["-y", "codixing-mcp", "--root", ".", "--profile", "minimal", "--no-daemon-fork"]
+startup_timeout_sec = 120

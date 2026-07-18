@@ -6,7 +6,10 @@ use serde_json::Value;
 
 use codixing_core::{Engine, RepoMapOptions};
 
-use super::common::ProgressReporter;
+use super::{
+    MAX_TOOL_ARRAY_ITEMS, common::ProgressReporter, requested_result_count,
+    requested_tool_token_budget, requested_traversal_depth,
+};
 
 pub(crate) fn call_cross_imports(engine: &Engine, args: &Value) -> (String, bool) {
     let from = match args.get("from").and_then(|v| v.as_str()) {
@@ -17,10 +20,7 @@ pub(crate) fn call_cross_imports(engine: &Engine, args: &Value) -> (String, bool
         Some(t) => t.to_string(),
         None => return ("Missing required argument: to".to_string(), true),
     };
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as usize);
+    let limit = requested_result_count(args, "limit", 100);
     let pattern = args.get("pattern").and_then(|v| v.as_str());
 
     let mut ranked = engine.cross_imports_ranked(&from, &to, None);
@@ -30,9 +30,7 @@ pub(crate) fn call_cross_imports(engine: &Engine, args: &Value) -> (String, bool
             Err(err) => return (format!("Invalid pattern `{pattern}`: {err}"), true),
         }
     }
-    if let Some(limit) = limit {
-        ranked.truncate(limit);
-    }
+    ranked.truncate(limit);
 
     if ranked.is_empty() {
         if let Some(pattern) = pattern {
@@ -118,7 +116,7 @@ pub(crate) fn call_get_transitive_deps(engine: &Engine, args: &Value) -> (String
         Some(f) => f.to_string(),
         None => return ("Missing required argument: file".to_string(), true),
     };
-    let depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(3) as usize;
+    let depth = requested_traversal_depth(args, "depth", 3);
 
     let deps = engine.dependencies(&file, depth);
 
@@ -143,15 +141,7 @@ pub(crate) fn call_get_transitive_deps(engine: &Engine, args: &Value) -> (String
 }
 
 pub(crate) fn call_get_repo_map(engine: &Engine, args: &Value) -> (String, bool) {
-    let token_budget = args
-        .get("token_budget")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(4000) as usize;
-
-    let options = RepoMapOptions {
-        token_budget,
-        ..RepoMapOptions::default()
-    };
+    let options = repo_map_options(args);
 
     match engine.repo_map(options) {
         Some(map) if map.is_empty() => (
@@ -166,12 +156,19 @@ pub(crate) fn call_get_repo_map(engine: &Engine, args: &Value) -> (String, bool)
     }
 }
 
+pub(crate) fn repo_map_options(args: &Value) -> RepoMapOptions {
+    RepoMapOptions {
+        token_budget: requested_tool_token_budget(args),
+        ..RepoMapOptions::default()
+    }
+}
+
 pub(crate) fn call_symbol_callers(engine: &Engine, args: &Value) -> (String, bool) {
     let symbol = match args.get("symbol").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
         None => return ("Missing required argument: symbol".to_string(), true),
     };
-    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+    let limit = requested_result_count(args, "limit", 20);
 
     // Try precise graph lookup first (AST-validated references)
     let precise = engine.symbol_callers_precise(&symbol, limit);
@@ -231,7 +228,7 @@ pub(crate) fn call_symbol_callees(engine: &Engine, args: &Value) -> (String, boo
         Some(s) => s.to_string(),
         None => return ("Missing required argument: symbol".to_string(), true),
     };
-    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+    let limit = requested_result_count(args, "limit", 20);
 
     // Use precise AST-based callee extraction
     let mut callees = engine.symbol_callees_precise(&symbol, None);
@@ -305,7 +302,7 @@ pub(crate) fn call_predict_impact(
         Some(p) => p,
         None => return ("Missing required argument: patch".to_string(), true),
     };
-    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(15) as usize;
+    let limit = requested_result_count(args, "limit", 15);
 
     if let Some(p) = progress {
         p.report(0, "Parsing diff...");
@@ -314,7 +311,10 @@ pub(crate) fn call_predict_impact(
     let mut changed_files: Vec<String> = Vec::new();
     for line in patch.lines() {
         if let Some(rest) = line.strip_prefix("+++ b/") {
-            changed_files.push(rest.trim().to_string());
+            let file = rest.trim().to_string();
+            if changed_files.len() < MAX_TOOL_ARRAY_ITEMS && !changed_files.contains(&file) {
+                changed_files.push(file);
+            }
         }
     }
 
@@ -333,7 +333,10 @@ pub(crate) fn call_predict_impact(
             if let Some(ctx) = rest.rsplit_once("@@").map(|(_, c)| c.trim()) {
                 // Extract function/method name from context line.
                 let name = extract_symbol_from_hunk_header(ctx);
-                if let Some(name) = name {
+                if let Some(name) = name
+                    && changed_symbols.len() < MAX_TOOL_ARRAY_ITEMS
+                    && !changed_symbols.contains(&name)
+                {
                     changed_symbols.push(name);
                 }
             }

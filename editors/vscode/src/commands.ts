@@ -55,6 +55,25 @@ export function initCommands(deps: {
 // Command: Index Workspace
 // ---------------------------------------------------------------------------
 
+export function buildInitArgs(root: string, embeddings: boolean): string[] {
+    const args = ['init', root];
+    if (embeddings) {
+        args.push('--embed');
+    }
+    return args;
+}
+
+/**
+ * Arguments for short-lived MCP subprocesses used by extension commands.
+ *
+ * The server defaults to the deliberately narrow minimal profile. Repo map,
+ * hotspot, and complexity tools are reviewer-profile tools, so select that
+ * read-only profile explicitly and keep the subprocess attached to stdio.
+ */
+export function buildReviewerMcpArgs(root: string): string[] {
+    return ['--root', root, '--profile', 'reviewer', '--no-daemon-fork'];
+}
+
 export async function cmdIndexWorkspace(): Promise<void> {
     const root = getWorkspaceRoot();
     if (!root) {
@@ -70,10 +89,7 @@ export async function cmdIndexWorkspace(): Promise<void> {
     const cfg = vscode.workspace.getConfiguration('codixing');
     const embeddings = cfg.get<boolean>('embeddings', false);
 
-    const args = ['init', root];
-    if (!embeddings) {
-        args.push('--no-embeddings');
-    }
+    const args = buildInitArgs(root, embeddings);
 
     outputChannel.show(true);
     outputChannel.appendLine(`[Codixing] Indexing workspace: ${root}`);
@@ -216,7 +232,7 @@ export async function cmdShowRepoMap(): Promise<void> {
         });
 
         let fullOutput = '';
-        const proc = cp.spawn(mcpBin, ['--root', root], { cwd: root });
+        const proc = cp.spawn(mcpBin, buildReviewerMcpArgs(root), { cwd: root });
         proc.stdout.on('data', (chunk: Buffer) => {
             fullOutput += chunk.toString();
         });
@@ -324,7 +340,7 @@ export async function cmdShowHotspots(): Promise<void> {
     });
 
     let fullOutput = '';
-    const proc = cp.spawn(mcpBin, ['--root', root], { cwd: root });
+    const proc = cp.spawn(mcpBin, buildReviewerMcpArgs(root), { cwd: root });
     proc.stdout.on('data', (chunk: Buffer) => {
         fullOutput += chunk.toString();
     });
@@ -409,7 +425,7 @@ export async function cmdShowComplexity(): Promise<void> {
     });
 
     let fullOutput = '';
-    const proc = cp.spawn(mcpBin, ['--root', root], { cwd: root });
+    const proc = cp.spawn(mcpBin, buildReviewerMcpArgs(root), { cwd: root });
     proc.stdout.on('data', (chunk: Buffer) => {
         fullOutput += chunk.toString();
     });
@@ -521,7 +537,13 @@ async function registerMcpServer(mcpBin: string, root: string): Promise<void> {
     const entry = {
         type: 'stdio',
         command: mcpBin,
-        args: ['--root', root],
+        args: [
+            '--root',
+            root,
+            '--profile',
+            'minimal',
+            '--no-daemon-fork',
+        ],
     };
 
     const targets: string[] = [

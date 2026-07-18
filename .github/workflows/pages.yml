@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
     paths: ['docs/**']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Published release tag whose installer assets must be verified'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -11,26 +17,133 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
-  cancel-in-progress: true
+  # Every production deployment shares one lock. A strict release dispatch
+  # supersedes an older docs deployment; ordinary docs pushes never cancel a
+  # release-tag deployment that is already in progress.
+  group: pages-production
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
 
 jobs:
   deploy:
+    # Release commits are deployed only by release.yml's strict tag dispatch.
+    # This prevents the main-push run from racing ahead with the old release's
+    # assets while the new release is still being published.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      ! startsWith(github.event.head_commit.message, 'release: v')
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve and verify published installer assets
+        id: release_assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          STRICT=false
+          if [ -n "$REQUESTED_TAG" ]; then
+            TAG="$REQUESTED_TAG"
+            STRICT=true
+          else
+            git fetch origin main --no-tags
+            CHECKOUT_COMMIT=$(git rev-parse HEAD)
+            MAIN_COMMIT=$(git rev-parse refs/remotes/origin/main)
+            if [ "$CHECKOUT_COMMIT" != "$MAIN_COMMIT" ]; then
+              echo "ready=false" >> "$GITHUB_OUTPUT"
+              echo "Skipping stale docs commit $CHECKOUT_COMMIT; origin/main is $MAIN_COMMIT."
+              exit 0
+            fi
+            TAG=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)
+          fi
+
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            if [ "$STRICT" = true ]; then
+              echo "ERROR: requested tag must be exact canonical semver vMAJOR.MINOR.PATCH"
+              exit 1
+            fi
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "No canonical published release is available; keeping the current website live."
+            exit 0
+          fi
+
+          RELEASE_STATE=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" \
+            --jq 'if .draft then "draft" else "published" end' 2>/dev/null || true)
+          if [ "$RELEASE_STATE" != published ]; then
+            if [ "$STRICT" = true ]; then
+              echo "ERROR: $TAG is not a published GitHub release"
+              exit 1
+            fi
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$STRICT" = true ]; then
+            git fetch origin "+refs/tags/$TAG:refs/tags/$TAG" --no-tags
+            TAG_COMMIT=$(git rev-list -n 1 "refs/tags/$TAG")
+            CHECKOUT_COMMIT=$(git rev-parse HEAD)
+            if [ "$CHECKOUT_COMMIT" != "$TAG_COMMIT" ]; then
+              echo "ERROR: Pages checkout $CHECKOUT_COMMIT does not match $TAG at $TAG_COMMIT"
+              exit 1
+            fi
+          fi
+
+          manifest=$(mktemp)
+          if ! curl --fail --silent --show-error --location \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/SHA256SUMS" \
+            --output "$manifest"; then
+            if [ "$STRICT" = true ]; then
+              echo "ERROR: $TAG has no downloadable SHA256SUMS"
+              exit 1
+            fi
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Latest release has no checksum manifest; keeping the current website live."
+            exit 0
+          fi
+
+          expected=()
+          for suffix in linux-x86_64 macos-aarch64 windows-x86_64; do
+            ext=""
+            if [ "$suffix" = windows-x86_64 ]; then
+              ext=.exe
+            fi
+            for bin in codixing codixing-mcp codixing-lsp codixing-server; do
+              expected+=("${bin}-${suffix}${ext}")
+            done
+          done
+          expected+=(codixing.vsix)
+          for asset in "${expected[@]}"; do
+            if ! awk -v asset="$asset" '$2 == asset { found=1 } END { exit !found }' "$manifest"; then
+              if [ "$STRICT" = true ]; then
+                echo "ERROR: $TAG checksum manifest is missing $asset"
+                exit 1
+              fi
+              echo "ready=false" >> "$GITHUB_OUTPUT"
+              echo "Latest release is incomplete; keeping the current website live."
+              exit 0
+            fi
+          done
+          test "$(wc -l < "$manifest")" -eq 13
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Setup Pages
+        if: steps.release_assets.outputs.ready == 'true'
         uses: actions/configure-pages@v5
 
       - name: Upload artifact
+        if: steps.release_assets.outputs.ready == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: docs/
 
       - name: Deploy to GitHub Pages
+        if: steps.release_assets.outputs.ready == 'true'
         id: deployment
         uses: actions/deploy-pages@v4

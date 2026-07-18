@@ -252,6 +252,10 @@
       We benchmarked Codixing on three tiers&mdash;its own Rust codebase (138 files), <a href="https://github.com/openclaw/openclaw">OpenClaw</a> (8,616 files, 1.5M lines), and the <a href="https://github.com/torvalds/linux">Linux kernel</a> (73,374 files, 30M lines). Here's what we found, and why it matters for AI coding agents.
     </p>
 
+    <div class="callout">
+      <p><strong>CLI update (July 2026):</strong> This article preserves the March 2026 measurements and terminology. The historical <code>--compact</code> MCP flag was removed in v0.34; current clients should use the default <code>minimal</code> profile or pass <code>--profile minimal</code>. The copyable setup at the end has been updated.</p>
+    </div>
+
     <div class="stat-grid">
       <div class="stat-card">
         <div class="stat-val">10/10</div>
@@ -336,7 +340,7 @@
 <span class="cmd">$ codixing init /path/to/openclaw</span>
 <span class="out">✓ Indexed 7607 files, 39658 chunks, 50084 symbols in 7.90s</span>
 
-<span class="cmt"># MCP server cold start</span>
+<span class="cmt"># Historical v0.33 MCP cold-start command (--compact is now removed)</span>
 <span class="cmd">$ codixing-mcp --root . --compact</span>
 <span class="out">Ready in 50ms (2 meta-tools, 47 discoverable on demand)</span></pre>
 
@@ -421,7 +425,7 @@
     </table>
 
     <div class="callout">
-      <p><strong>Key differentiator:</strong> Codixing achieves better search quality than tools that require paid embedding APIs (OpenAI, Voyage), while running entirely locally with zero external dependencies. Sub-second search on the Linux kernel (73K files), 50ms cold start on 8K-file monorepos, and <code>--compact</code> mode saves 96.7% of token init cost. Scales from 100 files to 73K+ without degradation.</p>
+      <p><strong>Key differentiator:</strong> Codixing achieves better search quality than tools that require paid embedding APIs (OpenAI, Voyage), while running entirely locally with zero external dependencies. Sub-second search on the Linux kernel (73K files), 50ms cold start on 8K-file monorepos, and the then-current <code>--compact</code> mode saved 96.7% of token init cost. Scales from 100 files to 73K+ without degradation.</p>
     </div>
 
     <h2>What matters for AI agents</h2>
@@ -447,7 +451,7 @@
   <span class="val">"mcpServers"</span>: {
     <span class="val">"codixing"</span>: {
       <span class="val">"command"</span>: <span class="val">"codixing-mcp"</span>,
-      <span class="val">"args"</span>: [<span class="val">"--root"</span>, <span class="val">"."</span>, <span class="val">"--compact"</span>]
+      <span class="val">"args"</span>: [<span class="val">"--root"</span>, <span class="val">"."</span>, <span class="val">"--profile"</span>, <span class="val">"minimal"</span>, <span class="val">"--no-daemon-fork"</span>]
     }
   }
 }</pre>

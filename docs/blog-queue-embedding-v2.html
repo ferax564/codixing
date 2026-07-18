@@ -275,6 +275,10 @@
       Embedding 881K chunks on the Linux kernel takes 60+ minutes. If ONNX crashes at chunk 500K, you start over. We shipped a queue-based embedding pipeline, iterated through 6 versions to get it right, and ended up with 17&times; faster search and 67% better symbol recall than grep on a 368K LoC TypeScript monorepo.
     </p>
 
+    <div class="callout">
+      <p><strong>CLI update (July 2026):</strong> This article preserves the original queue architecture and benchmark results. Embeddings are now opt-in: current <code>init</code> commands must pass <code>--embed</code> in addition to <code>--model</code>.</p>
+    </div>
+
     <div class="stat-grid">
       <div class="stat-card">
         <div class="stat-val">17&times;</div>
@@ -567,7 +571,7 @@
 <span class="cmd">cd codixing && cargo build --release --workspace</span>
 
 <span class="cmt"># Index a repo</span>
-<span class="cmd">./target/release/codixing init . --model bge-small-en</span>
+<span class="cmd">./target/release/codixing init . --embed --model bge-small-en</span>
 
 <span class="cmt"># Search</span>
 <span class="cmd">./target/release/codixing search "rate limiting" --strategy fast</span>

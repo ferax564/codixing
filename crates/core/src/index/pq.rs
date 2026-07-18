@@ -62,7 +62,7 @@ impl ProductQuantizer {
 
         let dim = vectors[0].len();
         assert!(
-            dim % config.num_subspaces == 0,
+            dim.is_multiple_of(config.num_subspaces),
             "vector dimension {dim} is not divisible by num_subspaces {}",
             config.num_subspaces
         );

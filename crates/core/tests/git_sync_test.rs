@@ -103,6 +103,103 @@ fn git_sync_reindexes_changed_files() {
 }
 
 #[test]
+#[serial]
+fn git_sync_preserves_complete_hash_baseline() {
+    if !git_available() {
+        eprintln!("git_sync_preserves_complete_hash_baseline: skipped (git not in PATH)");
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+
+    git(root, &["init"]);
+    git(root, &["config", "user.email", "test@test.com"]);
+    git(root, &["config", "user.name", "Test User"]);
+
+    std::fs::write(root.join("alpha.rs"), "pub fn alpha_v1() {}").unwrap();
+    std::fs::write(root.join("beta.rs"), "pub fn beta_untouched() {}").unwrap();
+    std::fs::write(root.join("gamma.rs"), "pub fn gamma_untouched() {}").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "initial"]);
+
+    drop(Engine::init(root, bm25_config(root)).unwrap());
+
+    std::fs::write(root.join("alpha.rs"), "pub fn alpha_v2() {}").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "update alpha"]);
+
+    let mut engine = Engine::open(root).unwrap();
+    let git_stats = engine.git_sync().unwrap();
+    assert_eq!(git_stats.modified, 1);
+    drop(engine);
+
+    // A following filesystem sync must retain beta/gamma in the baseline and
+    // recognize alpha's successfully indexed hash instead of treating every
+    // untouched file as newly added.
+    let mut reopened = Engine::open(root).unwrap();
+    let sync_stats = reopened.sync().unwrap();
+    assert_eq!(sync_stats.added, 0);
+    assert_eq!(sync_stats.modified, 0);
+    assert_eq!(sync_stats.removed, 0);
+    assert_eq!(sync_stats.unchanged, 3);
+}
+
+#[test]
+#[serial]
+fn git_sync_partial_failure_keeps_commit_retriable() {
+    if !git_available() {
+        eprintln!("git_sync_partial_failure_keeps_commit_retriable: skipped");
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init"]);
+    git(root, &["config", "user.email", "test@test.com"]);
+    git(root, &["config", "user.name", "Test User"]);
+    std::fs::write(root.join("lib.rs"), "pub fn version() -> u32 { 1 }\n").unwrap();
+    std::fs::write(
+        root.join("analysis.ipynb"),
+        r#"{"nbformat":4,"metadata":{"kernelspec":{"language":"python"}},"cells":[{"cell_type":"code","id":"one","source":"def value():\n    return 1\n"}]}"#,
+    )
+    .unwrap();
+    git(root, &["add", "lib.rs", "analysis.ipynb"]);
+    git(root, &["commit", "-m", "initial"]);
+    drop(Engine::init(root, bm25_config(root)).unwrap());
+
+    std::fs::write(root.join("lib.rs"), "pub fn version_two() -> u32 { 2 }\n").unwrap();
+    std::fs::write(
+        root.join("analysis.ipynb"),
+        r#"{"nbformat":4,"metadata":{"kernelspec":{"language":"python"}},"cells":[{"cell_type":"code","id":"one","source":"def value_with_longer_name():\n    return 222\n"}]}"#,
+    )
+    .unwrap();
+    git(root, &["add", "lib.rs", "analysis.ipynb"]);
+    git(root, &["commit", "-m", "mixed update"]);
+
+    let mut engine = Engine::open(root).unwrap();
+    let first = engine
+        .git_sync()
+        .expect_err("unsupported notebook update must fail the batch");
+    assert!(first.to_string().contains("notebook incremental sync"));
+    assert!(
+        !engine
+            .search(
+                SearchQuery::new("version_two")
+                    .with_limit(5)
+                    .with_strategy(Strategy::Instant)
+            )
+            .unwrap()
+            .is_empty(),
+        "successful siblings should still be committed to the searchable index"
+    );
+    let retry = engine
+        .git_sync()
+        .expect_err("failed git path must remain pending at the old commit");
+    assert!(retry.to_string().contains("notebook incremental sync"));
+}
+
+#[test]
 fn git_sync_handles_deleted_files() {
     if !git_available() {
         eprintln!("git_sync_handles_deleted_files: skipped (git not in PATH)");
@@ -192,6 +289,51 @@ fn git_sync_handles_renamed_files() {
     assert!(
         !new_results.is_empty(),
         "renamed file content should be indexed after git_sync"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn git_sync_rejects_source_symlink_escape_without_advancing_commit() {
+    use std::os::unix::fs::symlink;
+
+    if !git_available() {
+        eprintln!("git_sync_rejects_source_symlink_escape_without_advancing_commit: skipped");
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("repo");
+    let outside = dir.path().join("outside.rs");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(&outside, "pub fn outside_secret() {}\n").unwrap();
+    git(&root, &["init"]);
+    git(&root, &["config", "user.email", "test@test.com"]);
+    git(&root, &["config", "user.name", "Test User"]);
+    std::fs::write(root.join("lib.rs"), "pub fn inside() {}\n").unwrap();
+    git(&root, &["add", "lib.rs"]);
+    git(&root, &["commit", "-m", "initial"]);
+
+    drop(Engine::init(&root, bm25_config(&root)).unwrap());
+
+    std::fs::remove_file(root.join("lib.rs")).unwrap();
+    symlink("../outside.rs", root.join("lib.rs")).unwrap();
+    git(&root, &["add", "lib.rs"]);
+    git(
+        &root,
+        &["commit", "-m", "replace source with outside symlink"],
+    );
+
+    let mut engine = Engine::open(&root).unwrap();
+    assert!(engine.git_sync().is_err());
+    assert!(
+        engine.git_sync().is_err(),
+        "rejected git path must remain pending instead of advancing HEAD"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&outside).unwrap(),
+        "pub fn outside_secret() {}\n"
     );
 }
 

@@ -3,13 +3,14 @@
 //! All functions in this module are `#[cfg(unix)]` — they require Unix domain
 //! sockets and are not available on Windows.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{info, warn};
 
@@ -44,6 +45,7 @@ pub(crate) async fn run_daemon(
     socket_path: &Path,
     federation: Option<Arc<FederatedEngine>>,
     profile: McpProfile,
+    profile_ceiling: McpProfile,
 ) -> Result<()> {
     // Remove stale socket file if it exists, but never unlink a live daemon.
     if socket_path.exists() {
@@ -63,6 +65,7 @@ pub(crate) async fn run_daemon(
 
     let listener = UnixListener::bind(socket_path)
         .with_context(|| format!("failed to bind daemon socket at {}", socket_path.display()))?;
+    restrict_socket_permissions(socket_path)?;
 
     // Remove the socket file on process exit.
     let socket_path_owned = socket_path.to_path_buf();
@@ -175,12 +178,25 @@ pub(crate) async fn run_daemon(
         let engine_clone = Arc::clone(&engine);
         let fed_clone = federation.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_socket_connection(stream, engine_clone, fed_clone, profile).await
+            if let Err(e) =
+                handle_socket_connection(stream, engine_clone, fed_clone, profile, profile_ceiling)
+                    .await
             {
                 warn!(error = %e, "daemon: connection error");
             }
         });
     }
+}
+
+fn restrict_socket_permissions(socket_path: &Path) -> Result<()> {
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600)).with_context(
+        || {
+            format!(
+                "failed to restrict daemon socket permissions at {}",
+                socket_path.display()
+            )
+        },
+    )
 }
 
 /// Handle one client connection: run a JSON-RPC loop over the socket stream.
@@ -189,14 +205,16 @@ pub(crate) async fn handle_socket_connection(
     engine: Arc<RwLock<Engine>>,
     federation: Option<Arc<FederatedEngine>>,
     profile: McpProfile,
+    profile_ceiling: McpProfile,
 ) -> Result<()> {
     let (read_half, write_half) = stream.into_split();
     run_jsonrpc_loop(
         engine,
-        BufReader::new(read_half).lines(),
+        BufReader::new(read_half),
         BufWriter::new(write_half),
         federation,
         profile,
+        profile_ceiling,
     )
     .await
 }
@@ -263,4 +281,28 @@ pub(crate) async fn socket_alive(path: &Path) -> bool {
         tokio::time::timeout(Duration::from_millis(100), UnixStream::connect(path)).await,
         Ok(Ok(_))
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_socket_permissions_are_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let _listener = match std::os::unix::net::UnixListener::bind(&socket) {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping socket permission test: Unix sockets are sandboxed: {error}");
+                return;
+            }
+            Err(error) => panic!("failed to bind test daemon socket: {error}"),
+        };
+
+        restrict_socket_permissions(&socket).unwrap();
+
+        let mode = std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
 }

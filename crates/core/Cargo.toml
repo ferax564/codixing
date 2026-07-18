@@ -26,7 +26,7 @@ qdrant = ["dep:qdrant-client", "dep:tokio"]
 ##
 ## Build with:
 ##   cargo build --features codixing-core/qwen3
-qwen3 = ["dep:ort-qwen3", "dep:tokenizers-qwen3", "dep:ndarray-qwen3"]
+qwen3 = ["dep:ort-qwen3", "dep:ndarray-qwen3"]
 
 ## Enable the RustQueue-backed embedding pipeline.
 ## Pushes embedding work as batched jobs to an embedded queue with
@@ -60,7 +60,6 @@ rustqueue = { workspace = true, optional = true }
 pdf-extract = { workspace = true, optional = true }
 # Qwen3 ONNX backend — only pulled in when the qwen3 feature is enabled
 ort-qwen3      = { package = "ort",        version = "=2.0.0-rc.11", optional = true, features = ["load-dynamic", "ndarray"] }
-tokenizers-qwen3 = { package = "tokenizers", version = "0.22",         optional = true, default-features = false, features = ["onig"] }
 ndarray-qwen3  = { package = "ndarray",    version = "0.17",          optional = true }
 
 hf-hub = { workspace = true }

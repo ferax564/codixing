@@ -143,6 +143,35 @@ impl Parser {
         Ok(result)
     }
 
+    /// Parse a file without reading or writing the incremental tree cache.
+    ///
+    /// Bulk init and full graph rebuild consume each tree exactly once. Their
+    /// old `parse_file_uncached` + `invalidate` sequence still cloned the tree
+    /// and every entity into a contended DashMap first; this transient entry
+    /// point avoids those corpus-wide allocations entirely while preserving
+    /// `parse_file_uncached` semantics for callers that intentionally refresh
+    /// the cache.
+    pub fn parse_file_transient(&self, path: &Path, source: &[u8]) -> Result<ParseResult> {
+        let language = detect_language(path).ok_or_else(|| CodixingError::UnsupportedLanguage {
+            path: path.to_path_buf(),
+        })?;
+
+        if language.is_doc() || language.is_notebook() {
+            return Ok(ParseResult {
+                language,
+                entities: Vec::new(),
+                tree: None,
+                content_hash: xxh3_64(source),
+            });
+        }
+
+        if !language.is_tree_sitter() {
+            return self.do_config_parse(path, source, language);
+        }
+
+        self.do_parse(path, source, language, xxh3_64(source))
+    }
+
     /// Remove a file from the cache.
     pub fn invalidate(&self, path: &Path) {
         self.cache.remove(path);
@@ -339,6 +368,31 @@ pub struct Config {
             .filter(|e| e.kind == EntityKind::Function)
             .count();
         assert_eq!(fn_count, 2);
+    }
+
+    #[test]
+    fn transient_parse_never_populates_or_replaces_cache() {
+        let parser = Parser::new();
+        let cached_path = Path::new("cached.rs");
+        parser.parse_file(cached_path, b"fn cached() {}").unwrap();
+        assert_eq!(parser.cache_len(), 1);
+
+        let result = parser
+            .parse_file_transient(Path::new("bulk.rs"), b"fn bulk() {}")
+            .unwrap();
+
+        assert!(result.tree.is_some());
+        assert_eq!(
+            parser.cache_len(),
+            1,
+            "transient parsing must not touch cache"
+        );
+        assert!(
+            parser
+                .cache()
+                .get(Path::new("bulk.rs"), result.content_hash)
+                .is_none()
+        );
     }
 
     #[test]

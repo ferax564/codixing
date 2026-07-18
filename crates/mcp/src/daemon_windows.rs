@@ -14,7 +14,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions};
 use tracing::{info, warn};
 
@@ -29,10 +29,23 @@ use crate::jsonrpc::{McpProfile, run_jsonrpc_loop};
 /// Derive a unique pipe name from the project root path.
 ///
 /// Uses a stable hash of the canonicalized root path to avoid collisions between
-/// multiple project daemons. Format: `\\.\pipe\codixing-<hex_hash>-<profile>`.
-pub(crate) fn pipe_name_for_root(root: &Path, profile: McpProfile) -> String {
+/// multiple project daemons. Escalation-enabled daemons use a distinct name so
+/// a default client cannot accidentally inherit the broader runtime policy.
+pub(crate) fn pipe_name_for_root(
+    root: &Path,
+    profile: McpProfile,
+    allow_profile_escalation: bool,
+) -> String {
     let hash = stable_root_hash(root);
-    format!(r"\\.\pipe\codixing-{hash:016x}-{}", profile.as_str())
+    let policy_suffix = if allow_profile_escalation {
+        "-escalating"
+    } else {
+        ""
+    };
+    format!(
+        r"\\.\pipe\codixing-{hash:016x}-{}{policy_suffix}",
+        profile.as_str()
+    )
 }
 
 fn stable_root_hash(root: &Path) -> u64 {
@@ -72,6 +85,7 @@ pub(crate) async fn run_daemon(
     pipe_name: &str,
     federation: Option<Arc<FederatedEngine>>,
     profile: McpProfile,
+    profile_ceiling: McpProfile,
 ) -> Result<()> {
     // Create the first pipe instance with `first_pipe_instance(true)` to
     // ensure we are the only daemon for this project. If another daemon is
@@ -192,7 +206,8 @@ pub(crate) async fn run_daemon(
         let fed_clone = federation.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                handle_pipe_connection(connected, engine_clone, fed_clone, profile).await
+                handle_pipe_connection(connected, engine_clone, fed_clone, profile, profile_ceiling)
+                    .await
             {
                 warn!(error = %e, "daemon: pipe connection error");
             }
@@ -210,14 +225,16 @@ async fn handle_pipe_connection(
     engine: Arc<RwLock<Engine>>,
     federation: Option<Arc<FederatedEngine>>,
     profile: McpProfile,
+    profile_ceiling: McpProfile,
 ) -> Result<()> {
     let (read_half, write_half) = tokio::io::split(pipe);
     run_jsonrpc_loop(
         engine,
-        BufReader::new(read_half).lines(),
+        BufReader::new(read_half),
         BufWriter::new(write_half),
         federation,
         profile,
+        profile_ceiling,
     )
     .await
 }
@@ -283,15 +300,15 @@ mod tests {
     #[test]
     fn pipe_name_is_deterministic() {
         let root = PathBuf::from(r"C:\Users\dev\project");
-        let name1 = pipe_name_for_root(&root, McpProfile::Reviewer);
-        let name2 = pipe_name_for_root(&root, McpProfile::Reviewer);
+        let name1 = pipe_name_for_root(&root, McpProfile::Reviewer, false);
+        let name2 = pipe_name_for_root(&root, McpProfile::Reviewer, false);
         assert_eq!(name1, name2);
     }
 
     #[test]
     fn pipe_name_has_correct_prefix() {
         let root = PathBuf::from(r"C:\Users\dev\project");
-        let name = pipe_name_for_root(&root, McpProfile::Reviewer);
+        let name = pipe_name_for_root(&root, McpProfile::Reviewer, false);
         assert!(
             name.starts_with(r"\\.\pipe\codixing-"),
             "expected pipe prefix, got: {name}"
@@ -302,23 +319,23 @@ mod tests {
     fn pipe_name_differs_for_different_roots() {
         let root1 = PathBuf::from(r"C:\Users\dev\project1");
         let root2 = PathBuf::from(r"C:\Users\dev\project2");
-        let name1 = pipe_name_for_root(&root1, McpProfile::Reviewer);
-        let name2 = pipe_name_for_root(&root2, McpProfile::Reviewer);
+        let name1 = pipe_name_for_root(&root1, McpProfile::Reviewer, false);
+        let name2 = pipe_name_for_root(&root2, McpProfile::Reviewer, false);
         assert_ne!(name1, name2);
     }
 
     #[test]
     fn pipe_name_differs_for_different_profiles() {
         let root = PathBuf::from(r"C:\Users\dev\project");
-        let reviewer = pipe_name_for_root(&root, McpProfile::Reviewer);
-        let editor = pipe_name_for_root(&root, McpProfile::Editor);
+        let reviewer = pipe_name_for_root(&root, McpProfile::Reviewer, false);
+        let editor = pipe_name_for_root(&root, McpProfile::Editor, false);
         assert_ne!(reviewer, editor);
     }
 
     #[test]
     fn pipe_name_hex_suffix_is_16_chars() {
         let root = PathBuf::from(r"C:\some\path");
-        let name = pipe_name_for_root(&root, McpProfile::Reviewer);
+        let name = pipe_name_for_root(&root, McpProfile::Reviewer, false);
         let suffix = name
             .strip_prefix(r"\\.\pipe\codixing-")
             .unwrap()
@@ -328,6 +345,15 @@ mod tests {
         assert!(
             suffix.chars().all(|c| c.is_ascii_hexdigit()),
             "suffix should be hex: {suffix}"
+        );
+    }
+
+    #[test]
+    fn escalating_pipe_name_is_distinct() {
+        let root = PathBuf::from(r"C:\Users\dev\project");
+        assert_ne!(
+            pipe_name_for_root(&root, McpProfile::Minimal, false),
+            pipe_name_for_root(&root, McpProfile::Minimal, true)
         );
     }
 }

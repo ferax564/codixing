@@ -125,7 +125,7 @@ EOF
 # ── 1. Init ───────────────────────────────────────────────────────────────────
 info "1. init"
 
-OUT=$(run init . --no-embeddings)
+OUT=$(run init .)
 assert_contains "init exits cleanly"    "Indexed"  "$OUT"
 assert_contains "init reports files"    "files"    "$OUT"
 assert_contains "init reports symbols"  "symbols"  "$OUT"

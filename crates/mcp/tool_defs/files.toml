@@ -155,7 +155,7 @@ description = "Maximum seconds to wait before killing the process (default: 120)
 
 [[tools]]
 name = "list_files"
-description = "List all files currently indexed by Codixing with their chunk counts, including symbol-free docs and config files. Supports optional glob pattern filtering. Use when you need an inventory of what's in the index (e.g. to confirm the right subdirectory is covered) before running narrower searches."
+description = "List up to `limit` files currently indexed by Codixing with their chunk counts, including symbol-free docs and config files. Supports optional glob pattern filtering. Use when you need a bounded inventory of what's in the index (e.g. to confirm the right subdirectory is covered) before running narrower searches."
 handler = "files::call_list_files"
 calling_convention = "engine_args"
 read_only = true
@@ -166,7 +166,7 @@ description = "Optional glob pattern to filter files (e.g. '**/*.rs', 'src/**')"
 
 [tools.params.limit]
 type = "integer"
-description = "Maximum number of files to return (default: 200)"
+description = "Maximum number of files to return (default and hard max: 100)"
 
 [[tools]]
 name = "outline_file"

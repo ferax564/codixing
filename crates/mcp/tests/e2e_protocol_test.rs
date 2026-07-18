@@ -150,8 +150,8 @@ fn e2e_initialize_and_tools_list() {
         .as_array()
         .expect("tools should be an array");
     assert!(
-        tools.len() >= 40,
-        "full mode should list 40+ tools, got {}",
+        tools.len() <= 12,
+        "default minimal profile should keep the tool catalog narrow, got {}",
         tools.len()
     );
 
@@ -166,7 +166,11 @@ fn e2e_initialize_and_tools_list() {
     );
     assert!(
         !names.contains(&"write_file"),
-        "default reviewer profile should hide write_file"
+        "default minimal profile should hide write_file"
+    );
+    assert!(
+        !names.contains(&"read_file"),
+        "default minimal profile should hide specialist read tools"
     );
 }
 

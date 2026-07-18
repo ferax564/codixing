@@ -1,9 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Mutex;
 
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
+use tantivy::query::{QueryParser, TermSetQuery};
 use tantivy::schema::{Field, Value};
 use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, Term, doc};
@@ -738,38 +738,60 @@ impl TantivyIndex {
 
     /// Look up documents by a set of chunk IDs.
     ///
-    /// Scans all segments and returns full stored documents for any chunk whose
-    /// ID appears in `chunk_ids`. Used by the trigram search path to build
-    /// rich `SearchResult` objects from trigram-matched chunk IDs.
+    /// Uses the indexed exact-value `chunk_id` field to return full stored
+    /// documents for matching chunks. Used by hydration paths that need content
+    /// omitted from compact chunk metadata.
     pub fn lookup_chunks_by_ids(
         &self,
-        chunk_ids: &std::collections::HashSet<u64>,
+        chunk_ids: &HashSet<u64>,
     ) -> Result<Vec<tantivy::TantivyDocument>> {
         if chunk_ids.is_empty() {
             return Ok(Vec::new());
         }
-        let searcher = self.reader.searcher();
-        let mut results = Vec::new();
 
-        for segment_reader in searcher.segment_readers() {
-            let store_reader = segment_reader.get_store_reader(1)?;
-            for doc_id in 0..segment_reader.max_doc() {
-                if segment_reader.is_deleted(doc_id) {
-                    continue;
-                }
-                let doc: tantivy::TantivyDocument = store_reader.get(doc_id)?;
-                let chunk_id = doc
-                    .get_first(self.fields.chunk_id)
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(0);
-                if chunk_ids.contains(&chunk_id) {
-                    results.push(doc);
-                }
-            }
+        let searcher = self.reader.searcher();
+        let terms = chunk_ids
+            .iter()
+            .map(|chunk_id| Term::from_field_text(self.fields.chunk_id, &chunk_id.to_string()));
+        let query = TermSetQuery::new(terms);
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(chunk_ids.len()))?;
+
+        let mut results = Vec::with_capacity(top_docs.len());
+        for (_score, doc_address) in top_docs {
+            results.push(searcher.doc(doc_address)?);
         }
 
         Ok(results)
+    }
+
+    /// Look up stored content for a batch of chunk IDs.
+    ///
+    /// Missing and deleted chunk IDs are omitted from the returned map.
+    pub fn lookup_chunk_contents(&self, chunk_ids: &HashSet<u64>) -> Result<HashMap<u64, String>> {
+        let docs = self.lookup_chunks_by_ids(chunk_ids)?;
+        let mut contents = HashMap::with_capacity(docs.len());
+
+        for doc in docs {
+            let Some(chunk_id) = doc
+                .get_first(self.fields.chunk_id)
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<u64>().ok())
+            else {
+                continue;
+            };
+            let Some(content) = doc.get_first(self.fields.content).and_then(|v| v.as_str()) else {
+                continue;
+            };
+            contents.insert(chunk_id, content.to_string());
+        }
+
+        Ok(contents)
+    }
+
+    /// Look up stored content for one chunk ID.
+    pub fn lookup_chunk_content(&self, chunk_id: u64) -> Result<Option<String>> {
+        let ids = [chunk_id].into_iter().collect();
+        Ok(self.lookup_chunk_contents(&ids)?.remove(&chunk_id))
     }
 
     /// Read all chunk IDs and their content from the index.
@@ -988,6 +1010,64 @@ mod tests {
             assert!(!results.is_empty(), "expected results after reopen");
             assert_eq!(results[0].0, "7");
         }
+    }
+
+    #[test]
+    fn lookup_chunks_by_ids_returns_only_requested_chunks() {
+        let idx = TantivyIndex::create_in_ram().unwrap();
+        idx.add_chunk(&make_chunk(1, "src/a.rs", "fn requested_a() {}"))
+            .unwrap();
+        idx.add_chunk(&make_chunk(2, "src/b.rs", "fn not_requested() {}"))
+            .unwrap();
+        idx.add_chunk(&make_chunk(3, "src/c.rs", "fn requested_c() {}"))
+            .unwrap();
+        idx.commit().unwrap();
+
+        let requested: HashSet<u64> = [1, 3].into_iter().collect();
+        let docs = idx.lookup_chunks_by_ids(&requested).unwrap();
+        let found: HashSet<u64> = docs
+            .iter()
+            .filter_map(|doc| {
+                doc.get_first(idx.fields.chunk_id)
+                    .and_then(|v| v.as_str())
+                    .and_then(|id| id.parse().ok())
+            })
+            .collect();
+
+        assert_eq!(found, requested);
+    }
+
+    #[test]
+    fn lookup_chunk_contents_omits_missing_chunks() {
+        let idx = TantivyIndex::create_in_ram().unwrap();
+        idx.add_chunk(&make_chunk(11, "src/present.rs", "fn present() {}"))
+            .unwrap();
+        idx.commit().unwrap();
+
+        let requested: HashSet<u64> = [11, 999].into_iter().collect();
+        let contents = idx.lookup_chunk_contents(&requested).unwrap();
+
+        assert_eq!(contents.len(), 1);
+        assert_eq!(
+            contents.get(&11).map(String::as_str),
+            Some("fn present() {}")
+        );
+        assert!(!contents.contains_key(&999));
+    }
+
+    #[test]
+    fn lookup_chunk_contents_omits_deleted_chunks() {
+        let idx = TantivyIndex::create_in_ram().unwrap();
+        idx.add_chunk(&make_chunk(21, "src/deleted.rs", "fn deleted() {}"))
+            .unwrap();
+        idx.commit().unwrap();
+        idx.remove_file("src/deleted.rs").unwrap();
+        idx.commit().unwrap();
+
+        let requested: HashSet<u64> = [21].into_iter().collect();
+        assert!(idx.lookup_chunks_by_ids(&requested).unwrap().is_empty());
+        assert!(idx.lookup_chunk_contents(&requested).unwrap().is_empty());
+        assert_eq!(idx.lookup_chunk_content(21).unwrap(), None);
     }
 
     // --- Field-weighted BM25 tests ---

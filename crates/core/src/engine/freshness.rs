@@ -127,7 +127,7 @@ fn is_asset_file(path: &str) -> bool {
 /// The match is line-prefix based and intentionally tolerant — false
 /// positives downgrade severity, they do not introduce broken behavior.
 fn detect_go_embed_roots<I, S>(
-    project_root: &std::path::Path,
+    config: &crate::config::IndexConfig,
     files: I,
 ) -> (HashSet<String>, Vec<String>)
 where
@@ -142,7 +142,12 @@ where
         if !file.ends_with(".go") {
             continue;
         }
-        let abs = project_root.join(file);
+        // `files` is reconstructed from persisted index/graph state. Resolve
+        // each entry as untrusted input so corrupt metadata cannot make a
+        // read-only freshness audit inspect files outside configured roots.
+        let Some(abs) = config.resolve_path(file) else {
+            continue;
+        };
         let content = match std::fs::read_to_string(&abs) {
             Ok(c) => c,
             Err(_) => continue,
@@ -322,7 +327,7 @@ impl Engine {
         let (embed_wrappers, embed_prefixes) = if options.profile == AuditProfile::App {
             (HashSet::new(), Vec::new())
         } else {
-            detect_go_embed_roots(self.store.root(), all_files.iter().map(|s| s.as_str()))
+            detect_go_embed_roots(&self.config, all_files.iter().map(|s| s.as_str()))
         };
         let is_embed_protected = |path: &str| -> bool {
             embed_wrappers.contains(path)
@@ -487,6 +492,40 @@ mod tests {
     use crate::{Engine, IndexConfig};
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn go_embed_scan_rejects_corrupt_index_paths_outside_root() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        let outside = dir.path().join("outside.go");
+        fs::write(&outside, "package outside\n//go:embed stolen/*\n").unwrap();
+        let config = IndexConfig::new(&root);
+
+        let corrupt_paths = ["../outside.go".to_string(), outside.display().to_string()];
+        let (wrappers, prefixes) =
+            detect_go_embed_roots(&config, corrupt_paths.iter().map(String::as_str));
+        assert!(wrappers.is_empty());
+        assert!(prefixes.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn go_embed_scan_rejects_corrupt_index_symlink_outside_root() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        let outside = dir.path().join("outside.go");
+        fs::write(&outside, "package outside\n//go:embed stolen/*\n").unwrap();
+        symlink(&outside, root.join("escape.go")).unwrap();
+        let config = IndexConfig::new(&root);
+
+        let (wrappers, prefixes) = detect_go_embed_roots(&config, ["escape.go"]);
+        assert!(wrappers.is_empty());
+        assert!(prefixes.is_empty());
+    }
 
     #[test]
     fn audit_reports_files_even_when_chunk_counts_empty() {

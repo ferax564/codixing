@@ -2,8 +2,9 @@
   "name": "codixing",
   "displayName": "Codixing",
   "description": "Ultra-fast code retrieval engine — search, navigate, and understand code with AI-grade precision",
-  "version": "0.16.0",
+  "version": "0.45.0",
   "publisher": "ferax564",
+  "license": "Apache-2.0",
   "icon": "icon.png",
   "repository": {
     "type": "git",
@@ -11,6 +12,12 @@
   },
   "engines": {
     "vscode": "^1.85.0"
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "Codixing launches local CLI, MCP, and LSP binaries for the current workspace. Trust the workspace before enabling it."
+    }
   },
   "categories": [
     "Programming Languages",

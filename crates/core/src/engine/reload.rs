@@ -127,7 +127,10 @@ impl Engine {
 
         // Reload vector index if it exists and we have an embedder.
         if let Some(ref emb) = self.embedder {
-            if self.store.vector_index_path().exists() && self.store.file_chunks_path().exists() {
+            if VectorIndex::artifacts_exist(
+                &self.store.vector_index_path(),
+                &self.store.file_chunks_path(),
+            ) {
                 match VectorIndex::load(
                     &self.store.vector_index_path(),
                     &self.store.file_chunks_path(),

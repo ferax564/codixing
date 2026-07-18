@@ -3,6 +3,8 @@
 use codixing_core::{AuditProfile, Engine, FreshnessOptions, FreshnessTier};
 use serde_json::Value;
 
+use super::MAX_TOOL_ARRAY_ITEMS;
+
 pub(crate) fn call_audit_freshness(engine: &Engine, args: &Value) -> (String, bool) {
     let threshold_days = args
         .get("threshold_days")
@@ -22,6 +24,7 @@ pub(crate) fn call_audit_freshness(engine: &Engine, args: &Value) -> (String, bo
         Some(Value::Array(arr)) => arr
             .iter()
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .take(MAX_TOOL_ARRAY_ITEMS)
             .collect(),
         _ => Vec::new(),
     };

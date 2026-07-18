@@ -7,17 +7,25 @@ read_only = true
 
 [tools.params.query]
 type = "string"
-description = "Natural language or code search query (e.g. 'PageRank computation', 'fn search')"
+description = "Natural language or code search query (e.g. 'PageRank computation', 'fn search'). Must be non-blank and at most 1024 characters."
 required = true
 
 [tools.params.strategy]
 type = "string"
-description = "Retrieval strategy. Omit to auto-detect from query: single identifiers use 'instant' (BM25), multi-word uses 'fast'/'thorough'. Explicit options: 'instant'=BM25 only (fastest), 'fast'=hybrid BM25+vector, 'thorough'=hybrid+MMR deduplication, 'explore'=BM25 + graph expansion, 'deep'=hybrid + reranker"
-enum = ["instant", "fast", "thorough", "explore", "deep", "exact"]
+description = "Retrieval strategy. Omit to auto-detect from query: single identifiers use 'instant' (BM25), multi-word uses 'fast'/'thorough'. Explicit options: 'instant'=BM25 only (fastest), 'fast'=hybrid BM25+vector, 'thorough'=hybrid+MMR deduplication, 'explore'=BM25 + graph expansion, 'deep'=hybrid + reranker, 'exact'=trigram substring lookup, 'semantic'=embedding-free behavioral signatures."
+enum = ["instant", "fast", "thorough", "explore", "deep", "exact", "semantic"]
 
 [tools.params.limit]
 type = "integer"
-description = "Maximum number of results to return (default: 10, max recommended: 20)"
+description = "Maximum number of results to return (default: 10, hard max: 100; 20 or fewer recommended)"
+
+[tools.params.token_budget]
+type = "integer"
+description = "Maximum tokens in the final tool response (default: 4000, hard max: 12000). Includes warnings, metadata, and truncation marker."
+
+[tools.params.check_staleness]
+type = "boolean"
+description = "If true, scan the repository for files changed since indexing and include a stale-index warning. Default: false because this can be expensive on huge repositories."
 
 [tools.params.file_filter]
 type = "string"
@@ -55,7 +63,7 @@ description = "Optional file path substring to restrict results to a specific fi
 
 [[tools]]
 name = "search_usages"
-description = "Find all code locations where a symbol (function, struct, variable, etc.) is referenced or called. Unlike find_symbol which finds definitions, this finds usages \u2014 call sites, imports, and references. Essential for impact analysis before refactoring. Use `complete=true` for deterministic blast-radius queries (\u201call callers of X\u201d) where the top-K ranked view hides the long tail; otherwise stays on the ranked path. Tip: For graph-based caller discovery, use symbol_callers instead \u2014 it uses the dependency graph for more precise results."
+description = "Find code locations where a symbol (function, struct, variable, etc.) is referenced or called. Unlike find_symbol which finds definitions, this finds usages \u2014 call sites, imports, and references. Essential for impact analysis before refactoring. Use `complete=true` for a deterministic, pageable bounded scan where the ranked view hides the long tail; follow `next_offset` until `has_more=false`. Tip: For graph-based caller discovery, use symbol_callers instead \u2014 it uses the dependency graph for more precise results."
 handler = "search::call_search_usages"
 calling_convention = "engine_args"
 read_only = true
@@ -67,11 +75,15 @@ required = true
 
 [tools.params.limit]
 type = "integer"
-description = "Maximum number of usage locations to return (default: 20). Ignored when `complete=true`."
+description = "Maximum usage locations per response page (default: 20, hard max: 100)."
 
 [tools.params.complete]
 type = "boolean"
-description = "If true, returns every known call site / import for the symbol with no ranking and no cap, sorted deterministically by (file, line). Use for blast-radius queries where you need the full set. Default: false."
+description = "If true, scans up to 100000 candidate chunks for known call sites/imports without ranking, sorts references deterministically by (file, line), and returns total-within-scan/has_more/next_offset pagination metadata. Default: false."
+
+[tools.params.offset]
+type = "integer"
+description = "Zero-based page offset for `complete=true` (default: 0, hard max: 100000). Set it to the prior response's next_offset until has_more=false. Ignored in ranked mode."
 
 [[tools]]
 name = "read_symbol"

@@ -8,7 +8,7 @@ name = "federation_init"
 description = "Create an empty federation config file with sensible defaults. Use this as the first step to set up cross-repo federated search."
 handler = "federation::call_federation_init"
 calling_convention = "args_only"
-read_only = true
+read_only = false
 
 [tools.params.path]
 type = "string"
@@ -20,7 +20,7 @@ name = "federation_add_project"
 description = "Add a project to an existing federation config file. The project root must contain a .codixing/ index. Use when growing a multi-repo federated search surface."
 handler = "federation::call_federation_add_project"
 calling_convention = "args_only"
-read_only = true
+read_only = false
 
 [tools.params.config]
 type = "string"
@@ -41,7 +41,7 @@ name = "federation_remove_project"
 description = "Remove a project from a federation config file by its directory name. Use when a subproject has been archived or moved out of the federation."
 handler = "federation::call_federation_remove_project"
 calling_convention = "args_only"
-read_only = true
+read_only = false
 
 [tools.params.config]
 type = "string"
@@ -85,7 +85,7 @@ name = "federation_discover"
 description = "Auto-discover workspace projects under a root directory. Detects Cargo workspaces, npm/pnpm workspaces, Go workspaces, git submodules, and nested projects. Optionally writes a federation config file. Use when bootstrapping a federation from a polyrepo — saves manually enumerating every subproject."
 handler = "federation::call_federation_discover"
 calling_convention = "args_only"
-read_only = true
+read_only = false
 
 [tools.params.root]
 type = "string"

@@ -1,7 +1,7 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use tantivy::schema::Value;
 
 use crate::embedder::Embedder;
 use crate::error::Result;
@@ -54,32 +54,24 @@ impl<'a> VectorRetriever<'a> {
         }
     }
 
-    /// Resolve content for a chunk: prefer in-memory, fall back to Tantivy.
-    fn resolve_content(&self, chunk_id: u64, meta_content: &str) -> Option<String> {
-        if !meta_content.is_empty() {
-            return Some(meta_content.to_string());
+    /// Hydrate compact metadata content in one indexed Tantivy query.
+    fn hydrate_contents(&self, chunk_ids: &HashSet<u64>) -> HashMap<u64, String> {
+        if chunk_ids.is_empty() {
+            return HashMap::new();
         }
-        // Fall back to Tantivy stored fields.
-        if let Some(tantivy) = self.tantivy {
-            let ids: std::collections::HashSet<u64> = [chunk_id].into_iter().collect();
-            let docs = match tantivy.lookup_chunks_by_ids(&ids) {
-                Ok(docs) => docs,
-                Err(e) => {
-                    warn!(chunk_id, error = %e, "failed to hydrate vector hit content");
-                    return None;
-                }
-            };
-            let fields = tantivy.fields();
-            if let Some(content) = docs.into_iter().find_map(|doc| {
-                doc.get_first(fields.content)
-                    .and_then(|v| v.as_str())
-                    .map(str::to_owned)
-            }) {
-                return Some(content);
-            }
-        }
-        warn!(chunk_id, "dropping vector hit with empty content");
-        None
+        let Some(tantivy) = self.tantivy else {
+            return HashMap::new();
+        };
+        tantivy
+            .lookup_chunk_contents(chunk_ids)
+            .unwrap_or_else(|e| {
+                warn!(
+                    count = chunk_ids.len(),
+                    error = %e,
+                    "failed to batch-hydrate vector hit content"
+                );
+                HashMap::new()
+            })
     }
 }
 
@@ -101,6 +93,20 @@ impl Retriever for VectorRetriever<'_> {
 
         let matches = self.vector.search(&query_vec, fetch_limit)?;
 
+        let missing_content_ids: HashSet<u64> = matches
+            .iter()
+            .filter_map(|(chunk_id, _)| {
+                let meta = self.chunk_meta.get(chunk_id)?;
+                if let Some(ref filter) = query.file_filter {
+                    if !meta.file_path.contains(filter.as_str()) {
+                        return None;
+                    }
+                }
+                meta.content.is_empty().then_some(*chunk_id)
+            })
+            .collect();
+        let hydrated_contents = self.hydrate_contents(&missing_content_ids);
+
         let mut results = Vec::with_capacity(matches.len());
         for (chunk_id, distance) in matches {
             // Hydrate from the chunk_meta table.
@@ -111,7 +117,13 @@ impl Retriever for VectorRetriever<'_> {
             // Convert cosine distance to a similarity score (higher = better).
             let score = 1.0 - distance;
 
-            let Some(content) = self.resolve_content(chunk_id, &meta.content) else {
+            let content = if meta.content.is_empty() {
+                hydrated_contents.get(&chunk_id).cloned()
+            } else {
+                Some(meta.content.clone())
+            };
+            let Some(content) = content else {
+                warn!(chunk_id, "dropping vector hit with empty content");
                 continue;
             };
 

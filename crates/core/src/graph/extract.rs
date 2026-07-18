@@ -52,14 +52,22 @@ pub fn extract_definitions(source: &str, file_path: &str, lang: &Language) -> Ve
         None => return Vec::new(),
     };
 
+    extract_definitions_from_tree(&tree, source.as_bytes(), file_path, lang)
+}
+
+/// Extract definitions from an already-parsed tree-sitter tree.
+///
+/// Bulk indexing uses this entry point so symbol-graph construction can reuse
+/// the parser tree that is already in memory instead of parsing every source
+/// file again in a later graph-building pass.
+pub fn extract_definitions_from_tree(
+    tree: &tree_sitter::Tree,
+    source: &[u8],
+    file_path: &str,
+    lang: &Language,
+) -> Vec<DefinitionInfo> {
     let mut defs = Vec::new();
-    collect_definitions(
-        &tree.root_node(),
-        source.as_bytes(),
-        file_path,
-        lang,
-        &mut defs,
-    );
+    collect_definitions(&tree.root_node(), source, file_path, lang, &mut defs);
     defs
 }
 
@@ -87,14 +95,21 @@ pub fn extract_references(source: &str, file_path: &str, lang: &Language) -> Vec
         None => return Vec::new(),
     };
 
+    extract_references_from_tree(&tree, source.as_bytes(), file_path, lang)
+}
+
+/// Extract references from an already-parsed tree-sitter tree.
+///
+/// This is the zero-reparse counterpart to [`extract_references`] used by the
+/// bulk indexing pipeline.
+pub fn extract_references_from_tree(
+    tree: &tree_sitter::Tree,
+    source: &[u8],
+    file_path: &str,
+    lang: &Language,
+) -> Vec<ReferenceInfo> {
     let mut refs = Vec::new();
-    collect_references(
-        &tree.root_node(),
-        source.as_bytes(),
-        file_path,
-        lang,
-        &mut refs,
-    );
+    collect_references(&tree.root_node(), source, file_path, lang, &mut refs);
     refs
 }
 

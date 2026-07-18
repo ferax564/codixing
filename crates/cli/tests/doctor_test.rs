@@ -21,4 +21,12 @@ fn doctor_json_reports_missing_index_without_failure() {
     assert_eq!(report["binary"]["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(report["index"]["status"], "missing");
     assert_eq!(report["index"]["dir_exists"], false);
+
+    let daemon_endpoint = report["daemon"]["endpoint"]
+        .as_str()
+        .expect("doctor should report its default daemon endpoint");
+    #[cfg(unix)]
+    assert!(daemon_endpoint.ends_with("/.codixing/daemon-minimal.sock"));
+    #[cfg(windows)]
+    assert!(daemon_endpoint.ends_with("-minimal"));
 }

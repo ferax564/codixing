@@ -11,6 +11,8 @@ use codixing_core::{
     FederatedEngine, FederationConfig, SearchQuery, discover_projects, to_federation_config,
 };
 
+use super::requested_result_count;
+
 /// `federation_init` — create a template federation config file.
 pub fn call_federation_init(args: &Value) -> (String, bool) {
     let path = match args.get("path").and_then(|v| v.as_str()) {
@@ -245,7 +247,7 @@ pub fn call_federation_search(
         }
     };
 
-    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    let limit = requested_result_count(args, "limit", 10);
 
     let sq = SearchQuery::new(query).with_limit(limit);
 

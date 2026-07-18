@@ -3,6 +3,8 @@
 use codixing_core::{Engine, OrphanOptions};
 use serde_json::Value;
 
+use super::requested_result_count;
+
 pub(crate) fn call_find_orphans(engine: &Engine, args: &Value) -> (String, bool) {
     let mut options = OrphanOptions::default();
 
@@ -16,9 +18,7 @@ pub(crate) fn call_find_orphans(engine: &Engine, args: &Value) -> (String, bool)
     if let Some(check_dynamic) = args.get("check_dynamic").and_then(|v| v.as_bool()) {
         options.check_dynamic_refs = check_dynamic;
     }
-    if let Some(limit) = args.get("limit").and_then(|v| v.as_u64()) {
-        options.limit = limit as usize;
-    }
+    options.limit = requested_result_count(args, "limit", options.limit);
 
     let orphans = engine.find_orphans(options);
 

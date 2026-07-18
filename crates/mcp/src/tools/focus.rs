@@ -4,12 +4,14 @@ use serde_json::Value;
 
 use codixing_core::{Engine, FocusMapOptions};
 
+use super::{MAX_TOOL_ARRAY_ITEMS, requested_result_count};
+
 /// Handle the `focus_map` MCP tool call.
 ///
 /// When `seed_files` is provided, uses those as PPR seeds.
 /// Otherwise auto-detects from git (unstaged + staged + recent commits).
 pub(crate) fn call_focus_map(engine: &Engine, args: &Value) -> (String, bool) {
-    let max_files = args.get("max_files").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+    let max_files = requested_result_count(args, "max_files", 20);
     let include_symbols = args
         .get("include_symbols")
         .and_then(|v| v.as_bool())
@@ -26,6 +28,7 @@ pub(crate) fn call_focus_map(engine: &Engine, args: &Value) -> (String, bool) {
         let seeds: Vec<String> = if let Some(arr) = seeds_val.as_array() {
             arr.iter()
                 .filter_map(|v| v.as_str().map(String::from))
+                .take(MAX_TOOL_ARRAY_ITEMS)
                 .collect()
         } else if let Some(s) = seeds_val.as_str() {
             // Accept a single string too.

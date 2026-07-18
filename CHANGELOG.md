@@ -143,9 +143,8 @@ integrity warning.
 Tier 1 partial bundle plus the Windows indexing fix that briefly carried a
 v0.41.3 tag (collapsed into v0.42.0 — the v0.41.3 tag was deleted before any
 binaries / npm published, so v0.42.0 is the first shipped release that
-contains both the #107 fix and the Tier 1 features). Two Tier 1 items
-deferred to v0.43 — see [`plans/2026-05-01-v0.42-pr1-pr2.md`](plans/2026-05-01-v0.42-pr1-pr2.md)
-for the deferral rationale.
+contains both the #107 fix and the Tier 1 features). Two Tier 1 items were
+deferred to v0.43.
 
 ### Fixed
 

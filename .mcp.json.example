@@ -6,12 +6,10 @@
       "args": [
         "--root",
         ".",
-        "--compact"
-      ],
-      "env": {
-        "ORT_DYLIB_PATH": "~/.local/lib/libonnxruntime.dylib",
-        "DYLD_LIBRARY_PATH": "~/.local/lib"
-      }
+        "--profile",
+        "minimal",
+        "--no-daemon-fork"
+      ]
     }
   }
 }

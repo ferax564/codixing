@@ -260,7 +260,14 @@ impl Engine {
             symbols: &self.symbols,
             graph: self.graph.as_ref(),
             graph_boost_weight: self.config.graph.boost_weight,
-            recency_map: Some(self.get_recency_map()),
+            recency_map: match strategy {
+                Strategy::Fast | Strategy::Thorough => Some(self.get_recency_map()),
+                Strategy::Instant
+                | Strategy::Exact
+                | Strategy::Semantic
+                | Strategy::Explore
+                | Strategy::Deep => None,
+            },
             chunk_meta: Some(&self.chunk_meta),
             tantivy: Some(&self.tantivy),
             concepts,
@@ -332,37 +339,76 @@ impl Engine {
         let candidate_ids = self.get_trigram().search(&query.query);
 
         // Verify candidates and count actual substring matches using chunk content.
+        // Hydrate in bounded batches: a common identifier can hit millions of
+        // chunks in a monorepo, and materializing every stored body at once
+        // defeats compact metadata even though the caller only needs top-k.
+        const HYDRATE_BATCH_SIZE: usize = 2_048;
+        let retained_limit = query.limit.max(3);
         let mut results: Vec<SearchResult> = Vec::new();
-        for &chunk_id in &candidate_ids {
-            if let Some(meta) = self.chunk_meta.get(&chunk_id) {
-                // Apply file filter if set.
-                if let Some(ref filter) = query.file_filter {
-                    if !meta.file_path.contains(filter.as_str()) {
-                        continue;
+        for candidate_batch in candidate_ids.chunks(HYDRATE_BATCH_SIZE) {
+            let missing_content_ids: std::collections::HashSet<u64> = candidate_batch
+                .iter()
+                .filter_map(|chunk_id| {
+                    let meta = self.chunk_meta.get(chunk_id)?;
+                    if let Some(ref filter) = query.file_filter {
+                        if !meta.file_path.contains(filter.as_str()) {
+                            return None;
+                        }
                     }
+                    meta.content.is_empty().then_some(*chunk_id)
+                })
+                .collect();
+            let hydrated_contents = self.tantivy.lookup_chunk_contents(&missing_content_ids)?;
+
+            for &chunk_id in candidate_batch {
+                if let Some(meta) = self.chunk_meta.get(&chunk_id) {
+                    // Apply file filter if set.
+                    if let Some(ref filter) = query.file_filter {
+                        if !meta.file_path.contains(filter.as_str()) {
+                            continue;
+                        }
+                    }
+                    // Get content for verification: from meta if available, else from Tantivy.
+                    let content = if meta.content.is_empty() {
+                        hydrated_contents
+                            .get(&chunk_id)
+                            .cloned()
+                            .unwrap_or_default()
+                    } else {
+                        meta.content.clone()
+                    };
+                    // Verify actual substring match and count occurrences.
+                    let hit_count = content.matches(&query.query).count();
+                    if hit_count == 0 {
+                        continue; // Trigram false positive.
+                    }
+                    results.push(SearchResult {
+                        chunk_id: format!("{chunk_id}"),
+                        file_path: meta.file_path.clone(),
+                        language: meta.language.clone(),
+                        score: hit_count as f32,
+                        line_start: meta.line_start,
+                        line_end: meta.line_end,
+                        signature: meta.signature.clone(),
+                        scope_chain: meta.scope_chain.clone(),
+                        content,
+                    });
                 }
-                // Get content for verification: from meta if available, else from Tantivy.
-                let content = if meta.content.is_empty() {
-                    self.get_chunk_content(chunk_id).unwrap_or_default()
-                } else {
-                    meta.content.clone()
-                };
-                // Verify actual substring match and count occurrences.
-                let hit_count = content.matches(&query.query).count();
-                if hit_count == 0 {
-                    continue; // Trigram false positive.
-                }
-                results.push(SearchResult {
-                    chunk_id: format!("{chunk_id}"),
-                    file_path: meta.file_path.clone(),
-                    language: meta.language.clone(),
-                    score: hit_count as f32,
-                    line_start: meta.line_start,
-                    line_end: meta.line_end,
-                    signature: meta.signature.clone(),
-                    scope_chain: meta.scope_chain.clone(),
-                    content,
+            }
+
+            // Bound retained result bodies while preserving the globally best
+            // scores seen so far. Keep at least three so BM25 fallback semantics
+            // remain unchanged when a caller requests fewer than three hits.
+            if results.len() > retained_limit.saturating_mul(2) {
+                results.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.file_path.cmp(&b.file_path))
+                        .then_with(|| a.line_start.cmp(&b.line_start))
+                        .then_with(|| a.chunk_id.cmp(&b.chunk_id))
                 });
+                results.truncate(retained_limit);
             }
         }
 
@@ -371,6 +417,9 @@ impl Engine {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.file_path.cmp(&b.file_path))
+                .then_with(|| a.line_start.cmp(&b.line_start))
+                .then_with(|| a.chunk_id.cmp(&b.chunk_id))
         });
 
         // If trigram yields < 3 results, augment with BM25.
@@ -1852,6 +1901,39 @@ fn expand_query(query: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recency_map_is_only_initialized_for_consuming_pipelines() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("lib.rs"), "pub fn recency_fixture() {}\n").unwrap();
+        let mut config = crate::IndexConfig::new(root);
+        config.embedding.enabled = false;
+        let engine = Engine::init(root, config).unwrap();
+
+        assert!(engine.recency_map.get().is_none());
+        for strategy in [
+            Strategy::Instant,
+            Strategy::Exact,
+            Strategy::Semantic,
+            Strategy::Explore,
+            Strategy::Deep,
+        ] {
+            let context = engine.search_context("recency_fixture", strategy);
+            assert!(
+                context.recency_map.is_none(),
+                "unexpected map for {strategy:?}"
+            );
+            assert!(engine.recency_map.get().is_none());
+        }
+
+        let fast_context = engine.search_context("recency_fixture", Strategy::Fast);
+        assert!(fast_context.recency_map.is_some());
+        assert!(engine.recency_map.get().is_some());
+
+        let thorough_context = engine.search_context("recency_fixture", Strategy::Thorough);
+        assert!(thorough_context.recency_map.is_some());
+    }
 
     #[test]
     fn detects_rust_test_files() {

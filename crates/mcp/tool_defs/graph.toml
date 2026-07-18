@@ -17,7 +17,7 @@ required = true
 
 [tools.params.limit]
 type = "integer"
-description = "Maximum number of results to return (default: no limit)"
+description = "Maximum number of results to return (default and hard max: 100)"
 
 [tools.params.pattern]
 type = "string"
@@ -48,7 +48,7 @@ description = "Maximum number of tokens for the repo map (default: 4000)"
 
 [[tools]]
 name = "get_transitive_deps"
-description = "Get the full transitive dependency chain for a file \u2014 all files it depends on, directly or indirectly, up to a given depth. Use when planning a refactor that touches a foundational file and you need the blast radius before committing."
+description = "Get a depth-bounded transitive dependency chain for a file \u2014 files it depends on, directly or indirectly, up to the configured depth. Use when tracing what a file relies on; use `predict_impact` or `search_usages` when you need the reverse-direction blast radius."
 handler = "graph::call_get_transitive_deps"
 calling_convention = "engine_args"
 read_only = true
@@ -60,11 +60,11 @@ required = true
 
 [tools.params.depth]
 type = "integer"
-description = "Maximum hop depth for transitive traversal (default: 3, max recommended: 5)"
+description = "Maximum hop depth for transitive traversal (default: 3, hard max: 8)"
 
 [[tools]]
 name = "symbol_callers"
-description = "Return all functions in the codebase that directly call the given symbol. Uses the symbol-level call graph built at index time. Falls back to BM25 search if the graph has no results for this symbol. Use when modifying a function and you need to see every caller; prefer `search_usages --complete` when you need the full deterministic blast-radius set."
+description = "Return functions in the codebase that directly call the given symbol. Uses the symbol-level call graph built at index time and is capped by limit. Falls back to BM25 search if the graph has no results for this symbol. Use when modifying a function and you need its direct callers; for a broader deterministic bounded scan, use `search_usages` with `complete=true` and follow its next_offset pages."
 handler = "graph::call_symbol_callers"
 calling_convention = "engine_args"
 read_only = true
@@ -80,7 +80,7 @@ description = "Maximum call sites to return (default: 20)"
 
 [[tools]]
 name = "symbol_callees"
-description = "Return all functions that the given symbol directly calls. Uses the symbol-level call graph built at index time. Use when tracing what a function reaches into — the forward direction of `symbol_callers`."
+description = "Return up to `limit` functions that the given symbol directly calls. Uses the symbol-level call graph built at index time. Use when tracing what a function reaches into — the forward direction of `symbol_callers`."
 handler = "graph::call_symbol_callees"
 calling_convention = "engine_args"
 read_only = true

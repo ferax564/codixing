@@ -89,10 +89,9 @@ impl Engine {
         let mut precise_refs: Vec<SymbolReference> = Vec::new();
 
         for candidate in &candidates {
-            let abs_path = self
-                .config
-                .resolve_path(&candidate.file_path)
-                .unwrap_or_else(|| self.config.root.join(&candidate.file_path));
+            let Some(abs_path) = self.config.resolve_path(&candidate.file_path) else {
+                continue;
+            };
 
             let source = match std::fs::read_to_string(&abs_path) {
                 Ok(s) => s,
@@ -167,10 +166,9 @@ impl Engine {
         let symbol_base = symbol.rsplit("::").next().unwrap_or(symbol);
 
         for candidate in &candidates {
-            let abs_path = self
-                .config
-                .resolve_path(&candidate.file_path)
-                .unwrap_or_else(|| self.config.root.join(&candidate.file_path));
+            let Some(abs_path) = self.config.resolve_path(&candidate.file_path) else {
+                continue;
+            };
 
             let source = match std::fs::read_to_string(&abs_path) {
                 Ok(s) => s,
@@ -231,10 +229,9 @@ impl Engine {
             None => return Vec::new(),
         };
 
-        let abs_path = self
-            .config
-            .resolve_path(&sym.file_path)
-            .unwrap_or_else(|| self.config.root.join(&sym.file_path));
+        let Some(abs_path) = self.config.resolve_path(&sym.file_path) else {
+            return Vec::new();
+        };
 
         let lang = match detect_language(&abs_path) {
             Some(l) => l,
@@ -271,10 +268,9 @@ impl Engine {
             Some(s) => s,
             None => return String::new(),
         };
-        let abs_path = self
-            .config
-            .resolve_path(&sym.file_path)
-            .unwrap_or_else(|| self.config.root.join(&sym.file_path));
+        let Some(abs_path) = self.config.resolve_path(&sym.file_path) else {
+            return String::new();
+        };
         match std::fs::read_to_string(&abs_path) {
             Ok(source) => source
                 .lines()

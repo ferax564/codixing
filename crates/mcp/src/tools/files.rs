@@ -9,6 +9,8 @@ use codixing_core::{
     Engine, GrepMatch, GrepOptions, SessionEventKind, SharedEventType, SharedSessionEvent,
 };
 
+use super::{requested_context_lines, requested_result_count, requested_tool_token_budget};
+
 pub(crate) fn call_read_file(engine: &Engine, args: &Value) -> (String, bool) {
     let file = match args.get("file").and_then(|v| v.as_str()) {
         Some(f) => f,
@@ -17,10 +19,7 @@ pub(crate) fn call_read_file(engine: &Engine, args: &Value) -> (String, bool) {
 
     let line_start = args.get("line_start").and_then(|v| v.as_u64());
     let line_end = args.get("line_end").and_then(|v| v.as_u64());
-    let token_budget = args
-        .get("token_budget")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(4000) as usize;
+    let token_budget = requested_tool_token_budget(args);
 
     match engine.read_file_range(file, line_start, line_end) {
         Ok(None) => (
@@ -41,7 +40,7 @@ pub(crate) fn call_read_file(engine: &Engine, args: &Value) -> (String, bool) {
                 symbol: None,
                 agent_id: engine.session().session_id().to_string(),
             });
-            let max_chars = token_budget * 4;
+            let max_chars = token_budget.saturating_mul(4);
             let tee_hint = if content.len() > max_chars {
                 engine.tee_if_truncated(&content, "read_file")
             } else {
@@ -99,22 +98,11 @@ pub(crate) fn call_grep_code(engine: &Engine, args: &Value) -> (String, bool) {
 
     // Accept both legacy `context_lines` (symmetric) and new asymmetric
     // `before_context` / `after_context` params. Explicit before/after wins.
-    let legacy_context = args
-        .get("context_lines")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize;
-    let before_context = args
-        .get("before_context")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as usize)
-        .unwrap_or(legacy_context);
-    let after_context = args
-        .get("after_context")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as usize)
-        .unwrap_or(legacy_context);
+    let legacy_context = requested_context_lines(args, "context_lines", 0);
+    let before_context = requested_context_lines(args, "before_context", legacy_context);
+    let after_context = requested_context_lines(args, "after_context", legacy_context);
 
-    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+    let limit = requested_result_count(args, "limit", 50);
     let count_only = args
         .get("count_only")
         .and_then(|v| v.as_bool())
@@ -191,7 +179,7 @@ fn format_grep_matches(pattern: &str, matches: &[GrepMatch]) -> String {
 
 pub(crate) fn call_list_files(engine: &Engine, args: &Value) -> (String, bool) {
     let pattern = args.get("pattern").and_then(|v| v.as_str());
-    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
+    let limit = requested_result_count(args, "limit", 100);
 
     let stats = engine.stats();
     let all_files = engine.indexed_files();
@@ -298,35 +286,12 @@ pub(crate) fn call_outline_file(engine: &Engine, args: &Value) -> (String, bool)
 // Write tools
 // ---------------------------------------------------------------------------
 
-/// Resolve `rel` against `root`, collapsing `.`/`..` lexically, and reject any
-/// path that escapes `root`. Pure (no `Engine`) so it is unit-testable and so
-/// every write tool — including `apply_patch` — can share one chokepoint.
-fn normalize_within_root(root: &Path, rel: &str) -> Result<PathBuf, String> {
-    let candidate = root.join(rel);
-
-    let mut normalized = PathBuf::new();
-    for part in candidate.components() {
-        match part {
-            std::path::Component::ParentDir => {
-                normalized.pop();
-            }
-            std::path::Component::CurDir => {}
-            c => normalized.push(c),
-        }
-    }
-
-    if !normalized.starts_with(root) {
-        return Err(format!(
-            "Path '{rel}' escapes the project root \u{2014} operation denied."
-        ));
-    }
-
-    Ok(normalized)
-}
-
 fn resolve_safe_path(engine: &Engine, rel: &str) -> Result<PathBuf, String> {
-    let root = engine.config().root.clone();
-    normalize_within_root(&root, rel)
+    engine.config().resolve_path_for_write(rel).ok_or_else(|| {
+        format!(
+            "Path '{rel}' does not resolve safely inside the configured project roots \u{2014} operation denied."
+        )
+    })
 }
 
 /// Truncate `s` to at most `max_bytes`, snapping the cut **down** to the nearest
@@ -577,6 +542,10 @@ pub(crate) fn call_delete_file(engine: &mut Engine, args: &Value) -> (String, bo
     }
 }
 
+fn is_safe_git_revision_arg(revision: &str) -> bool {
+    !revision.trim().is_empty() && !revision.starts_with('-')
+}
+
 pub(crate) fn call_git_diff(engine: &Engine, args: &Value) -> (String, bool) {
     let root = engine.config().root.clone();
 
@@ -593,42 +562,79 @@ pub(crate) fn call_git_diff(engine: &Engine, args: &Value) -> (String, bool) {
 
     let mut cmd = std::process::Command::new("git");
     cmd.current_dir(&root);
+    cmd.arg("diff");
 
     if staged {
-        cmd.args(["diff", "--cached"]);
-    } else if let Some(r) = commit {
-        cmd.args(["diff", r]);
-    } else {
-        cmd.arg("diff");
+        cmd.arg("--cached");
+    }
+    if stat_only {
+        // Git requires options to precede `--end-of-options`.
+        cmd.arg("--stat");
     }
 
-    if stat_only {
-        cmd.arg("--stat");
+    if !staged && let Some(r) = commit {
+        // `commit` is untrusted MCP input. Without the end-of-options marker,
+        // values such as `--output=/tmp/file` turn this nominally read-only
+        // reviewer tool into an arbitrary file write/truncation primitive.
+        if !is_safe_git_revision_arg(r) {
+            return (
+                "Invalid commit/ref: expected a revision such as HEAD~1, main, or abc123"
+                    .to_string(),
+                true,
+            );
+        }
+        let revision = format!("{r}^{{commit}}");
+        let valid_revision = std::process::Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", "--end-of-options"])
+            .arg(&revision)
+            .current_dir(&root)
+            .output()
+            .is_ok_and(|output| output.status.success());
+        if !valid_revision {
+            return (format!("Invalid commit/ref: '{r}'"), true);
+        }
+        cmd.arg("--end-of-options").arg(r);
     }
 
     if let Some(f) = file {
         cmd.arg("--").arg(f);
     }
 
-    match cmd.output() {
+    match run_bounded_command(&mut cmd, MAX_GIT_CAPTURE_BYTES) {
         Err(e) => (format!("Failed to run git: {e}"), true),
         Ok(out) if !out.status.success() => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            (format!("git diff failed: {stderr}"), true)
+            let stderr = String::from_utf8_lossy(&out.stderr.bytes);
+            let capture_note = if out.stderr.truncated {
+                format!("\n... (stderr exceeded the {MAX_GIT_CAPTURE_BYTES}-byte capture limit)")
+            } else {
+                String::new()
+            };
+            (format!("git diff failed: {stderr}{capture_note}"), true)
         }
         Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stdout = String::from_utf8_lossy(&out.stdout.bytes);
             if stdout.trim().is_empty() {
                 ("No changes detected.".to_string(), false)
             } else {
                 let max = 12000;
                 if stdout.len() > max {
-                    let tee_hint = engine.tee_if_truncated(&stdout, "git_diff");
+                    let (truncation_note, tee_hint) = if out.stdout.truncated {
+                        (
+                            format!(
+                                "process output exceeded the {MAX_GIT_CAPTURE_BYTES}-byte capture limit"
+                            ),
+                            String::new(),
+                        )
+                    } else {
+                        (
+                            format!("{} bytes total", stdout.len()),
+                            engine.tee_if_truncated(&stdout, "git_diff"),
+                        )
+                    };
                     (
                         format!(
-                            "{}\n\n... (truncated, {} bytes total){tee_hint}",
+                            "{}\n\n... (truncated; {truncation_note}){tee_hint}",
                             truncate_chars(&stdout, max),
-                            stdout.len()
                         ),
                         false,
                     )
@@ -653,7 +659,6 @@ pub(crate) fn call_apply_patch(engine: &mut Engine, args: &Value) -> (String, bo
         None => return ("Missing required argument: patch".to_string(), true),
     };
 
-    let root = engine.config().root.clone();
     let mut affected: Vec<PathBuf> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
 
@@ -679,7 +684,7 @@ pub(crate) fn call_apply_patch(engine: &mut Engine, args: &Value) -> (String, bo
             errors.push("Patch contains an empty target path \u{2014} skipped.".to_string());
             continue;
         }
-        let abs_path = match normalize_within_root(&root, &fp.path) {
+        let abs_path = match resolve_safe_path(engine, &fp.path) {
             Ok(p) => p,
             Err(e) => {
                 errors.push(e);
@@ -1052,6 +1057,8 @@ pub(crate) fn call_run_tests(engine: &mut Engine, args: &Value) -> (String, bool
         Ok(RunOutcome::Completed {
             stdout,
             stderr,
+            stdout_truncated,
+            stderr_truncated,
             status,
             success,
         }) => {
@@ -1074,9 +1081,17 @@ pub(crate) fn call_run_tests(engine: &mut Engine, args: &Value) -> (String, bool
                 combined
             };
 
+            let capture_note = if stdout_truncated || stderr_truncated {
+                format!(
+                    "Process output exceeded the {}-byte per-stream capture limit; only the most recent output was retained.\n",
+                    MAX_PROCESS_CAPTURE_BYTES
+                )
+            } else {
+                String::new()
+            };
             let header = format!(
                 "Command: {command}\nExit code: {status}\nTimeout: {timeout_secs}s\n\
-                 Status: {}\n\n",
+                 Status: {}\n{capture_note}\n",
                 if success {
                     "\u{2713} PASSED"
                 } else {
@@ -1093,10 +1108,100 @@ enum RunOutcome {
     Completed {
         stdout: Vec<u8>,
         stderr: Vec<u8>,
+        stdout_truncated: bool,
+        stderr_truncated: bool,
         status: i32,
         success: bool,
     },
     TimedOut,
+}
+
+/// Retain only the tail of each child stream while continuing to drain it.
+/// Test commands can otherwise allocate unbounded memory before the response's
+/// much smaller presentation cap is applied.
+const MAX_PROCESS_CAPTURE_BYTES: usize = 256 * 1024;
+const MAX_GIT_CAPTURE_BYTES: usize = 1024 * 1024;
+
+#[derive(Default)]
+struct BoundedCapture {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+fn read_bounded_tail(mut reader: impl std::io::Read, max_bytes: usize) -> BoundedCapture {
+    use std::collections::VecDeque;
+
+    let mut tail: VecDeque<u8> = VecDeque::with_capacity(max_bytes.min(8 * 1024));
+    let mut buffer = [0u8; 8 * 1024];
+    let mut truncated = false;
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        tail.extend(&buffer[..read]);
+        if tail.len() > max_bytes {
+            let excess = tail.len() - max_bytes;
+            tail.drain(..excess);
+            truncated = true;
+        }
+    }
+    BoundedCapture {
+        bytes: tail.into_iter().collect(),
+        truncated,
+    }
+}
+
+fn read_bounded_head(mut reader: impl std::io::Read, max_bytes: usize) -> BoundedCapture {
+    let mut bytes = Vec::with_capacity(max_bytes.min(8 * 1024));
+    let mut buffer = [0u8; 8 * 1024];
+    let mut truncated = false;
+    loop {
+        let read = match reader.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        let remaining = max_bytes.saturating_sub(bytes.len());
+        bytes.extend_from_slice(&buffer[..read.min(remaining)]);
+        truncated |= read > remaining;
+    }
+    BoundedCapture { bytes, truncated }
+}
+
+struct BoundedCommandOutput {
+    stdout: BoundedCapture,
+    stderr: BoundedCapture,
+    status: std::process::ExitStatus,
+}
+
+fn run_bounded_command(
+    command: &mut std::process::Command,
+    max_bytes_per_stream: usize,
+) -> std::io::Result<BoundedCommandOutput> {
+    use std::process::Stdio;
+
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_handle = std::thread::spawn(move || {
+        stdout.map_or_else(BoundedCapture::default, |pipe| {
+            read_bounded_head(pipe, max_bytes_per_stream)
+        })
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        stderr.map_or_else(BoundedCapture::default, |pipe| {
+            read_bounded_head(pipe, max_bytes_per_stream)
+        })
+    });
+    let status = child.wait()?;
+    Ok(BoundedCommandOutput {
+        stdout: stdout_handle.join().unwrap_or_default(),
+        stderr: stderr_handle.join().unwrap_or_default(),
+        status,
+    })
 }
 
 /// Spawn `shell flag command` in `root` and enforce `timeout_secs`. Stdout and
@@ -1111,7 +1216,6 @@ fn run_with_timeout(
     root: &Path,
     timeout_secs: u64,
 ) -> std::io::Result<RunOutcome> {
-    use std::io::Read;
     use std::process::Stdio;
     use std::time::{Duration, Instant};
 
@@ -1128,20 +1232,26 @@ fn run_with_timeout(
     // forever, and our `try_wait` loop would never see it finish.
     let drain = |pipe: Option<std::process::ChildStdout>| {
         std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(mut p) = pipe {
-                let _ = p.read_to_end(&mut buf);
+            if let Some(pipe) = pipe {
+                read_bounded_tail(pipe, MAX_PROCESS_CAPTURE_BYTES)
+            } else {
+                BoundedCapture {
+                    bytes: Vec::new(),
+                    truncated: false,
+                }
             }
-            buf
         })
     };
     let drain_err = |pipe: Option<std::process::ChildStderr>| {
         std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(mut p) = pipe {
-                let _ = p.read_to_end(&mut buf);
+            if let Some(pipe) = pipe {
+                read_bounded_tail(pipe, MAX_PROCESS_CAPTURE_BYTES)
+            } else {
+                BoundedCapture {
+                    bytes: Vec::new(),
+                    truncated: false,
+                }
             }
-            buf
         })
     };
     let out_handle = drain(child.stdout.take());
@@ -1149,14 +1259,16 @@ fn run_with_timeout(
 
     let collect = |child: &mut std::process::Child,
                    status: std::process::ExitStatus,
-                   out_handle: std::thread::JoinHandle<Vec<u8>>,
-                   err_handle: std::thread::JoinHandle<Vec<u8>>| {
+                   out_handle: std::thread::JoinHandle<BoundedCapture>,
+                   err_handle: std::thread::JoinHandle<BoundedCapture>| {
         let _ = child;
         let stdout = out_handle.join().unwrap_or_default();
         let stderr = err_handle.join().unwrap_or_default();
         RunOutcome::Completed {
-            stdout,
-            stderr,
+            stdout: stdout.bytes,
+            stderr: stderr.bytes,
+            stdout_truncated: stdout.truncated,
+            stderr_truncated: stderr.truncated,
             status: status.code().unwrap_or(-1),
             success: status.success(),
         }
@@ -1191,7 +1303,6 @@ fn run_with_timeout(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn truncate_chars_snaps_below_multibyte_boundary() {
@@ -1225,21 +1336,13 @@ mod tests {
     }
 
     #[test]
-    fn normalize_within_root_collapses_and_rejects_escapes() {
-        let root = Path::new("/repo");
-        // Normal relative path resolves under root.
-        assert_eq!(
-            normalize_within_root(root, "src/main.rs").unwrap(),
-            Path::new("/repo/src/main.rs")
-        );
-        // Interior `..` that stays within root is fine.
-        assert_eq!(
-            normalize_within_root(root, "src/../lib.rs").unwrap(),
-            Path::new("/repo/lib.rs")
-        );
-        // Escaping `..` is rejected — this is the apply_patch traversal guard.
-        assert!(normalize_within_root(root, "../../etc/passwd").is_err());
-        assert!(normalize_within_root(root, "src/../../escape").is_err());
+    fn git_diff_revision_rejects_option_injection() {
+        assert!(is_safe_git_revision_arg("HEAD~1"));
+        assert!(is_safe_git_revision_arg("main"));
+        assert!(!is_safe_git_revision_arg(""));
+        assert!(!is_safe_git_revision_arg("   "));
+        assert!(!is_safe_git_revision_arg("--output=/tmp/should-not-exist"));
+        assert!(!is_safe_git_revision_arg("--ext-diff"));
     }
 
     #[cfg(unix)]
@@ -1282,5 +1385,35 @@ mod tests {
             }
             RunOutcome::TimedOut => panic!("draining large output must not time out"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_with_timeout_bounds_retained_output() {
+        let dir = std::env::temp_dir();
+        let outcome =
+            run_with_timeout("sh", "-c", "yes abcdefgh | head -n 100000", &dir, 30).unwrap();
+        match outcome {
+            RunOutcome::Completed {
+                stdout,
+                stdout_truncated,
+                ..
+            } => {
+                assert_eq!(stdout.len(), MAX_PROCESS_CAPTURE_BYTES);
+                assert!(stdout_truncated);
+            }
+            RunOutcome::TimedOut => panic!("bounded draining must not time out"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_command_drains_but_does_not_retain_unbounded_output() {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "yes abcdefgh | head -n 100000"]);
+        let output = run_bounded_command(&mut command, 32 * 1024).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout.bytes.len(), 32 * 1024);
+        assert!(output.stdout.truncated);
     }
 }

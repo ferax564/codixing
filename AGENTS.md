@@ -44,7 +44,6 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 - **Finding where something is defined** → `codixing symbols <name>`
 - **Literal or regex text scan** → `codixing grep "<pattern>"` (emits `path:line:col:text`; supports `--count`, `--files-with-matches`, `-i`, `--invert`, `--glob`, `--file`, `--json`)
 - **Searching by concept / natural language** → `codixing search "<query>"`
-- **Searching by symbol type** → `codixing search "<query>" --kind function` (function, struct, enum, trait, impl, const)
 - **Listing files by glob** → `Glob` tool (Codixing doesn't replace file finding)
 - **Impact analysis before a change** → `codixing impact <file>` (blast radius + affected tests)
 - **Seeing all callers of a function** → `codixing usages <name>`
@@ -64,18 +63,18 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 
 - `crates/core/` — engine: AST parsing, BM25, graph, embeddings, PageRank, test mapping, shared sessions, queue-based embedding (optional `rustqueue` feature), doc indexing (Markdown + HTML + reStructuredText + AsciiDoc + plain-text + OpenAPI/Swagger + Jupyter notebook dispatcher + optional PDF via `--features pdf`), change impact analysis, semantic concept graph, API surface analysis, type relations, usage example mining, cross-file context assembly, behavioral signatures, query-personalized PageRank (with LRU cache for repeat-seed BM25 sets), learned query reformulation (identifier co-occurrence + doc-to-code + session mining algorithm), output filter pipeline (TOML-based, tee recovery)
 - `crates/cli/` — `codixing` CLI binary
-- `crates/mcp/` — MCP server (`codixing-mcp`), 70 tools in `src/tools/` (always shipped in full — the `--medium` curation was removed in v0.38 after the agent benchmark showed it hid high-leverage tools like `get_complexity`)
+- `crates/mcp/` — MCP server (`codixing-mcp`) with generated tool definitions and profile-filtered discovery (`tool_defs/*.toml`)
 - `crates/server/` — HTTP API server (`codixing-server`), REST endpoints with SSE streaming for sync
 - `crates/core/src/federation/` — cross-repo federated search (`--federation config.json`)
 - `crates/lsp/` — LSP server (`codixing-lsp`), hover/go-to-def/refs/symbols/call hierarchy/complexity diagnostics/rename/semantic tokens
-- `Codex-plugin/` — Codex plugin with 5 skills + MCP server config
+- `claude-plugin/` — Claude Code plugin with 5 skills + MCP server config
 - `.codixing/` — index data (do not edit manually)
 
 ## Build & Test
 
 ```bash
 cargo build --release --workspace          # build all binaries
-cargo test --workspace                      # run all tests (1308)
+cargo test --workspace                      # run the full workspace suite
 cargo clippy --workspace -- -D warnings     # lint (must pass)
 cargo fmt --check                           # format check (must pass)
 
@@ -107,10 +106,10 @@ The Codixing Codex plugin provides 5 slash commands:
 
 Use `/codixing-release [version]` to ship. It handles everything:
 1. Pre-flight checks (clean state, tests, clippy, fmt)
-2. Version bump in all 5 locations
+2. Version bump in all 14 fields across 7 files
 3. Documentation update (README, AGENTS.md, docs/index.html)
 4. PR creation + CI monitoring + review comment fixes
-5. Merge + tag (with auto-tag re-push workaround)
+5. Merge + one automatic version tag; main CI dispatches the release after artifacts build
 6. GitHub Release notes
 7. Blog post (asks for angle first)
 8. X post via automarketing repo
@@ -120,16 +119,18 @@ Use `/codixing-release [version]` to ship. It handles everything:
 When bumping the version, update ALL of these files:
 
 1. `Cargo.toml` — `workspace.package.version`
-2. `npm/package.json` — `version`
-3. `docs/install.sh` — `VERSION`
-4. `Codex-plugin/.Codex-plugin/plugin.json` — `version`
-5. `.Codex-plugin/marketplace.json` — `metadata.version` AND `plugins[0].version`
+2. `Cargo.lock` — the source-less package versions for `codixing`, `codixing-core`, `codixing-lsp`, `codixing-mcp`, and `codixing-server`
+3. `npm/package.json` — `version`
+4. `editors/vscode/package.json` — `version`
+5. `editors/vscode/package-lock.json` — top-level `version` AND `packages[""].version`
+6. `claude-plugin/.claude-plugin/plugin.json` — `version`
+7. `.claude-plugin/marketplace.json` — `metadata.version`, the Codixing plugin version, AND immutable `source.ref` (`vX.Y.Z`)
 
 ### Dual plugin manifest
 
 The plugin lives in two files that must stay version-synced:
-- `.Codex-plugin/marketplace.json` — registry entry for the Codex marketplace (what `Codex plugin marketplace add` reads).
-- `Codex-plugin/.Codex-plugin/plugin.json` — the actual plugin bundle that ships with hooks + skills.
+- `.claude-plugin/marketplace.json` — registry entry for the Claude Code marketplace (what `claude plugin marketplace add` reads).
+- `claude-plugin/.claude-plugin/plugin.json` — the actual plugin bundle that ships with hooks + skills.
 
 Both are covered by `scripts/bump_version.py`; edit by hand only if you know why.
 
@@ -140,7 +141,7 @@ Both are covered by `scripts/bump_version.py`; edit by hand only if you know why
 Every commit MUST pass all 3 checks. No exceptions:
 
 ```bash
-cargo test --workspace                      # ALL tests must pass (1308)
+cargo test --workspace                      # ALL tests must pass
 cargo clippy --workspace -- -D warnings     # zero warnings
 cargo fmt --check                           # zero diffs
 ```
@@ -161,7 +162,7 @@ Never ship visual changes without visual verification.
 ### Documentation is part of the feature
 
 Every feature commit MUST include documentation updates:
-- Update test count in README.md, AGENTS.md, and docs/index.html
+- Keep durable test-suite wording accurate; do not hand-maintain an exact count
 - Update feature descriptions in README.md Key Features if applicable
 - Update AGENTS.md if the change affects project structure, tools, or capabilities
 - Update docs/docs.html if LSP or MCP capabilities change
@@ -181,7 +182,7 @@ When dispatching subagents (implementation, review, or any task):
 ### Plan quality
 
 Implementation plans MUST use actual API signatures, not guesses:
-- `grep` for real method signatures before writing plan code snippets
+- Use `codixing symbols`, `codixing context`, or a targeted file read to verify real method signatures before writing plan code snippets
 - Verify struct field names against the actual source
 - When a plan reviewer finds API mismatches, fix ALL of them — not just the ones flagged
 
@@ -190,7 +191,7 @@ Implementation plans MUST use actual API signatures, not guesses:
 When launching multiple feature branches in parallel (e.g. via worktree agents):
 
 1. **Plan merge order upfront.** Identify which files are shared and decide merge order from smallest/most-independent to largest.
-2. **Each PR must include its own docs updates.** Update README, website, test counts, and AGENTS.md as part of each feature PR.
+2. **Each PR must include its own docs updates.** Update README, website, and AGENTS.md as part of each feature PR.
 3. **Merge one at a time, wait for CI.** After each squash-merge, pull main, verify CI passes on main (including the Jekyll/Pages build), THEN rebase the next PR.
 4. **Check for behavioral interactions.** When planning features that change binary behavior (e.g., daemon auto-fork), explicitly note impacts on existing tests that spawn the binary as a subprocess.
 
@@ -198,14 +199,18 @@ When launching multiple feature branches in parallel (e.g. via worktree agents):
 
 The CI workflow (`.github/workflows/ci.yml`) has the following jobs:
 
-- **test** — builds and tests on Ubuntu, macOS, and Windows (matrix); runs clippy and fmt check
-- **vscode** — compiles the VS Code extension on Ubuntu
-- **release-build** — builds optimized release binaries for `x86_64-linux`, `aarch64-darwin`, and `x86_64-windows-msvc` (no-default-features). Runs only on `main` pushes and `v*` tag pushes — never on PRs. Uploads artifacts named `binaries-<suffix>` with 14-day retention. `needs: test` so broken code never produces binaries. Artifacts are downloaded by `release.yml` on tag push instead of rebuilding from scratch (saves ~25 min per release).
-- **audit** — runs `cargo-audit` on Ubuntu only; `continue-on-error: true` (non-blocking while advisories are triaged)
-- **coverage** — runs `cargo-llvm-cov` on Ubuntu only; uploads `lcov.info` as the `coverage-report` artifact
-- **benchmarks** — runs `cargo bench` on Ubuntu only; uploads `bench-results.txt` as the `benchmark-results` artifact; depends on `test` (only runs after tests pass)
+- **test** — blocking Ubuntu/macOS/Windows matrix. All legs validate JSON and formatting; Ubuntu and macOS build/test with default features and run clippy, while Windows builds/tests with `--no-default-features`. Ubuntu also runs the README ↔ CLI drift check and `scripts/self_audit.sh`.
+- **vscode** — blocking reusable `vsix.yml` job. It compiles, packages, and inspects the extension icon, license, and embedded version on every CI event; on `main` pushes it also uploads `vsix-package` with 14-day retention.
+- **msrv** — blocking Ubuntu check of all workspace targets at Rust 1.88 with `--no-default-features`.
+- **npm-installer** — blocking Ubuntu/Node 18 tests for release-version consistency and rollback, exact npm tarball comparison, downloader and signal forwarding, npm package contents, and the checksum-verified shell installer.
+- **audit** — blocking Ubuntu `cargo-audit` run. Its explicit advisory ignores are justified in `audit.toml`; there is no `continue-on-error` escape hatch.
+- **coverage** — blocking Ubuntu coverage generation and `coverage-report` artifact upload. The final Codecov upload alone is configured not to fail CI on a Codecov service error.
+- **release-build** — blocking three-platform matrix on `main` pushes only (never PRs or tag pushes). It has `needs: [test, npm-installer]`, builds the four binaries for Linux x86_64, macOS arm64, and Windows x86_64 (Windows uses `--no-default-features`), and uploads `binaries-<suffix>` artifacts with 14-day retention.
+- **benchmarks** — blocking Ubuntu `cargo bench` job with no `needs` dependency, so it starts in parallel rather than waiting for `test`; uploads `benchmark-results`.
 
-**CI → release coupling invariant:** `release.yml` references `workflow: ci.yml` when downloading artifacts via `dawidd6/action-download-artifact`. If you rename `ci.yml`, update `release.yml` at the same time or release.yml will fail to find binaries. Same rule applies to the `release-build` job name and the `binaries-<suffix>` artifact naming convention — both are contractual with the downloader.
+The auto-tag workflow waits for the entire CI workflow to conclude successfully, so every blocking job above gates release tagging even though `release-build` itself directly depends only on `test` and `npm-installer`.
+
+**CI → release coupling invariant:** `release.yml` resolves a successful `ci.yml` run for the exact tagged commit and downloads `binaries-linux-x86_64`, `binaries-macos-aarch64`, `binaries-windows-x86_64`, and `vsix-package` with `gh run download`. If the CI filename, artifact names, or release-build/VSIX publication behavior changes, update `release.yml` in the same change.
 
 ### CI checklist before merging
 
@@ -213,21 +218,21 @@ Before merging any PR:
 - [ ] All CI checks green (macOS + Ubuntu + Windows)
 - [ ] GitHub Pages build passes (no Jekyll/Liquid errors)
 - [ ] Review comments addressed and responded to
-- [ ] Test count in README/AGENTS.md/website matches actual `cargo test` output
+- [ ] Documentation describes the current test matrix without a stale hand-maintained exact count
 - [ ] Documentation updated for all new features
 
 ### Release checklist
 
 Before tagging a release:
 - [ ] All pending PRs merged to main (`gh pr list --state open --base main` must be empty)
-- [ ] All 5 version locations updated (see above)
+- [ ] All 14 version fields across the 7 files above are updated
 - [ ] `cargo test --workspace` passes locally
 - [ ] `cargo clippy --workspace -- -D warnings` passes
 - [ ] `cargo fmt --check` passes
 - [ ] README Key Features section reflects new features
-- [ ] docs/index.html test count and tool count are correct
+- [ ] docs/index.html describes the current CLI/MCP/test surfaces without stale exact counts
 - [ ] docs/docs.html has no stale references
-- [ ] Plugin version matches in both `Codex-plugin/` and `.Codex-plugin/marketplace.json`
+- [ ] Plugin version matches in both `claude-plugin/` and `.claude-plugin/marketplace.json`
 - [ ] GitHub Pages build succeeds (check the deploy workflow)
 - [ ] **CI run on the merge commit produced `binaries-linux-x86_64`, `binaries-macos-aarch64`, and `binaries-windows-x86_64` artifacts** — `release.yml` downloads these by commit SHA instead of rebuilding. Check the Actions tab for the CI run on the target commit. If the release-build job failed or never ran, re-trigger CI (push an empty commit) before tagging, or `release.yml` will fail to find artifacts. Artifact retention is 14 days.
 
@@ -257,18 +262,19 @@ When adding a new crate that depends on `codixing-core`, ALWAYS:
 
 ## MCP Server Configuration
 
-The `.mcp.json` configures the Codixing MCP server for Codex. **Required flags:**
+The `.mcp.json` configures the Codixing MCP server for Codex. **Recommended for editor stdio:**
 
 - `--no-daemon-fork` — prevents stale daemon socket issues that silently kill the MCP connection
 
-The `--medium` flag was removed in v0.38. `codixing-mcp` now always advertises
-the full 70-tool catalog. The April 2026 agent benchmark found
+The `--medium` flag was removed in v0.38. `codixing-mcp` generates its catalog
+from `tool_defs/*.toml` and filters `tools/list` by the active profile. The April 2026 agent benchmark found
 `--medium` was hiding `get_complexity`, `review_context`, and other showcase
 tools — fixing the curation restored the March "66% fewer tokens / 66% fewer
 calls" headline. See `docs/research-recall-stickiness-2026-04-13.md` §4.19–4.24.
-MCP profile flags set the startup default only; agents can call
-`get_mcp_profile` and `set_mcp_profile` at runtime to inspect or switch the
-active profile for the current connection without killing the MCP server.
+Agents can call `get_mcp_profile` and `set_mcp_profile` at runtime to inspect or
+switch within the server's startup safety ceiling. Minimal/reviewer startup is
+read-only; `--allow-profile-escalation` must be explicit if runtime promotion to
+a write-capable profile is intended.
 
 Example `.mcp.json`:
 ```json
@@ -288,14 +294,13 @@ Example `.mcp.json`:
 The Codixing index lives in `.codixing/`. After significant file changes, sync it:
 
 ```bash
-ORT_DYLIB_PATH=~/.local/lib/libonnxruntime.so LD_LIBRARY_PATH=~/.local/lib \
-  ./target/release/codixing sync .
+./target/release/codixing sync .
 ```
 
 To rebuild from scratch (BgeSmallEn is the recommended model — fastest init, good retrieval):
 ```bash
-ORT_DYLIB_PATH=~/.local/lib/libonnxruntime.so LD_LIBRARY_PATH=~/.local/lib \
-  ./target/release/codixing init . --model bge-small-en
+ORT_DYLIB_PATH=/absolute/path/to/libonnxruntime.so \
+  ./target/release/codixing init . --embed --model bge-small-en
 ```
 
 ## Grep Trigram Benchmark
@@ -345,9 +350,9 @@ See `benchmarks/results/README.md` § "Release-to-release performance comparison
 | BM25-only    | 0.3s      | —    | ~115ms           | ~35ms       | No ONNX needed |
 | **BgeSmallEn** | **110s** | 384  | ~107ms           | ~35ms       | **Recommended** — hybrid search shines on NL queries |
 
-ONNX Runtime lives at `~/.local/lib/`:
-- macOS: `~/.local/lib/libonnxruntime.dylib` (v1.24.3, installed via pip's `onnxruntime` package)
-- Linux: `~/.local/lib/libonnxruntime.so` (v1.23.2+)
-
-Set `ORT_DYLIB_PATH` (macOS) or `LD_LIBRARY_PATH` (Linux) for BgeSmallEn/BgeBaseEn to work.
-The `.mcp.json` already sets this for the MCP server.
+For BgeSmallEn/BgeBaseEn, set `ORT_DYLIB_PATH` on every platform to the exact
+absolute shared-library file (`libonnxruntime.dylib`, `libonnxruntime.so`, or
+`onnxruntime.dll`). `LD_LIBRARY_PATH` may still be needed on Linux when that
+library has dependencies outside the loader's normal search path. Run
+`codixing doctor` to verify the resolved runtime; BM25-only operation needs no
+ONNX Runtime.

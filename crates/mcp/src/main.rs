@@ -5,7 +5,8 @@
 //!
 //! **Daemon mode** (`--daemon`):
 //!   Loads the engine once and serves it over a Unix domain socket
-//!   (`.codixing/daemon.sock`) or a Windows named pipe
+//!   (`.codixing/daemon-<profile>[-escalating].sock`) or a policy-specific
+//!   Windows named pipe
 //!   (`\\.\pipe\codixing-<hash>`). Subsequent `codixing-mcp` invocations
 //!   detect the live daemon and proxy their stdin/stdout through it,
 //!   making per-call latency ~1 ms instead of ~30 ms.
@@ -31,7 +32,7 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use tokio::io::{AsyncBufReadExt, BufReader, BufWriter};
+use tokio::io::{BufReader, BufWriter};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -53,14 +54,16 @@ struct Args {
     root: PathBuf,
 
     /// Start in daemon mode: load the engine once and serve multiple clients
-    /// concurrently. On Unix, listens on a domain socket (`.codixing/daemon.sock`).
-    /// On Windows, listens on a named pipe (`\\.\pipe\codixing-<hash>`).
+    /// concurrently. The Unix socket and Windows named-pipe names include the
+    /// startup profile and escalation policy so distinct safety ceilings cannot
+    /// accidentally share one daemon.
     /// Subsequent `codixing-mcp` invocations will auto-proxy through the daemon.
     #[arg(long)]
     daemon: bool,
 
     /// Path to the Unix socket used by daemon mode (Unix only).
-    /// Defaults to `<root>/.codixing/daemon.sock`.
+    /// Defaults to `<root>/.codixing/daemon-<profile>[-escalating].sock` on Unix
+    /// and a policy-specific Codixing named pipe on Windows.
     /// On Windows, the pipe name is derived automatically from the root path.
     #[arg(long)]
     socket: Option<PathBuf>,
@@ -83,13 +86,18 @@ struct Args {
     no_daemon_fork: bool,
 
     /// Initial MCP tool exposure profile. Agents can switch per connection
-    /// at runtime with the set_mcp_profile tool.
-    #[arg(long, value_enum, default_value_t = jsonrpc::McpProfile::Reviewer)]
+    /// at runtime within the startup safety ceiling.
+    #[arg(long, value_enum, default_value_t = jsonrpc::McpProfile::Minimal)]
     profile: jsonrpc::McpProfile,
 
     /// Shortcut for `--profile editor`: expose non-destructive write tools.
     #[arg(long)]
     allow_write_tools: bool,
+
+    /// Allow runtime profile upgrades beyond the startup safety ceiling.
+    /// Without this explicit opt-in, minimal/reviewer servers stay read-only.
+    #[arg(long)]
+    allow_profile_escalation: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +116,7 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     let profile = effective_profile(args.profile, args.allow_write_tools)?;
+    let runtime_profile_ceiling = jsonrpc::profile_ceiling(profile, args.allow_profile_escalation);
 
     let root = args
         .root
@@ -117,7 +126,7 @@ async fn main() -> Result<()> {
     #[cfg(unix)]
     let socket_path = args
         .socket
-        .unwrap_or_else(|| default_socket_path(&root, profile));
+        .unwrap_or_else(|| default_socket_path(&root, profile, args.allow_profile_escalation));
 
     // Optionally load a federated engine for cross-repo search.
     let federation: Option<Arc<FederatedEngine>> = match &args.federation {
@@ -149,12 +158,27 @@ async fn main() -> Result<()> {
 
         #[cfg(unix)]
         {
-            daemon::run_daemon(engine, &socket_path, federation, profile).await
+            daemon::run_daemon(
+                engine,
+                &socket_path,
+                federation,
+                profile,
+                runtime_profile_ceiling,
+            )
+            .await
         }
         #[cfg(windows)]
         {
-            let pipe_name = daemon_windows::pipe_name_for_root(&root, profile);
-            daemon_windows::run_daemon(engine, &pipe_name, federation, profile).await
+            let pipe_name =
+                daemon_windows::pipe_name_for_root(&root, profile, args.allow_profile_escalation);
+            daemon_windows::run_daemon(
+                engine,
+                &pipe_name,
+                federation,
+                profile,
+                runtime_profile_ceiling,
+            )
+            .await
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -197,6 +221,9 @@ async fn main() -> Result<()> {
             }
             daemon_args.push("--profile".to_string());
             daemon_args.push(profile.as_str().to_string());
+            if args.allow_profile_escalation {
+                daemon_args.push("--allow-profile-escalation".to_string());
+            }
             std::process::Command::new(&exe)
                 .args(&daemon_args)
                 .stdin(std::process::Stdio::null())
@@ -216,7 +243,8 @@ async fn main() -> Result<()> {
 
         // Auto-fork a daemon if none is running (Windows).
         #[cfg(windows)]
-        let pipe_name = daemon_windows::pipe_name_for_root(&root, profile);
+        let pipe_name =
+            daemon_windows::pipe_name_for_root(&root, profile, args.allow_profile_escalation);
         #[cfg(windows)]
         if !args.no_daemon_fork && !daemon_windows::pipe_alive(&pipe_name).await {
             info!("auto-starting daemon on pipe {}", pipe_name);
@@ -242,6 +270,9 @@ async fn main() -> Result<()> {
             }
             daemon_args.push("--profile".to_string());
             daemon_args.push(profile.as_str().to_string());
+            if args.allow_profile_escalation {
+                daemon_args.push("--allow-profile-escalation".to_string());
+            }
             std::process::Command::new(&exe)
                 .args(&daemon_args)
                 .stdin(std::process::Stdio::null())
@@ -285,10 +316,11 @@ async fn main() -> Result<()> {
             let stdout = tokio::io::stdout();
             jsonrpc::run_jsonrpc_loop(
                 engine,
-                BufReader::new(stdin).lines(),
+                BufReader::new(stdin),
                 BufWriter::new(stdout),
                 federation,
                 profile,
+                runtime_profile_ceiling,
             )
             .await
         }
@@ -303,18 +335,26 @@ fn effective_profile(
         return Ok(profile);
     }
     match profile {
-        jsonrpc::McpProfile::Reviewer => Ok(jsonrpc::McpProfile::Editor),
-        jsonrpc::McpProfile::Editor | jsonrpc::McpProfile::Dangerous => Ok(profile),
-        jsonrpc::McpProfile::Minimal => {
-            anyhow::bail!("--allow-write-tools cannot be combined with --profile minimal")
+        jsonrpc::McpProfile::Minimal | jsonrpc::McpProfile::Reviewer => {
+            Ok(jsonrpc::McpProfile::Editor)
         }
+        jsonrpc::McpProfile::Editor | jsonrpc::McpProfile::Dangerous => Ok(profile),
     }
 }
 
 #[cfg(unix)]
-fn default_socket_path(root: &Path, profile: jsonrpc::McpProfile) -> PathBuf {
+fn default_socket_path(
+    root: &Path,
+    profile: jsonrpc::McpProfile,
+    allow_profile_escalation: bool,
+) -> PathBuf {
+    let policy_suffix = if allow_profile_escalation {
+        "-escalating"
+    } else {
+        ""
+    };
     root.join(".codixing")
-        .join(format!("daemon-{}.sock", profile.as_str()))
+        .join(format!("daemon-{}{policy_suffix}.sock", profile.as_str()))
 }
 
 // ---------------------------------------------------------------------------
@@ -325,7 +365,7 @@ async fn load_engine(root: &Path, profile: jsonrpc::McpProfile) -> Result<Engine
     if Engine::index_exists(root) {
         // Read-only profiles expose no mutating tools — open without the
         // writer so the Tantivy write lock stays free for CLI syncs running
-        // alongside. A later set_mcp_profile upgrade re-acquires the writer.
+        // alongside. An allowed set_mcp_profile upgrade re-acquires the writer.
         if profile.is_read_only_profile() {
             info!(
                 root = %root.display(),
@@ -385,6 +425,46 @@ async fn load_engine(root: &Path, profile: jsonrpc::McpProfile) -> Result<Engine
 #[cfg(test)]
 mod load_engine_tests {
     use super::*;
+
+    #[test]
+    fn cli_default_profile_is_minimal() {
+        let args = Args::try_parse_from(["codixing-mcp"]).expect("default args should parse");
+        assert_eq!(args.profile, jsonrpc::McpProfile::Minimal);
+        assert!(!args.allow_profile_escalation);
+        assert_eq!(
+            jsonrpc::profile_ceiling(args.profile, args.allow_profile_escalation),
+            jsonrpc::McpProfile::Reviewer
+        );
+    }
+
+    #[test]
+    fn profile_escalation_requires_explicit_startup_flag() {
+        let args = Args::try_parse_from(["codixing-mcp", "--allow-profile-escalation"])
+            .expect("escalation flag should parse");
+        assert!(args.allow_profile_escalation);
+        assert_eq!(
+            jsonrpc::profile_ceiling(args.profile, args.allow_profile_escalation),
+            jsonrpc::McpProfile::Dangerous
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn escalating_daemon_uses_a_distinct_socket() {
+        let root = Path::new("/tmp/project");
+        assert_ne!(
+            default_socket_path(root, jsonrpc::McpProfile::Minimal, false),
+            default_socket_path(root, jsonrpc::McpProfile::Minimal, true)
+        );
+    }
+
+    #[test]
+    fn allow_write_tools_shortcut_still_selects_editor_from_default() {
+        assert_eq!(
+            effective_profile(jsonrpc::McpProfile::default(), true).unwrap(),
+            jsonrpc::McpProfile::Editor
+        );
+    }
 
     fn make_index(dir: &Path) {
         std::fs::write(

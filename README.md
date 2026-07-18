@@ -10,10 +10,17 @@ Code retrieval engine that saves your AI agent 73% of its token budget. Replaces
 ## Install
 
 ```sh
-curl -fsSL https://codixing.com/install.sh | sh
+curl --proto '=https' --proto-redir '=https' -fsSLo /tmp/codixing-install.sh https://codixing.com/install.sh
+sh /tmp/codixing-install.sh
 ```
 
-Installs `codixing` to `/usr/local/bin`. macOS (Apple Silicon) and Linux (x86_64). Binaries also on the [releases page](https://github.com/ferax564/codixing/releases).
+Installs the `codixing`, `codixing-mcp`, `codixing-lsp`, and
+`codixing-server` suite on Linux x86_64 or Apple Silicon macOS. It uses
+`/usr/local/bin` when writable and otherwise falls back to
+`$HOME/.local/bin`. Set `CODIXING_INSTALL_DIR` for another destination or
+`CODIXING_VERSION=X.Y.Z` to pin a release. Windows x86_64 binaries are on the
+[releases page](https://github.com/ferax564/codixing/releases), and the MCP
+server is also available through `npx -y codixing-mcp`.
 
 ### Claude Code plugin (optional)
 
@@ -33,13 +40,17 @@ Add to your project's `.mcp.json`:
   "mcpServers": {
     "codixing": {
       "command": "npx",
-      "args": ["-y", "codixing-mcp", "--root", ".", "--no-daemon-fork"]
+      "args": ["-y", "codixing-mcp", "--root", ".", "--profile", "minimal", "--no-daemon-fork"]
     }
   }
 }
 ```
 
-Or for OpenAI Codex CLI: `codex mcp add codixing -- codixing-mcp --root .`
+Or for OpenAI Codex CLI: `codex mcp add codixing -- npx -y codixing-mcp --root . --profile minimal --no-daemon-fork`
+
+For large repositories, run `codixing init .` before starting the MCP client. When
+using Codex configuration, set `startup_timeout_sec = 120` so the first `npx`
+download or index load is not cut off by the default startup timeout.
 
 ---
 
@@ -76,17 +87,21 @@ At 50 agent sessions/day, that's **$1,400/month** back in your pocket — and th
 If you are wiring Codixing into an AI agent, start with these tools instead of
 exposing the whole surface at once:
 
-| Task | Use this first | Why |
-|------|----------------|-----|
-| Find relevant code from a concept | `code_search` / `codixing search` | Ranked, token-bounded retrieval for natural language and code terms |
-| Jump to a known definition | `find_symbol` / `codixing symbols` | Definitions only, not every textual mention |
-| Check blast radius before editing | `search_usages --complete` or `predict_impact` / `codixing impact` | Deterministic callers/importers/tests instead of top-K guesses |
-| Understand a feature | `feature_hub` or `get_context_for_task` | One call combines search, dependencies, dependents, and tests |
-| Inspect exact text | `grep_code` / `codixing grep` | Literal/regex scan for strings, errors, TODOs, and generated names |
-| Focus on current work | `focus_map` / `codixing graph --map` | Graph-ranked context biased toward changed or seed files |
+| Task | Use this first | MCP profile | Why |
+|------|----------------|-------------|-----|
+| Find relevant code from a concept | `code_search` / `codixing search` | Minimal | Ranked, token-bounded retrieval for natural language and code terms |
+| Jump to a known definition | `find_symbol` / `codixing symbols` | Minimal | Definitions only, not every textual mention |
+| Get a compact architecture map | `get_repo_map` / `codixing graph --map` | Minimal | A bounded orientation pass before deeper traversal |
+| Check blast radius before editing | `search_usages --complete` or `predict_impact` / `codixing impact` | Reviewer | Deterministic bounded scan instead of top-K guesses; follow `next_offset` pages |
+| Understand a feature | `feature_hub` or `get_context_for_task` | Reviewer | One call combines search, dependencies, dependents, and tests |
+| Inspect exact text | `grep_code` / `codixing grep` | Reviewer | Literal/regex scan for strings, errors, TODOs, and generated names |
+| Focus on current work | `focus_map` / `codixing graph --map` | Reviewer | Graph-ranked context biased toward changed or seed files |
 
-The rest of the MCP tools are specialist tools. Use `search_tools` and
-`get_tool_schema` when an agent needs to discover a narrower capability.
+Minimal is the startup default. Call `set_mcp_profile` with `reviewer` before
+using the read-only specialist rows above. Use `search_tools` and
+`get_tool_schema` when an agent needs to discover a narrower capability. A
+minimal/reviewer server cannot upgrade itself into a write-capable profile
+unless it was started explicitly with `--allow-profile-escalation`.
 
 ---
 
@@ -96,7 +111,8 @@ The rest of the MCP tools are specialist tools. Use `search_tools` and
 
 ```bash
 # 1. Install
-curl -fsSL https://codixing.com/install.sh | sh
+curl --proto '=https' --proto-redir '=https' -fsSLo /tmp/codixing-install.sh https://codixing.com/install.sh
+sh /tmp/codixing-install.sh
 
 # 2. Index your project
 codixing init .
@@ -127,7 +143,7 @@ codixing callees src/engine.rs    # what does this file import?
 codixing sync
 
 # Architecture map
-codixing graph --token-budget 4000
+codixing graph --map --token-budget 4000
 ```
 
 ### Hybrid search (optional)
@@ -142,8 +158,11 @@ codixing search "how does auth work" --strategy fast
 
 ONNX-based embedding models (`bge-small-en`, `bge-base-en`, etc.) require ONNX
 Runtime (`pip install onnxruntime`, or download from the
-[onnxruntime releases](https://github.com/microsoft/onnxruntime/releases)). The
-static `model2vec` model and BM25-only installs do not need it.
+[onnxruntime releases](https://github.com/microsoft/onnxruntime/releases)). Set
+`ORT_DYLIB_PATH` to the exact absolute path of `libonnxruntime.so`,
+`libonnxruntime.dylib`, or `onnxruntime.dll` before running Codixing. Run
+`codixing doctor` to verify the path. The static `model2vec` model and BM25-only
+installs do not need ONNX Runtime.
 
 ---
 
@@ -152,7 +171,7 @@ static `model2vec` model and BM25-only installs do not need it.
 The most common commands (run `codixing --help` for the full list):
 
 ```bash
-codixing search "query"          # Semantic code search
+codixing search "query"          # Ranked code search
 codixing grep "pattern"          # Literal/regex text scan (path:line:col:text)
 codixing symbols Widget          # Find symbol definitions
 codixing usages add_chunk        # Find call sites and imports
@@ -184,16 +203,19 @@ Full reference: [codixing.com/docs](https://codixing.com/docs)
 
 ### MCP server (optional)
 
-For editors with MCP support, the `codixing-mcp` binary has a 71-tool JSON-RPC 2.0 catalog.
-It starts in the read-only `reviewer` profile by default; use `--profile minimal`
-for a narrow search/symbol/repo-map surface, `--profile editor` or
+For editors with MCP support, the `codixing-mcp` binary exposes a generated,
+profile-gated JSON-RPC 2.0 catalog.
+It starts in the narrow read-only `minimal` profile by default; use
+`--profile reviewer` for the broader read-only analysis surface, `--profile editor` or
 `--allow-write-tools` for non-destructive write helpers, and `--profile dangerous`
-only when destructive file and shell tools are intentional. Agents can also call
-`get_mcp_profile` and `set_mcp_profile` to inspect or switch the active profile
-for the current MCP connection without restarting the server; successful switches
-emit `notifications/tools/list_changed` so clients can refresh `tools/list`.
+only when destructive file and shell tools are intentional. Agents can call
+`get_mcp_profile` and `set_mcp_profile` to inspect or switch within the server's
+startup safety ceiling. Minimal/reviewer startup remains read-only by default;
+`--allow-profile-escalation` is required to permit runtime write-profile upgrades.
+Successful switches emit `notifications/tools/list_changed` so clients can
+refresh `tools/list`.
 
-| Category | Tools |
+| Category | Representative tools |
 |----------|-------|
 | **Search** | code_search, find_symbol, grep_code, search_usages, read_symbol, find_similar, stitch_context |
 | **Graph** | get_repo_map, focus_map, get_references, get_transitive_deps, symbol_callers, symbol_callees, predict_impact, find_orphans, explain |
@@ -214,7 +236,8 @@ codixing-mcp --root /path/to/project --daemon  # explicit daemon start
 codixing-mcp --root /path/to/project --no-daemon-fork  # disable auto-start
 ```
 
-The daemon auto-updates the index within ~100ms of any file save.
+The daemon auto-updates the index after a short debounce on file saves, then
+persists the refreshed index before serving the new state.
 
 ---
 
@@ -279,7 +302,7 @@ Raw results: [external_competitor_benchmark.md](benchmarks/results/external_comp
 
 **Large codebase** (368K LoC, 7,607 files): Init 7.9s, search 94ms, 99% token reduction vs grep.
 
-**Linux kernel** (63K C/H files, 30M+ lines, 84K-node dependency graph): 1.57s cold-start search, 0.79s warm via the MCP daemon path. Zero-deserialization mmap for instant startup. Note: fresh-process CLI invocations on a 2GB+ hybrid index pay startup cost on every call — prefer the MCP daemon or `--no-embeddings` for the CLI path.
+**Linux kernel** (63K C/H files, 30M+ lines, 84K-node dependency graph): 1.57s cold-start search, 0.79s warm via the MCP daemon path. Zero-deserialization mmap for instant startup. Note: fresh-process CLI invocations on a 2GB+ hybrid index pay startup cost on every call — prefer the MCP daemon or a BM25-only index (`codixing init .` without `--embed`) for the CLI path.
 
 **SWE-bench Lite** (300 tasks, 12 repos): Recall@5 = 74.3% (vs grep 41.3%).
 
@@ -289,7 +312,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ## Key Features
 
-- **29 languages** — Tree-sitter AST for Rust, Python, TypeScript, Go, Java, C, C++, C#, Ruby, Swift, Kotlin, Scala, Zig, PHP, Bash, Matlab; line-based parsing for config/diagram formats (YAML, TOML, Dockerfile, Makefile, Mermaid, XML); structured doc parsers for Markdown, HTML, reStructuredText, AsciiDoc, and plain text
+- **Broad language and document support** — Tree-sitter AST for Rust, Python, JavaScript/TypeScript/TSX, Go, Java, C, C++, C#, Ruby, Swift, Kotlin, Scala, Zig, PHP, Bash, and Matlab; line-based parsing for config/diagram formats (YAML, TOML, Dockerfile, Makefile, Mermaid, XML); structured doc parsers for Markdown, HTML, reStructuredText, AsciiDoc, and plain text
 - **Documentation indexing** — indexes Markdown, HTML, reStructuredText (`.rst`), AsciiDoc (`.adoc`), and plain text (`.txt` + bare `README`/`LICENSE`/`AUTHORS`/`CHANGELOG`) alongside code with section-aware chunking, CHANGELOG-aware version-section splitting, breadcrumb metadata, and doc-to-code graph linking; use `--docs-only` to restrict results to docs or `--code-only` to exclude them
 - **Hybrid search** — BM25 + optional vector embeddings, fused with Reciprocal Rank Fusion
 - **Symbol-level call graph** — Function-to-function call edges extracted from AST, including Rust trait dispatch, Python class inheritance, and TypeScript interface implementations
@@ -310,21 +333,21 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Usage example mining** — `codixing examples` finds real usage from tests, callers, and doc blocks
 - **Cross-file context assembly** — `codixing context` follows import chains and callees to assemble understanding context
 - **Agent context pack** — `codixing agent-context-pack` and MCP `agent_context_pack` compile a versioned JSON pack with repo orientation, must-read evidence handles, related symbols, likely tests, docs, risks, and recommended next tools
-- **External-context import** — `codixing import <github|adr|jira|linear> <path>` (and the `import_external` MCP tool) ingest GitHub issues/PRs (from `gh issue list --json …` or the REST API), architecture decision records, and Jira/Linear issue exports (CSV or JSON, auto-detected) as first-class searchable documents. Imported context is chunked like docs, linked to the code symbols it mentions (doc→code graph edges, so `callers`/`impact` surface the tickets discussing a file), and tagged so `codixing search --source github` (or `--source jira` / `linear` / `adr` / `external`) scopes results. Fully local — no SaaS connector or API key. Re-importing a source replaces it; imports survive `sync` (a full `init` rebuilds from disk, so re-run imports after)
+- **External-context import** — `codixing import <github|adr|jira|linear> <path>` and the MCP `import_external` tool ingest GitHub issues/PRs (from `gh issue list --json …` or the REST API), architecture decision records, and Jira/Linear issue exports (CSV or JSON, auto-detected) as first-class searchable documents. Imported context is chunked like docs, linked to the code symbols it mentions (doc→code graph edges, so `callers`/`impact` surface the tickets discussing a file), and tagged so `codixing search --source github` (or `--source jira` / `linear` / `adr` / `external`) scopes results. Fully local — no SaaS connector or API key. Re-importing a source replaces it; imports survive `sync` (a full `init` rebuilds from disk, so re-run imports after)
 - **Query-personalized PageRank** — Query-time graph boost seeds PageRank from query-relevant nodes for context-aware ranking
 - **Learned query reformulation** — Project-specific vocabulary expansion learns from codebase patterns
-- **CLI + MCP** — Full CLI surface for direct use (run `codixing --help`); 71 MCP tools for editor integration (search, graph traversal, file operations, code review, git analysis, session memory, federation discovery)
+- **CLI + MCP** — Full CLI surface for direct use (run `codixing --help`) plus a profile-gated MCP catalog for editor integration (search, graph traversal, file operations, code review, git analysis, session memory, federation discovery)
 - **File freshness audit** — `audit_freshness` tool identifies stale and orphaned files across releases
 - **Preflight gates** — Plugin enforces existence scanning before proposing new features
 - **TypeScript import resolution** — Resolve `.js` → `.ts` imports with node16/bundler moduleResolution support, enabling 0.8+ R@10 on cross-package code discovery
-- **Background embedding drain** — Instant BM25 search after `codixing init`, hybrid vector search transparently upgrades as embeddings complete in the background
+- **BM25-first embedding workflow** — Plain `codixing init .` creates the fast lexical/graph index. `init --embed` builds vectors and waits for a durable checkpoint; `init --embed --defer-embeddings` intentionally returns BM25-only and `codixing embed` adds vectors later without re-indexing source
 - **Model2Vec with code-aware preprocessing** — Static embeddings via `potion-base-8M` (no ONNX needed, instant init). CamelCase/snake_case splitting before tokenization reduces subword fragments by 50-70%, achieving MRR 1.000 on concept queries
 - **Jina Code Int8** — `jina-embeddings-v2-base-code` int8-quantized for ARM64 (768 dims, 8ms/query, nDCG@10 0.949). Set `JINA_CODE_INT8_ONNX` env var to the model path
 - **Embedding speed measurement** — New `bench-embed` CLI subcommand for profiling embedding performance across custom models
 - **Health diagnostics** — `codixing doctor` reports binary/version, index metadata health, git staleness, daemon endpoint status, ONNX runtime configuration, and index disk usage in human or JSON form
 - **Daemon mode** — Engine stays in memory, auto-starts on first connection, Unix socket (macOS/Linux) or named pipe (Windows) IPC, file watcher for live index updates, 30-min idle timeout
 - **Field-weighted BM25** — Configurable per-field boosting (entity_names 3×, signature 2×, scope_chain 1.5×, content 1×)
-- **Search pipeline** — Composable search stages (definition boost, test demotion, path match, graph boost, recency boost, graph semantic propagation via GraphPropagationStage, file-level dedup via FileDedupStage, truncation) with 6 strategies including trigram exact-match
+- **Search pipeline** — Composable search stages (definition boost, test demotion, path match, graph boost, recency boost, graph semantic propagation via GraphPropagationStage, file-level dedup via FileDedupStage, truncation) with seven strategies, including trigram exact-match and embedding-free semantic matching
 - **Multi-query RRF fusion** — Auto-generates query reformulations for natural-language queries (3+ words) and fuses results via Reciprocal Rank Fusion; also available via explicit `queries` parameter on `code_search`
 - **Git recency signal** — Mildly boosts recently modified files (+10% linear decay over 180 days) via lazy-loaded git log timestamps
 - **Overlapping chunks** — Bridge chunks at AST-aware chunk boundaries capture cross-function context; configurable `overlap_ratio` (default 0.0)
@@ -332,7 +355,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Kernel-scale performance** — Tested on the Linux kernel (63K C/H files, 30M+ lines, 84K-node graph): 1.57s cold-start search, 0.79s warm via the MCP daemon. Mmap symbol table AND trigram index (zero-deserialization), compact chunk metadata (11× smaller), lazy trigram loading
 - **Trigram pre-filtering** — File-level trigram inverted index (Russ Cox/trigrep technique) skips files before disk I/O; **110× faster** literal grep at 1K files, **52× faster** at 10K files; persistent bitcode storage, regex HIR walking with OR-branch support, parallel rayon verification
 - **LSP rename + semantic tokens** — Cross-file rename refactoring with conflict detection; semantic highlighting for Rust, Python, TypeScript, Go
-- **Queue-based embedding** — Optional RustQueue-backed pipeline with crash recovery, parallel ONNX workers (N× throughput), deferred embedding (`--defer-embeddings`), and streaming mpsc pattern that fixes OOM on large repos
+- **Optional RustQueue embedding primitives** — Feature-gated, file-grouped job and bounded-channel worker implementation for embedding experiments; the supported CLI durability path is `codixing embed` with generation checkpoints
 - **Streaming embeddings** — Fixed-window batch processing (256 chunks) with progress reporting; incremental vector reuse via content hashing
 - **Federation auto-discovery** — Auto-detects Cargo, npm, pnpm, Go workspaces, git submodules, and nested projects
 - **Read-only concurrent access** — Multiple instances share the same index; periodic reload detects writer updates automatically
@@ -340,12 +363,12 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Cosmetic-edit embedding reuse** — `sync` computes a deterministic per-file *signature fingerprint* (symbol signatures, imports, exports) from the AST; when a file's content changed but its fingerprint did not (a comment/whitespace/internal-logic edit), it refreshes BM25/symbols but reuses the cached embedding vectors instead of recomputing them. Conservative: any file without a stable fingerprint re-embeds
 - **Progress notifications** — Long-running MCP tools emit `notifications/progress` with streaming partial results so agents see live status
 - **Windows support** — Named pipe daemon, brute-force vector fallback when usearch (POSIX-only) is unavailable
-- **GitHub Action** — Automated code review with impact analysis on PRs
+- **GitHub Action** — Bounded dependency-impact analysis on PRs, with changed-file and comment-size ceilings for very large diffs
 - **Token budgets** — All output respects token limits; adaptive truncation at score cliffs
 - **Cross-repo federation** — Unified search across multiple indexed projects with CLI management and workspace auto-discovery (`codixing federation init/add/remove/list/search/discover`)
 - **Cross-package import graph** — `cross-imports` command finds files in one directory that import from another via single O(E) graph walk
 - **HTTP API server** — REST endpoints (search, symbols, grep, hotspots, complexity, outline, graph) with SSE streaming (`crates/server/`)
-- **Single binary** — No JVM, no Docker, no external databases, no API keys. macOS, Linux, and Windows
+- **Self-contained binaries** — No JVM, Docker, external database, or hosted API key. CLI, MCP, LSP, and HTTP server binaries are released for Linux, Apple Silicon macOS, and Windows x86_64
 
 ---
 
@@ -375,9 +398,9 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 │                                                                   │
 │  Retriever: BM25 · Hybrid (RRF) · Thorough (MMR) · Explore      │
 │  + Exact (trigram) · Graph boost · Definition 3.5× · Session     │
-│  SearchPipeline: composable stages, 6 strategies                  │
+│  SearchPipeline: composable stages, 7 strategies                  │
 │                                                                   │
-│  API: CLI · MCP (71 tools, JSON-RPC 2.0) · LSP · HTTP            │
+│  API: CLI · profile-gated MCP · LSP · HTTP                       │
 │       Daemon (Unix socket / Windows named pipe) · File Watcher   │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -388,7 +411,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # 1357 tests
+cargo test --workspace        # run the workspace test suite
 cargo clippy --workspace -- -D warnings
 cargo fmt --check
 ```

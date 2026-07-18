@@ -56,8 +56,9 @@ enum Command {
 
         /// Embedding model to use. Only meaningful with --embed.
         /// Options: bge-small-en, bge-base-en, bge-large-en,
-        ///          jina-embed-code, nomic-embed-code,
-        ///          snowflake-arctic-l, qwen3
+        ///          jina-embed-code, jina-code-int8, nomic-embed-code,
+        ///          snowflake-arctic-l, qwen3, model2vec,
+        ///          model2vec-retrieval, model2vec-jina-code
         #[arg(long, value_name = "MODEL", default_value = "bge-base-en")]
         model: String,
 
@@ -67,14 +68,14 @@ enum Command {
         #[arg(long)]
         reranker: bool,
 
-        /// With --embed: embed in the background and return after BM25+graph
-        /// is ready. Search is available immediately; vector hits phase in as
-        /// the background drain completes. No effect without --embed.
+        /// With --embed: skip vector construction and return with BM25+graph
+        /// only. Run `codixing embed` later to add vectors without re-indexing.
+        /// No effect without --embed.
         #[arg(long)]
         defer_embeddings: bool,
 
-        /// With --embed: block until embeddings complete before returning.
-        /// No effect without --embed.
+        /// Deprecated compatibility flag. `init --embed` now waits by default
+        /// so the process cannot exit with an incomplete vector index.
         #[arg(long)]
         wait: bool,
 
@@ -131,7 +132,7 @@ enum Command {
 
         /// Only return imported external-context results. Pass a bare `--source`
         /// (or `--source external`) for any import, or a namespace like
-        /// `--source github` / `--source adr` to filter to one source.
+        /// `--source github`, `adr`, `jira`, or `linear` to filter to one source.
         #[arg(long, value_name = "SOURCE", num_args = 0..=1, default_missing_value = "external")]
         source: Option<String>,
 
@@ -395,10 +396,11 @@ enum Command {
         #[arg(long)]
         count: bool,
 
-        /// Deterministic "all callers" mode: disables ranking and the result
-        /// cap, returns every known call site / import sorted by
-        /// `(file, line)`. Use for blast-radius queries where the top-K
-        /// ranked view hides the long tail.
+        /// Bounded deterministic callers mode: disables ranking, scans up to
+        /// 100,000 retrieved candidate chunks, and returns the known call sites
+        /// and imports sorted by `(file, line)`. Use for blast-radius queries
+        /// where the top-K ranked view hides the long tail; matches beyond the
+        /// scan ceiling are not reported.
         #[arg(long)]
         complete: bool,
     },
@@ -461,7 +463,7 @@ enum Command {
         threads: Option<usize>,
     },
 
-    /// Import external project context (GitHub issues/PRs, ADRs) into the index.
+    /// Import external project context (GitHub, ADR, Jira, or Linear) into the index.
     ///
     /// Imported documents become searchable alongside code and docs, are linked
     /// to the code symbols they mention (doc→code graph edges), and are tagged
@@ -471,11 +473,13 @@ enum Command {
     ///   github  PATH is a JSON file from `gh issue list --json …` (or the
     ///           GitHub REST API). PRs are detected and tagged automatically.
     ///   adr     PATH is a Markdown file or a directory of ADR records.
+    ///   jira    PATH is a Jira CSV export or REST API JSON response.
+    ///   linear  PATH is a Linear CSV export or API JSON response.
     ///
     /// Re-importing a source replaces its previously imported documents. A full
     /// `codixing init` rebuilds from disk only — re-run imports afterward.
     Import {
-        /// Source type: `github` or `adr`.
+        /// Source type: `github`, `adr`, `jira`, or `linear`.
         #[arg(value_name = "SOURCE")]
         source: String,
 
@@ -509,8 +513,8 @@ enum Command {
 
     /// Embed all un-embedded chunks in an existing BM25-only index.
     ///
-    /// Run this after initialising with `--no-embeddings` to add vector search
-    /// capability without a full re-index.  Only chunks that lack vector
+    /// Run this after a BM25-only `init` (without `--embed`) to add vector
+    /// search capability without a full re-index. Only chunks that lack vector
     /// representations are embedded; existing vectors are not re-computed.
     Embed {
         /// Project root to embed (defaults to current directory).
@@ -1288,7 +1292,7 @@ fn cmd_init(
         if defer_embeddings {
             config.embedding.enabled = false;
             eprintln!(
-                "Deferring embeddings — BM25+graph available immediately. Run `codixing embed` to add vectors."
+                "Skipping embeddings — BM25+graph will be available. Run `codixing embed` later to add vectors without re-indexing."
             );
         }
     } else if reranker || defer_embeddings {
@@ -1314,23 +1318,23 @@ fn cmd_init(
 
     let engine = Engine::init(&root, config).with_context(|| "failed to initialize index")?;
 
-    // Re-enable embeddings in the saved config so `codixing embed` works later.
-    // Engine::init() persists config.json early, and defer_embeddings set
-    // enabled=false. Without this fix, `codixing embed` would fail because
-    // Engine::open() reads the saved config and skips loading the embedder.
-    if embed && defer_embeddings {
-        let config_path = root.join(".codixing").join("config.json");
-        if let Ok(text) = std::fs::read_to_string(&config_path) {
-            if let Ok(mut saved) = serde_json::from_str::<serde_json::Value>(&text) {
-                if let Some(emb) = saved.get_mut("embedding") {
-                    emb["enabled"] = serde_json::Value::Bool(true);
-                    let _ = std::fs::write(
-                        &config_path,
-                        serde_json::to_string_pretty(&saved).unwrap_or_default(),
-                    );
-                }
-            }
+    if embed && !defer_embeddings && !engine.embeddings_ready() {
+        let (done, total) = engine.embedding_progress();
+        eprintln!("Embedding {total} chunks in background ({done}/{total} complete)...");
+        if !wait {
+            eprintln!(
+                "Waiting for embeddings to complete. To return BM25-only, pass --defer-embeddings and run `codixing embed` later."
+            );
         }
+        engine.wait_for_embeddings();
+    }
+    if embed && !defer_embeddings {
+        if engine.embeddings_failed() {
+            anyhow::bail!(
+                "embedding failed; the BM25+graph index is usable, and `codixing embed` can retry vector construction"
+            );
+        }
+        eprintln!("Embeddings complete.");
     }
 
     let stats = engine.stats();
@@ -1344,18 +1348,6 @@ fn cmd_init(
         stats.vector_count,
         elapsed.as_secs_f64(),
     );
-
-    if embed && !engine.embeddings_ready() {
-        let (done, total) = engine.embedding_progress();
-        eprintln!("Embedding {total} chunks in background ({done}/{total} complete)...");
-        eprintln!("Search is available now (BM25+graph ready; vector hits phase in).");
-
-        if wait {
-            eprintln!("Waiting for embeddings to complete (--wait)...");
-            engine.wait_for_embeddings();
-            eprintln!("Embeddings complete.");
-        }
-    }
 
     Ok(())
 }
@@ -1406,7 +1398,7 @@ fn cmd_search(
 ) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
 
-    // Fast path: if a codixing-mcp daemon is running at .codixing/daemon.sock,
+    // Fast path: if the default minimal codixing-mcp daemon is running,
     // proxy the search through it. The daemon holds the engine in memory, so
     // this avoids the ~4s cold-process startup on large hybrid indexes.
     //
@@ -1589,10 +1581,12 @@ fn cmd_grep(args: GrepArgs) -> Result<()> {
         (None, None) => None,
     };
 
-    // Fast path: daemon proxy. Only available when no --json / --file (the
-    // daemon handler ignores args it doesn't recognize, but we want the CLI's
-    // JSON rendering to match byte-for-byte whether warm or cold).
-    if !args.json && args.file.is_none() {
+    // Fast path: daemon proxy. Aggregate modes deliberately stay in-process:
+    // MCP caps result-producing calls at 100 entries, while the CLI promises
+    // an exact total when --count / --files-with-matches has no explicit
+    // limit. Proxying those modes would make the answer depend on whether a
+    // warm daemon happened to be running.
+    if !args.json && args.file.is_none() && !args.count && !args.files_with_matches {
         if let Some(text) = daemon_proxy::try_grep(
             &root,
             &args.pattern,
@@ -3743,7 +3737,7 @@ fn onnx_health() -> serde_json::Value {
 
 #[cfg(unix)]
 fn daemon_health(root: &Path) -> serde_json::Value {
-    let endpoint = root.join(".codixing").join("daemon.sock");
+    let endpoint = daemon_proxy::default_daemon_endpoint(root);
     let present = endpoint.exists();
     let connectable = std::os::unix::net::UnixStream::connect(&endpoint).is_ok();
     serde_json::json!({
@@ -3755,12 +3749,7 @@ fn daemon_health(root: &Path) -> serde_json::Value {
 
 #[cfg(windows)]
 fn daemon_health(root: &Path) -> serde_json::Value {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    root.hash(&mut hasher);
-    let endpoint = format!(r"\\.\pipe\codixing-{:016x}", hasher.finish());
+    let endpoint = daemon_proxy::default_daemon_endpoint(root);
     let connectable = std::fs::OpenOptions::new()
         .read(true)
         .write(true)

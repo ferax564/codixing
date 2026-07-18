@@ -403,27 +403,6 @@ impl GraphPropagationStage {
     const MAX_INJECTED: usize = 3;
     const CALLEE_DAMPING: f32 = 0.25;
     const CALLER_DAMPING: f32 = 0.15;
-
-    fn resolve_content(ctx: &SearchContext<'_>, chunk_id: u64, meta_content: &str) -> String {
-        if !meta_content.is_empty() {
-            return meta_content.to_string();
-        }
-        let Some(tantivy) = ctx.tantivy else {
-            return String::new();
-        };
-        let ids: std::collections::HashSet<u64> = [chunk_id].into_iter().collect();
-        let Ok(docs) = tantivy.lookup_chunks_by_ids(&ids) else {
-            return String::new();
-        };
-        let fields = tantivy.fields();
-        docs.into_iter()
-            .find_map(|doc| {
-                doc.get_first(fields.content)
-                    .and_then(|v| tantivy::schema::Value::as_str(&v))
-                    .map(ToString::to_string)
-            })
-            .unwrap_or_default()
-    }
 }
 
 impl SearchStage for GraphPropagationStage {
@@ -466,7 +445,9 @@ impl SearchStage for GraphPropagationStage {
         candidates.retain(|(path, _)| seen_candidates.insert(path.clone()));
         candidates.truncate(Self::MAX_INJECTED);
 
-        // Build SearchResult for each candidate from chunk_meta.
+        // Resolve candidate metadata first so compact content can be hydrated in
+        // one indexed Tantivy query rather than one query per injected result.
+        let mut candidate_chunks = Vec::with_capacity(candidates.len());
         for (file_path, score) in candidates {
             // Find the first chunk for this file in chunk_meta (lowest line_start).
             let best_chunk = chunk_meta
@@ -475,19 +456,46 @@ impl SearchStage for GraphPropagationStage {
                 .min_by_key(|entry| entry.value().line_start);
 
             if let Some(entry) = best_chunk {
-                let meta = entry.value();
-                results.push(SearchResult {
-                    chunk_id: meta.chunk_id.to_string(),
-                    file_path: meta.file_path.clone(),
-                    language: meta.language.clone(),
-                    score,
-                    line_start: meta.line_start,
-                    line_end: meta.line_end,
-                    signature: meta.signature.clone(),
-                    scope_chain: meta.scope_chain.clone(),
-                    content: Self::resolve_content(ctx, meta.chunk_id, &meta.content),
-                });
+                candidate_chunks.push((entry.value().clone(), score));
             }
+        }
+
+        let missing_content_ids: std::collections::HashSet<u64> = candidate_chunks
+            .iter()
+            .filter_map(|(meta, _)| meta.content.is_empty().then_some(meta.chunk_id))
+            .collect();
+        let hydrated_contents = if let Some(tantivy) = ctx.tantivy {
+            match tantivy.lookup_chunk_contents(&missing_content_ids) {
+                Ok(contents) => contents,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to batch-hydrate graph neighbors");
+                    std::collections::HashMap::new()
+                }
+            }
+        } else {
+            std::collections::HashMap::new()
+        };
+
+        for (meta, score) in candidate_chunks {
+            let content = if meta.content.is_empty() {
+                hydrated_contents
+                    .get(&meta.chunk_id)
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                meta.content.clone()
+            };
+            results.push(SearchResult {
+                chunk_id: meta.chunk_id.to_string(),
+                file_path: meta.file_path,
+                language: meta.language,
+                score,
+                line_start: meta.line_start,
+                line_end: meta.line_end,
+                signature: meta.signature,
+                scope_chain: meta.scope_chain,
+                content,
+            });
         }
 
         sort_descending(results);

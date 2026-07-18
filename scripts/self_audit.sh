@@ -29,7 +29,7 @@ FAILURES=0
 
 echo "== self-audit: init (fresh index, BM25-only) =="
 rm -rf .codixing
-INIT_OUT=$("$CODIXING" init . --model none 2>&1) || {
+INIT_OUT=$("$CODIXING" init . 2>&1) || {
   echo "FAIL: init exited non-zero"
   echo "$INIT_OUT"
   exit 1

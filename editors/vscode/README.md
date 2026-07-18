@@ -26,13 +26,15 @@ dependency graph, and MCP integration directly into VS Code and Cursor.
 
 ## Requirements
 
-Install the Codixing binaries:
+Install the complete Codixing binary suite:
 
 ```bash
-cargo install codixing codixing-mcp codixing-server
+curl --proto '=https' --proto-redir '=https' -fsSLo /tmp/codixing-install.sh https://codixing.com/install.sh
+sh /tmp/codixing-install.sh
 ```
 
-Or build from source:
+This installs `codixing`, `codixing-mcp`, `codixing-lsp`, and
+`codixing-server`. Or build all four from source:
 
 ```bash
 cargo build --release --workspace
@@ -54,7 +56,7 @@ cargo build --release --workspace
 
 ```bash
 cd editors/vscode
-npm install          # required before first build
+npm ci               # reproducible install from package-lock.json
 npm run compile      # compile TypeScript -> out/
 npm run package      # produce .vsix for manual install
 ```
