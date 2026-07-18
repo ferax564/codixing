@@ -378,7 +378,7 @@ mod trigram_v2_tests {
                 let word_id = lcg.next() % 50;
                 content.push_str(&format!("ident_{word_id} "));
             }
-            if (lcg.next() % 2) == 0 {
+            if lcg.next().is_multiple_of(2) {
                 content.push_str(literal);
                 content.push(' ');
             }

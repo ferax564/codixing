@@ -1131,7 +1131,7 @@ struct BoundedCapture {
 fn read_bounded_tail(mut reader: impl std::io::Read, max_bytes: usize) -> BoundedCapture {
     use std::collections::VecDeque;
 
-    let mut tail = VecDeque::with_capacity(max_bytes.min(8 * 1024));
+    let mut tail: VecDeque<u8> = VecDeque::with_capacity(max_bytes.min(8 * 1024));
     let mut buffer = [0u8; 8 * 1024];
     let mut truncated = false;
     loop {

@@ -1236,10 +1236,7 @@ impl FileTrigramIndex {
                 // the whole OR matches everything.
                 let mut result: std::collections::HashSet<&str> = std::collections::HashSet::new();
                 for sub in subs {
-                    match self.execute_plan(sub) {
-                        None => return None, // MatchAll branch → can't pre-filter
-                        Some(candidates) => result.extend(candidates),
-                    }
+                    result.extend(self.execute_plan(sub)?);
                 }
                 Some(result.into_iter().collect())
             }

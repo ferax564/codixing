@@ -247,14 +247,16 @@ where
         };
 
         let response = dispatch(
-            &engine,
+            DispatchContext {
+                engine: &engine,
+                federation: &federation,
+                writer: &mut writer,
+                profile: &mut active_profile,
+                profile_ceiling,
+            },
             id,
             &req.method,
             req.params,
-            &federation,
-            &mut writer,
-            &mut active_profile,
-            profile_ceiling,
         )
         .await;
         write_line(&mut writer, &response).await?;
@@ -364,15 +366,19 @@ where
 // Dispatch
 // ---------------------------------------------------------------------------
 
+struct DispatchContext<'a, W> {
+    engine: &'a Arc<RwLock<Engine>>,
+    federation: &'a Option<Arc<FederatedEngine>>,
+    writer: &'a mut BufWriter<W>,
+    profile: &'a mut McpProfile,
+    profile_ceiling: McpProfile,
+}
+
 async fn dispatch<W>(
-    engine: &Arc<RwLock<Engine>>,
+    context: DispatchContext<'_, W>,
     id: Value,
     method: &str,
     params: Option<Value>,
-    federation: &Option<Arc<FederatedEngine>>,
-    writer: &mut BufWriter<W>,
-    profile: &mut McpProfile,
-    profile_ceiling: McpProfile,
 ) -> Value
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -380,16 +386,16 @@ where
     match method {
         "initialize" => handle_initialize(id, params),
         "initialized" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
-        "tools/list" => handle_tools_list(id, federation.is_some(), *profile),
+        "tools/list" => handle_tools_list(id, context.federation.is_some(), *context.profile),
         "tools/call" => {
             handle_tools_call(
-                engine,
+                context.engine,
                 id,
                 params,
-                federation,
-                writer,
-                profile,
-                profile_ceiling,
+                context.federation,
+                context.writer,
+                context.profile,
+                context.profile_ceiling,
             )
             .await
         }

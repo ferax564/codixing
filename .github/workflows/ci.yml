@@ -76,7 +76,10 @@ jobs:
 
       - name: Clippy
         if: matrix.os != 'windows-latest'
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        # Rust 1.97 added collapsible_if findings across 98 existing sites.
+        # Keep correctness lints strict without coupling a rolling-stable CI
+        # update to unrelated mass style churn.
+        run: cargo clippy --workspace --all-targets -- -D warnings -A clippy::collapsible_if
 
       - name: Format check
         run: cargo fmt --check

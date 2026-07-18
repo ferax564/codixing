@@ -480,7 +480,7 @@ mod tests {
 
         assert!(response[..split].contains(&format!("\"id\":{CALL_RESPONSE_ID}")));
         assert!(
-            !contains_call_response(response[..split].as_bytes()),
+            !contains_call_response(&response.as_bytes()[..split]),
             "an id in an incomplete pipe frame must not terminate the read"
         );
         assert!(contains_call_response(response.as_bytes()));

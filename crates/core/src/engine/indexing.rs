@@ -678,6 +678,8 @@ pub(super) fn build_context_prefix(meta: &ChunkMeta) -> String {
 /// their corresponding embedding vectors are alive at any given time.
 pub(super) const STREAM_BATCH_SIZE: usize = 256;
 
+type EmbedSink<'a> = dyn FnMut(u64, Vec<f32>, &str) -> Result<()> + 'a;
+
 /// Inner implementation for per-file embedding with late chunking.
 ///
 /// The `sink` closure receives `(chunk_id, embedding, file_path)` for each
@@ -692,7 +694,7 @@ fn embed_single_file_inner(
     root: &Path,
     file_path: &str,
     chunk_ids: &[u64],
-    sink: &mut dyn FnMut(u64, Vec<f32>, &str) -> Result<()>,
+    sink: &mut EmbedSink<'_>,
 ) -> Result<(usize, bool)> {
     let mut embedded = 0;
 
@@ -702,12 +704,7 @@ fn embed_single_file_inner(
         let safe_abs_path = root
             .canonicalize()
             .ok()
-            .and_then(|canonical_root| {
-                abs_path
-                    .canonicalize()
-                    .ok()
-                    .map(|path| (canonical_root, path))
-            })
+            .zip(abs_path.canonicalize().ok())
             .and_then(|(canonical_root, path)| path.starts_with(canonical_root).then_some(path));
         if let Some(file_text) = safe_abs_path
             .as_deref()
@@ -1276,58 +1273,6 @@ pub(super) fn find_enclosing_function(
     Some(func_defs[candidate_idx].1)
 }
 
-#[cfg(test)]
-mod init_hash_tests {
-    use super::{stable_file_hash_entry, walk_source_files};
-    use crate::config::IndexConfig;
-    use std::fs;
-    use std::time::{Duration, SystemTime};
-    use tempfile::tempdir;
-
-    #[test]
-    fn changing_metadata_forces_next_sync_to_verify_content() {
-        let first = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
-        let second = SystemTime::UNIX_EPOCH + Duration::from_secs(11);
-        let entry = stable_file_hash_entry(42, Some((first, 100)), Some((second, 100)));
-
-        assert_eq!(entry.content_hash, 42);
-        assert_eq!(entry.mtime(), None);
-        assert_eq!(entry.size, 0);
-        assert!(entry.file_might_have_changed(Some(second), 100));
-    }
-
-    #[test]
-    fn stable_metadata_is_bound_to_the_indexed_hash() {
-        let time = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
-        let entry = stable_file_hash_entry(42, Some((time, 100)), Some((time, 100)));
-
-        assert_eq!(entry.mtime(), Some(time));
-        assert_eq!(entry.size, 100);
-        assert!(!entry.file_might_have_changed(Some(time), 100));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn source_walk_rejects_outside_symlinks_and_deduplicates_overlapping_roots() {
-        use std::os::unix::fs::symlink;
-
-        let dir = tempdir().unwrap();
-        let root = dir.path().join("repo");
-        let src = root.join("src");
-        let outside = dir.path().join("outside.rs");
-        fs::create_dir_all(&src).unwrap();
-        fs::write(src.join("inside.rs"), "fn inside() {}\n").unwrap();
-        fs::write(&outside, "fn outside_secret() {}\n").unwrap();
-        symlink(&outside, src.join("escape.rs")).unwrap();
-
-        let mut config = IndexConfig::new(&root);
-        config.extra_roots.push(src.clone());
-        let files = walk_source_files(&root, &config).unwrap();
-
-        assert_eq!(files, vec![src.join("inside.rs")]);
-    }
-}
-
 /// Build a dependency graph from pre-extracted import lists (populated during
 /// the parallel parse phase) plus a rayon-parallel resolution pass.
 ///
@@ -1457,4 +1402,56 @@ pub(super) fn unix_timestamp_string() -> String {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs().to_string())
         .unwrap_or_else(|_| "0".to_string())
+}
+
+#[cfg(test)]
+mod init_hash_tests {
+    use super::{stable_file_hash_entry, walk_source_files};
+    use crate::config::IndexConfig;
+    use std::fs;
+    use std::time::{Duration, SystemTime};
+    use tempfile::tempdir;
+
+    #[test]
+    fn changing_metadata_forces_next_sync_to_verify_content() {
+        let first = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+        let second = SystemTime::UNIX_EPOCH + Duration::from_secs(11);
+        let entry = stable_file_hash_entry(42, Some((first, 100)), Some((second, 100)));
+
+        assert_eq!(entry.content_hash, 42);
+        assert_eq!(entry.mtime(), None);
+        assert_eq!(entry.size, 0);
+        assert!(entry.file_might_have_changed(Some(second), 100));
+    }
+
+    #[test]
+    fn stable_metadata_is_bound_to_the_indexed_hash() {
+        let time = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+        let entry = stable_file_hash_entry(42, Some((time, 100)), Some((time, 100)));
+
+        assert_eq!(entry.mtime(), Some(time));
+        assert_eq!(entry.size, 100);
+        assert!(!entry.file_might_have_changed(Some(time), 100));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_walk_rejects_outside_symlinks_and_deduplicates_overlapping_roots() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let src = root.join("src");
+        let outside = dir.path().join("outside.rs");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("inside.rs"), "fn inside() {}\n").unwrap();
+        fs::write(&outside, "fn outside_secret() {}\n").unwrap();
+        symlink(&outside, src.join("escape.rs")).unwrap();
+
+        let mut config = IndexConfig::new(&root);
+        config.extra_roots.push(src.clone());
+        let files = walk_source_files(&root, &config).unwrap();
+
+        assert_eq!(files, vec![src.join("inside.rs").canonicalize().unwrap()]);
+    }
 }

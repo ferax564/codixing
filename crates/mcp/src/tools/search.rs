@@ -562,18 +562,6 @@ fn complete_usage_page(
     (start, end, has_more, has_more.then_some(end))
 }
 
-#[cfg(test)]
-mod complete_usage_tests {
-    use super::complete_usage_page;
-
-    #[test]
-    fn pagination_reports_the_next_offset_until_the_tail() {
-        assert_eq!(complete_usage_page(250, 0, 100), (0, 100, true, Some(100)));
-        assert_eq!(complete_usage_page(250, 200, 100), (200, 250, false, None));
-        assert_eq!(complete_usage_page(250, 999, 100), (250, 250, false, None));
-    }
-}
-
 pub(crate) fn call_read_symbol(engine: &Engine, args: &Value) -> (String, bool) {
     let name = match args.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
@@ -904,4 +892,16 @@ pub(crate) fn call_explain(
     );
 
     (out, false)
+}
+
+#[cfg(test)]
+mod complete_usage_tests {
+    use super::complete_usage_page;
+
+    #[test]
+    fn pagination_reports_the_next_offset_until_the_tail() {
+        assert_eq!(complete_usage_page(250, 0, 100), (0, 100, true, Some(100)));
+        assert_eq!(complete_usage_page(250, 200, 100), (200, 250, false, None));
+        assert_eq!(complete_usage_page(250, 999, 100), (250, 250, false, None));
+    }
 }

@@ -102,32 +102,33 @@ impl Engine {
         let pending_signatures: DashMap<String, u64> = DashMap::new();
         let pending_hashes: DashMap<std::path::PathBuf, FileHashEntry> = DashMap::new();
 
-        let ctx = IndexContext {
-            root: &root,
-            config: &config,
-            parser: &parser,
-            tantivy: &tantivy,
-            symbols: &symbols,
-            chunk_count: &chunk_count,
-            file_chunk_map: &file_chunk_map,
-            chunk_meta_map: &chunk_meta_map,
-            pending_embeds: &pending_embeds,
-            queue_embeddings: embedder.is_some(),
-            pending_imports: &pending_imports,
-            pending_calls: &pending_calls,
-            pending_symbol_graph: &pending_symbol_graph,
-            pending_doc_refs: &pending_doc_refs,
-            pending_signatures: &pending_signatures,
-            pending_hashes: &pending_hashes,
-        };
+        {
+            let ctx = IndexContext {
+                root: &root,
+                config: &config,
+                parser: &parser,
+                tantivy: &tantivy,
+                symbols: &symbols,
+                chunk_count: &chunk_count,
+                file_chunk_map: &file_chunk_map,
+                chunk_meta_map: &chunk_meta_map,
+                pending_embeds: &pending_embeds,
+                queue_embeddings: embedder.is_some(),
+                pending_imports: &pending_imports,
+                pending_calls: &pending_calls,
+                pending_symbol_graph: &pending_symbol_graph,
+                pending_doc_refs: &pending_doc_refs,
+                pending_signatures: &pending_signatures,
+                pending_hashes: &pending_hashes,
+            };
 
-        // Process files in parallel: parse → chunk → index → extract symbols.
-        files.par_iter().for_each(|path| {
-            if let Err(e) = process_file(path, &ctx) {
-                warn!(path = %path.display(), error = %e, "skipping file");
-            }
-        });
-        drop(ctx);
+            // Process files in parallel: parse → chunk → index → extract symbols.
+            files.par_iter().for_each(|path| {
+                if let Err(e) = process_file(path, &ctx) {
+                    warn!(path = %path.display(), error = %e, "skipping file");
+                }
+            });
+        }
 
         tantivy.commit()?;
 
