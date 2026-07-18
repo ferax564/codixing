@@ -11,7 +11,14 @@ use codixing_core::{
     Strategy,
 };
 
-use super::common::ProgressReporter;
+use super::{
+    MAX_TOOL_PAGINATION_OFFSET, common::ProgressReporter, requested_bounded_usize,
+    requested_result_count, requested_tool_token_budget,
+};
+
+const MAX_SEARCH_RESULTS: usize = 100;
+const MAX_REFORMULATION_QUERIES: usize = 8;
+const MAX_QUERY_CHARS: usize = 1_024;
 
 // ── search arg structs ──────────────────────────────────────────────────────
 
@@ -21,6 +28,8 @@ struct SearchArgs {
     kind_filter: Option<String>,
     fetch_limit: usize,
     effective_strategy: Strategy,
+    token_budget: usize,
+    check_staleness: bool,
 }
 
 // ── call_code_search helpers ────────────────────────────────────────────────
@@ -31,7 +40,16 @@ fn parse_search_args(engine: &Engine, args: &Value) -> Result<SearchArgs, String
         .get("query")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "Missing required argument: query".to_string())?
-        .to_string();
+        .trim();
+    if query_str.is_empty() {
+        return Err("Search query must not be blank".to_string());
+    }
+    if query_str.chars().count() > MAX_QUERY_CHARS {
+        return Err(format!(
+            "Search query is too long (maximum: {MAX_QUERY_CHARS} characters)"
+        ));
+    }
+    let query_str = query_str.to_string();
 
     let strategy = match args.get("strategy").and_then(|v| v.as_str()) {
         Some("instant") => Strategy::Instant,
@@ -44,7 +62,7 @@ fn parse_search_args(engine: &Engine, args: &Value) -> Result<SearchArgs, String
         _ => engine.detect_strategy(&query_str),
     };
 
-    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    let limit = requested_result_count(args, "limit", 10);
 
     // Optional type filter: "function", "struct", "enum", "trait", "class", "method", "type",
     // "const", "interface".
@@ -57,7 +75,10 @@ fn parse_search_args(engine: &Engine, args: &Value) -> Result<SearchArgs, String
     // 1. Get more results (definitions are rare among usage-heavy chunks)
     // 2. Skip adaptive truncation (which may cut definition chunks)
     let (fetch_limit, effective_strategy) = if kind_filter.is_some() {
-        (limit * 5, Strategy::Instant)
+        (
+            limit.saturating_mul(5).min(MAX_SEARCH_RESULTS),
+            Strategy::Instant,
+        )
     } else {
         (limit, strategy)
     };
@@ -68,6 +89,11 @@ fn parse_search_args(engine: &Engine, args: &Value) -> Result<SearchArgs, String
         kind_filter,
         fetch_limit,
         effective_strategy,
+        token_budget: requested_tool_token_budget(args),
+        check_staleness: args
+            .get("check_staleness")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
     })
 }
 
@@ -95,7 +121,10 @@ fn build_search_query(parsed: &SearchArgs, args: &Value) -> SearchQuery {
     // Extract optional multi-query reformulations for RRF fusion.
     let queries: Option<Vec<String>> = args.get("queries").and_then(|v| v.as_array()).map(|arr| {
         arr.iter()
-            .filter_map(|v| v.as_str().map(String::from))
+            .filter_map(|value| value.as_str().map(str::trim))
+            .filter(|value| !value.is_empty() && value.chars().count() <= MAX_QUERY_CHARS)
+            .take(MAX_REFORMULATION_QUERIES)
+            .map(String::from)
             .collect()
     });
     query.queries = queries;
@@ -249,18 +278,22 @@ fn format_search_output(
     results: &[SearchResult],
     limit: usize,
     kind_filter: &Option<String>,
+    token_budget: usize,
+    check_staleness: bool,
 ) -> String {
     let session = engine.session().clone();
     let mut out = String::new();
 
     // Staleness warning when index is significantly out of date.
-    let stale = engine.check_staleness();
-    let total_stale = stale.modified_files + stale.new_files + stale.deleted_files;
-    if stale.is_stale && total_stale > 10 {
-        out.push_str(&format!(
-            "> **Warning:** Index is stale ({} file(s) changed). Run `codixing sync .` to update.\n\n",
-            total_stale
-        ));
+    if check_staleness {
+        let stale = engine.check_staleness();
+        let total_stale = stale.modified_files + stale.new_files + stale.deleted_files;
+        if stale.is_stale && total_stale > 10 {
+            out.push_str(&format!(
+                "> **Warning:** Index is stale ({} file(s) changed). Run `codixing sync .` to update.\n\n",
+                total_stale
+            ));
+        }
     }
 
     if results.len() < limit {
@@ -292,7 +325,7 @@ fn format_search_output(
             out.push_str(&format!("\n```\n{}\n```\n\n", r.content));
         }
     } else {
-        out.push_str(&engine.format_results(results, Some(8000)));
+        out.push_str(&engine.format_results(results, Some(token_budget)));
     }
 
     if !engine.embeddings_ready() {
@@ -378,7 +411,14 @@ pub(crate) fn call_code_search(
                 }
             }
 
-            let out = format_search_output(engine, &results, parsed.limit, &parsed.kind_filter);
+            let out = format_search_output(
+                engine,
+                &results,
+                parsed.limit,
+                &parsed.kind_filter,
+                parsed.token_budget,
+                parsed.check_staleness,
+            );
             (out, false)
         }
         Err(e) => (format!("Search error: {e}"), true),
@@ -439,13 +479,17 @@ pub(crate) fn call_search_usages(engine: &Engine, args: &Value) -> (String, bool
         Some(s) => s.to_string(),
         None => return ("Missing required argument: symbol".to_string(), true),
     };
-    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+    let limit = requested_result_count(args, "limit", 20);
     let complete = args
         .get("complete")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let offset = requested_bounded_usize(args, "offset", 0, 0, MAX_TOOL_PAGINATION_OFFSET);
 
-    // Complete mode: deterministic, unranked, no cap.
+    // Complete mode: deterministic and unranked. The core performs a bounded
+    // candidate scan (currently at most 100,000 candidate chunks); MCP pages
+    // the resulting reference set so agents can traverse it without one
+    // context-heavy response.
     if complete {
         use codixing_core::ReferenceOptions;
         let refs = engine.symbol_references(
@@ -461,11 +505,18 @@ pub(crate) fn call_search_usages(engine: &Engine, args: &Value) -> (String, bool
                 false,
             );
         }
+        let total = refs.len();
+        let (start, end, has_more, next_offset) = complete_usage_page(total, offset, limit);
+        let page = &refs[start..end];
+        let next_offset = next_offset
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "null".to_string());
         let mut out = format!(
-            "Found {} location(s) referencing `{symbol}` (complete, deterministic, no ranking):\n\n",
-            refs.len()
+            "Found {total} location(s) referencing `{symbol}` in the deterministic bounded scan (no ranking; candidate cap: 100000).\n\
+             Page: offset={offset}, returned={}, limit={limit}, has_more={has_more}, next_offset={next_offset}\n\n",
+            page.len()
         );
-        for r in &refs {
+        for r in page {
             out.push_str(&format!("  {} L{} [{}]\n", r.file_path, r.line + 1, r.kind));
             if !r.context.is_empty() {
                 out.push_str(&format!("    {}\n", r.context));
@@ -497,6 +548,29 @@ pub(crate) fn call_search_usages(engine: &Engine, args: &Value) -> (String, bool
             (out, false)
         }
         Err(e) => (format!("Usage search error: {e}"), true),
+    }
+}
+
+fn complete_usage_page(
+    total: usize,
+    offset: usize,
+    limit: usize,
+) -> (usize, usize, bool, Option<usize>) {
+    let start = offset.min(total);
+    let end = start.saturating_add(limit).min(total);
+    let has_more = end < total;
+    (start, end, has_more, has_more.then_some(end))
+}
+
+#[cfg(test)]
+mod complete_usage_tests {
+    use super::complete_usage_page;
+
+    #[test]
+    fn pagination_reports_the_next_offset_until_the_tail() {
+        assert_eq!(complete_usage_page(250, 0, 100), (0, 100, true, Some(100)));
+        assert_eq!(complete_usage_page(250, 200, 100), (200, 250, false, None));
+        assert_eq!(complete_usage_page(250, 999, 100), (250, 250, false, None));
     }
 }
 
@@ -565,7 +639,7 @@ pub(crate) fn call_stitch_context(engine: &Engine, args: &Value) -> (String, boo
         Some(q) => q.to_string(),
         None => return ("Missing required argument: query".to_string(), true),
     };
-    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+    let limit = requested_result_count(args, "limit", 5);
 
     let sq = SearchQuery::new(&query).with_limit(limit);
     let results = match engine.search(sq) {

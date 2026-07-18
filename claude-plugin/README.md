@@ -9,6 +9,11 @@ claude plugin marketplace add ferax564/codixing
 claude plugin install codixing@codixing
 ```
 
+Then run `/codixing-setup` in Claude Code. The bundled MCP server is available
+immediately; setup installs and initializes the separate `codixing` CLI used by
+the automatic search and post-edit hooks. Until the CLI and `jq` are available,
+the hooks deliberately pass tool calls through instead of blocking them.
+
 Or from a local clone:
 
 ```bash
@@ -45,16 +50,16 @@ The plugin ships a **PreToolUse hook** that intercepts Grep calls targeting code
 | `/codixing-preflight` | Duplicate detection — searches for existing implementations before new features |
 | `/codixing-release` | Automated release pipeline — version bump, tests, docs, CI, blog, X post |
 
-### MCP server (70-tool catalog)
+### MCP server (profile-gated catalog)
 
-The plugin bundles the Codixing MCP server via `npx`. On first use, it downloads the `codixing-mcp` binary (~45MB) which then runs locally — no external APIs, no cloud dependencies.
+The plugin bundles the Codixing MCP launcher via `npx`. On first use, it downloads the checksum-verified binary for the current supported platform, then runs it locally — no external APIs or cloud service.
 
-The server starts in the read-only `reviewer` profile by default. Use `--profile minimal` for a narrow search/symbol/repo-map surface, `--profile editor` or `--allow-write-tools` for non-destructive write helpers, and `--profile dangerous` only when destructive file and shell tools are intentional. Agents can also call `get_mcp_profile` and `set_mcp_profile` to inspect or switch the active profile for the current MCP connection without restarting the server.
+The server starts in the narrow read-only `minimal` profile by default. Use `--profile reviewer` for the broader read-only analysis surface, `--profile editor` or `--allow-write-tools` for non-destructive write helpers, and `--profile dangerous` only when destructive file and shell tools are intentional. Agents can call `get_mcp_profile` and `set_mcp_profile` to inspect or switch within the server's startup safety ceiling. Minimal/reviewer startup remains read-only unless `--allow-profile-escalation` was explicitly enabled.
 
-### CLI commands (28)
+### CLI commands
 
 ```bash
-codixing search "query"          # Semantic code search
+codixing search "query"          # Ranked code search
 codixing symbols Widget          # Find symbol definitions
 codixing usages add_chunk        # Find call sites and imports
 codixing callers src/engine.rs   # Who imports this file
@@ -75,16 +80,43 @@ codixing audit                   # Find stale files
 
 - Claude Code CLI
 - Node.js 18+ (for `npx`)
-- macOS (Apple Silicon) or Linux (x86_64)
+- `jq` and the `codixing` CLI for automatic hooks (`/codixing-setup` installs the CLI)
+- macOS (Apple Silicon) or Linux (x86_64) for the full plugin workflow
+
+The npm MCP launcher also supports Windows x86_64. The plugin's Bash hooks are
+not currently tested on Windows, so use the MCP server there without relying on
+automatic Grep/Bash redirection.
 
 ## Optional: Semantic Search
 
 For natural-language queries, install ONNX Runtime and enable embeddings:
 
 ```bash
-# macOS
-pip install onnxruntime && cp $(python3 -c "import onnxruntime; print(onnxruntime.__file__.replace('__init__.py', ''))").libs/libonnxruntime.dylib ~/.local/lib/
+python3 -m pip install --user onnxruntime
+
+# Point the Rust runtime loader at the exact library inside the Python wheel.
+export ORT_DYLIB_PATH="$(python3 - <<'PY'
+from pathlib import Path
+import onnxruntime
+
+root = Path(onnxruntime.__file__).parent
+candidates = [
+    path
+    for pattern in ("libonnxruntime.so*", "libonnxruntime*.dylib", "onnxruntime.dll")
+    for path in root.rglob(pattern)
+    if "providers" not in path.name
+]
+if not candidates:
+    raise SystemExit("ONNX Runtime shared library not found in the Python package")
+print(min(candidates, key=lambda path: len(path.name)).resolve())
+PY
+)"
 
 # Then re-index with embeddings
-codixing init . --model bge-small-en
+codixing doctor
+codixing init . --embed --model bge-small-en
 ```
+
+Persist `ORT_DYLIB_PATH` in your shell or MCP environment if you use embeddings
+regularly. BM25-only indexing and the static `model2vec` model need no ONNX
+Runtime.

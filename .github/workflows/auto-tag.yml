@@ -1,85 +1,167 @@
 name: Auto-tag release
 
 on:
-  push:
-    branches: [main]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
 
 jobs:
   tag:
-    name: Create version tag from release commit
+    name: Tag the CI-verified release commit
+    if: >-
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
-    if: "startsWith(github.event.head_commit.message, 'release: v')"
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
-      - name: Extract version from commit message
-        id: version
+      - name: Confirm the CI commit is the current main head
+        id: target
+        shell: bash
         env:
-          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          VERIFIED_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          # Extract vX.Y.Z from "release: vX.Y.Z — description"
-          VERSION=$(echo "$COMMIT_MSG" | grep -oP 'v\d+\.\d+\.\d+' | head -1)
-          if [ -z "$VERSION" ]; then
-            echo "No version found in commit message"
+          git fetch origin main --no-tags
+          CHECKED_OUT_SHA=$(git rev-parse HEAD)
+          MAIN_SHA=$(git rev-parse refs/remotes/origin/main)
+          if [ "$CHECKED_OUT_SHA" != "$VERIFIED_SHA" ]; then
+            echo "ERROR: checkout is $CHECKED_OUT_SHA, expected CI commit $VERIFIED_SHA"
             exit 1
           fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Detected version: $VERSION"
+          if [ "$VERIFIED_SHA" != "$MAIN_SHA" ]; then
+            echo "Main advanced to $MAIN_SHA; refusing to tag older CI commit $VERIFIED_SHA."
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "eligible=true" >> "$GITHUB_OUTPUT"
+          echo "sha=$VERIFIED_SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Verify version consistency
+      - name: Extract exact release version from commit subject
+        if: steps.target.outputs.eligible == 'true'
+        id: version
+        shell: bash
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          EXPECTED="${VERSION#v}"
-          CARGO_VERSION=$(grep '^version = ' Cargo.toml | head -1 | grep -oP '\d+\.\d+\.\d+')
-          NPM_VERSION=$(grep '"version"' npm/package.json | grep -oP '\d+\.\d+\.\d+')
-          INSTALL_VERSION=$(grep 'VERSION=' docs/install.sh | grep -oP '\d+\.\d+\.\d+')
+          SUBJECT=$(git log -1 --format=%s)
+          SUBJECT="$SUBJECT" python3 - <<'PY'
+          import os
+          import re
 
-          ERRORS=0
-          for PAIR in "Cargo.toml:$CARGO_VERSION" "npm/package.json:$NPM_VERSION" "docs/install.sh:$INSTALL_VERSION"; do
-            FILE="${PAIR%%:*}"
-            ACTUAL="${PAIR#*:}"
-            if [ "$ACTUAL" != "$EXPECTED" ]; then
-              echo "ERROR: $FILE has $ACTUAL, expected $EXPECTED"
-              ERRORS=$((ERRORS + 1))
+          subject = os.environ["SUBJECT"]
+          match = re.fullmatch(
+              r"release: (v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))(?: [—-] .+)?",
+              subject,
+          )
+          output = os.environ["GITHUB_OUTPUT"]
+          with open(output, "a", encoding="utf-8") as stream:
+              if match is None:
+                  stream.write("release=false\n")
+                  print("Successful main CI was not for an exact release commit; nothing to tag.")
+              else:
+                  stream.write("release=true\n")
+                  stream.write(f"tag={match.group(1)}\n")
+                  print(f"Validated release commit for {match.group(1)}")
+          PY
+
+      - name: Verify tagged source metadata
+        if: steps.version.outputs.release == 'true'
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          EXPECTED_VERSION="${TAG#v}"
+          python3 scripts/check_version_consistency.py "$EXPECTED_VERSION"
+          EXPECTED_VERSION="$EXPECTED_VERSION" python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          expected = re.escape(os.environ["EXPECTED_VERSION"])
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          if re.search(rf"^## \[{expected}\](?:\s|$)", changelog, re.MULTILINE) is None:
+              raise SystemExit(f"ERROR: CHANGELOG.md has no heading for {os.environ['EXPECTED_VERSION']}")
+          print(f"CHANGELOG entry found for {os.environ['EXPECTED_VERSION']}")
+          PY
+
+      - name: Refuse a non-monotonic release tag
+        if: steps.version.outputs.release == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          RELEASES_FILE=$(mktemp)
+          gh api --method GET --paginate --slurp \
+            "repos/$GITHUB_REPOSITORY/releases" \
+            -f per_page=100 > "$RELEASES_FILE"
+          LATEST_TAG=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" \
+            --jq .tag_name 2>/dev/null || true)
+          ORDER=$(python3 scripts/release_order.py "$TAG" "$LATEST_TAG" "$RELEASES_FILE")
+          RELATION=${ORDER%%|*}
+          case "$RELATION" in
+            first|newer|same) ;;
+            *)
+              echo "ERROR: refusing to create non-monotonic release tag $TAG ($RELATION)"
+              exit 1
+              ;;
+          esac
+
+      - name: Create tag or verify the existing tag
+        id: tag_state
+        if: steps.version.outputs.release == 'true'
+        shell: bash
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          VERIFIED_SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          git fetch origin main --no-tags
+          CURRENT_MAIN=$(git rev-parse refs/remotes/origin/main)
+          if [ "$CURRENT_MAIN" != "$VERIFIED_SHA" ]; then
+            echo "Main advanced to $CURRENT_MAIN before tag publication; refusing $VERIFIED_SHA."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git ls-remote --exit-code --refs --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            git fetch origin "+refs/tags/$TAG:refs/tags/$TAG" --no-tags
+            TAG_SHA=$(git rev-list -n 1 "refs/tags/$TAG")
+            if [ "$TAG_SHA" != "$VERIFIED_SHA" ]; then
+              echo "ERROR: existing $TAG points to $TAG_SHA, not release commit $VERIFIED_SHA"
+              exit 1
             fi
-          done
-
-          if [ $ERRORS -gt 0 ]; then
-            echo "Version mismatch — aborting tag creation."
-            exit 1
-          fi
-          echo "All version locations consistent: $EXPECTED"
-
-      - name: Verify CHANGELOG has an entry for this version
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          EXPECTED="${VERSION#v}"
-          if ! grep -qE "^## \[$EXPECTED\]" CHANGELOG.md; then
-            echo "ERROR: CHANGELOG.md has no '## [$EXPECTED]' entry — aborting tag creation."
-            echo "Releases must ship with their changelog (v0.43/v0.44 shipped without one)."
-            exit 1
-          fi
-          echo "CHANGELOG entry found for $EXPECTED"
-
-      - name: Check tag doesn't already exist
-        id: check
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          if git rev-parse "$VERSION" >/dev/null 2>&1; then
-            echo "Tag $VERSION already exists, skipping"
-            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "$TAG already points to the CI-verified release commit."
           else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+            git tag "$TAG" "$VERIFIED_SHA"
+            # Include an up-to-date main ref in one atomic push. The lease
+            # makes the tag creation fail if main moves after the fetch above.
+            git push --atomic \
+              --force-with-lease="refs/heads/main:$VERIFIED_SHA" \
+              origin \
+              "$VERIFIED_SHA:refs/heads/main" \
+              "refs/tags/$TAG:refs/tags/$TAG"
+            echo "Tagged and pushed $TAG at $VERIFIED_SHA"
           fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
 
-      - name: Create and push tag
-        if: steps.check.outputs.exists == 'false'
+      - name: Dispatch release for the verified tag
+        if: steps.tag_state.outputs.ready == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          git tag "$VERSION"
-          git push origin "$VERSION"
-          echo "Tagged and pushed $VERSION"
+          for attempt in {1..6}; do
+            if gh workflow run release.yml --ref "$TAG" -f "tag=$TAG"; then
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "ERROR: release workflow dispatch did not accept $TAG"
+          exit 1

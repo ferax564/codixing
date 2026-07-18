@@ -456,7 +456,7 @@
         <a href="#cli-usages">usages</a>
         <a href="#cli-agent-context-pack">agent-context-pack</a>
         <a href="#cli-sync">sync / git-sync</a>
-        <a href="#cli-analyze">analyze</a>
+        <a href="#cli-analysis">analysis workflow</a>
       </div>
       <div class="sidebar-group">
         <div class="sidebar-group-label">Search</div>
@@ -487,23 +487,24 @@
       <!-- Installation -->
       <section class="doc-section" id="installation">
         <h2>Installation</h2>
-        <p>Codixing ships as pre-built static binaries for macOS and Linux. No Rust toolchain or compilation required.</p>
+        <p>Codixing ships as pre-built binaries for Apple Silicon macOS, Linux x86_64, and Windows x86_64. No Rust toolchain or compilation is required.</p>
 
         <h3>One-line install (recommended)</h3>
-        <p>Downloads the correct binary for your OS and architecture, and places it in <code>/usr/local/bin</code>.</p>
+        <p>Downloads the checksum-verified four-binary suite. It uses <code>/usr/local/bin</code> when writable and otherwise <code>$HOME/.local/bin</code>; override with <code>CODIXING_INSTALL_DIR</code> and pin with <code>CODIXING_VERSION=X.Y.Z</code>.</p>
 
         <div class="pre-label">shell</div>
-        <pre><code>curl -fsSL https://codixing.com/install.sh | sh</code></pre>
+        <pre><code>curl --proto '=https' --proto-redir '=https' -fsSLo /tmp/codixing-install.sh https://codixing.com/install.sh
+sh /tmp/codixing-install.sh</code></pre>
 
-        <p>Installs three binaries: <code>codixing</code> (CLI), <code>codixing-mcp</code> (MCP server), <code>codixing-lsp</code> (LSP server).</p>
+        <p>Installs four binaries: <code>codixing</code> (CLI), <code>codixing-mcp</code> (MCP server), <code>codixing-lsp</code> (LSP server), and <code>codixing-server</code> (HTTP/SSE server).</p>
 
         <div class="callout callout-info">
           <span class="callout-icon">ℹ</span>
-          <span>Supported platforms: macOS (Apple Silicon + Intel), Linux (x86_64). Windows binaries are available on the <a href="https://github.com/ferax564/codixing/releases" style="color:var(--cyan)">releases page</a> for manual install.</span>
+          <span>The shell installer supports Apple Silicon macOS and Linux x86_64. Windows x86_64 binaries are available on the <a href="https://github.com/ferax564/codixing/releases" style="color:var(--cyan)">releases page</a>; <code>npx -y codixing-mcp</code> is the portable MCP-only option.</span>
         </div>
 
         <h3>Build from source</h3>
-        <p>If you prefer to compile yourself, you need the Rust stable toolchain via <a href="https://rustup.rs" style="color:var(--cyan)">rustup</a>.</p>
+        <p>If you prefer to compile yourself, install Rust 1.88 or newer via <a href="https://rustup.rs" style="color:var(--cyan)">rustup</a>.</p>
 
         <div class="pre-label">shell</div>
         <pre><code><span class="tok-comment"># Clone the repository</span>
@@ -516,20 +517,21 @@ cargo build --release --workspace
 <span class="tok-comment"># Binaries are now at:</span>
 ./target/release/codixing       <span class="tok-comment"># CLI</span>
 ./target/release/codixing-mcp   <span class="tok-comment"># MCP server</span>
-./target/release/codixing-lsp   <span class="tok-comment"># LSP server</span></code></pre>
+./target/release/codixing-lsp   <span class="tok-comment"># LSP server</span>
+./target/release/codixing-server <span class="tok-comment"># HTTP/SSE server</span></code></pre>
 
         <h3>Optional features</h3>
         <table class="doc-table">
           <thead><tr><th>Feature flag</th><th>What it enables</th></tr></thead>
           <tbody>
-            <tr><td>--features qdrant</td><td>Qdrant vector backend instead of the built-in usearch HNSW index</td></tr>
-            <tr><td>--features qwen3</td><td>Qwen3-Embedding-0.6B via candle (1024-dim, GPU-optional)</td></tr>
+            <tr><td>--features qdrant</td><td>Experimental Qdrant client APIs; the CLI does not yet replace its built-in vector backend with Qdrant</td></tr>
+            <tr><td>--features qwen3</td><td>Qwen3-Embedding-0.6B via ONNX Runtime (1024 dimensions)</td></tr>
           </tbody>
         </table>
 
         <div class="callout callout-info">
           <span class="callout-icon">ℹ</span>
-          <span>The default build uses BGE-Base-EN-v1.5 (768-dim) via ONNX through fastembed. No GPU or external model server required.</span>
+          <span>The default build can use BGE embeddings through fastembed, but ordinary <code>codixing init .</code> remains BM25-only. BGE requires <code>--embed</code> plus ONNX Runtime; static <code>model2vec</code> embeddings do not require ONNX or an external model server.</span>
         </div>
       </section>
 
@@ -549,7 +551,7 @@ cargo build --release --workspace
 pub fn handle_auth_request(req: Request) -&gt; Result&lt;Token&gt;</span>
 
 <span class="tok-comment"># 3. Or with full hybrid (downloads BGE model on first run)</span>
-<span class="tok-cmd">codixing init</span> .
+<span class="tok-cmd">codixing init</span> . <span class="tok-flag">--embed --model bge-small-en</span>
 <span class="tok-cmd">codixing search</span> "authentication handler" <span class="tok-flag">--strategy fast</span></code></pre>
 
         <h3>Claude Code</h3>
@@ -557,24 +559,27 @@ pub fn handle_auth_request(req: Request) -&gt; Result&lt;Token&gt;</span>
         <div class="pre-label">Plugin (recommended)</div>
         <pre><code><span class="tok-cmd">claude plugin marketplace add</span> ferax564/codixing
 <span class="tok-cmd">claude plugin install</span> codixing@codixing</code></pre>
-        <p>Installs the MCP server (70-tool catalog) plus five slash commands: <code>/codixing-setup</code> (index + register), <code>/codixing-explore</code> (architecture deep-dive), <code>/codixing-review</code> (code review with impact analysis), <code>/codixing-preflight</code> (duplicate detection), <code>/codixing-release</code> (automated release pipeline). Restart Claude Code after installing.</p>
+        <p>Installs the profile-gated MCP server plus five slash commands: <code>/codixing-setup</code> (index + register), <code>/codixing-explore</code> (architecture deep-dive), <code>/codixing-review</code> (code review with impact analysis), <code>/codixing-preflight</code> (duplicate detection), <code>/codixing-release</code> (automated release pipeline). Restart Claude Code after installing.</p>
 
         <p>Alternatively, register just the MCP server without the plugin:</p>
         <div class="pre-label">MCP only</div>
-        <pre><code><span class="tok-cmd">claude mcp add</span> codixing -- npx -y codixing-mcp --root .</code></pre>
+        <pre><code><span class="tok-cmd">claude mcp add</span> codixing -- npx -y codixing-mcp --root . --profile minimal --no-daemon-fork</code></pre>
 
         <h3>OpenAI Codex CLI</h3>
 
-        <p>Install the binary first, then register the MCP server. Codex requires the local binary &mdash; <code>npx</code> is not supported. The MCP catalog contains 70 tools; the active <code>tools/list</code> response is profile-filtered and can be changed at runtime with <code>set_mcp_profile</code>.</p>
+        <p>Codex supports both a local binary and <code>npx</code>. Pre-index large repositories before connecting, select the <code>minimal</code> profile to keep <code>tools/list</code> small, and allow 120 seconds for the first package download and index load.</p>
         <div class="pre-label">shell</div>
-        <pre><code><span class="tok-cmd">curl -fsSL</span> https://codixing.com/install.sh | sh
-<span class="tok-cmd">codex mcp add</span> codixing -- codixing-mcp --root .</code></pre>
+        <pre><code><span class="tok-cmd">curl --proto '=https' --proto-redir '=https' -fsSLo</span> /tmp/codixing-install.sh https://codixing.com/install.sh
+<span class="tok-cmd">sh</span> /tmp/codixing-install.sh
+<span class="tok-cmd">codixing init</span> .
+<span class="tok-cmd">codex mcp add</span> codixing -- npx -y codixing-mcp --root . --profile minimal --no-daemon-fork</code></pre>
 
         <p>Or add to <code>~/.codex/config.toml</code>:</p>
         <div class="pre-label">~/.codex/config.toml</div>
         <pre><code>[mcp_servers.codixing]
 command = "codixing-mcp"
-args = ["--root", "."]</code></pre>
+args = ["--root", ".", "--profile", "minimal", "--no-daemon-fork"]
+startup_timeout_sec = 120</code></pre>
 
         <h3>Cursor / Windsurf</h3>
 
@@ -584,7 +589,7 @@ args = ["--root", "."]</code></pre>
   <span class="tok-key">"mcpServers"</span>: {
     <span class="tok-key">"codixing"</span>: {
       <span class="tok-key">"command"</span>: <span class="tok-str">"npx"</span>,
-      <span class="tok-key">"args"</span>: [<span class="tok-str">"-y"</span>, <span class="tok-str">"codixing-mcp"</span>, <span class="tok-str">"--root"</span>, <span class="tok-str">"."</span>]
+      <span class="tok-key">"args"</span>: [<span class="tok-str">"-y"</span>, <span class="tok-str">"codixing-mcp"</span>, <span class="tok-str">"--root"</span>, <span class="tok-str">"."</span>, <span class="tok-str">"--profile"</span>, <span class="tok-str">"minimal"</span>, <span class="tok-str">"--no-daemon-fork"</span>]
     }
   }
 }</code></pre>
@@ -598,7 +603,7 @@ args = ["--root", "."]</code></pre>
     {
       <span class="tok-key">"name"</span>: <span class="tok-str">"codixing"</span>,
       <span class="tok-key">"command"</span>: <span class="tok-str">"npx"</span>,
-      <span class="tok-key">"args"</span>: [<span class="tok-str">"-y"</span>, <span class="tok-str">"codixing-mcp"</span>, <span class="tok-str">"--root"</span>, <span class="tok-str">"."</span>]
+      <span class="tok-key">"args"</span>: [<span class="tok-str">"-y"</span>, <span class="tok-str">"codixing-mcp"</span>, <span class="tok-str">"--root"</span>, <span class="tok-str">"."</span>, <span class="tok-str">"--profile"</span>, <span class="tok-str">"minimal"</span>, <span class="tok-str">"--no-daemon-fork"</span>]
     }
   ]
 }</code></pre>
@@ -607,17 +612,17 @@ args = ["--root", "."]</code></pre>
       <!-- CLI: init -->
       <section class="doc-section" id="cli-init">
         <h2>CLI — <code>init</code></h2>
-        <p>Initialises a Codixing index inside the <code>.codixing/</code> directory at the given path. Safe to re-run — it performs an incremental update on an existing index.</p>
+        <p>Builds a Codixing index inside the <code>.codixing/</code> directory at the given path. Use <code>sync</code> or <code>git-sync</code> for routine incremental updates; use <code>init</code> when you intentionally want to reconstruct the complete index.</p>
 
         <div class="pre-label">usage</div>
-        <pre><code>codixing init &lt;PATH&gt; [OPTIONS]</code></pre>
+        <pre><code>codixing init [OPTIONS] [PATH]</code></pre>
 
         <table class="doc-table">
           <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
           <tbody>
-            <tr><td>--model &lt;name&gt;</td><td>none</td><td>Enable vector embeddings: <code>bge-small-en</code> (recommended), <code>bge-base-en</code>, <code>jina-small</code>, <code>snowflake-arctic</code>, <code>nomic-embed</code>. BM25-only by default.</td></tr>
+            <tr><td>--embed</td><td>false</td><td>Enable vector embeddings. BM25-only is the fast default.</td></tr>
+            <tr><td>--model &lt;name&gt;</td><td>bge-base-en</td><td>Select the model used with <code>--embed</code>. Supported families include BGE, Jina Code, Nomic, Snowflake Arctic, Qwen3 (feature-gated), and the ONNX-free <code>model2vec</code> variants; run <code>codixing init --help</code> for the accepted names.</td></tr>
             <tr><td>--also &lt;DIR&gt;</td><td>—</td><td>Add an extra root directory to the same index (multi-repo mode).</td></tr>
-            <tr><td>--force</td><td>false</td><td>Wipe and rebuild the index from scratch.</td></tr>
           </tbody>
         </table>
 
@@ -625,8 +630,8 @@ args = ["--root", "."]</code></pre>
         <pre><code><span class="tok-comment"># Fast BM25-only index of current directory</span>
 codixing init .
 
-<span class="tok-comment"># Full hybrid index</span>
-codixing init /path/to/project
+<span class="tok-comment"># Full hybrid index (waits for a durable vector checkpoint)</span>
+codixing init /path/to/project --embed --model bge-small-en
 
 <span class="tok-comment"># Multi-repo: index two roots together</span>
 codixing init . --also ../shared-lib</code></pre>
@@ -635,7 +640,7 @@ codixing init . --also ../shared-lib</code></pre>
       <!-- CLI: search -->
       <section class="doc-section" id="cli-search">
         <h2>CLI — <code>search</code></h2>
-        <p>Query the index with a natural language phrase or symbol name. Results are ranked by score, graph centrality, and deduped with MMR.</p>
+        <p>Query the index with a natural language phrase or symbol name. Depending on the selected strategy, retrieval uses lexical, vector, graph, reranker, exact, or behavioral-signature stages; MMR deduplication is applied only by strategies that request it.</p>
 
         <div class="pre-label">usage</div>
         <pre><code>codixing search &lt;QUERY&gt; [OPTIONS]</code></pre>
@@ -643,11 +648,11 @@ codixing init . --also ../shared-lib</code></pre>
         <table class="doc-table">
           <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
           <tbody>
-            <tr><td>--strategy &lt;S&gt;</td><td>fast</td><td>One of: <code>instant</code>, <code>fast</code>, <code>thorough</code>, <code>explore</code>, <code>deep</code></td></tr>
-            <tr><td>--limit &lt;N&gt;</td><td>20</td><td>Maximum number of results to return</td></tr>
-            <tr><td>--tokens &lt;N&gt;</td><td>8000</td><td>Token budget for output (cl100k)</td></tr>
-            <tr><td>--lang &lt;L&gt;</td><td>—</td><td>Filter results to a specific language (e.g. <code>rust</code>, <code>python</code>)</td></tr>
-            <tr><td>--reranker</td><td>false</td><td>Enable cross-encoder reranking (implies <code>deep</code> strategy)</td></tr>
+            <tr><td>--strategy &lt;S&gt;</td><td>auto</td><td>One of: <code>auto</code>, <code>instant</code>, <code>fast</code>, <code>thorough</code>, <code>explore</code>, <code>deep</code>, <code>exact</code>, <code>semantic</code></td></tr>
+            <tr><td>--limit &lt;N&gt;</td><td>10</td><td>Maximum number of results to return</td></tr>
+            <tr><td>--token-budget &lt;N&gt;</td><td>—</td><td>Token budget for formatted output; implies <code>--format</code></td></tr>
+            <tr><td>--file &lt;PATH&gt;</td><td>—</td><td>Restrict results to matching file paths</td></tr>
+            <tr><td>--code-only / --docs-only</td><td>false</td><td>Restrict results by source type</td></tr>
           </tbody>
         </table>
 
@@ -659,10 +664,11 @@ codixing search "parse JWT token"
 codixing search "TokenVerifier"
 
 <span class="tok-comment"># Thorough hybrid with custom token budget</span>
-codixing search "database connection pool" --strategy thorough --tokens 4000
+codixing search "database connection pool" --strategy thorough --token-budget 4000
 
-<span class="tok-comment"># Cross-encoder reranking for highest precision</span>
-codixing search "error handling middleware" --reranker</code></pre>
+<span class="tok-comment"># Cross-encoder reranking (configure it while indexing)</span>
+codixing init . --embed --reranker
+codixing search "error handling middleware" --strategy deep</code></pre>
       </section>
 
       <!-- CLI: symbols -->
@@ -671,13 +677,13 @@ codixing search "error handling middleware" --reranker</code></pre>
         <p>Look up definitions (functions, structs, classes, methods) by name. Case-insensitive substring match across all indexed files.</p>
 
         <div class="pre-label">usage</div>
-        <pre><code>codixing symbols &lt;NAME&gt; [OPTIONS]</code></pre>
+        <pre><code>codixing symbols [OPTIONS] [FILTER]</code></pre>
 
         <table class="doc-table">
           <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
           <tbody>
-            <tr><td>--kind &lt;K&gt;</td><td>—</td><td>Filter by symbol kind: <code>function</code>, <code>class</code>, <code>struct</code>, <code>method</code>, <code>interface</code></td></tr>
-            <tr><td>--limit &lt;N&gt;</td><td>20</td><td>Max results</td></tr>
+            <tr><td>--file &lt;PATH&gt;</td><td>—</td><td>Restrict definitions to a matching file path</td></tr>
+            <tr><td>--count</td><td>false</td><td>Print only the number of matching definitions</td></tr>
           </tbody>
         </table>
 
@@ -685,20 +691,20 @@ codixing search "error handling middleware" --reranker</code></pre>
         <pre><code><span class="tok-comment"># Find all symbols named "authenticate"</span>
 codixing symbols authenticate
 
-<span class="tok-comment"># Only structs matching "config"</span>
-codixing symbols config --kind struct</code></pre>
+<span class="tok-comment"># Restrict matching definitions to one file</span>
+codixing symbols config --file src/config.rs</code></pre>
       </section>
 
       <!-- CLI: graph -->
       <section class="doc-section" id="cli-graph">
         <h2>CLI — <code>graph</code></h2>
-        <p>Display graph statistics and top PageRank-scored files for the indexed repository.</p>
+        <p>Display graph statistics or generate a token-budgeted PageRank repository map.</p>
 
         <div class="pre-label">usage</div>
-        <pre><code>codixing graph [OPTIONS]
+        <pre><code>codixing graph [OPTIONS] [PATH]
 
-<span class="tok-comment"># Show top 20 highest-PageRank files</span>
-codixing graph --top 20</code></pre>
+<span class="tok-comment"># Show a PageRank-ranked repository map</span>
+codixing graph --map --token-budget 4000</code></pre>
 
         <div class="pre-label">example output</div>
         <pre><code><span class="tok-out">Graph: 770 nodes, 4,821 edges
@@ -739,10 +745,20 @@ handler.rs → db/user.rs → models.rs</span></code></pre>
       <!-- CLI: usages -->
       <section class="doc-section" id="cli-usages">
         <h2>CLI — <code>usages</code></h2>
-        <p>Find all files and locations where a symbol is referenced. Combines BM25 with graph-boosted scoring.</p>
+        <p>Find ranked reference locations for a symbol. The default view is bounded; <code>--complete</code> performs a slower deterministic scan of up to 100,000 candidate chunks for blast-radius work.</p>
 
         <div class="pre-label">usage</div>
-        <pre><code>codixing usages &lt;SYMBOL&gt; [--limit &lt;N&gt;]</code></pre>
+        <pre><code>codixing usages [OPTIONS] &lt;SYMBOL&gt;</code></pre>
+
+        <table class="doc-table">
+          <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+          <tbody>
+            <tr><td>--limit &lt;N&gt;</td><td>20</td><td>Maximum results in the ranked view</td></tr>
+            <tr><td>--file &lt;PATH&gt;</td><td>—</td><td>Restrict ranked results to matching file paths</td></tr>
+            <tr><td>--complete</td><td>false</td><td>Disable ranking and return deterministic known references from the bounded complete scan</td></tr>
+            <tr><td>--count</td><td>false</td><td>Print only the number of returned references</td></tr>
+          </tbody>
+        </table>
 
         <div class="pre-label">example</div>
         <pre><code>codixing usages "HybridRetriever" --limit 10
@@ -798,80 +814,72 @@ Sync complete in 0.12s</span></code></pre>
 
         <div class="callout callout-info">
           <span class="callout-icon">ℹ</span>
-          <span><code>git-sync</code> requires the directory to be a git repository. Falls back gracefully with an error if not.</span>
+          <span><code>git-sync</code> returns a no-op when Git metadata or the required diff is unavailable. Use <code>sync</code> for non-Git projects and whenever uncommitted/untracked filesystem drift must be authoritative.</span>
         </div>
       </section>
 
-      <!-- Analyze -->
-      <section class="doc-section" id="cli-analyze">
-        <h2>CLI — <code>analyze</code></h2>
-        <p>One-click deep analysis of any local directory or GitHub repository. Indexes the code (reusing an existing index if present), then prints a rich report covering indexing speed, language breakdown, most-called functions, import hotspots, and an AI-style repo map.</p>
+      <!-- Analysis workflow -->
+      <section class="doc-section" id="cli-analysis">
+        <h2>CLI — repository analysis workflow</h2>
+        <p>Compose the supported commands below to index a repository, inspect its architecture, generate a self-contained graph dashboard, and check the blast radius of a file.</p>
 
         <div class="pre-label">usage</div>
-        <pre><code>codixing analyze &lt;PATH_OR_URL&gt; [OPTIONS]
+        <pre><code>git clone --depth=1 https://github.com/owner/repo.git
+cd repo
+codixing init .
+codixing graph . --map --token-budget 8000
+codixing graph . --html graph.html
+codixing impact --json src/path/to/file.rs
 
-<span class="tok-out"># Local directory
-</span>codixing analyze /path/to/project
-
-<span class="tok-out"># GitHub shorthand (clones with --depth=1)
-</span>codixing analyze github.com/owner/repo
-
-<span class="tok-out"># Full URL
-</span>codixing analyze https://github.com/owner/repo
-
-<span class="tok-out"># Start the graph viewer after analysis
-</span>codixing analyze github.com/owner/repo --serve --port 8080
-
-<span class="tok-out"># Machine-readable output
-</span>codixing analyze /path/to/project --output json</code></pre>
-
-        <h3>Flags</h3>
-        <table class="params-table">
-          <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
-          <tbody>
-            <tr><td><code>--serve</code></td><td>false</td><td>Launch the REST + graph viewer server after analysis</td></tr>
-            <tr><td><code>--port</code></td><td>8080</td><td>Port for the server when <code>--serve</code> is used</td></tr>
-            <tr><td><code>--no-embeddings</code></td><td>false</td><td>Skip vector embedding (faster, BM25+graph only)</td></tr>
-            <tr><td><code>--output</code></td><td>text</td><td><code>text</code> or <code>json</code> report format</td></tr>
-          </tbody>
-        </table>
+<span class="tok-out"># Optional local graph/API server
+</span>codixing serve . --port 8080</code></pre>
 
         <div class="callout callout-info">
           <span class="callout-icon">ℹ</span>
-          <span>When a <code>.codixing/</code> index already exists in the target directory, <code>analyze</code> opens the existing index and skips re-indexing, making repeat runs instant.</span>
+          <span><code>init</code> rebuilds the complete index. For routine updates after the first index, use <code>sync</code> or <code>git-sync</code>.</span>
         </div>
       </section>
 
       <!-- Strategies -->
       <section class="doc-section" id="strategies">
         <h2>Search Strategies</h2>
-        <p>Every search command and MCP tool accepts a <code>strategy</code> parameter. Choose based on your latency and precision requirements.</p>
+        <p><code>codixing search</code> and the MCP <code>code_search</code> tool accept a <code>strategy</code> parameter. The default <code>auto</code> route selects an appropriate strategy from the query and available index capabilities.</p>
 
         <div class="strategy-grid">
           <div class="strategy-card">
             <div class="s-name">instant</div>
             <div class="s-desc">BM25 only. No vector scoring, no graph boost.</div>
-            <div class="s-meta">~2ms · zero model required</div>
+            <div class="s-meta">fastest · zero model required</div>
           </div>
           <div class="strategy-card">
             <div class="s-name">fast</div>
             <div class="s-desc">BM25 + vector RRF fusion + graph PageRank boost.</div>
-            <div class="s-meta">~10ms · default</div>
+            <div class="s-meta">requires vectors for hybrid scoring</div>
           </div>
           <div class="strategy-card">
             <div class="s-name">thorough</div>
             <div class="s-desc">Same as fast but with MMR deduplication applied.</div>
-            <div class="s-meta">~15ms</div>
+            <div class="s-meta">higher diversity</div>
           </div>
           <div class="strategy-card">
             <div class="s-name">explore</div>
             <div class="s-desc">BM25 first-pass then graph neighbour expansion (RepoHyper-style).</div>
-            <div class="s-meta">~20ms · best for architecture queries</div>
+            <div class="s-meta">best for architecture queries</div>
           </div>
           <div class="strategy-card">
             <div class="s-name">deep</div>
             <div class="s-desc">thorough + BGE-Reranker-Base cross-encoder second pass.</div>
-            <div class="s-meta">~80–150ms · highest precision</div>
+            <div class="s-meta">requires the reranker configured at init</div>
+          </div>
+          <div class="strategy-card">
+            <div class="s-name">exact</div>
+            <div class="s-desc">Trigram substring lookup with deterministic bounded ranking.</div>
+            <div class="s-meta">best for exact identifiers and literals</div>
+          </div>
+          <div class="strategy-card">
+            <div class="s-name">semantic</div>
+            <div class="s-desc">Embedding-free matching over behavioral signatures.</div>
+            <div class="s-meta">concept matching without ONNX</div>
           </div>
         </div>
 
@@ -914,44 +922,46 @@ Sync complete in 0.12s</span></code></pre>
         <h2>MCP — Setup</h2>
         <p>The <code>codixing-mcp</code> binary implements JSON-RPC 2.0 over stdin/stdout and is compatible with Claude Code and any MCP-capable client.</p>
 
-        <h3>Standard mode</h3>
-        <p>A new engine instance is loaded per invocation. Suitable for occasional use.</p>
+        <h3>Default mode</h3>
+        <p>The first invocation normally auto-starts a background daemon and proxies the MCP connection to it. Pass <code>--no-daemon-fork</code> when a client should own a direct stdio process instead.</p>
         <div class="pre-label">shell</div>
         <pre><code>codixing-mcp --root /path/to/project</code></pre>
 
         <h3>Daemon mode</h3>
-        <p>The first invocation starts a background daemon that holds the engine in memory and serves subsequent calls over a Unix socket (<code>.codixing/daemon.sock</code>). This gives 4–5× faster throughput on cheap operations.</p>
+        <p>The daemon holds the engine in memory and serves subsequent calls over a profile-specific Unix socket (<code>.codixing/daemon-&lt;profile&gt;.sock</code>; escalation-enabled policies use a separate suffix). This avoids reloading a large index for each connection.</p>
         <div class="pre-label">shell</div>
         <pre><code>codixing-mcp --root /path/to/project --daemon</code></pre>
 
         <h3>Auto-init</h3>
-        <p>If no index exists at <code>--root</code>, the MCP server automatically runs <code>init --model bge-small-en</code> before serving the first request. No manual setup required when connecting from Claude Code.</p>
+        <p>If no index exists at <code>--root</code>, the MCP server automatically builds a BM25-only index before serving the first request. For large repositories, run <code>codixing init .</code> ahead of time so client startup timeouts do not interrupt indexing.</p>
 
         <h3>Runtime tool profiles</h3>
-        <p>The startup <code>--profile</code> flag only sets the initial profile. Agents can call <code>get_mcp_profile</code> to inspect the active profile, then <code>set_mcp_profile</code> to switch between <code>minimal</code>, <code>reviewer</code>, <code>editor</code>, and <code>dangerous</code> for the current MCP connection without killing the server. Successful switches emit <code>notifications/tools/list_changed</code> so clients can refresh <code>tools/list</code>.</p>
+        <p><code>minimal</code> is the default and exposes the smallest read-only discovery set. Agents can call <code>get_mcp_profile</code> and <code>set_mcp_profile</code> to switch within the process's startup safety ceiling. Minimal/reviewer startup cannot promote itself into a write-capable profile unless <code>--allow-profile-escalation</code> was supplied explicitly; <code>dangerous</code> also requires per-call confirmation. Successful switches emit <code>notifications/tools/list_changed</code> so clients can refresh <code>tools/list</code>.</p>
+
+        <p>Every tool result passes through a 4,000-token default response envelope with a 12,000-token hard maximum. Tool-specific limits may be lower, and large result sets should be paged rather than requesting one unbounded response. Individual JSON-RPC documents are capped at 8 MiB.</p>
 
         <h3>VS Code / Cursor extension</h3>
-        <p>Install the extension from <code>editors/vscode/</code>. It exposes 6 commands and auto-writes the MCP server entry to both <code>~/.claude.json</code> and <code>~/.cursor/mcp.json</code>.</p>
+        <p>Install the extension from <code>editors/vscode/</code>. Its command-palette actions can index, sync, search, inspect the repository, start the daemon, and write the MCP server entry to both <code>~/.claude.json</code> and <code>~/.cursor/mcp.json</code>.</p>
       </section>
 
       <!-- MCP Tools -->
       <section class="doc-section" id="mcp-tools">
-        <h2>MCP — Tools Reference (35 highlighted of 70 total)</h2>
-        <p>All tools are called via JSON-RPC 2.0 <code>tools/call</code> with a <code>name</code> and <code>arguments</code> object. Write tools (<code>write_file</code>, <code>edit_file</code>, <code>delete_file</code>) automatically reindex after every operation. Intelligence tools expose the call graph, impact analysis, context stitching, complexity metrics, persistent memory, test discovery, duplicate detection, PR review context, and project onboarding generation.</p>
+        <h2>MCP — Selected tools reference</h2>
+        <p>All tools are called via JSON-RPC 2.0 <code>tools/call</code> with a <code>name</code> and <code>arguments</code> object. <code>tools/list</code> returns only the active profile's subset; use <code>search_tools</code> and <code>get_tool_schema</code> for compact discovery. Write tools automatically reindex after an operation.</p>
 
         <div class="tool-card">
           <div class="tool-header">
             <span class="tool-name">code_search</span>
-            <span class="tool-desc">Hybrid search across all strategies</span>
+            <span class="tool-desc">Strategy-routed ranked search</span>
           </div>
           <div class="tool-body">
-            <p>The primary retrieval tool. Runs BM25 + vector fusion with optional graph boost and MMR deduplication.</p>
+            <p>The primary retrieval tool. Routes across BM25, optional vectors, graph expansion, reranking, exact trigram lookup, and behavioral signatures according to <code>strategy</code>; stages that are unavailable or unnecessary are skipped.</p>
             <div class="pre-label">parameters</div>
             <pre><code>{
   <span class="tok-key">"query"</span>:    <span class="tok-str">"authentication middleware"</span>,  <span class="tok-comment">// required</span>
-  <span class="tok-key">"strategy"</span>: <span class="tok-str">"fast"</span>,                     <span class="tok-comment">// instant|fast|thorough|explore|deep</span>
+  <span class="tok-key">"strategy"</span>: <span class="tok-str">"fast"</span>,                     <span class="tok-comment">// instant|fast|thorough|explore|deep|exact|semantic</span>
   <span class="tok-key">"limit"</span>:    <span class="tok-num">20</span>,
-  <span class="tok-key">"tokens"</span>:   <span class="tok-num">8000</span>
+  <span class="tok-key">"token_budget"</span>: <span class="tok-num">4000</span>
 }</code></pre>
           </div>
         </div>
@@ -966,7 +976,7 @@ Sync complete in 0.12s</span></code></pre>
             <div class="pre-label">parameters</div>
             <pre><code>{
   <span class="tok-key">"name"</span>: <span class="tok-str">"HybridRetriever"</span>,
-  <span class="tok-key">"kind"</span>: <span class="tok-str">"struct"</span>  <span class="tok-comment">// optional: function|class|struct|method|interface</span>
+  <span class="tok-key">"file"</span>: <span class="tok-str">"retriever"</span>  <span class="tok-comment">// optional path substring</span>
 }</code></pre>
           </div>
         </div>
@@ -974,14 +984,14 @@ Sync complete in 0.12s</span></code></pre>
         <div class="tool-card">
           <div class="tool-header">
             <span class="tool-name">read_symbol</span>
-            <span class="tool-desc">Full source of any symbol by name</span>
+            <span class="tool-desc">Source block for a symbol by name</span>
           </div>
           <div class="tool-body">
-            <p>Returns the complete source block for a symbol (function body, struct definition, class, etc.), token-budgeted.</p>
+            <p>Returns the resolved source block for a symbol (function body, struct definition, class, etc.), subject to the response token budget.</p>
             <div class="pre-label">parameters</div>
             <pre><code>{
-  <span class="tok-key">"name"</span>:   <span class="tok-str">"handle_auth_request"</span>,
-  <span class="tok-key">"tokens"</span>: <span class="tok-num">4000</span>
+  <span class="tok-key">"name"</span>: <span class="tok-str">"handle_auth_request"</span>,
+  <span class="tok-key">"file"</span>: <span class="tok-str">"src/auth"</span>  <span class="tok-comment">// optional disambiguation</span>
 }</code></pre>
           </div>
         </div>
@@ -995,8 +1005,7 @@ Sync complete in 0.12s</span></code></pre>
             <p>Returns an Aider-style repository map: files sorted by PageRank with their top-level symbol signatures. Excellent for giving an agent a high-level orientation of a codebase.</p>
             <div class="pre-label">parameters</div>
             <pre><code>{
-  <span class="tok-key">"tokens"</span>: <span class="tok-num">4000</span>,
-  <span class="tok-key">"seed_files"</span>: [<span class="tok-str">"src/engine.rs"</span>]  <span class="tok-comment">// optional: personalised PageRank seed</span>
+  <span class="tok-key">"token_budget"</span>: <span class="tok-num">4000</span>
 }</code></pre>
           </div>
         </div>
@@ -1010,8 +1019,7 @@ Sync complete in 0.12s</span></code></pre>
             <p>Returns the direct import/call graph neighbours of a file — who imports it, and what it imports.</p>
             <div class="pre-label">parameters</div>
             <pre><code>{
-  <span class="tok-key">"file"</span>:  <span class="tok-str">"src/auth/handler.rs"</span>,
-  <span class="tok-key">"depth"</span>: <span class="tok-num">1</span>
+  <span class="tok-key">"file"</span>: <span class="tok-str">"src/auth/handler.rs"</span>
 }</code></pre>
           </div>
         </div>
@@ -1019,15 +1027,14 @@ Sync complete in 0.12s</span></code></pre>
         <div class="tool-card">
           <div class="tool-header">
             <span class="tool-name">get_transitive_deps</span>
-            <span class="tool-desc">Blast-radius multi-hop traversal</span>
+            <span class="tool-desc">Multi-hop dependency traversal</span>
           </div>
           <div class="tool-body">
-            <p>Returns all transitive dependencies (or dependents) of a file up to the specified depth. Useful for impact analysis before a refactor.</p>
+            <p>Traverses the files a target depends on up to the specified depth. Use <code>predict_impact</code> for the dependent/blast-radius direction.</p>
             <div class="pre-label">parameters</div>
             <pre><code>{
-  <span class="tok-key">"file"</span>:      <span class="tok-str">"src/index/bm25.rs"</span>,
-  <span class="tok-key">"direction"</span>: <span class="tok-str">"callers"</span>,  <span class="tok-comment">// "callers" | "callees"</span>
-  <span class="tok-key">"depth"</span>:     <span class="tok-num">3</span>
+  <span class="tok-key">"file"</span>:  <span class="tok-str">"src/index/bm25.rs"</span>,
+  <span class="tok-key">"depth"</span>: <span class="tok-num">3</span>
 }</code></pre>
           </div>
         </div>
@@ -1035,14 +1042,16 @@ Sync complete in 0.12s</span></code></pre>
         <div class="tool-card">
           <div class="tool-header">
             <span class="tool-name">search_usages</span>
-            <span class="tool-desc">All usage locations for a symbol</span>
+            <span class="tool-desc">Ranked or deterministic paged usages</span>
           </div>
           <div class="tool-body">
-            <p>Combines BM25 with graph boost to find every location a symbol is referenced across the codebase.</p>
+            <p>Returns a ranked view by default. Set <code>complete=true</code> for a deterministic, pageable call-site/import scan and follow <code>next_offset</code> until <code>has_more=false</code>. Complete mode scans at most 100,000 candidate chunks, so completion is relative to that ceiling.</p>
             <div class="pre-label">parameters</div>
             <pre><code>{
-  <span class="tok-key">"symbol"</span>: <span class="tok-str">"PageRank"</span>,
-  <span class="tok-key">"limit"</span>:  <span class="tok-num">30</span>
+  <span class="tok-key">"symbol"</span>:   <span class="tok-str">"PageRank"</span>,
+  <span class="tok-key">"complete"</span>: <span class="tok-num">true</span>,
+  <span class="tok-key">"limit"</span>:    <span class="tok-num">20</span>,
+  <span class="tok-key">"offset"</span>:   <span class="tok-num">0</span>
 }</code></pre>
           </div>
         </div>
@@ -1057,10 +1066,9 @@ Sync complete in 0.12s</span></code></pre>
             <div class="pre-label">parameters</div>
             <pre><code>{
   <span class="tok-key">"pattern"</span>:  <span class="tok-str">"fn handle_\\w+"</span>,
-  <span class="tok-key">"glob"</span>:     <span class="tok-str">"**/*.rs"</span>,     <span class="tok-comment">// optional file filter</span>
-  <span class="tok-key">"context"</span>:  <span class="tok-num">2</span>,              <span class="tok-comment">// lines before/after match</span>
-  <span class="tok-key">"literal"</span>:  <span class="tok-num">false</span>,          <span class="tok-comment">// true = treat pattern as literal string</span>
-  <span class="tok-key">"tokens"</span>:   <span class="tok-num">4000</span>
+  <span class="tok-key">"file_glob"</span>: <span class="tok-str">"**/*.rs"</span>,   <span class="tok-comment">// optional file filter</span>
+  <span class="tok-key">"context_lines"</span>: <span class="tok-num">2</span>,        <span class="tok-comment">// hard max: 5</span>
+  <span class="tok-key">"literal"</span>: <span class="tok-num">false</span>
 }</code></pre>
           </div>
         </div>
@@ -1074,10 +1082,10 @@ Sync complete in 0.12s</span></code></pre>
             <p>Returns the raw source of a file, optionally sliced to a line range. Respects the token budget.</p>
             <div class="pre-label">parameters</div>
             <pre><code>{
-  <span class="tok-key">"path"</span>:       <span class="tok-str">"src/engine.rs"</span>,
-  <span class="tok-key">"start_line"</span>: <span class="tok-num">80</span>,   <span class="tok-comment">// optional</span>
-  <span class="tok-key">"end_line"</span>:   <span class="tok-num">140</span>,  <span class="tok-comment">// optional</span>
-  <span class="tok-key">"tokens"</span>:     <span class="tok-num">4000</span>
+  <span class="tok-key">"file"</span>:         <span class="tok-str">"src/engine.rs"</span>,
+  <span class="tok-key">"line_start"</span>:   <span class="tok-num">80</span>,   <span class="tok-comment">// 0-indexed, optional</span>
+  <span class="tok-key">"line_end"</span>:     <span class="tok-num">140</span>,  <span class="tok-comment">// 0-indexed, optional</span>
+  <span class="tok-key">"token_budget"</span>: <span class="tok-num">4000</span>
 }</code></pre>
           </div>
         </div>
@@ -1112,7 +1120,7 @@ Sync complete in 0.12s</span></code></pre>
             <span class="tool-desc">Switch tools without restarting MCP</span>
           </div>
           <div class="tool-body">
-            <p>Changes the active profile for the current connection and emits <code>notifications/tools/list_changed</code>. Use <code>editor</code> for non-destructive edits; <code>dangerous</code> requires explicit confirmation.</p>
+            <p>Changes the active profile within the process's startup ceiling and emits <code>notifications/tools/list_changed</code>. A minimal/reviewer process needs <code>--allow-profile-escalation</code> before it can enter a write profile; <code>dangerous</code> also requires explicit confirmation.</p>
             <div class="pre-label">parameters</div>
             <pre><code>{
   <span class="tok-key">"profile"</span>: <span class="tok-str">"editor"</span>,           <span class="tok-comment">// minimal|reviewer|editor|dangerous</span>
@@ -1169,14 +1177,14 @@ Sync complete in 0.12s</span></code></pre>
         <div class="tool-card">
           <div class="tool-header">
             <span class="tool-name" style="color:#a78bfa">list_files</span>
-            <span class="tool-desc">List all indexed files with optional glob filtering</span>
+            <span class="tool-desc">Page indexed files with optional glob filtering</span>
           </div>
           <div class="tool-body">
-            <p>Returns all source files currently tracked in the Codixing index, sorted lexicographically, with chunk counts per file (a proxy for size). Use before bulk edits or to explore project structure without consuming tokens on a full repo map.</p>
+            <p>Returns a bounded, lexicographically sorted page of files tracked in the Codixing index, with chunk counts per file (a proxy for size). Use before bulk edits or to explore project structure without consuming tokens on a full repo map.</p>
             <div class="pre-label">parameters</div>
             <pre><code>{
-  <span class="tok-key">"pattern"</span>: <span class="tok-str">"src/**/*.rs"</span>,  <span class="tok-comment">// optional glob — omit to list all</span>
-  <span class="tok-key">"limit"</span>:   <span class="tok-num">200</span>              <span class="tok-comment">// default: 200</span>
+  <span class="tok-key">"pattern"</span>: <span class="tok-str">"src/**/*.rs"</span>,  <span class="tok-comment">// optional glob</span>
+  <span class="tok-key">"limit"</span>:   <span class="tok-num">100</span>              <span class="tok-comment">// default and hard maximum</span>
 }</code></pre>
           </div>
         </div>
@@ -1184,10 +1192,10 @@ Sync complete in 0.12s</span></code></pre>
         <div class="tool-card">
           <div class="tool-header">
             <span class="tool-name" style="color:#a78bfa">rename_symbol</span>
-            <span class="tool-desc">Rename an identifier across every file in the project</span>
+            <span class="tool-desc">Plain substring replacement across indexed files</span>
           </div>
           <div class="tool-body">
-            <p>Finds all exact occurrences of <code>old_name</code> via literal grep, replaces them with <code>new_name</code> in every matching file, re-indexes each modified file, and returns a per-file summary. Optional <code>file_glob</code> restricts the rename to a subset of files. Run <code>search_usages</code> first to understand the blast radius.</p>
+            <p>This is not a semantic rename: it replaces the <code>old_name</code> substring even inside larger identifiers, comments, and strings, then re-indexes modified files. Optional <code>file_filter</code> restricts matching paths. Use <code>dry_run=true</code> first, and prefer an LSP-backed rename for ambiguous identifiers.</p>
             <div class="pre-label">parameters</div>
             <pre><code>{
   <span class="tok-key">"old_name"</span>:    <span class="tok-str">"compute_pagerank"</span>,
@@ -1236,7 +1244,7 @@ Sync complete in 0.12s</span></code></pre>
             <span class="tool-desc">Per-file symbol tree sorted by line number</span>
           </div>
           <div class="tool-body">
-            <p>Returns all symbols in a single file (functions, classes, structs, methods, etc.) sorted by line number. More token-efficient than <code>read_file</code> when you need to understand a file's structure before diving into a specific function. Includes line ranges, kinds, and signatures.</p>
+            <p>Returns a line-sorted symbol outline for one file (functions, classes, structs, methods, etc.) within the response envelope. More token-efficient than <code>read_file</code> when you need to understand a file's structure before diving into a specific function. Includes line ranges, kinds, and signatures.</p>
             <div class="pre-label">parameters</div>
             <pre><code>{
   <span class="tok-key">"file"</span>: <span class="tok-str">"src/engine.rs"</span>  <span class="tok-comment">// relative path</span>
@@ -1250,7 +1258,7 @@ Sync complete in 0.12s</span></code></pre>
             <span class="tool-desc">Apply a unified git diff with auto-reindex</span>
           </div>
           <div class="tool-body">
-            <p>Accepts a unified diff in standard git format (<code>--- a/file</code> / <code>+++ b/file</code> / <code>@@ hunks @@</code>), applies it to the filesystem, and re-indexes every modified file atomically. Handles new files (<code>--- /dev/null</code>), deleted files (<code>+++ /dev/null</code>), and multi-file diffs in a single call. Prefer this over multiple <code>edit_file</code> calls for complex refactors.</p>
+            <p>Accepts a unified diff in standard git format (<code>--- a/file</code> / <code>+++ b/file</code> / <code>@@ hunks @@</code>), applies its file hunks, and re-indexes modified files. A multi-file patch can report partial errors, so inspect the result before treating the operation as complete.</p>
             <div class="pre-label">parameters</div>
             <pre><code>{
   <span class="tok-key">"patch"</span>: <span class="tok-str">"--- a/src/foo.rs\n+++ b/src/foo.rs\n@@ -1,3 +1,4 @@\n context\n+new line\n more"</span>
@@ -1264,7 +1272,7 @@ Sync complete in 0.12s</span></code></pre>
             <span class="tool-desc">Execute a test command and return the output</span>
           </div>
           <div class="tool-body">
-            <p>Runs a shell command string via <code>sh -c</code> inside the project root, captures stdout + stderr, and returns the combined output with exit code. Use after <code>write_file</code>, <code>edit_file</code>, or <code>apply_patch</code> to close the write→test→read loop without leaving the MCP session. Output truncated to the last 8 000 characters. Default timeout: 120s.</p>
+            <p>Runs a shell command string via <code>sh -c</code> (or <code>cmd /C</code> on Windows) inside the project root and returns bounded output with the exit code. Each stream has a capture ceiling; the combined response keeps at most the most recent 8,000 characters before the final MCP response envelope. Default timeout: 120s.</p>
             <div class="pre-label">parameters</div>
             <pre><code>{
   <span class="tok-key">"command"</span>:      <span class="tok-str">"cargo test my_test"</span>,
@@ -1276,10 +1284,10 @@ Sync complete in 0.12s</span></code></pre>
         <div class="tool-card">
           <div class="tool-header">
             <span class="tool-name" style="color:#ffc56b">symbol_callers</span>
-            <span class="tool-desc">All functions that call a given symbol</span>
+            <span class="tool-desc">Bounded direct callers for a symbol</span>
           </div>
           <div class="tool-body">
-            <p>Returns every function that directly calls the named symbol, using the byte-range-accurate symbol-level call graph. Requires graph support to be enabled at index time.</p>
+            <p>Returns up to <code>limit</code> direct callers from the symbol-level call graph, with a search fallback when the graph has no result. Use paged <code>search_usages complete=true</code> for a broader deterministic scan.</p>
             <div class="pre-label">parameters</div>
             <pre><code>{
   <span class="tok-key">"symbol"</span>: <span class="tok-str">"process_file"</span>
@@ -1290,10 +1298,10 @@ Sync complete in 0.12s</span></code></pre>
         <div class="tool-card">
           <div class="tool-header">
             <span class="tool-name" style="color:#ffc56b">symbol_callees</span>
-            <span class="tool-desc">All functions a given symbol calls</span>
+            <span class="tool-desc">Bounded direct callees for a symbol</span>
           </div>
           <div class="tool-body">
-            <p>Returns every function the named symbol calls out to. Complements <code>symbol_callers</code> for full bidirectional traversal of the call graph.</p>
+            <p>Returns up to <code>limit</code> direct callees for the named symbol. Complements <code>symbol_callers</code> for bidirectional call-graph inspection.</p>
             <div class="pre-label">parameters</div>
             <pre><code>{
   <span class="tok-key">"symbol"</span>: <span class="tok-str">"process_file"</span>
@@ -1469,9 +1477,9 @@ Sync complete in 0.12s</span></code></pre>
 
         <h3>Capabilities</h3>
         <ul>
-          <li><code>textDocument/hover</code> — signature + doc comment for the symbol under the cursor</li>
+          <li><code>textDocument/hover</code> — kind, signature, and definition path for the symbol under the cursor</li>
           <li><code>textDocument/definition</code> — go-to-definition across all indexed files</li>
-          <li><code>textDocument/references</code> — find all usages of a symbol</li>
+          <li><code>textDocument/references</code> — return a bounded set of indexed usages for a symbol</li>
           <li><code>workspace/symbol</code> — global symbol search by query string (up to 200 results)</li>
           <li><code>textDocument/documentSymbol</code> — per-file symbol outline</li>
           <li><code>textDocument/completion</code> — symbol-name completions from the index</li>
@@ -1484,6 +1492,8 @@ Sync complete in 0.12s</span></code></pre>
 
         <h3>Call Hierarchy</h3>
         <p><code>textDocument/prepareCallHierarchy</code>, <code>callHierarchy/incomingCalls</code>, and <code>callHierarchy/outgoingCalls</code> provide cross-language call hierarchy — navigate callers and callees across Rust, Python, TypeScript, and other supported languages.</p>
+
+        <p>Full-text open/change/save buffers are capped at 8 MiB per document. Oversized replacements are rejected from the resident document store rather than consuming unbounded editor-server memory.</p>
 
         <h3>Neovim (lazy.nvim)</h3>
         <div class="pre-label">~/.config/nvim/lua/plugins/codixing.lua</div>
@@ -1515,47 +1525,63 @@ Sync complete in 0.12s</span></code></pre>
           <tbody>
             <tr><td>root</td><td>—</td><td>Primary repository root path</td></tr>
             <tr><td>extra_roots</td><td>[]</td><td>Additional roots for multi-repo indexing</td></tr>
-            <tr><td>chunk_config</td><td>—</td><td>Max chunk tokens, overlap lines</td></tr>
-            <tr><td>embedding_config</td><td>—</td><td>Model selection, batch size</td></tr>
-            <tr><td>graph_config</td><td>—</td><td>PageRank damping, max iterations</td></tr>
+            <tr><td>languages</td><td>[]</td><td>Optional allow-list; empty auto-detects supported formats</td></tr>
+            <tr><td>exclude_patterns</td><td>built-in defaults</td><td>Additional glob patterns excluded from indexing</td></tr>
+            <tr><td>chunk</td><td>defaults</td><td>Maximum chunk size and overlap behavior</td></tr>
+            <tr><td>embedding</td><td>disabled</td><td>Model, batching, and vector-index settings</td></tr>
+            <tr><td>graph</td><td>defaults</td><td>PageRank damping and iteration count</td></tr>
+            <tr><td>bm25</td><td>defaults</td><td>Field-specific ranking boosts</td></tr>
           </tbody>
         </table>
 
         <h3>.codixing/ directory layout</h3>
         <div class="pre-label">directory</div>
         <pre><code>.codixing/
-├── index/          <span class="tok-comment"># Tantivy BM25 index segments</span>
-├── vectors/        <span class="tok-comment"># usearch HNSW index + id map</span>
+├── tantivy/             <span class="tok-comment"># BM25 segments and stored chunk content</span>
+├── vectors/             <span class="tok-comment"># generation-based vector snapshots</span>
 ├── graph/
-│   └── graph.bin   <span class="tok-comment"># petgraph bitcode serialisation</span>
-├── symbols.bin     <span class="tok-comment"># DashMap symbol table (bitcode)</span>
-└── meta.bin        <span class="tok-comment"># IndexMeta: file hashes, last git commit</span></code></pre>
+│   ├── graph.bin        <span class="tok-comment"># file dependency graph</span>
+│   └── symbol_graph.bin <span class="tok-comment"># symbol-level call graph</span>
+├── symbols_v2.bin       <span class="tok-comment"># persisted symbol table</span>
+├── chunk_meta.bin       <span class="tok-comment"># compact resident chunk metadata</span>
+├── *_trigram.bin        <span class="tok-comment"># exact-search candidate indexes</span>
+├── tree_hashes_v2.bin   <span class="tok-comment"># authoritative sync baseline</span>
+├── config.json          <span class="tok-comment"># persisted index configuration</span>
+└── meta.json            <span class="tok-comment"># counts, format version, and git commit</span></code></pre>
       </section>
 
       <!-- Embeddings -->
       <section class="doc-section" id="embeddings">
         <h2>Embeddings</h2>
 
-        <h3>BGE-Base-EN-v1.5 (default)</h3>
-        <p>768-dimensional embeddings via fastembed ONNX. Downloaded automatically on first <code>init</code> (no <code>--model bge-small-en</code> flag). Stored in the system model cache. int8 quantised at index time.</p>
+        <h3>BGE embeddings (opt-in)</h3>
+        <p>Enable fastembed ONNX vectors with <code>codixing init . --embed --model bge-small-en</code>. The model is downloaded on first use and stored in the system model cache; ordinary <code>init</code> remains BM25-only.</p>
+        <p>Install ONNX Runtime, then set <code>ORT_DYLIB_PATH</code> to the exact absolute path of <code>libonnxruntime.so</code>, <code>libonnxruntime.dylib</code>, or <code>onnxruntime.dll</code>. A Python wheel does not configure that environment variable for the Codixing process. Run <code>codixing doctor</code> to verify the resolved path. See the <a href="https://ort.pyke.io/setup/linking#runtime-loading-with-load-dynamic">ort runtime-loading guide</a> for platform details.</p>
+
+        <h3>Model2Vec (ONNX-free)</h3>
+        <p>For semantic retrieval without installing ONNX Runtime, use the static Model2Vec backend. It downloads a compact model on first use and builds vectors with the same durable embedding workflow.</p>
+        <div class="pre-label">shell</div>
+        <pre><code>codixing init . --embed --model model2vec
+
+<span class="tok-comment"># Larger retrieval-optimised static model</span>
+codixing init . --embed --model model2vec-retrieval</code></pre>
 
         <h3>Qwen3-Embedding-0.6B <span class="badge badge-orange">feature flag</span></h3>
-        <p>1024-dimensional embeddings via candle. Requires building with <code>--features qwen3</code>. Suitable for GPU-accelerated environments or when higher-dimensional representations are preferred.</p>
+        <p>1024-dimensional embeddings via ONNX Runtime. Requires building with <code>--features qwen3</code>. Suitable when the higher-dimensional Qwen3 representation is preferred.</p>
         <div class="pre-label">shell</div>
-        <pre><code>cargo build --release --features qwen3
-codixing init . --embedding-model qwen3</code></pre>
+        <pre><code>cargo build --release -p codixing --features qwen3
+codixing init . --embed --model qwen3</code></pre>
 
-        <h3>Qdrant backend <span class="badge badge-purple">feature flag</span></h3>
-        <p>Replaces the built-in usearch HNSW index with an external Qdrant instance. Useful for team deployments where the vector index is shared.</p>
+        <h3>Qdrant client <span class="badge badge-purple">experimental</span></h3>
+        <p>The <code>qdrant</code> feature compiles the experimental client APIs, but the current CLI does not route indexing or search through them. Do not use the BM25-only command below as a Qdrant setup path; backend selection still requires library integration.</p>
         <div class="pre-label">shell</div>
-        <pre><code>cargo build --release --features qdrant
-QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=codixing codixing init .</code></pre>
+        <pre><code>cargo build --release -p codixing-core --features qdrant</code></pre>
       </section>
 
       <!-- Languages -->
       <section class="doc-section" id="languages">
         <h2>Language Support</h2>
-        <p>Codixing uses tree-sitter for AST-aware parsing. All 24 languages below get full chunking, symbol extraction, and import graph edges.</p>
+        <p>Codixing uses tree-sitter for AST-aware parsing in 18 programming languages. Config, diagram, and documentation formats use dedicated structural or line-based parsers with capabilities appropriate to each format.</p>
 
         <h3>Tier 1 — Full support</h3>
         <div class="lang-grid">
@@ -1597,7 +1623,14 @@ QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=codixing codixing init .</cod
           <span class="lang-pill">XML/Draw.io</span>
         </div>
 
-        <p>Files in unsupported languages are indexed with a line-based fallback chunker — they appear in BM25 results but not in the symbol table or graph.</p>
+        <h3>Documentation — Section-aware chunking</h3>
+        <div class="lang-grid">
+          <span class="lang-pill">Markdown</span>
+          <span class="lang-pill">HTML</span>
+          <span class="lang-pill">reStructuredText</span>
+          <span class="lang-pill">AsciiDoc</span>
+          <span class="lang-pill">Plain text</span>
+        </div>
 
         <div class="callout callout-info">
           <span class="callout-icon">&#8505;</span>
@@ -1608,7 +1641,7 @@ QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=codixing codixing init .</cod
       <!-- Architecture -->
       <section class="doc-section" id="architecture">
         <h2>Architecture</h2>
-        <p>Codixing is a Rust workspace with four crates:</p>
+        <p>Codixing is a Rust workspace with five crates:</p>
 
         <table class="doc-table">
           <thead><tr><th>Crate</th><th>Role</th></tr></thead>
@@ -1617,6 +1650,7 @@ QDRANT_URL=http://localhost:6333 QDRANT_COLLECTION=codixing codixing init .</cod
             <tr><td>cli</td><td>Binary wrapping core with clap subcommands</td></tr>
             <tr><td>server</td><td>Axum REST API server exposing core over HTTP</td></tr>
             <tr><td>mcp</td><td>JSON-RPC 2.0 stdin/stdout MCP server for Claude Code</td></tr>
+            <tr><td>lsp</td><td>Language Server Protocol integration for editors</td></tr>
           </tbody>
         </table>
 

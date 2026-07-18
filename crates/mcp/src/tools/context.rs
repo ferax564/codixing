@@ -5,7 +5,10 @@ use serde_json::Value;
 use codixing_core::context_assembly::IntelligentContextAssembler;
 use codixing_core::{AgentContextMode, Engine, SearchQuery};
 
-use super::common::ProgressReporter;
+use super::{
+    MAX_TOOL_ARRAY_ITEMS, common::ProgressReporter, requested_result_count,
+    requested_structured_tool_token_budget, requested_tool_token_budget,
+};
 
 pub(crate) fn call_get_context_for_task(
     engine: &Engine,
@@ -16,11 +19,7 @@ pub(crate) fn call_get_context_for_task(
         Some(t) => t.to_string(),
         None => return ("Missing required argument: task".to_string(), true),
     };
-    let token_budget = args
-        .get("token_budget")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(4000) as usize;
-    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    let (token_budget, limit) = context_request_bounds(args);
 
     // 1. Search with the task description
     if let Some(p) = progress {
@@ -100,6 +99,13 @@ pub(crate) fn call_get_context_for_task(
     (out, false)
 }
 
+pub(crate) fn context_request_bounds(args: &Value) -> (usize, usize) {
+    (
+        requested_tool_token_budget(args),
+        requested_result_count(args, "limit", 10),
+    )
+}
+
 pub(crate) fn call_agent_context_pack(
     engine: &Engine,
     args: &Value,
@@ -118,19 +124,18 @@ pub(crate) fn call_agent_context_pack(
         Ok(mode) => mode,
         Err(e) => return (e, true),
     };
-    let token_budget = args
-        .get("token_budget")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(6000) as usize;
+    let token_budget = requested_structured_tool_token_budget(args);
     let changed_files = match args.get("changed_files") {
         Some(Value::Array(values)) => values
             .iter()
             .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+            .take(MAX_TOOL_ARRAY_ITEMS)
             .collect(),
         Some(Value::String(value)) => value
             .split(',')
             .map(str::trim)
             .filter(|value| !value.is_empty())
+            .take(MAX_TOOL_ARRAY_ITEMS)
             .map(ToOwned::to_owned)
             .collect(),
         _ => Vec::new(),
@@ -178,10 +183,7 @@ pub(crate) fn call_assemble_location_context(engine: &Engine, args: &Value) -> (
         None => return ("Missing required argument: file".to_string(), true),
     };
     let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
-    let token_budget = args
-        .get("token_budget")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(4096) as usize;
+    let token_budget = requested_tool_token_budget(args);
     let budget_mode = match args.get("budget_mode").and_then(|v| v.as_str()) {
         Some("strict") => BudgetMode::Strict,
         _ => BudgetMode::Soft,

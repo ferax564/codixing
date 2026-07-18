@@ -43,7 +43,7 @@ jobs:
 
       - name: Prepare benchmark fixture (index codixing repo)
         run: |
-          ./target/release/codixing init . --model none
+          ./target/release/codixing init .
 
       - name: Run agent benchmark (codixing repo subset, ~8 sessions)
         id: bench

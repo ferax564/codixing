@@ -44,6 +44,14 @@ let outputChannel: vscode.OutputChannel;
 
 export function activate(context: vscode.ExtensionContext): void {
     outputChannel = vscode.window.createOutputChannel('Codixing');
+    context.subscriptions.push(outputChannel);
+
+    if (!vscode.workspace.isTrusted) {
+        outputChannel.appendLine(
+            '[Codixing] Disabled in Restricted Mode because the extension launches workspace-scoped binaries.',
+        );
+        return;
+    }
 
     // Status bar item (right side, priority 100 keeps it near the right edge)
     statusBarItem = vscode.window.createStatusBarItem(

@@ -1,12 +1,434 @@
 pub mod qdrant;
 
 use std::collections::HashMap;
-use std::path::Path;
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "usearch")]
 use usearch::{Index, IndexOptions, MetricKind, ScalarKind, new_index};
 
 use crate::error::{CodixingError, Result};
+
+const VECTOR_GENERATION_FORMAT: u32 = 1;
+static GENERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// A generation manifest is the publication point for a vector checkpoint.
+///
+/// The index and file-to-chunk map are written and synced first. A uniquely
+/// named manifest is then renamed into place, so readers see either the prior
+/// complete generation or the new complete generation, never a mixed pair.
+#[derive(Debug, Serialize, Deserialize)]
+struct VectorGenerationManifest {
+    format_version: u32,
+    generation: String,
+    index_file: String,
+    file_chunks_file: String,
+    vector_count: u64,
+}
+
+#[derive(Debug)]
+struct GenerationArtifacts {
+    manifest_path: PathBuf,
+    index_path: PathBuf,
+    file_chunks_path: PathBuf,
+    vector_count: usize,
+}
+
+#[derive(Debug)]
+struct PublicationCleanup {
+    generations: Vec<GenerationArtifacts>,
+    legacy_index: bool,
+    legacy_file_chunks: bool,
+}
+
+fn path_file_name(path: &Path) -> Result<String> {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .ok_or_else(|| {
+            CodixingError::VectorIndex(format!(
+                "vector artifact path has no file name: {}",
+                path.display()
+            ))
+        })
+}
+
+fn artifact_parent(index_path: &Path, file_chunks_path: &Path) -> Result<PathBuf> {
+    let index_parent = index_path.parent().ok_or_else(|| {
+        CodixingError::VectorIndex(format!(
+            "vector index path has no parent: {}",
+            index_path.display()
+        ))
+    })?;
+    let chunks_parent = file_chunks_path.parent().ok_or_else(|| {
+        CodixingError::VectorIndex(format!(
+            "file-chunks path has no parent: {}",
+            file_chunks_path.display()
+        ))
+    })?;
+    if index_parent != chunks_parent {
+        return Err(CodixingError::VectorIndex(format!(
+            "vector index and file-chunks artifacts must share a directory: {} vs {}",
+            index_parent.display(),
+            chunks_parent.display()
+        )));
+    }
+    Ok(index_parent.to_path_buf())
+}
+
+fn manifest_prefix(index_path: &Path) -> Result<String> {
+    Ok(format!(
+        "{}.manifest.generation-",
+        path_file_name(index_path)?
+    ))
+}
+
+fn generation_from_manifest_path(index_path: &Path, manifest_path: &Path) -> Option<String> {
+    let prefix = manifest_prefix(index_path).ok()?;
+    let name = manifest_path.file_name()?.to_string_lossy();
+    name.strip_prefix(&prefix)
+        .and_then(|rest| rest.strip_suffix(".json"))
+        .filter(|generation| !generation.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn generation_paths(index_path: &Path, generation: &str) -> Result<GenerationArtifacts> {
+    let parent = index_path.parent().ok_or_else(|| {
+        CodixingError::VectorIndex(format!(
+            "vector index path has no parent: {}",
+            index_path.display()
+        ))
+    })?;
+    let index_name = path_file_name(index_path)?;
+    Ok(GenerationArtifacts {
+        manifest_path: parent.join(format!(
+            "{index_name}.manifest.generation-{generation}.json"
+        )),
+        index_path: parent.join(format!("{index_name}.generation-{generation}")),
+        file_chunks_path: parent.join(format!("{index_name}.file-chunks.generation-{generation}")),
+        vector_count: 0,
+    })
+}
+
+fn manifest_paths(index_path: &Path) -> Result<Vec<PathBuf>> {
+    let parent = index_path.parent().ok_or_else(|| {
+        CodixingError::VectorIndex(format!(
+            "vector index path has no parent: {}",
+            index_path.display()
+        ))
+    })?;
+    let prefix = manifest_prefix(index_path)?;
+    let mut paths = Vec::new();
+    match fs::read_dir(parent) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with(&prefix) && name.ends_with(".json") {
+                    paths.push(entry.path());
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(paths),
+        Err(error) => return Err(error.into()),
+    }
+    // Generation IDs start with a fixed-width monotonic timestamp. Sorting by
+    // file name therefore selects the newest publication without a mutable
+    // "current" pointer that would need cross-platform replacement semantics.
+    paths.sort();
+    paths.reverse();
+    Ok(paths)
+}
+
+fn next_generation(index_path: &Path) -> Result<String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let newest_sequence = manifest_paths(index_path)?
+        .into_iter()
+        .filter_map(|path| generation_from_manifest_path(index_path, &path))
+        .filter_map(|generation| {
+            generation
+                .split('-')
+                .next()
+                .and_then(|part| u128::from_str_radix(part, 16).ok())
+        })
+        .max()
+        .unwrap_or(0);
+    let sequence = now.max(newest_sequence.saturating_add(1));
+    let nonce = GENERATION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    Ok(format!(
+        "{sequence:032x}-{:08x}-{nonce:016x}",
+        std::process::id()
+    ))
+}
+
+fn tracked_id_count(file_chunks: &HashMap<String, Vec<u64>>) -> Result<usize> {
+    file_chunks.values().try_fold(0usize, |total, ids| {
+        total.checked_add(ids.len()).ok_or_else(|| {
+            CodixingError::VectorIndex("tracked vector count overflowed usize".to_string())
+        })
+    })
+}
+
+fn validate_vector_counts(
+    actual_count: usize,
+    file_chunks: &HashMap<String, Vec<u64>>,
+    manifest_count: Option<usize>,
+) -> Result<()> {
+    let tracked_count = tracked_id_count(file_chunks)?;
+    if actual_count != tracked_count {
+        return Err(CodixingError::VectorIndex(format!(
+            "inconsistent vector artifacts: index contains {actual_count} vectors but file-chunks tracks {tracked_count} IDs"
+        )));
+    }
+    if let Some(expected) = manifest_count
+        && actual_count != expected
+    {
+        return Err(CodixingError::VectorIndex(format!(
+            "inconsistent vector generation: manifest declares {expected} vectors but index contains {actual_count}"
+        )));
+    }
+    Ok(())
+}
+
+fn write_new_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+fn sync_file(path: &Path) -> Result<()> {
+    OpenOptions::new().write(true).open(path)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<()> {
+    File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<()> {
+    // Windows does not permit opening directories through std::fs::File. The
+    // two data files and manifest itself are still flushed before publication.
+    Ok(())
+}
+
+fn resolve_manifest(index_path: &Path, manifest_path: &Path) -> Result<GenerationArtifacts> {
+    let generation = generation_from_manifest_path(index_path, manifest_path).ok_or_else(|| {
+        CodixingError::VectorIndex(format!(
+            "invalid vector generation manifest name: {}",
+            manifest_path.display()
+        ))
+    })?;
+    let bytes = fs::read(manifest_path)?;
+    let manifest: VectorGenerationManifest = serde_json::from_slice(&bytes).map_err(|error| {
+        CodixingError::Serialization(format!(
+            "failed to deserialize vector manifest {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    if manifest.format_version != VECTOR_GENERATION_FORMAT {
+        return Err(CodixingError::VectorIndex(format!(
+            "unsupported vector generation format {} in {}",
+            manifest.format_version,
+            manifest_path.display()
+        )));
+    }
+    if manifest.generation != generation {
+        return Err(CodixingError::VectorIndex(format!(
+            "vector manifest generation mismatch in {}",
+            manifest_path.display()
+        )));
+    }
+
+    let mut expected = generation_paths(index_path, &generation)?;
+    if path_file_name(&expected.index_path)? != manifest.index_file
+        || path_file_name(&expected.file_chunks_path)? != manifest.file_chunks_file
+    {
+        return Err(CodixingError::VectorIndex(format!(
+            "vector manifest references unexpected artifact names in {}",
+            manifest_path.display()
+        )));
+    }
+    expected.vector_count = usize::try_from(manifest.vector_count).map_err(|_| {
+        CodixingError::VectorIndex(format!(
+            "vector count in {} does not fit this platform",
+            manifest_path.display()
+        ))
+    })?;
+    Ok(expected)
+}
+
+fn load_published_generation<T>(
+    index_path: &Path,
+    file_chunks_path: &Path,
+    mut load_pair: impl FnMut(&Path, &Path, Option<usize>) -> Result<T>,
+) -> Result<T> {
+    artifact_parent(index_path, file_chunks_path)?;
+    let mut last_error = None;
+
+    // A second scan closes the small race where a read started before a new
+    // manifest was published and its old generation was cleaned up meanwhile.
+    for _ in 0..2 {
+        for manifest_path in manifest_paths(index_path)? {
+            let loaded = resolve_manifest(index_path, &manifest_path).and_then(|artifacts| {
+                load_pair(
+                    &artifacts.index_path,
+                    &artifacts.file_chunks_path,
+                    Some(artifacts.vector_count),
+                )
+            });
+            match loaded {
+                Ok(index) => return Ok(index),
+                Err(error) => last_error = Some(error),
+            }
+        }
+
+        // Legacy indexes used one canonical pair written in place. Keep this
+        // fallback so upgrades do not force a full re-embed.
+        if index_path.exists() && file_chunks_path.exists() {
+            match load_pair(index_path, file_chunks_path, None) {
+                Ok(index) => return Ok(index),
+                Err(error) => last_error = Some(error),
+            }
+        }
+    }
+
+    if let Some(error) = last_error {
+        Err(CodixingError::VectorIndex(format!(
+            "no valid vector generation could be loaded: {error}"
+        )))
+    } else {
+        Err(CodixingError::VectorIndex(format!(
+            "no published vector artifacts found beside {}",
+            index_path.display()
+        )))
+    }
+}
+
+fn artifacts_exist(index_path: &Path, file_chunks_path: &Path) -> bool {
+    if artifact_parent(index_path, file_chunks_path).is_err() {
+        return false;
+    }
+    if let Ok(paths) = manifest_paths(index_path) {
+        for manifest_path in paths {
+            if let Ok(artifacts) = resolve_manifest(index_path, &manifest_path)
+                && artifacts.index_path.is_file()
+                && artifacts.file_chunks_path.is_file()
+            {
+                return true;
+            }
+        }
+    }
+    index_path.is_file() && file_chunks_path.is_file()
+}
+
+fn publication_cleanup_snapshot(
+    index_path: &Path,
+    file_chunks_path: &Path,
+) -> Result<PublicationCleanup> {
+    let generations = manifest_paths(index_path)?
+        .into_iter()
+        .filter_map(|manifest_path| {
+            let generation = generation_from_manifest_path(index_path, &manifest_path)?;
+            generation_paths(index_path, &generation).ok()
+        })
+        .collect();
+    Ok(PublicationCleanup {
+        generations,
+        legacy_index: index_path.is_file(),
+        legacy_file_chunks: file_chunks_path.is_file(),
+    })
+}
+
+fn cleanup_after_publication(
+    index_path: &Path,
+    file_chunks_path: &Path,
+    cleanup: PublicationCleanup,
+) {
+    let Some(parent) = index_path.parent() else {
+        return;
+    };
+
+    // Delete only generations whose manifests were visible before this save
+    // started. A live directory sweep can remove another publisher's data
+    // files after it writes them but before it publishes its manifest. Leaving
+    // unpublished crash orphans for an explicit maintenance pass is safer than
+    // racing an active cross-process publisher.
+    for generation in cleanup.generations {
+        let _ = fs::remove_file(generation.manifest_path);
+        let _ = fs::remove_file(generation.index_path);
+        let _ = fs::remove_file(generation.file_chunks_path);
+    }
+
+    // Legacy artifacts can be removed only now that a complete generation is
+    // durably published, and only when they predated this save. Failures are
+    // harmless and retried on a later save.
+    if cleanup.legacy_index {
+        let _ = fs::remove_file(index_path);
+    }
+    if cleanup.legacy_file_chunks {
+        let _ = fs::remove_file(file_chunks_path);
+    }
+    let _ = sync_directory(parent);
+}
+
+fn publish_generation(
+    index_path: &Path,
+    file_chunks_path: &Path,
+    file_chunks: &HashMap<String, Vec<u64>>,
+    vector_count: usize,
+    write_index: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
+    validate_vector_counts(vector_count, file_chunks, Some(vector_count))?;
+    let parent = artifact_parent(index_path, file_chunks_path)?;
+    fs::create_dir_all(&parent)?;
+    let cleanup = publication_cleanup_snapshot(index_path, file_chunks_path)?;
+
+    let generation = next_generation(index_path)?;
+    let mut artifacts = generation_paths(index_path, &generation)?;
+    artifacts.vector_count = vector_count;
+
+    write_index(&artifacts.index_path)?;
+    sync_file(&artifacts.index_path)?;
+
+    let file_chunks_bytes = bitcode::serialize(file_chunks).map_err(|error| {
+        CodixingError::Serialization(format!("failed to serialize file_chunks: {error}"))
+    })?;
+    write_new_file(&artifacts.file_chunks_path, &file_chunks_bytes)?;
+
+    let manifest = VectorGenerationManifest {
+        format_version: VECTOR_GENERATION_FORMAT,
+        generation,
+        index_file: path_file_name(&artifacts.index_path)?,
+        file_chunks_file: path_file_name(&artifacts.file_chunks_path)?,
+        vector_count: u64::try_from(vector_count).map_err(|_| {
+            CodixingError::VectorIndex("vector count does not fit in u64".to_string())
+        })?,
+    };
+    let manifest_bytes = serde_json::to_vec(&manifest).map_err(|error| {
+        CodixingError::Serialization(format!("failed to serialize vector manifest: {error}"))
+    })?;
+    let manifest_tmp = artifacts.manifest_path.with_extension("json.tmp");
+    write_new_file(&manifest_tmp, &manifest_bytes)?;
+    fs::rename(&manifest_tmp, &artifacts.manifest_path)?;
+    sync_directory(&parent)?;
+
+    cleanup_after_publication(index_path, file_chunks_path, cleanup);
+    Ok(())
+}
 
 /// Pluggable vector search backend.
 ///
@@ -167,18 +589,32 @@ mod usearch_impl {
             self.len() == 0
         }
 
-        /// Persist the HNSW graph to `index_path` and the file-chunk map to
-        /// `file_chunks_path` (bitcode binary).
+        /// Persist the HNSW graph and file-chunk map as one published generation.
+        ///
+        /// `index_path` and `file_chunks_path` are retained as legacy path
+        /// anchors; newly saved data uses immutable generation files beside
+        /// them and a unique manifest as the atomic publication point.
         pub fn save(&self, index_path: &Path, file_chunks_path: &Path) -> Result<()> {
-            self.inner
-                .save(index_path.to_string_lossy().as_ref())
-                .map_err(|e| CodixingError::VectorIndex(format!("save index failed: {e}")))?;
+            publish_generation(
+                index_path,
+                file_chunks_path,
+                &self.file_chunks,
+                self.len(),
+                |generation_index_path| {
+                    self.inner
+                        .save(generation_index_path.to_string_lossy().as_ref())
+                        .map_err(|error| {
+                            CodixingError::VectorIndex(format!(
+                                "save vector generation failed: {error}"
+                            ))
+                        })
+                },
+            )
+        }
 
-            let bytes = bitcode::serialize(&self.file_chunks).map_err(|e| {
-                CodixingError::Serialization(format!("failed to serialize file_chunks: {e}"))
-            })?;
-            std::fs::write(file_chunks_path, bytes)?;
-            Ok(())
+        /// Return whether a published generation or legacy artifact pair exists.
+        pub fn artifacts_exist(index_path: &Path, file_chunks_path: &Path) -> bool {
+            super::artifacts_exist(index_path, file_chunks_path)
         }
 
         /// Load an existing index from disk.
@@ -192,22 +628,33 @@ mod usearch_impl {
             dims: usize,
             quantize: bool,
         ) -> Result<Self> {
-            let idx = Self::new(dims, quantize)?;
-            idx.inner
-                .load(index_path.to_string_lossy().as_ref())
-                .map_err(|e| CodixingError::VectorIndex(format!("load index failed: {e}")))?;
+            load_published_generation(
+                index_path,
+                file_chunks_path,
+                |idx_path, fc_path, expected| {
+                    let idx = Self::new(dims, quantize)?;
+                    idx.inner
+                        .load(idx_path.to_string_lossy().as_ref())
+                        .map_err(|error| {
+                            CodixingError::VectorIndex(format!("load index failed: {error}"))
+                        })?;
 
-            let bytes = std::fs::read(file_chunks_path)?;
-            let file_chunks: HashMap<String, Vec<u64>> =
-                bitcode::deserialize(&bytes).map_err(|e| {
-                    CodixingError::Serialization(format!("failed to deserialize file_chunks: {e}"))
-                })?;
+                    let bytes = fs::read(fc_path)?;
+                    let file_chunks: HashMap<String, Vec<u64>> = bitcode::deserialize(&bytes)
+                        .map_err(|error| {
+                            CodixingError::Serialization(format!(
+                                "failed to deserialize file_chunks: {error}"
+                            ))
+                        })?;
+                    validate_vector_counts(idx.inner.size(), &file_chunks, expected)?;
 
-            Ok(Self {
-                inner: idx.inner,
-                file_chunks,
-                dims,
-            })
+                    Ok(Self {
+                        inner: idx.inner,
+                        file_chunks,
+                        dims,
+                    })
+                },
+            )
         }
 
         /// Access the file-chunk map (for persistence).
@@ -325,11 +772,23 @@ mod brute_force_impl {
                     vector.len()
                 )));
             }
-            // Update existing entry or push new one.
-            if let Some(entry) = self.entries.iter_mut().find(|(id, _)| *id == chunk_id) {
-                entry.1 = vector.to_vec();
-            } else {
-                self.entries.push((chunk_id, vector.to_vec()));
+            // Update existing entry or push new one. When an ID is updated,
+            // remove every stale file association before recording its new
+            // owner; otherwise tracked IDs can outnumber actual vectors and
+            // make a checkpoint internally inconsistent.
+            let replaced =
+                if let Some(entry) = self.entries.iter_mut().find(|(id, _)| *id == chunk_id) {
+                    entry.1 = vector.to_vec();
+                    true
+                } else {
+                    self.entries.push((chunk_id, vector.to_vec()));
+                    false
+                };
+            if replaced {
+                self.file_chunks.retain(|_, ids| {
+                    ids.retain(|id| *id != chunk_id);
+                    !ids.is_empty()
+                });
             }
             self.file_chunks
                 .entry(file_path.to_string())
@@ -393,27 +852,35 @@ mod brute_force_impl {
             self.entries.is_empty()
         }
 
-        /// Persist the index to `index_path` (JSON) and the file-chunk map to
-        /// `file_chunks_path` (bitcode binary).
+        /// Persist the index and file-chunk map as one published generation.
         pub fn save(&self, index_path: &Path, file_chunks_path: &Path) -> Result<()> {
-            // Save vectors as JSON for cross-platform portability.
-            let data = serde_json::json!({
-                "type": "brute_force",
-                "dims": self.dims,
-                "entries": self.entries.iter().map(|(id, vec)| {
-                    serde_json::json!({ "chunk_id": id, "vector": vec })
-                }).collect::<Vec<_>>(),
-            });
-            let bytes = serde_json::to_vec(&data).map_err(|e| {
-                CodixingError::VectorIndex(format!("failed to serialize vector index: {e}"))
-            })?;
-            std::fs::write(index_path, bytes)?;
+            publish_generation(
+                index_path,
+                file_chunks_path,
+                &self.file_chunks,
+                self.len(),
+                |generation_index_path| {
+                    // Save vectors as JSON for cross-platform portability.
+                    let data = serde_json::json!({
+                        "type": "brute_force",
+                        "dims": self.dims,
+                        "entries": self.entries.iter().map(|(id, vec)| {
+                            serde_json::json!({ "chunk_id": id, "vector": vec })
+                        }).collect::<Vec<_>>(),
+                    });
+                    let bytes = serde_json::to_vec(&data).map_err(|error| {
+                        CodixingError::VectorIndex(format!(
+                            "failed to serialize vector index: {error}"
+                        ))
+                    })?;
+                    write_new_file(generation_index_path, &bytes)
+                },
+            )
+        }
 
-            let fc_bytes = bitcode::serialize(&self.file_chunks).map_err(|e| {
-                CodixingError::Serialization(format!("failed to serialize file_chunks: {e}"))
-            })?;
-            std::fs::write(file_chunks_path, fc_bytes)?;
-            Ok(())
+        /// Return whether a published generation or legacy artifact pair exists.
+        pub fn artifacts_exist(index_path: &Path, file_chunks_path: &Path) -> bool {
+            super::artifacts_exist(index_path, file_chunks_path)
         }
 
         /// Load an existing index from disk.
@@ -425,34 +892,53 @@ mod brute_force_impl {
             dims: usize,
             _quantize: bool,
         ) -> Result<Self> {
-            let bytes = std::fs::read(index_path)?;
-            let data: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| {
-                CodixingError::VectorIndex(format!("failed to deserialize vector index: {e}"))
-            })?;
+            load_published_generation(
+                index_path,
+                file_chunks_path,
+                |idx_path, fc_path, expected| {
+                    let bytes = fs::read(idx_path)?;
+                    let data: serde_json::Value =
+                        serde_json::from_slice(&bytes).map_err(|error| {
+                            CodixingError::VectorIndex(format!(
+                                "failed to deserialize vector index: {error}"
+                            ))
+                        })?;
 
-            let mut entries = Vec::new();
-            if let Some(arr) = data["entries"].as_array() {
-                for entry in arr {
-                    let chunk_id = entry["chunk_id"].as_u64().unwrap_or(0);
-                    let vector: Vec<f32> = entry["vector"]
-                        .as_array()
-                        .map(|a| a.iter().map(|v| v.as_f64().unwrap_or(0.0) as f32).collect())
-                        .unwrap_or_default();
-                    entries.push((chunk_id, vector));
-                }
-            }
+                    let mut entries = Vec::new();
+                    if let Some(arr) = data["entries"].as_array() {
+                        for entry in arr {
+                            let chunk_id = entry["chunk_id"].as_u64().unwrap_or(0);
+                            let vector: Vec<f32> = entry["vector"]
+                                .as_array()
+                                .map(|a| {
+                                    a.iter().map(|v| v.as_f64().unwrap_or(0.0) as f32).collect()
+                                })
+                                .unwrap_or_default();
+                            if vector.len() != dims {
+                                return Err(CodixingError::VectorIndex(format!(
+                                    "persisted vector dimension mismatch: expected {dims}, got {}",
+                                    vector.len()
+                                )));
+                            }
+                            entries.push((chunk_id, vector));
+                        }
+                    }
+                    let fc_bytes = fs::read(fc_path)?;
+                    let file_chunks: HashMap<String, Vec<u64>> = bitcode::deserialize(&fc_bytes)
+                        .map_err(|error| {
+                            CodixingError::Serialization(format!(
+                                "failed to deserialize file_chunks: {error}"
+                            ))
+                        })?;
+                    validate_vector_counts(entries.len(), &file_chunks, expected)?;
 
-            let fc_bytes = std::fs::read(file_chunks_path)?;
-            let file_chunks: HashMap<String, Vec<u64>> =
-                bitcode::deserialize(&fc_bytes).map_err(|e| {
-                    CodixingError::Serialization(format!("failed to deserialize file_chunks: {e}"))
-                })?;
-
-            Ok(Self {
-                entries,
-                file_chunks,
-                dims,
-            })
+                    Ok(Self {
+                        entries,
+                        file_chunks,
+                        dims,
+                    })
+                },
+            )
         }
 
         /// Access the file-chunk map (for persistence).
@@ -533,6 +1019,28 @@ mod tests {
         v
     }
 
+    fn write_test_manifest(
+        index_path: &Path,
+        generation: &str,
+        vector_count: usize,
+    ) -> GenerationArtifacts {
+        let mut artifacts = generation_paths(index_path, generation).unwrap();
+        artifacts.vector_count = vector_count;
+        let manifest = VectorGenerationManifest {
+            format_version: VECTOR_GENERATION_FORMAT,
+            generation: generation.to_string(),
+            index_file: path_file_name(&artifacts.index_path).unwrap(),
+            file_chunks_file: path_file_name(&artifacts.file_chunks_path).unwrap(),
+            vector_count: vector_count as u64,
+        };
+        fs::write(
+            &artifacts.manifest_path,
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        artifacts
+    }
+
     #[test]
     fn add_and_search() {
         let mut idx = VectorIndex::new(4, false).unwrap();
@@ -581,6 +1089,26 @@ mod tests {
         assert_eq!(idx.len(), 0);
     }
 
+    #[cfg(not(feature = "usearch"))]
+    #[test]
+    fn brute_force_update_moves_file_mapping_without_duplication() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx_path = dir.path().join("updated.usearch");
+        let fc_path = dir.path().join("updated_file_chunks.bin");
+        let mut idx = VectorIndex::new(4, false).unwrap();
+
+        idx.add_mut(5, &unit_vec(4, 0), "old.rs").unwrap();
+        idx.add_mut(5, &unit_vec(4, 1), "new.rs").unwrap();
+
+        assert_eq!(idx.len(), 1);
+        assert!(!idx.file_chunks().contains_key("old.rs"));
+        assert_eq!(idx.file_chunks().get("new.rs"), Some(&vec![5]));
+        idx.save(&idx_path, &fc_path).unwrap();
+        let loaded = VectorIndex::load(&idx_path, &fc_path, 4, false).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded.file_chunks().get("new.rs"), Some(&vec![5]));
+    }
+
     #[test]
     fn vector_index_implements_backend_trait() {
         // Compile-time check: VectorIndex must satisfy VectorBackend.
@@ -598,10 +1126,184 @@ mod tests {
         idx.add_mut(42, &unit_vec(4, 0), "foo.rs").unwrap();
         idx.save(&idx_path, &fc_path).unwrap();
 
+        assert!(VectorIndex::artifacts_exist(&idx_path, &fc_path));
+        assert!(!idx_path.exists(), "new saves must not use the legacy path");
+        assert!(!fc_path.exists(), "new saves must not use the legacy path");
+        assert_eq!(manifest_paths(&idx_path).unwrap().len(), 1);
+
         let loaded = VectorIndex::load(&idx_path, &fc_path, 4, false).unwrap();
         assert_eq!(loaded.len(), 1);
         let results = loaded.search(&unit_vec(4, 0), 1).unwrap();
         assert_eq!(results[0].0, 42);
+    }
+
+    #[test]
+    fn unpublished_generation_is_ignored_with_legacy_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx_path = dir.path().join("legacy.usearch");
+        let fc_path = dir.path().join("legacy_file_chunks.bin");
+
+        let mut idx = VectorIndex::new(4, false).unwrap();
+        idx.add_mut(7, &unit_vec(4, 2), "legacy.rs").unwrap();
+        idx.save(&idx_path, &fc_path).unwrap();
+
+        let published_manifest = manifest_paths(&idx_path).unwrap().pop().unwrap();
+        let published = resolve_manifest(&idx_path, &published_manifest).unwrap();
+        fs::copy(&published.index_path, &idx_path).unwrap();
+        fs::copy(&published.file_chunks_path, &fc_path).unwrap();
+        fs::remove_file(&published_manifest).unwrap();
+
+        // These immutable data files model a crash before manifest publication.
+        // With no manifest they must not shadow the complete legacy pair.
+        assert!(published.index_path.exists());
+        assert!(published.file_chunks_path.exists());
+        let loaded = VectorIndex::load(&idx_path, &fc_path, 4, false).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded.search(&unit_vec(4, 2), 1).unwrap()[0].0, 7);
+    }
+
+    #[test]
+    fn invalid_newest_manifest_falls_back_to_valid_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx_path = dir.path().join("fallback.usearch");
+        let fc_path = dir.path().join("fallback_file_chunks.bin");
+
+        let mut idx = VectorIndex::new(4, false).unwrap();
+        idx.add_mut(11, &unit_vec(4, 1), "valid.rs").unwrap();
+        idx.save(&idx_path, &fc_path).unwrap();
+
+        // Publish a lexically newer manifest whose data files are absent,
+        // modeling a damaged external copy. The loader must continue to the
+        // newest generation that validates completely.
+        let bad_generation = "ffffffffffffffffffffffffffffffff-ffffffff-ffffffffffffffff";
+        write_test_manifest(&idx_path, bad_generation, 99);
+
+        let loaded = VectorIndex::load(&idx_path, &fc_path, 4, false).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded.search(&unit_vec(4, 1), 1).unwrap()[0].0, 11);
+    }
+
+    #[test]
+    fn inconsistent_generation_count_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx_path = dir.path().join("count.usearch");
+        let fc_path = dir.path().join("count_file_chunks.bin");
+
+        let mut idx = VectorIndex::new(4, false).unwrap();
+        idx.add_mut(42, &unit_vec(4, 0), "foo.rs").unwrap();
+        idx.save(&idx_path, &fc_path).unwrap();
+
+        let manifest_path = manifest_paths(&idx_path).unwrap().pop().unwrap();
+        let artifacts = resolve_manifest(&idx_path, &manifest_path).unwrap();
+        let inconsistent: HashMap<String, Vec<u64>> =
+            HashMap::from([("foo.rs".to_string(), vec![42, 999])]);
+        fs::write(
+            &artifacts.file_chunks_path,
+            bitcode::serialize(&inconsistent).unwrap(),
+        )
+        .unwrap();
+
+        let error = match VectorIndex::load(&idx_path, &fc_path, 4, false) {
+            Ok(_) => panic!("inconsistent vector generation should be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("tracks 2 IDs"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn successful_save_cleans_only_previously_published_generations() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx_path = dir.path().join("cleanup.usearch");
+        let fc_path = dir.path().join("cleanup_file_chunks.bin");
+
+        let mut idx = VectorIndex::new(4, false).unwrap();
+        idx.add_mut(1, &unit_vec(4, 0), "a.rs").unwrap();
+        idx.save(&idx_path, &fc_path).unwrap();
+        let first_manifest = manifest_paths(&idx_path).unwrap().pop().unwrap();
+        let first = resolve_manifest(&idx_path, &first_manifest).unwrap();
+
+        let orphan_generation = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee-eeeeeeee-eeeeeeeeeeeeeeee";
+        let orphan = generation_paths(&idx_path, orphan_generation).unwrap();
+        fs::write(&orphan.index_path, b"partial").unwrap();
+        fs::write(&orphan.file_chunks_path, b"partial").unwrap();
+        fs::write(&idx_path, b"legacy").unwrap();
+        fs::write(&fc_path, b"legacy").unwrap();
+
+        idx.add_mut(2, &unit_vec(4, 1), "b.rs").unwrap();
+        idx.save(&idx_path, &fc_path).unwrap();
+
+        assert_eq!(manifest_paths(&idx_path).unwrap().len(), 1);
+        assert!(!first.manifest_path.exists());
+        assert!(!first.index_path.exists());
+        assert!(!first.file_chunks_path.exists());
+        assert!(
+            orphan.index_path.exists(),
+            "unpublished data may belong to a concurrent publisher"
+        );
+        assert!(
+            orphan.file_chunks_path.exists(),
+            "unpublished data may belong to a concurrent publisher"
+        );
+        assert!(!idx_path.exists());
+        assert!(!fc_path.exists());
+    }
+
+    #[test]
+    fn concurrent_publishers_do_not_delete_unpublished_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx_path = dir.path().join("concurrent.usearch");
+        let fc_path = dir.path().join("concurrent_file_chunks.bin");
+        let empty_file_chunks = HashMap::new();
+
+        // Give both publishers the same already-published predecessor. Each
+        // may delete this seed generation, but neither may delete the other's
+        // in-progress generation.
+        publish_generation(&idx_path, &fc_path, &empty_file_chunks, 0, |path| {
+            write_new_file(path, b"seed")
+        })
+        .unwrap();
+
+        let (index_written_tx, index_written_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        let publisher_idx_path = idx_path.clone();
+        let publisher_fc_path = fc_path.clone();
+        let publisher = std::thread::spawn(move || {
+            let empty_file_chunks = HashMap::new();
+            publish_generation(
+                &publisher_idx_path,
+                &publisher_fc_path,
+                &empty_file_chunks,
+                0,
+                |path| {
+                    write_new_file(path, b"publisher-a")?;
+                    index_written_tx.send(()).unwrap();
+                    resume_rx.recv().unwrap();
+                    Ok(())
+                },
+            )
+        });
+
+        // Publisher A has written its index but has not published a manifest.
+        // Publisher B completes an entire save in that window. A live cleanup
+        // sweep here would unlink A's index and make its subsequent sync fail.
+        index_written_rx.recv().unwrap();
+        publish_generation(&idx_path, &fc_path, &empty_file_chunks, 0, |path| {
+            write_new_file(path, b"publisher-b")
+        })
+        .unwrap();
+        resume_tx.send(()).unwrap();
+        publisher.join().unwrap().unwrap();
+
+        let manifests = manifest_paths(&idx_path).unwrap();
+        assert_eq!(manifests.len(), 2);
+        for manifest_path in manifests {
+            let artifacts = resolve_manifest(&idx_path, &manifest_path).unwrap();
+            assert!(artifacts.index_path.is_file());
+            assert!(artifacts.file_chunks_path.is_file());
+        }
     }
 
     /// Verify 384d vectors (BgeSmallEn) work with and without quantization.

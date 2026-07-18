@@ -74,7 +74,7 @@ impl Router {
 }
 EOF
 
-(cd "$TMPDIR_ROOT" && "$CLI" init . --no-embeddings >/dev/null 2>&1)
+(cd "$TMPDIR_ROOT" && "$CLI" init . >/dev/null 2>&1)
 
 # ── Start server ──────────────────────────────────────────────────────────────
 info "Starting server on port $PORT"

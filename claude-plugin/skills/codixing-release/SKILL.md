@@ -1,6 +1,6 @@
 ---
 name: codixing-release
-description: "Complete Codixing release pipeline — version bump in 5 locations, tests, docs, CI review, benchmark, blog, X post, tag, publish. Use /codixing-release [version] to ship a new version."
+description: "Complete Codixing release pipeline — transactional version bump, tests, docs, CI review, benchmark, blog, X post, tag, publish. Use /codixing-release [version] to ship a new version."
 user-invocable: true
 disable-model-invocation: false
 argument-hint: "[version]"
@@ -32,7 +32,7 @@ cargo fmt --check
 
 If ANY fails, fix first. Do NOT pipe through awk/tail — that masks failures.
 
-## Step 2: Version Bump (ALL 5 locations)
+## Step 2: Version Bump (ALL 14 fields across 7 files)
 
 **Preferred: use the bump script** (prevents duplicate-key corruption):
 
@@ -47,41 +47,47 @@ The script prints confirmation for each file and a verify command with the actua
 Determine version from git log since last tag. Then update ALL of:
 
 1. `Cargo.toml` — `workspace.package.version`
-2. `npm/package.json` — `"version"`
-3. `docs/install.sh` — `VERSION=`
-4. `claude-plugin/.claude-plugin/plugin.json` — `"version"`
-5. `.claude-plugin/marketplace.json` — `metadata.version` AND `plugins[0].version`
+2. `Cargo.lock` — the source-less package versions for `codixing`, `codixing-core`, `codixing-lsp`, `codixing-mcp`, and `codixing-server`
+3. `npm/package.json` — `"version"`
+4. `editors/vscode/package.json` — `"version"`
+5. `editors/vscode/package-lock.json` — top-level `version` AND `packages[""].version`
+6. `claude-plugin/.claude-plugin/plugin.json` — `"version"`
+7. `.claude-plugin/marketplace.json` — `metadata.version`, the Codixing plugin version, AND immutable `source.ref` (`vX.Y.Z`)
 
 Verify (set `NEW_VERSION` to the version you just bumped to):
 ```bash
 NEW_VERSION="0.35.0"   # replace with target
-grep -rn "$NEW_VERSION" Cargo.toml npm/package.json docs/install.sh \
-  claude-plugin/.claude-plugin/plugin.json .claude-plugin/marketplace.json
+python3 scripts/check_version_consistency.py "$NEW_VERSION"
 ```
 
 ## Step 3: Documentation Update
 
-Update ALL of these. Grep for OLD counts to find strays:
+Update the durable release-facing descriptions. Tool and test totals are
+generated and change frequently, so do not copy exact counts into prose:
 
-- **README.md** — feature list, test count, tool count (grep `"[0-9]+ MCP tools"` and `"[0-9]+ tests"`)
-- **CLAUDE.md** — version, test count, tool count
-- **docs/index.html** — test count, tool count (multiple occurrences — check all)
+- **README.md** — feature list, install commands, and profile behavior
+- **CLAUDE.md** — release workflow, version-field contract, and profile behavior
+- **docs/index.html / docs/docs.html** — install commands and user-visible capabilities
 
 ```bash
-# Find any remaining old counts:
-grep -rn "OLD_TEST_COUNT\|OLD_TOOL_COUNT" README.md CLAUDE.md docs/index.html
+# Verify the transactional version fields, then look for a stale old version:
+python3 scripts/check_version_consistency.py "$NEW_VERSION"
+codixing grep "OLD_VERSION" --literal
 ```
 
-## Step 4: Benchmark (if OpenClaw available)
+## Step 4: Retrieval Benchmark (if OpenClaw available)
 
 Run from the repo root:
 
 ```bash
-./target/release/codixing init benchmarks/repos/openclaw --no-embeddings --wait
 python3 benchmarks/queue_v2_benchmark.py --repo openclaw
 ```
 
-Report actual R@10 numbers. Do NOT predict. If OpenClaw not available, say "benchmark TBD."
+The benchmark removes any existing OpenClaw index and creates the required
+hybrid `bge-small-en` index before measuring concept accuracy. Do not pre-index
+the fixture with a different configuration. Report actual Recall@10 numbers
+from the generated Codixing retrieval and embedding report. Do NOT predict. If
+OpenClaw is not available, say "benchmark TBD."
 
 ## Step 5: Create PR
 
@@ -110,22 +116,33 @@ MANDATORY after creating the PR:
 ## Step 7: Merge + Tag
 
 ```bash
-gh pr merge N --squash
+gh pr merge N --squash --delete-branch
 git checkout main && git pull
-# Auto-tag fires but GITHUB_TOKEN won't trigger release.yml. Re-push:
-sleep 15 && git fetch --tags
-git tag -d vX.Y.Z 2>/dev/null; git push origin :refs/tags/vX.Y.Z 2>/dev/null
-git tag vX.Y.Z && git push origin vX.Y.Z
-# Clean up branch:
-git branch -d release/vX.Y.Z; git push origin --delete release/vX.Y.Z
+# auto-tag.yml creates vX.Y.Z once from the release commit.
+AUTO_TAG_RUN=$(gh run list --workflow auto-tag.yml --branch main --limit 1 \
+  --json databaseId --jq '.[0].databaseId')
+gh run watch "$AUTO_TAG_RUN"
+git fetch --tags
+git rev-parse vX.Y.Z
 ```
+
+Do not delete or re-push the tag. `auto-tag.yml` runs only after the complete
+main CI workflow succeeds, creates the tag at that verified commit, and then
+dispatches `release.yml` with the tag.
 
 ## Step 8: Verify Release Artifacts
 
 ```bash
-# Wait for release workflow:
-gh run list --workflow release.yml --limit 1
-# When complete:
+# Inspect the complete main CI run that produced the release artifacts:
+gh run list --workflow ci.yml --branch main --limit 3
+gh run watch RUN_ID
+
+# Inspect auto-tag, then the release.yml run it dispatched:
+gh run list --workflow auto-tag.yml --limit 3
+gh run list --workflow release.yml --event workflow_dispatch --limit 3
+gh run watch RELEASE_RUN_ID
+
+# When the dispatched run completes:
 gh release view vX.Y.Z
 ```
 
@@ -141,8 +158,9 @@ gh release edit vX.Y.Z --notes "$(cat <<'EOF'
 [Description]
 
 ### Install
-curl -fsSL https://codixing.com/install.sh | bash
-npm install -g codixing
+curl --proto '=https' --proto-redir '=https' -fsSLo /tmp/codixing-install.sh https://codixing.com/install.sh
+sh /tmp/codixing-install.sh
+npm install -g codixing-mcp
 
 **Full Changelog**: https://github.com/ferax564/codixing/compare/vPREV...vX.Y.Z
 EOF
@@ -188,7 +206,7 @@ python3 social/scripts/post.py --file social/approved/YYYY-MM-DD-x-codixing-vXYZ
 
 ## Final Checklist
 
-- [ ] Version in all 5 locations
+- [ ] All 14 version fields across all 7 files are consistent
 - [ ] Tests pass (Ubuntu + macOS + Windows)
 - [ ] PR review comments addressed (P1/P2)
 - [ ] README, CLAUDE.md, docs/index.html updated

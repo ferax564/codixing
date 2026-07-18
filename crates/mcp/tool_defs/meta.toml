@@ -35,7 +35,7 @@ meta = true
 
 [[tools]]
 name = "set_mcp_profile"
-description = "Switch the active MCP tool exposure profile for this connection without restarting the server. Use this when an agent needs more or fewer tools than the startup profile exposed."
+description = "Switch the active MCP tool exposure profile for this connection within the server's maximum_profile safety ceiling. Use when an agent needs a different allowed tool surface. Minimal/reviewer startup stays read-only unless the server was explicitly started with --allow-profile-escalation."
 handler = "self::call_set_mcp_profile_placeholder"
 calling_convention = "args_only"
 read_only = true

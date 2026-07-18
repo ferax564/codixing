@@ -3,7 +3,7 @@
     "codixing": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "codixing-mcp", "--root", "."]
+      "args": ["-y", "codixing-mcp", "--root", ".", "--profile", "minimal", "--no-daemon-fork"]
     }
   }
 }

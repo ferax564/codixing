@@ -81,10 +81,12 @@ impl Engine {
         for def in &definitions {
             let test_mappings = self.find_tests_for_file(&def.file_path);
             for mapping in &test_mappings {
-                let abs_path = self
-                    .config
-                    .resolve_path(&mapping.test_file)
-                    .unwrap_or_else(|| self.config.root.join(&mapping.test_file));
+                // Test mappings are persisted index state. Treat them as
+                // untrusted on load so a corrupt index cannot escape the
+                // configured roots while assembling a read-only MCP result.
+                let Some(abs_path) = self.config.resolve_path(&mapping.test_file) else {
+                    continue;
+                };
 
                 let source = match std::fs::read_to_string(&abs_path) {
                     Ok(s) => s,

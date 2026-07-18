@@ -64,7 +64,7 @@ const QWEN3_MAX_LENGTH: usize = 512;
 #[cfg(feature = "qwen3")]
 struct OrtQwen3Session {
     session: ort_qwen3::session::Session,
-    tokenizer: tokenizers_qwen3::Tokenizer,
+    tokenizer: tokenizers::Tokenizer,
     /// Number of past_key_values.N.key/value pairs the model expects.
     num_kv_layers: usize,
 }
@@ -74,9 +74,7 @@ impl OrtQwen3Session {
     fn from_hf(repo_id: &str, onnx_file: &str, max_length: usize) -> Result<Self> {
         use hf_hub::api::sync::ApiBuilder;
         use ort_qwen3::session::{Session, builder::GraphOptimizationLevel};
-        use tokenizers_qwen3::{
-            PaddingDirection, PaddingParams, PaddingStrategy, TruncationParams,
-        };
+        use tokenizers::{PaddingDirection, PaddingParams, PaddingStrategy, TruncationParams};
 
         let api = ApiBuilder::new()
             .build()
@@ -103,7 +101,7 @@ impl OrtQwen3Session {
             .commit_from_file(model_path)
             .map_err(|e| CodixingError::Embedding(format!("ort model load: {e}")))?;
 
-        let mut tokenizer = tokenizers_qwen3::Tokenizer::from_file(tok_path)
+        let mut tokenizer = tokenizers::Tokenizer::from_file(tok_path)
             .map_err(|e| CodixingError::Embedding(format!("tokenizer load: {e}")))?;
 
         // Left-padding: ensures the real last token is always at position T-1,

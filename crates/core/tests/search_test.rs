@@ -158,6 +158,35 @@ fn search_no_results() {
 }
 
 #[test]
+fn exact_search_hydrates_content_after_reopen() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let src = root.join("src");
+    fs::create_dir_all(&src).unwrap();
+    let marker = "reopened_exact_marker_74219";
+    fs::write(
+        src.join("lib.rs"),
+        format!("pub fn fixture() {{ let marker = \"{marker}\"; }}\n"),
+    )
+    .unwrap();
+
+    drop(Engine::init(root, bm25_config(root)).unwrap());
+    let engine = Engine::open(root).unwrap();
+    let results = engine
+        .search(
+            SearchQuery::new(marker)
+                .with_limit(10)
+                .with_strategy(Strategy::Exact),
+        )
+        .unwrap();
+
+    assert!(
+        results.iter().any(|result| result.content.contains(marker)),
+        "exact search should hydrate compact metadata content from Tantivy after reopen"
+    );
+}
+
+#[test]
 fn search_with_progress_reports_bm25_phase() {
     let dir = tempdir().unwrap();
     let root = dir.path();

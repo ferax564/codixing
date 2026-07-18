@@ -30,8 +30,8 @@ use crate::symbols::writer::write_mmap_symbols;
 use crate::vector::VectorIndex;
 
 use super::indexing::{
-    IndexContext, add_call_edges, add_doc_edges, build_file_trigram_from_content, build_graph,
-    populate_symbol_graph, process_file, unix_timestamp_string, walk_source_files,
+    IndexContext, PendingSymbolGraph, add_call_edges, add_doc_edges, build_file_trigram_from_files,
+    build_graph, populate_symbol_graph, process_file, unix_timestamp_string, walk_source_files,
 };
 use super::{Engine, git_head_commit};
 
@@ -75,31 +75,6 @@ impl Engine {
             None
         };
 
-        // Initialise the embedding job queue (if rustqueue feature is enabled
-        // and embeddings are active).
-        #[cfg(feature = "rustqueue")]
-        let embed_queue: Option<Arc<rustqueue::RustQueue>> = if embedder.is_some() {
-            let queue_path = root.join(".codixing").join("embed_queue.db");
-            match rustqueue::RustQueue::redb(&queue_path) {
-                Ok(builder) => match builder.build() {
-                    Ok(rq) => {
-                        info!("embedding job queue initialised");
-                        Some(Arc::new(rq))
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "failed to build embedding queue; using sync path");
-                        None
-                    }
-                },
-                Err(e) => {
-                    warn!(error = %e, "failed to open embedding queue; using sync path");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
         let dims = embedder.as_ref().map(|e| e.dims).unwrap_or(0);
         let quantize = config.embedding.quantize;
 
@@ -113,17 +88,19 @@ impl Engine {
         // Collect embeddings per file for later batch insertion.
         // We process files in parallel for parse/chunk/index, but embedding
         // batch is collected and inserted after the parallel phase.
-        let pending_embeds: DashMap<u64, String> = DashMap::new(); // chunk_id → content
+        let pending_embeds: DashMap<u64, String> = DashMap::new(); // chunk_id → empty marker
         // Import lists extracted during parse — reused by build_graph to avoid
         // a second file-read + parse pass (each file is parsed exactly once).
         let pending_imports: DashMap<String, (Vec<RawImport>, Language)> = DashMap::new();
         // Call names extracted during parse — resolved into Calls edges after
         // the symbol table is fully populated (end of parallel phase).
         let pending_calls: DashMap<String, Vec<String>> = DashMap::new();
-        let file_contents: DashMap<String, Vec<u8>> = DashMap::new();
+        // Compact symbol-graph inputs extracted from each already-parsed tree.
+        let pending_symbol_graph = PendingSymbolGraph::new();
         let pending_doc_refs: DashMap<String, Vec<crate::language::doc::SymbolRef>> =
             DashMap::new();
         let pending_signatures: DashMap<String, u64> = DashMap::new();
+        let pending_hashes: DashMap<std::path::PathBuf, FileHashEntry> = DashMap::new();
 
         let ctx = IndexContext {
             root: &root,
@@ -135,11 +112,13 @@ impl Engine {
             file_chunk_map: &file_chunk_map,
             chunk_meta_map: &chunk_meta_map,
             pending_embeds: &pending_embeds,
+            queue_embeddings: embedder.is_some(),
             pending_imports: &pending_imports,
             pending_calls: &pending_calls,
-            file_contents: &file_contents,
+            pending_symbol_graph: &pending_symbol_graph,
             pending_doc_refs: &pending_doc_refs,
             pending_signatures: &pending_signatures,
+            pending_hashes: &pending_hashes,
         };
 
         // Process files in parallel: parse → chunk → index → extract symbols.
@@ -148,6 +127,7 @@ impl Engine {
                 warn!(path = %path.display(), error = %e, "skipping file");
             }
         });
+        drop(ctx);
 
         tantivy.commit()?;
 
@@ -169,7 +149,7 @@ impl Engine {
                     // Resolve doc symbol references into DocumentedBy edges.
                     add_doc_edges(&mut g, &symbols, &pending_doc_refs);
                     // Populate the symbol-level inner graph with function-level call edges.
-                    populate_symbol_graph(&mut g, &files, &root, &config, &file_contents);
+                    populate_symbol_graph(&mut g, pending_symbol_graph);
                     let scores =
                         compute_pagerank(&g, config.graph.damping, config.graph.iterations);
                     g.apply_pagerank(&scores);
@@ -186,20 +166,23 @@ impl Engine {
                         .iter()
                         .map(|e| (*e.key(), e.value().content.clone())),
                 );
-                let ft = build_file_trigram_from_content(&file_contents);
+                let ft = build_file_trigram_from_files(&files, &root, &config);
                 (tri, ft)
             },
         );
 
+        // These parse-phase caches have reached their final consumers. Free
+        // them before concept/reformulation construction and persistence so
+        // peak RSS does not stack every auxiliary representation at once.
+        drop(pending_imports);
+        drop(pending_calls);
+        drop(pending_doc_refs);
+
         // Persist graph.
         if let Some(ref g) = graph {
             let flat = g.to_flat();
-            if let Err(e) = store.save_graph(&flat) {
-                warn!(error = %e, "failed to persist graph");
-            }
-            if let Err(e) = store.save_symbol_graph(g) {
-                warn!(error = %e, "failed to persist symbol graph");
-            }
+            store.save_graph(&flat)?;
+            store.save_symbol_graph(g)?;
         }
 
         // Build concept index from symbols + graph co-occurrences.
@@ -217,21 +200,19 @@ impl Engine {
             }
             let idx = builder.build();
             if !idx.is_empty() {
-                // Persist concept index.
-                match bitcode::serialize(&idx) {
-                    Ok(bytes) => {
-                        if let Err(e) = std::fs::write(store.concepts_path(), &bytes) {
-                            warn!(error = %e, "failed to persist concept index");
-                        }
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "failed to serialize concept index");
-                    }
-                }
+                let bytes = bitcode::serialize(&idx).map_err(|e| {
+                    CodixingError::Serialization(format!("failed to serialize concept index: {e}"))
+                })?;
+                std::fs::write(store.concepts_path(), &bytes)?;
                 Some(idx)
             } else {
-                // Clean up stale artifact from previous index
-                let _ = std::fs::remove_file(store.concepts_path());
+                // A stale prior artifact would be loaded as current data, so a
+                // cleanup failure is fatal just like a failed write.
+                if let Err(e) = std::fs::remove_file(store.concepts_path()) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        return Err(e.into());
+                    }
+                }
                 None
             }
         };
@@ -247,34 +228,27 @@ impl Engine {
             }
             let reform = builder.build();
             if !reform.is_empty() {
-                match bitcode::serialize(&reform) {
-                    Ok(bytes) => {
-                        if let Err(e) = std::fs::write(store.reformulations_path(), &bytes) {
-                            warn!(error = %e, "failed to persist reformulations");
-                        }
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "failed to serialize reformulations");
-                    }
-                }
+                let bytes = bitcode::serialize(&reform).map_err(|e| {
+                    CodixingError::Serialization(format!("failed to serialize reformulations: {e}"))
+                })?;
+                std::fs::write(store.reformulations_path(), &bytes)?;
                 Some(reform)
             } else {
-                // Clean up stale artifact from previous index
-                let _ = std::fs::remove_file(store.reformulations_path());
+                if let Err(e) = std::fs::remove_file(store.reformulations_path()) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        return Err(e.into());
+                    }
+                }
                 None
             }
         };
 
         // Persist trigram indexes.
-        if let Err(e) = trigram_idx.save_mmap_binary_v2(
+        trigram_idx.save_mmap_binary_v2(
             &store.chunk_trigram_path(),
             crate::index::trigram::PostingCodec::DeltaVarint,
-        ) {
-            warn!(error = %e, "failed to persist chunk trigram index");
-        }
-        if let Err(e) = ft_idx.save_binary(&store.file_trigram_path()) {
-            warn!(error = %e, "failed to persist file trigram index");
-        }
+        )?;
+        ft_idx.save_binary(&store.file_trigram_path())?;
 
         let (graph_nodes, graph_edges) = graph
             .as_ref()
@@ -295,45 +269,20 @@ impl Engine {
             }
         }
 
-        // The parser cache only holds AST-parsed files. Doc/config files
-        // (Markdown, TOML, HTML, LICENSE, …) never enter it, so hash them
-        // here too — otherwise the first sync after init re-classifies every
-        // doc file as "added" and re-indexes (and re-embeds) all of them.
-        let mut hashes: Vec<(std::path::PathBuf, u64)> =
-            parser.cache().content_hashes().into_iter().collect();
-        {
-            let cached: std::collections::HashSet<&std::path::PathBuf> =
-                hashes.iter().map(|(p, _)| p).collect();
-            let uncached: Vec<std::path::PathBuf> = files
-                .iter()
-                .filter(|f| !cached.contains(f))
-                .cloned()
-                .collect();
-            drop(cached);
-            for path in uncached {
-                match std::fs::read(&path) {
-                    Ok(content) => {
-                        hashes.push((path, xxhash_rust::xxh3::xxh3_64(&content)));
-                    }
-                    Err(e) => {
-                        debug!(path = %path.display(), error = %e,
-                            "skipping baseline hash for unreadable file");
-                    }
-                }
-            }
-        }
+        // `process_file` records every successfully indexed file directly.
+        // This remains complete even though bulk parsing drops AST cache entries
+        // immediately, and avoids a third source-file read for doc/config files.
+        let mut v2_hashes: Vec<(std::path::PathBuf, FileHashEntry)> =
+            pending_hashes.into_iter().collect();
+        v2_hashes.sort_by(|a, b| a.0.cmp(&b.0));
+        let hashes: Vec<(std::path::PathBuf, u64)> = v2_hashes
+            .iter()
+            .map(|(path, entry)| (path.clone(), entry.content_hash))
+            .collect();
         store.save_tree_hashes(&hashes)?;
 
-        // Also write v2 hashes with mtime+size for fast sync pre-filtering.
-        let v2_hashes: Vec<(std::path::PathBuf, FileHashEntry)> = hashes
-            .iter()
-            .map(|(path, hash)| {
-                let (mtime, size) = std::fs::metadata(path)
-                    .map(|m| (m.modified().ok(), m.len()))
-                    .unwrap_or((None, 0));
-                (path.clone(), FileHashEntry::new(*hash, mtime, size))
-            })
-            .collect();
+        // Metadata was captured around the exact source read. Re-statting here
+        // could pair old indexed bytes with a newer mtime/size after a long init.
         store.save_tree_hashes_v2(&v2_hashes)?;
 
         // Persist signature fingerprints (keyed by normalized relative path) so
@@ -385,6 +334,13 @@ impl Engine {
         // populate it and swap it in when embedding completes.
         let vector_arc: Arc<RwLock<Option<VectorIndex>>> = Arc::new(RwLock::new(None));
 
+        // BM25-only init no longer needs in-memory source bodies after the
+        // trigram indexes and compact metadata have been persisted. Tantivy is
+        // the canonical hydration store, so release this final corpus copy.
+        if embedder.is_none() {
+            clear_chunk_contents(&chunk_meta_map);
+        }
+
         // Wrap chunk_meta in Arc so the background thread can share it.
         let chunk_meta_arc: Arc<DashMap<u64, ChunkMeta>> = Arc::new(chunk_meta_map);
 
@@ -428,34 +384,42 @@ impl Engine {
                         match result {
                             Ok(Ok(completed_vector)) => {
                                 // Persist to disk before exposing to readers.
-                                if let Err(e) =
-                                    completed_vector.save(&vector_index_path, &file_chunks_path)
-                                {
-                                    tracing::error!(
-                                        error = %e,
-                                        "background embedding: failed to persist vector index"
-                                    );
+                                match completed_vector.save(&vector_index_path, &file_chunks_path) {
+                                    Ok(()) => {
+                                        *vector_slot.write().unwrap_or_else(|e| e.into_inner()) =
+                                            Some(completed_vector);
+                                        state_clone.mark_ready();
+                                        tracing::info!(
+                                            chunks = state_clone.progress().0,
+                                            "background embedding complete"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(
+                                            error = %e,
+                                            "background embedding: failed to persist vector index"
+                                        );
+                                        state_clone.mark_failed();
+                                    }
                                 }
-                                *vector_slot.write().unwrap_or_else(|e| e.into_inner()) =
-                                    Some(completed_vector);
-                                state_clone.mark_ready();
-                                tracing::info!(
-                                    chunks = state_clone.progress().0,
-                                    "background embedding complete"
-                                );
                             }
                             Ok(Err(e)) => {
                                 tracing::error!(
                                     error = %e,
                                     "background embedding failed"
                                 );
-                                state_clone.mark_ready();
+                                state_clone.mark_failed();
                             }
                             Err(_panic) => {
                                 tracing::error!("background embedding panicked");
-                                state_clone.mark_ready();
+                                state_clone.mark_failed();
                             }
                         }
+                        // Success, model/runtime errors, cancellation, and
+                        // caught panics are all terminal. None of them should
+                        // pin a corpus-sized duplicate of the Tantivy bodies
+                        // for the remaining Engine lifetime.
+                        clear_chunk_contents(&chunk_meta_clone);
                     })
                     .map_err(|e| {
                         CodixingError::Config(format!("failed to spawn embed thread: {e}"))
@@ -491,10 +455,15 @@ impl Engine {
         let session = Arc::new(SessionState::with_root(true, &root));
         session.cleanup_old_sessions();
 
+        // The freshly-built auxiliary indexes have already been persisted.
+        // Release their construction-time HashMaps and let the existing lazy
+        // loaders reopen them on demand (the chunk trigram then uses mmap).
+        drop(trigram_idx);
+        drop(ft_idx);
+        drop(concept_index);
+        drop(reformulations);
         let trigram = std::sync::OnceLock::new();
-        let _ = trigram.set(trigram_idx);
         let file_trigram = std::sync::OnceLock::new();
-        let _ = file_trigram.set(ft_idx);
 
         let filter_pipeline = FilterPipeline::load(&store.codixing_dir());
         filter_pipeline.clear();
@@ -509,23 +478,11 @@ impl Engine {
             symbols,
             file_chunk_counts,
             embedder,
-            #[cfg(feature = "rustqueue")]
-            embed_queue,
             vector: vector_arc,
             chunk_meta: chunk_meta_arc,
             graph,
-            // Seed the lazy OnceLocks with the freshly-built values so the
-            // first query after init() doesn't re-read from disk.
-            concept_index: {
-                let cell = std::sync::OnceLock::new();
-                let _ = cell.set(concept_index);
-                cell
-            },
-            reformulations: {
-                let cell = std::sync::OnceLock::new();
-                let _ = cell.set(reformulations);
-                cell
-            },
+            concept_index: std::sync::OnceLock::new(),
+            reformulations: std::sync::OnceLock::new(),
             reranker,
             trigram,
             session,
@@ -692,8 +649,7 @@ impl Engine {
 
         // Restore vector index if it exists.
         let (embedder, vector) = if config.embedding.enabled
-            && store.vector_index_path().exists()
-            && store.file_chunks_path().exists()
+            && VectorIndex::artifacts_exist(&store.vector_index_path(), &store.file_chunks_path())
         {
             match Embedder::new(&config.embedding.model) {
                 Ok(e) => {
@@ -713,27 +669,6 @@ impl Engine {
             }
         } else {
             (None, None)
-        };
-
-        // Initialise the embedding job queue for re-embedding during sync.
-        #[cfg(feature = "rustqueue")]
-        let embed_queue: Option<Arc<rustqueue::RustQueue>> = if embedder.is_some() && !read_only {
-            let queue_path = store.codixing_dir().join("embed_queue.db");
-            match rustqueue::RustQueue::redb(&queue_path) {
-                Ok(builder) => match builder.build() {
-                    Ok(rq) => Some(Arc::new(rq)),
-                    Err(e) => {
-                        warn!(error = %e, "failed to build embedding queue; using sync path");
-                        None
-                    }
-                },
-                Err(e) => {
-                    warn!(error = %e, "failed to open embedding queue; using sync path");
-                    None
-                }
-            }
-        } else {
-            None
         };
 
         // Restore graph.
@@ -828,8 +763,6 @@ impl Engine {
             symbols,
             file_chunk_counts,
             embedder,
-            #[cfg(feature = "rustqueue")]
-            embed_queue,
             vector: Arc::new(RwLock::new(vector)),
             chunk_meta: Arc::new(chunk_meta),
             graph,
@@ -950,8 +883,7 @@ impl Engine {
 
         // Restore vector index if it exists.
         let (embedder, vector) = if config.embedding.enabled
-            && store.vector_index_path().exists()
-            && store.file_chunks_path().exists()
+            && VectorIndex::artifacts_exist(&store.vector_index_path(), &store.file_chunks_path())
         {
             match Embedder::new(&config.embedding.model) {
                 Ok(e) => {
@@ -1055,8 +987,6 @@ impl Engine {
             symbols,
             file_chunk_counts,
             embedder,
-            #[cfg(feature = "rustqueue")]
-            embed_queue: None,
             vector: Arc::new(RwLock::new(vector)),
             chunk_meta: Arc::new(chunk_meta),
             graph,
@@ -1085,6 +1015,14 @@ impl Engine {
     /// [`CodixingError::ReadOnly`].
     pub fn is_read_only(&self) -> bool {
         self.read_only
+    }
+}
+
+/// Release source bodies retained during initialization while preserving the
+/// compact metadata needed for ranking and graph operations.
+fn clear_chunk_contents(chunk_meta: &DashMap<u64, ChunkMeta>) {
+    for mut entry in chunk_meta.iter_mut() {
+        entry.content = String::new();
     }
 }
 

@@ -10,7 +10,7 @@
   <!-- Open Graph -->
   <meta property="og:type" content="website" />
   <meta property="og:title" content="Codixing — Code Retrieval Engine for AI Agents" />
-  <meta property="og:description" content="R@10=0.763 retrieval accuracy. 73% fewer tokens. 28 CLI commands. Hybrid BM25 + embeddings + call graph PageRank — in a single Rust binary." />
+  <meta property="og:description" content="R@10=0.763 retrieval accuracy. 73% fewer tokens. Profile-gated MCP. Hybrid BM25 + embeddings + call graph PageRank — local Rust binaries, no hosted service." />
   <meta property="og:url" content="https://codixing.com/" />
   <meta property="og:image" content="https://codixing.com/og-image.png" />
   <meta property="og:image:width" content="1200" />
@@ -20,7 +20,7 @@
   <!-- Twitter/X Card -->
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="Codixing — Code Retrieval Engine for AI Agents" />
-  <meta name="twitter:description" content="R@10=0.763 retrieval accuracy. 73% fewer tokens. 28 CLI commands. Hybrid BM25 + embeddings + call graph PageRank — in a single Rust binary." />
+  <meta name="twitter:description" content="R@10=0.763 retrieval accuracy. 73% fewer tokens. Profile-gated MCP. Hybrid BM25 + embeddings + call graph PageRank — local Rust binaries, no hosted service." />
   <meta name="twitter:image" content="https://codixing.com/og-image.png" />
 
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -1016,12 +1016,12 @@
     <div class="hero">
       <div class="hero-badge">
         <span class="badge-dot"></span>
-        Rust-native &bull; 1357 tests &bull; 29 CLI commands &bull; 73% token savings
+        Rust-native &bull; 1,400+ tests &bull; CLI + MCP &bull; 73% token savings
       </div>
       <h1>Your AI agent is<br><span class="grad">burning money on grep</span></h1>
       <p class="hero-sub">
         A single <code>rg</code> call on a real codebase returns 2,240 hits and 225 KB of noise.
-        Codixing returns the right 20 results in 1.3 KB&mdash;<strong>73% fewer tokens, 55% fewer tool calls</strong>, and 2&times; better retrieval accuracy. One Rust binary, zero dependencies.
+        Codixing returns the right 20 results in 1.3 KB&mdash;<strong>73% fewer tokens, 55% fewer tool calls</strong>, and 2&times; better retrieval accuracy. Local Rust binaries, no hosted service.
       </p>
       <div class="hero-cta">
         <a class="btn-primary" href="https://github.com/ferax564/codixing">
@@ -1059,8 +1059,8 @@
           <span class="metric-label">R@10 retrieval accuracy (vs grep 0.345)</span>
         </div>
         <div class="metric-item">
-          <span class="metric-val" data-count="26" data-suffix="">0</span>
-          <span class="metric-label">CLI commands</span>
+          <span class="metric-val" data-count="4" data-suffix="">0</span>
+          <span class="metric-label">MCP safety profiles</span>
         </div>
       </div>
     </div>
@@ -1120,17 +1120,17 @@
             <div class="t-line"><span class="t-prompt">$</span><span class="t-cmd">&nbsp;codixing init .</span></div>
             <div class="t-line"><span class="t-output t-success">&#10003; Indexed 138 files, 1113 chunks, 2323 symbols in 0.21s</span></div>
             <div class="t-blank"></div>
-            <div class="t-line"><span class="t-comment"># Search with hybrid strategy (30ms)</span></div>
+            <div class="t-line"><span class="t-comment"># Ranked search with bounded output</span></div>
             <div class="t-blank"></div>
-            <div class="t-line"><span class="t-prompt">$</span><span class="t-cmd">&nbsp;codixing search "dead code detection" --strategy fast</span></div>
+            <div class="t-line"><span class="t-prompt">$</span><span class="t-cmd">&nbsp;codixing search "dead code detection"</span></div>
             <div class="t-line"><span class="t-output t-section">&#9658; src/orphans.rs [score: 0.94]</span></div>
             <div class="t-line"><span class="t-output">  pub enum OrphanConfidence { Certain, High, Moderate, Low }</span></div>
             <div class="t-line"><span class="t-output t-section">&#9658; src/engine/orphans.rs [score: 0.87]</span></div>
             <div class="t-line"><span class="t-output">  pub fn find_orphans(&amp;self, options: OrphanOptions)</span></div>
             <div class="t-blank"></div>
-            <div class="t-line"><span class="t-comment"># Type-filtered search (6 kinds: fn, struct, enum, impl, const, trait)</span></div>
+            <div class="t-line"><span class="t-comment"># Look up indexed symbols by name</span></div>
             <div class="t-blank"></div>
-            <div class="t-line"><span class="t-prompt">$</span><span class="t-cmd">&nbsp;codixing search "Engine" --kind struct</span></div>
+            <div class="t-line"><span class="t-prompt">$</span><span class="t-cmd">&nbsp;codixing symbols Engine</span></div>
             <div class="t-line"><span class="t-output t-info">  pub struct Engine { tantivy, embedder, vector, graph... }</span></div>
             <div class="t-blank"></div>
             <div class="t-line"><span class="t-prompt">$</span><span class="cursor"></span></div>
@@ -1328,7 +1328,7 @@
               <div style="color:var(--text-muted);font-size:0.82rem">JavaScript<br><span style="font-size:0.8em">Hit@5</span></div>
             </div>
           </div>
-          <p style="margin-top:16px;color:var(--text-muted);font-size:0.85rem">24 languages supported via tree-sitter AST: Rust, Python, TypeScript, Go, Java, C, C++, C#, Ruby, Swift, Kotlin, Scala, Zig, PHP, Bash, Matlab, YAML, TOML, Dockerfile, Makefile, Mermaid, XML/Draw.io.</p>
+          <p style="margin-top:16px;color:var(--text-muted);font-size:0.85rem">Tree-sitter AST support for 18 programming languages, plus dedicated config and diagram parsers for YAML, TOML, Dockerfile, Makefile, Mermaid, and XML/Draw.io.</p>
         </div>
         <div class="bench-card">
           <h3>Indexing speed</h3>
@@ -1489,8 +1489,8 @@
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#007aff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="4" r="2"/><circle cx="4" cy="18" r="2"/><circle cx="20" cy="18" r="2"/><path d="M12 6v4M12 10l-6 6M12 10l6 6"/></svg>
           </div>
           <h3>AST-aware chunking</h3>
-          <p>Tree-sitter parsing across 24 languages keeps functions and classes semantically intact. No more mid-function splits corrupting context.</p>
-          <span class="feature-tag">Rust &bull; Python &bull; TS &bull; Go &bull; Java &bull; C++ &bull; +18</span>
+          <p>Tree-sitter parsing across 18 programming languages keeps functions and classes semantically intact. Dedicated config, diagram, and documentation parsers cover non-code sources.</p>
+          <span class="feature-tag">Rust &bull; Python &bull; TS &bull; Go &bull; Java &bull; C++ &bull; +12</span>
         </div>
         <div class="feature-card" style="--delay:0.07s">
           <div class="feature-icon purple">
@@ -1521,16 +1521,16 @@
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#30d158" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><path d="M14 17h6M17 14v6"/><path d="M7 10v4M10 7h4M17 10v4"/></svg>
           </div>
           <h3>CLI + MCP</h3>
-          <p>28 CLI commands for direct use, plus a 71-tool JSON-RPC 2.0 catalog for Claude Code and any MCP-capable client. MCP starts read-only by default, with explicit profiles for minimal search, editing, and dangerous operations that agents can switch per connection.</p>
-          <span class="feature-tag">29 CLI cmds &bull; 71 MCP tools &bull; runtime profiles &bull; Unix socket</span>
+          <p>A full CLI for direct use plus a generated, profile-gated JSON-RPC 2.0 catalog for Claude Code and any MCP-capable client. MCP starts in minimal read-only mode; write-capable runtime escalation requires an explicit process flag.</p>
+          <span class="feature-tag">CLI &bull; bounded MCP profiles &bull; Unix socket</span>
         </div>
         <div class="feature-card" style="--delay:0.35s">
           <div class="feature-icon pink">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ff3b30" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
           </div>
-          <h3>Zero runtime stack</h3>
-          <p>Single statically-linked Rust binary under 50MB. No JVM, no Docker, no external database required. Works on macOS, Linux, and Windows.</p>
-          <span class="feature-tag">Single binary &bull; Tantivy &bull; usearch</span>
+          <h3>Self-contained runtime</h3>
+          <p>Native Rust binaries with no JVM, Docker, external database, or hosted service required. Works on macOS, Linux, and Windows.</p>
+          <span class="feature-tag">Native binaries &bull; Tantivy &bull; usearch</span>
         </div>
         <div class="feature-card" style="--delay:0.42s">
           <div class="feature-icon cyan">
@@ -1558,8 +1558,8 @@
       <div class="mcp-layout">
         <div>
           <div class="section-label reveal">CLI &amp; MCP Integration</div>
-          <h2 class="section-title reveal">28 CLI commands +<br>70 MCP tools</h2>
-          <p class="section-sub reveal">Use Codixing directly from the terminal with 28 commands, or connect any MCP-capable editor. MCP profiles keep agents scoped: reviewer is read-only by default, minimal narrows discovery, editor enables non-destructive writes, and dangerous must be requested explicitly. Auto-forked daemons are profile-isolated.</p>
+          <h2 class="section-title reveal">CLI commands +<br>profile-gated MCP</h2>
+          <p class="section-sub reveal">Use Codixing directly from the terminal or connect any MCP-capable editor. MCP profiles keep agents scoped: minimal is the narrow read-only default, reviewer expands analysis, and write-capable runtime escalation is available only when the process starts with explicit permission. Auto-forked daemons are policy-isolated.</p>
           <div class="tools-grid reveal">
             <div class="tool-card">
               <div class="tool-name">code_search</div>
@@ -1618,7 +1618,8 @@
       <span class="c-str">"command"</span>: <span class="c-str">"codixing-mcp"</span>,
       <span class="c-str">"args"</span>: [
         <span class="c-str">"--root"</span>, <span class="c-str">"."</span>,
-        <span class="c-str">"--no-daemon-fork"</span>  <span class="c-cmt">// prevents stale daemon socket issues</span>
+        <span class="c-str">"--profile"</span>, <span class="c-str">"minimal"</span>,
+        <span class="c-str">"--no-daemon-fork"</span>
       ]
     <span class="c-key">}</span>
   <span class="c-key">}</span>
@@ -1676,7 +1677,7 @@
             <div class="step-num">1</div>
             <div class="step-content">
               <h4>Install</h4>
-              <p>One command — downloads the right binary for your OS and architecture.</p>
+              <p>Downloads and verifies the four-binary suite for your OS and architecture.</p>
             </div>
           </div>
           <div class="step" data-step="index">
@@ -1697,7 +1698,7 @@
             <div class="step-num">4</div>
             <div class="step-content">
               <h4>Connect to Claude Code</h4>
-              <p>Drop in an <code>.mcp.json</code>, or run <code>claude mcp add codixing -- npx -y codixing-mcp --root . --no-daemon-fork</code>. Claude Code starts with the reviewer profile and can switch tool profiles at runtime through <code>set_mcp_profile</code>.</p>
+              <p>Pre-index large repositories, then drop in an <code>.mcp.json</code> or run <code>claude mcp add codixing -- npx -y codixing-mcp --root . --profile minimal --no-daemon-fork</code>. The minimal profile keeps the initial tool catalog small and can expand to reviewer at runtime; write-capable promotion requires explicit process startup permission.</p>
             </div>
           </div>
         </div>
@@ -1710,14 +1711,14 @@
           </div>
           <div class="code-window-body">
             <div class="code-pane-qs active" id="qs-build">
-<span class="ln">1</span><span class="c-cmt"># macOS &amp; Linux — auto-detects OS and arch</span>
-<span class="ln">2</span><span style="color:var(--text)">curl -fsSL https://codixing.com/install.sh | sh</span>
+<span class="ln">1</span><span class="c-cmt"># Apple Silicon macOS or Linux x86_64</span>
+<span class="ln">2</span><span style="color:var(--text)">curl --proto '=https' --proto-redir '=https' -fsSLo /tmp/codixing-install.sh https://codixing.com/install.sh &amp;&amp; sh /tmp/codixing-install.sh</span>
 <span class="ln">3</span><span style="color:var(--text)"></span>
-<span class="ln">4</span><span class="c-cmt"># Installs three binaries to /usr/local/bin:</span>
+<span class="ln">4</span><span class="c-cmt"># Installs to /usr/local/bin or ~/.local/bin:</span>
 <span class="ln">5</span><span class="c-ok">✓ codixing</span>
 <span class="ln">6</span><span class="c-ok">✓ codixing-mcp</span>
 <span class="ln">7</span><span class="c-ok">✓ codixing-lsp</span>
-<span class="ln">8</span><span style="color:var(--text)"></span>
+<span class="ln">8</span><span class="c-ok">✓ codixing-server</span>
 <span class="ln">9</span><span class="c-cmt"># Or build from source (requires Rust)</span>
 <span class="ln">10</span><span style="color:var(--text)">cargo build --release --workspace</span>
             </div>
@@ -1725,11 +1726,11 @@
 <span class="ln">1</span><span class="c-cmt"># BM25-only (0.21s for 138 files, no ONNX needed)</span>
 <span class="ln">2</span><span style="color:var(--text)">codixing init .</span>
 <span class="ln">3</span><span style="color:var(--text)"></span>
-<span class="ln">4</span><span class="c-cmt"># Hybrid with BgeSmallEn (100% search accuracy)</span>
-<span class="ln">5</span><span style="color:var(--text)">codixing init . --model bge-small-en</span>
+<span class="ln">4</span><span class="c-cmt"># Hybrid with BgeSmallEn (set ORT_DYLIB_PATH first)</span>
+<span class="ln">5</span><span style="color:var(--text)">codixing init . --embed --model bge-small-en</span>
 <span class="ln">6</span><span style="color:var(--text)"></span>
-<span class="ln">7</span><span class="c-cmt"># Cross-repo federated search</span>
-<span class="ln">8</span><span style="color:var(--text)">codixing init . --federation repos.json</span>
+<span class="ln">7</span><span class="c-cmt"># Discover indexed projects for federated search</span>
+<span class="ln">8</span><span style="color:var(--text)">codixing federation discover .. --output repos.json</span>
 <span class="ln">9</span><span style="color:var(--text)"></span>
 <span class="ln">10</span><span class="c-cmt"># Keep index up-to-date incrementally</span>
 <span class="ln">11</span><span style="color:var(--text)">codixing sync .</span>
@@ -1746,7 +1747,7 @@
 <span class="ln">9</span><span style="color:var(--text)">codixing callees src/engine.rs</span>
 <span class="ln">10</span><span style="color:var(--text)"></span>
 <span class="ln">11</span><span class="c-cmt"># Repository architecture map</span>
-<span class="ln">12</span><span style="color:var(--text)">codixing graph --token-budget 4000</span>
+<span class="ln">12</span><span style="color:var(--text)">codixing graph --map --token-budget 4000</span>
             </div>
             <div class="code-pane-qs" id="qs-mcp-setup">
 <span class="ln">1</span><span class="c-cmt"># Claude Code — plugin (recommended)</span>
@@ -1761,7 +1762,7 @@
 <span class="ln">10</span><span class="c-ok">/codixing-release</span><span style="color:var(--text-muted)">   — automated release pipeline</span>
 <span class="ln">11</span><span style="color:var(--text)"></span>
 <span class="ln">12</span><span class="c-cmt"># Or MCP only (any MCP client)</span>
-<span class="ln">13</span><span style="color:var(--text)">claude mcp add codixing -- npx -y codixing-mcp --root . --no-daemon-fork</span>
+<span class="ln">13</span><span style="color:var(--text)">claude mcp add codixing -- npx -y codixing-mcp --root . --profile minimal --no-daemon-fork</span>
             </div>
           </div>
         </div>
@@ -1774,7 +1775,7 @@
     <div class="wrapper">
       <div class="reveal">
         <h2>Give your agent a<br><span class="grad">real code understanding</span></h2>
-        <p>Open source, single binary, zero configuration. Works with Claude Code, Cursor, and any MCP-capable client.</p>
+        <p>Open source, self-contained, and local. Works with Claude Code, Cursor, and any MCP-capable client.</p>
         <div class="hero-cta" style="margin-bottom:0">
           <a class="btn-primary" href="https://github.com/ferax564/codixing">
             <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>

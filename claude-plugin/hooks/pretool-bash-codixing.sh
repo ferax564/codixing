@@ -25,6 +25,11 @@ if [ ! -d ".codixing" ]; then
   exit 0
 fi
 
+# Do not block a shell search with a redirect the user cannot follow. The MCP
+# package and CLI are separate installations; jq is optional hook plumbing.
+command -v codixing >/dev/null 2>&1 || exit 0
+command -v jq >/dev/null 2>&1 || exit 0
+
 COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // ""')
 
 # Empty command — nothing to check.
@@ -100,13 +105,33 @@ if [ -z "$PATTERN" ]; then
   PATTERN="<your-query>"
 fi
 
-cat <<DENY_JSON
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PreToolUse",
-    "permissionDecision": "deny",
-    "additionalContext": "CODIXING DOGFOODING: Your Bash command shelled out to '${FIRST_BIN}' against indexed code. Use the codixing CLI instead.\n\nSuggested commands:\n  codixing grep \"${PATTERN}\"          — literal/regex text scan with line numbers (new in v0.36)\n  codixing search \"${PATTERN}\"       — semantic search\n  codixing symbols ${PATTERN}         — find symbol definitions\n  codixing usages ${PATTERN}          — find call sites and imports\n\nAll available commands:\n  codixing grep \"<pattern>\"           — literal/regex scan (path:line:col:text) — supports --count, --files-with-matches, --invert, -i, --glob, --file, --json\n  codixing search \"<query>\"           — semantic search (code, docs, config)\n  codixing symbols <name>             — find symbol definitions\n  codixing usages <symbol>            — find call sites and imports\n  codixing callers <file>             — who imports this file\n  codixing callees <file>             — what this file imports\n  codixing impact <file>              — blast radius analysis\n  codixing graph --map                — architecture overview\n\nPassthrough exceptions: non-indexed paths (target/, node_modules/, .git/, vendor/, /tmp/), pure find (no -exec), cat on a single file without a grep pipe."
+CONTEXT=$(cat <<DENY_CONTEXT
+CODIXING DOGFOODING: Your Bash command shelled out to '${FIRST_BIN}' against indexed code. Use the codixing CLI instead.
+
+Suggested commands:
+  codixing grep "${PATTERN}"          — literal/regex text scan with line numbers
+  codixing search "${PATTERN}"       — semantic search
+  codixing symbols ${PATTERN}         — find symbol definitions
+  codixing usages ${PATTERN}          — find call sites and imports
+
+All available commands:
+  codixing grep "<pattern>"           — literal/regex scan (path:line:col:text) — supports --count, --files-with-matches, --invert, -i, --glob, --file, --json
+  codixing search "<query>"           — semantic search (code, docs, config)
+  codixing symbols <name>             — find symbol definitions
+  codixing usages <symbol>            — find call sites and imports
+  codixing callers <file>             — who imports this file
+  codixing callees <file>             — what this file imports
+  codixing impact <file>              — blast radius analysis
+  codixing graph --map                — architecture overview
+
+Passthrough exceptions: non-indexed paths (target/, node_modules/, .git/, vendor/, /tmp/), pure find (no -exec), cat on a single file without a grep pipe.
+DENY_CONTEXT
+)
+jq -n --arg context "$CONTEXT" '{
+  hookSpecificOutput: {
+    hookEventName: "PreToolUse",
+    permissionDecision: "deny",
+    additionalContext: $context
   }
-}
-DENY_JSON
+}'
 exit 0

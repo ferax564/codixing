@@ -17,7 +17,7 @@ use std::path::Path;
 
 use codixing_core::complexity::{count_cyclomatic_complexity, risk_band};
 use codixing_core::language::detect_language;
-use codixing_core::{Engine, EntityKind};
+use codixing_core::{Engine, EntityKind, IndexConfig};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer, LspService, Server};
@@ -34,6 +34,54 @@ struct CodixingBackend {
     open_docs: Arc<Mutex<HashMap<Url, String>>>,
     /// Complexity threshold for diagnostics (functions >= this trigger a warning).
     complexity_threshold: usize,
+}
+
+/// Maximum full-document buffer retained from an LSP client.
+///
+/// The server requests full-text synchronization, so every `didOpen`,
+/// `didChange`, and text-bearing `didSave` can otherwise replace one resident
+/// string with an arbitrarily large allocation. Eight MiB accommodates large
+/// generated sources while matching the MCP ingress ceiling.
+const MAX_LSP_DOCUMENT_BYTES: usize = 8 * 1024 * 1024;
+
+fn store_open_document(docs: &mut HashMap<Url, String>, uri: Url, text: String) -> bool {
+    store_open_document_with_limit(docs, uri, text, MAX_LSP_DOCUMENT_BYTES)
+}
+
+fn store_open_document_with_limit(
+    docs: &mut HashMap<Url, String>,
+    uri: Url,
+    text: String,
+    max_bytes: usize,
+) -> bool {
+    if text.len() > max_bytes {
+        // Drop any prior buffer for the same document too: retaining stale
+        // contents after rejecting a full-text replacement is misleading and
+        // defeats the resident-memory bound for that URI.
+        docs.remove(&uri);
+        return false;
+    }
+    docs.insert(uri, text);
+    true
+}
+
+/// Resolve a client-supplied `file://` URI to a canonical file inside one of
+/// the configured project roots. The URI is untrusted LSP input: lexical
+/// prefix checks alone would accept `..` components and symlinks that escape
+/// the workspace.
+fn resolve_workspace_uri(config: &IndexConfig, uri: &Url) -> Option<(PathBuf, String)> {
+    let requested = uri.to_file_path().ok()?;
+    let canonical = requested.canonicalize().ok()?;
+    let is_contained = config.all_roots().any(|root| {
+        root.canonicalize()
+            .ok()
+            .is_some_and(|canonical_root| canonical.starts_with(canonical_root))
+    });
+    if !is_contained {
+        return None;
+    }
+    let relative = config.normalize_path(&canonical)?;
+    Some((canonical, relative))
 }
 
 #[tower_lsp::async_trait]
@@ -122,9 +170,18 @@ impl LanguageServer for CodixingBackend {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri.clone();
         let text = params.text_document.text;
+        let text_bytes = text.len();
         match self.open_docs.lock() {
             Ok(mut docs) => {
-                docs.insert(uri.clone(), text);
+                if !store_open_document(&mut docs, uri.clone(), text) {
+                    warn!(
+                        %uri,
+                        text_bytes,
+                        limit = MAX_LSP_DOCUMENT_BYTES,
+                        "dropping oversized did_open document"
+                    );
+                    return;
+                }
             }
             Err(_) => {
                 warn!("open_docs mutex poisoned; dropping did_open");
@@ -137,9 +194,17 @@ impl LanguageServer for CodixingBackend {
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
         if let Some(change) = params.content_changes.into_iter().last() {
+            let text_bytes = change.text.len();
             match self.open_docs.lock() {
                 Ok(mut docs) => {
-                    docs.insert(uri, change.text);
+                    if !store_open_document(&mut docs, uri.clone(), change.text) {
+                        warn!(
+                            %uri,
+                            text_bytes,
+                            limit = MAX_LSP_DOCUMENT_BYTES,
+                            "dropping oversized did_change document"
+                        );
+                    }
                 }
                 Err(_) => warn!("open_docs mutex poisoned; dropping did_change"),
             }
@@ -149,28 +214,51 @@ impl LanguageServer for CodixingBackend {
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         let uri = params.text_document.uri.clone();
 
+        // Resolve before accepting text or touching the index. A client can
+        // send any file URI here, including absolute paths and in-root
+        // symlinks whose targets are outside the workspace.
+        let path = match self.engine.read() {
+            Ok(engine) => match resolve_workspace_uri(engine.config(), &uri) {
+                Some((path, _)) => path,
+                None => {
+                    warn!(%uri, "ignoring did_save outside configured roots");
+                    return;
+                }
+            },
+            Err(_) => {
+                warn!("engine rwlock poisoned; skipping reindex on save");
+                return;
+            }
+        };
+
         // Update tracked content if provided.
         if let Some(text) = params.text {
+            let text_bytes = text.len();
             match self.open_docs.lock() {
                 Ok(mut docs) => {
-                    docs.insert(uri.clone(), text);
+                    if !store_open_document(&mut docs, uri.clone(), text) {
+                        warn!(
+                            %uri,
+                            text_bytes,
+                            limit = MAX_LSP_DOCUMENT_BYTES,
+                            "dropping oversized did_save document"
+                        );
+                    }
                 }
                 Err(_) => warn!("open_docs mutex poisoned; skipping did_save text update"),
             }
         }
 
         // Live reindex the saved file.
-        if let Ok(path) = uri.to_file_path() {
-            let reindexed = match self.engine.write() {
-                Ok(mut engine) => engine.reindex_file(&path).is_ok(),
-                Err(_) => {
-                    warn!("engine rwlock poisoned; skipping reindex on save");
-                    false
-                }
-            };
-            if reindexed {
-                info!(?path, "reindexed on save");
+        let reindexed = match self.engine.write() {
+            Ok(mut engine) => engine.reindex_file(&path).is_ok(),
+            Err(_) => {
+                warn!("engine rwlock poisoned; skipping reindex on save");
+                false
             }
+        };
+        if reindexed {
+            info!(?path, "reindexed on save");
         }
 
         // Refresh diagnostics.
@@ -245,10 +333,9 @@ impl LanguageServer for CodixingBackend {
             None => return Ok(None),
         };
 
-        let abs = engine
-            .config()
-            .resolve_path(&sym.file_path)
-            .unwrap_or_else(|| PathBuf::from(&sym.file_path));
+        let Some(abs) = engine.config().resolve_path(&sym.file_path) else {
+            return Ok(None);
+        };
 
         let uri = match Url::from_file_path(&abs) {
             Ok(u) => u,
@@ -283,10 +370,7 @@ impl LanguageServer for CodixingBackend {
         let locations: Vec<Location> = usages
             .into_iter()
             .filter_map(|r| {
-                let abs = engine
-                    .config()
-                    .resolve_path(&r.file_path)
-                    .unwrap_or_else(|| PathBuf::from(&r.file_path));
+                let abs = engine.config().resolve_path(&r.file_path)?;
                 let uri = Url::from_file_path(&abs).ok()?;
                 Some(Location {
                     uri,
@@ -317,10 +401,7 @@ impl LanguageServer for CodixingBackend {
             .into_iter()
             .take(50)
             .filter_map(|sym| {
-                let abs = engine
-                    .config()
-                    .resolve_path(&sym.file_path)
-                    .unwrap_or_else(|| PathBuf::from(&sym.file_path));
+                let abs = engine.config().resolve_path(&sym.file_path)?;
                 let uri = Url::from_file_path(&abs).ok()?;
                 Some(SymbolInformation {
                     name: sym.name.clone(),
@@ -347,17 +428,12 @@ impl LanguageServer for CodixingBackend {
         params: DocumentSymbolParams,
     ) -> Result<Option<DocumentSymbolResponse>> {
         let uri = params.text_document.uri;
-        let abs = match uri.to_file_path() {
-            Ok(p) => p,
-            Err(_) => return Ok(None),
-        };
-
         let engine = self
             .engine
             .read()
             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
-        let rel = match engine.config().normalize_path(&abs) {
-            Some(r) => r,
+        let rel = match resolve_workspace_uri(engine.config(), &uri) {
+            Some((_, relative)) => relative,
             None => return Ok(None),
         };
 
@@ -389,6 +465,15 @@ impl LanguageServer for CodixingBackend {
     // -----------------------------------------------------------------------
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
         let uri = &params.text_document.uri;
+        let is_workspace_document = self
+            .engine
+            .read()
+            .ok()
+            .and_then(|engine| resolve_workspace_uri(engine.config(), uri))
+            .is_some();
+        if !is_workspace_document {
+            return Ok(None);
+        }
         let mut actions = Vec::new();
 
         for diag in &params.context.diagnostics {
@@ -472,32 +557,9 @@ impl LanguageServer for CodixingBackend {
     // -----------------------------------------------------------------------
     async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
         let uri = &params.text_document.uri;
-        let abs = match uri.to_file_path() {
-            Ok(p) => p,
-            Err(_) => return Ok(None),
-        };
-
-        let (source, rel) = {
-            let engine = self
-                .engine
-                .read()
-                .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
-            let rel = match engine.config().normalize_path(&abs) {
-                Some(r) => r,
-                None => return Ok(None),
-            };
-            let src = {
-                let docs = self
-                    .open_docs
-                    .lock()
-                    .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
-                docs.get(uri).cloned()
-            }
-            .or_else(|| std::fs::read_to_string(&abs).ok());
-            match src {
-                Some(s) => (s, rel),
-                None => return Ok(None),
-            }
+        let (_, rel, source) = match self.workspace_document(uri) {
+            Some(document) => document,
+            None => return Ok(None),
         };
 
         let syms = {
@@ -565,13 +627,11 @@ impl LanguageServer for CodixingBackend {
             .engine
             .read()
             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
-        let current_file = params
-            .text_document_position
-            .text_document
-            .uri
-            .to_file_path()
-            .ok()
-            .and_then(|p| engine.config().normalize_path(&p));
+        let current_file = resolve_workspace_uri(
+            engine.config(),
+            &params.text_document_position.text_document.uri,
+        )
+        .map(|(_, relative)| relative);
 
         let symbols = engine.symbol_table().lookup_prefix(&prefix);
         let mut seen = std::collections::HashSet::new();
@@ -679,17 +739,12 @@ impl LanguageServer for CodixingBackend {
     ) -> Result<Option<Vec<CallHierarchyItem>>> {
         let pos = &params.text_document_position_params;
         let uri = &pos.text_document.uri;
-        let abs = match uri.to_file_path() {
-            Ok(p) => p,
-            Err(_) => return Ok(None),
-        };
-
         let engine = self
             .engine
             .read()
             .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
-        let rel = match engine.config().normalize_path(&abs) {
-            Some(r) => r,
+        let rel = match resolve_workspace_uri(engine.config(), uri) {
+            Some((_, relative)) => relative,
             None => return Ok(None),
         };
 
@@ -705,10 +760,9 @@ impl LanguageServer for CodixingBackend {
             None => return Ok(None),
         };
 
-        let sym_abs = engine
-            .config()
-            .resolve_path(&sym.file_path)
-            .unwrap_or_else(|| PathBuf::from(&sym.file_path));
+        let Some(sym_abs) = engine.config().resolve_path(&sym.file_path) else {
+            return Ok(None);
+        };
         let sym_uri = match Url::from_file_path(&sym_abs) {
             Ok(u) => u,
             Err(_) => return Ok(None),
@@ -746,10 +800,9 @@ impl LanguageServer for CodixingBackend {
 
         let mut results = Vec::new();
         for caller in &callers {
-            let abs = engine
-                .config()
-                .resolve_path(&caller.file_path)
-                .unwrap_or_else(|| PathBuf::from(&caller.file_path));
+            let Some(abs) = engine.config().resolve_path(&caller.file_path) else {
+                continue;
+            };
             let uri = match Url::from_file_path(&abs) {
                 Ok(u) => u,
                 Err(_) => continue,
@@ -825,10 +878,9 @@ impl LanguageServer for CodixingBackend {
                 None => continue,
             };
 
-            let abs = engine
-                .config()
-                .resolve_path(&sym.file_path)
-                .unwrap_or_else(|| PathBuf::from(&sym.file_path));
+            let Some(abs) = engine.config().resolve_path(&sym.file_path) else {
+                continue;
+            };
             let uri = match Url::from_file_path(&abs) {
                 Ok(u) => u,
                 Err(_) => continue,
@@ -941,10 +993,10 @@ impl LanguageServer for CodixingBackend {
 
         // Build WorkspaceEdit from affected files.
         let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
-        let root = engine.config().root.clone();
-
         for file_rel in &validation.affected_files {
-            let abs = root.join(file_rel);
+            let Some(abs) = engine.config().resolve_path(file_rel) else {
+                continue;
+            };
             let content = match std::fs::read_to_string(&abs) {
                 Ok(c) => c,
                 Err(_) => continue,
@@ -1005,22 +1057,8 @@ impl LanguageServer for CodixingBackend {
         params: SemanticTokensParams,
     ) -> Result<Option<SemanticTokensResult>> {
         let uri = &params.text_document.uri;
-        let abs = match uri.to_file_path() {
-            Ok(p) => p,
-            Err(_) => return Ok(None),
-        };
-
-        let content = {
-            let docs = self
-                .open_docs
-                .lock()
-                .map_err(|_| tower_lsp::jsonrpc::Error::internal_error())?;
-            docs.get(uri).cloned()
-        }
-        .or_else(|| std::fs::read_to_string(&abs).ok());
-
-        let content = match content {
-            Some(c) => c,
+        let (abs, _, content) = match self.workspace_document(uri) {
+            Some(document) => document,
             None => return Ok(None),
         };
 
@@ -1038,13 +1076,29 @@ impl LanguageServer for CodixingBackend {
 // ---------------------------------------------------------------------------
 
 impl CodixingBackend {
+    /// Load an LSP document only after resolving its URI to a canonical path
+    /// inside a configured root. Open-buffer text is preferred, but the URI is
+    /// still validated before using it so every request shares one boundary.
+    fn workspace_document(&self, uri: &Url) -> Option<(PathBuf, String, String)> {
+        let (absolute, relative) = {
+            let engine = self.engine.read().ok()?;
+            resolve_workspace_uri(engine.config(), uri)?
+        };
+        let content = self
+            .open_docs
+            .lock()
+            .ok()?
+            .get(uri)
+            .cloned()
+            .or_else(|| std::fs::read_to_string(&absolute).ok())?;
+        Some((absolute, relative, content))
+    }
+
     /// Find the best-matching symbol for `word`, preferring exact name matches
     /// in the current file, then exact matches globally, then substring matches.
     fn best_symbol(&self, engine: &Engine, word: &str, uri: &Url) -> Option<codixing_core::Symbol> {
-        let current_file = uri
-            .to_file_path()
-            .ok()
-            .and_then(|p| engine.config().normalize_path(&p));
+        let current_file =
+            resolve_workspace_uri(engine.config(), uri).map(|(_, relative)| relative);
 
         let all = engine.symbols(word, None).unwrap_or_default();
         if all.is_empty() {
@@ -1082,14 +1136,7 @@ impl CodixingBackend {
     /// Collect the text before the cursor, joining with previous lines for
     /// multi-line call support.  Returns up to 5 preceding lines concatenated.
     fn text_before_cursor(&self, pos: &TextDocumentPositionParams) -> Option<String> {
-        let content = {
-            let docs = self.open_docs.lock().unwrap();
-            docs.get(&pos.text_document.uri).cloned()
-        };
-        let content = content.or_else(|| {
-            let path = pos.text_document.uri.to_file_path().ok()?;
-            std::fs::read_to_string(path).ok()
-        })?;
+        let (_, _, content) = self.workspace_document(&pos.text_document.uri)?;
 
         let lines: Vec<&str> = content.lines().collect();
         let cur_line = pos.position.line as usize;
@@ -1162,67 +1209,29 @@ impl CodixingBackend {
     /// Extract the identifier prefix up to (but not past) the cursor position.
     /// Used for completions — returns the partial word being typed.
     fn prefix_at(&self, pos: &TextDocumentPositionParams) -> Option<String> {
-        let content = {
-            let docs = self.open_docs.lock().unwrap();
-            docs.get(&pos.text_document.uri).cloned()
-        };
-        let content = content.or_else(|| {
-            let path = pos.text_document.uri.to_file_path().ok()?;
-            std::fs::read_to_string(path).ok()
-        })?;
+        let (_, _, content) = self.workspace_document(&pos.text_document.uri)?;
         prefix_at_position(&content, pos.position)
     }
 
     /// Extract the word under the cursor and return its Range in the document.
     fn word_range_at(&self, pos: &TextDocumentPositionParams) -> Option<Range> {
-        let content = {
-            let docs = self.open_docs.lock().unwrap();
-            docs.get(&pos.text_document.uri).cloned()
-        };
-        let content = content.or_else(|| {
-            let path = pos.text_document.uri.to_file_path().ok()?;
-            std::fs::read_to_string(path).ok()
-        })?;
+        let (_, _, content) = self.workspace_document(&pos.text_document.uri)?;
         word_range_at_position(&content, pos.position)
     }
 
     /// Extract the word under the cursor from either the tracked open document
     /// or by reading the file from disk.
     fn word_at(&self, pos: &TextDocumentPositionParams) -> Option<String> {
-        let content = {
-            let docs = self.open_docs.lock().unwrap();
-            docs.get(&pos.text_document.uri).cloned()
-        };
-        let content = content.or_else(|| {
-            let path = pos.text_document.uri.to_file_path().ok()?;
-            std::fs::read_to_string(path).ok()
-        })?;
+        let (_, _, content) = self.workspace_document(&pos.text_document.uri)?;
         word_at_position(&content, pos.position)
     }
 
     /// Compute cyclomatic complexity for each function in the file and publish
     /// diagnostics for those exceeding the threshold.
     async fn publish_complexity_diagnostics(&self, uri: &Url) {
-        let abs = match uri.to_file_path() {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-
-        let (source, rel) = {
-            let engine = self.engine.read().unwrap();
-            let rel = match engine.config().normalize_path(&abs) {
-                Some(r) => r,
-                None => return,
-            };
-            let src = {
-                let docs = self.open_docs.lock().unwrap();
-                docs.get(uri).cloned()
-            }
-            .or_else(|| std::fs::read_to_string(&abs).ok());
-            match src {
-                Some(s) => (s, rel),
-                None => return,
-            }
+        let (_, rel, source) = match self.workspace_document(uri) {
+            Some(document) => document,
+            None => return,
         };
 
         let syms = {
@@ -1939,6 +1948,86 @@ fn walk_tree(
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_document_storage_enforces_the_per_document_byte_limit() {
+        assert_eq!(MAX_LSP_DOCUMENT_BYTES, 8 * 1024 * 1024);
+
+        let uri = Url::parse("file:///workspace/src/lib.rs").unwrap();
+        let mut docs = HashMap::new();
+        assert!(store_open_document_with_limit(
+            &mut docs,
+            uri.clone(),
+            "12345678".to_string(),
+            8,
+        ));
+        assert_eq!(docs.get(&uri).map(String::as_str), Some("12345678"));
+
+        assert!(!store_open_document_with_limit(
+            &mut docs,
+            uri.clone(),
+            "123456789".to_string(),
+            8,
+        ));
+        assert!(
+            !docs.contains_key(&uri),
+            "an oversized full-text replacement must drop the stale buffer"
+        );
+    }
+
+    #[test]
+    fn workspace_uri_resolution_contains_absolute_traversal_and_extra_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let extra = dir.path().join("shared");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(extra.join("src")).unwrap();
+        let primary_file = root.join("src/main.rs");
+        let extra_file = extra.join("src/shared.rs");
+        let outside = dir.path().join("outside.rs");
+        std::fs::write(&primary_file, "fn main() {}\n").unwrap();
+        std::fs::write(&extra_file, "pub fn shared() {}\n").unwrap();
+        std::fs::write(&outside, "fn outside() {}\n").unwrap();
+
+        let mut config = IndexConfig::new(&root);
+        config.extra_roots.push(extra.clone());
+
+        let primary_uri = Url::from_file_path(&primary_file).unwrap();
+        let (resolved_primary, primary_rel) =
+            resolve_workspace_uri(&config, &primary_uri).expect("primary workspace URI");
+        assert_eq!(resolved_primary, primary_file.canonicalize().unwrap());
+        assert_eq!(primary_rel, "src/main.rs");
+
+        let extra_uri = Url::from_file_path(&extra_file).unwrap();
+        let (resolved_extra, extra_rel) =
+            resolve_workspace_uri(&config, &extra_uri).expect("extra-root workspace URI");
+        assert_eq!(resolved_extra, extra_file.canonicalize().unwrap());
+        assert_eq!(extra_rel, "shared/src/shared.rs");
+
+        let absolute_outside = Url::from_file_path(&outside).unwrap();
+        assert!(resolve_workspace_uri(&config, &absolute_outside).is_none());
+
+        let traversal = Url::from_file_path(root.join("src/../../outside.rs")).unwrap();
+        assert!(resolve_workspace_uri(&config, &traversal).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_uri_resolution_rejects_symlink_target_outside_root() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = dir.path().join("outside.rs");
+        std::fs::write(&outside, "fn outside() {}\n").unwrap();
+        let escape = root.join("escape.rs");
+        symlink(&outside, &escape).unwrap();
+
+        let config = IndexConfig::new(&root);
+        let uri = Url::from_file_path(escape).unwrap();
+        assert!(resolve_workspace_uri(&config, &uri).is_none());
+    }
 
     // -- word_at_position ---------------------------------------------------
 

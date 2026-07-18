@@ -134,7 +134,7 @@ def index_repo(repo_dir):
         shutil.rmtree(codixing_dir)
     start = time.perf_counter()
     r = subprocess.run(
-        [str(CODIXING), "init", str(repo_dir), "--no-embeddings"],
+        [str(CODIXING), "init", str(repo_dir)],
         capture_output=True, timeout=120, env=ENV,
     )
     elapsed = time.perf_counter() - start

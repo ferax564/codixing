@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Queue Embedding v2 — Benchmark: grep vs codixing (strategy-aware).
+"""Codixing retrieval and durable-embedding workflow benchmark.
 
 Usage:
     python3 benchmarks/queue_v2_benchmark.py [--repo openclaw|linux|both] [--skip-accuracy]
@@ -11,8 +11,10 @@ Outputs:
 
 import json
 import re
+import shutil
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 from pathlib import Path
@@ -20,6 +22,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CODIXING = REPO_ROOT / "target" / "release" / "codixing"
 RESULTS_DIR = REPO_ROOT / "benchmarks" / "results"
+ACCURACY_MODEL = "bge-small-en"
+MAX_STDOUT_BYTES = 8 * 1024 * 1024
+MAX_STDERR_BYTES = 2 * 1024 * 1024
 
 REPOS = {
     "openclaw": REPO_ROOT / "benchmarks" / "repos" / "openclaw",
@@ -27,18 +32,87 @@ REPOS = {
 }
 
 
-def run(cmd: list[str], cwd: str | None = None, timeout: int = 600) -> tuple[str, float]:
-    """Run command, return (stdout, elapsed_seconds)."""
+def run(
+    cmd: list[str],
+    cwd: str | None = None,
+    timeout: int = 600,
+    allowed_returncodes: tuple[int, ...] = (0,),
+    max_stdout_bytes: int = MAX_STDOUT_BYTES,
+    max_stderr_bytes: int = MAX_STDERR_BYTES,
+) -> tuple[str, float]:
+    """Run a command with bounded output, returning stdout and elapsed time."""
     start = time.monotonic()
-    result = subprocess.run(
-        cmd, capture_output=True, text=True, cwd=cwd, timeout=timeout
+    process = subprocess.Popen(
+        cmd,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
+
+    streams = {
+        "stdout": (process.stdout, max_stdout_bytes),
+        "stderr": (process.stderr, max_stderr_bytes),
+    }
+    captured = {"stdout": bytearray(), "stderr": bytearray()}
+    exceeded: list[str] = []
+    lock = threading.Lock()
+
+    def drain(name: str, stream, limit: int) -> None:
+        assert stream is not None
+        while chunk := stream.read(64 * 1024):
+            with lock:
+                remaining = max(0, limit - len(captured[name]))
+                captured[name].extend(chunk[:remaining])
+                over_limit = len(chunk) > remaining
+                if over_limit and name not in exceeded:
+                    exceeded.append(name)
+            if over_limit:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                break
+
+    readers = [
+        threading.Thread(target=drain, args=(name, stream, limit), daemon=True)
+        for name, (stream, limit) in streams.items()
+    ]
+    for reader in readers:
+        reader.start()
+
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        process.kill()
+        process.wait()
+        for reader in readers:
+            reader.join()
+        raise subprocess.TimeoutExpired(
+            cmd,
+            timeout,
+            output=bytes(captured["stdout"]).decode("utf-8", errors="replace"),
+            stderr=bytes(captured["stderr"]).decode("utf-8", errors="replace"),
+        ) from exc
+
+    for reader in readers:
+        reader.join()
+
     elapsed = time.monotonic() - start
-    if result.returncode != 0:
-        print(f"  WARN: {' '.join(cmd[:3])}... exited {result.returncode}", file=sys.stderr)
-        if result.stderr:
-            print(f"  stderr: {result.stderr[:200]}", file=sys.stderr)
-    return result.stdout, elapsed
+    stdout = bytes(captured["stdout"]).decode("utf-8", errors="replace")
+    stderr = bytes(captured["stderr"]).decode("utf-8", errors="replace")
+    if exceeded:
+        limits = ", ".join(
+            f"{name}={streams[name][1]} bytes" for name in sorted(exceeded)
+        )
+        raise RuntimeError(f"command output exceeded benchmark limit ({limits}): {cmd!r}")
+    if process.returncode not in allowed_returncodes:
+        raise subprocess.CalledProcessError(
+            process.returncode,
+            cmd,
+            output=stdout,
+            stderr=stderr,
+        )
+    return stdout, elapsed
 
 
 def build_codixing():
@@ -63,18 +137,46 @@ def load_queries() -> list[dict]:
 def grep_search(repo_path: Path, pattern: str, top_k: int = 10) -> tuple[list[str], float]:
     """Run grep and return (top files ranked by match count, elapsed_ms)."""
     out, elapsed = run(
-        ["grep", "-rn", "--include=*.ts", "--include=*.tsx",
-         "--include=*.js", "--include=*.jsx", pattern, "."],
+        [
+            "grep",
+            "--recursive",
+            "--with-filename",
+            "--count",
+            "--binary-files=without-match",
+            "--include=*.ts",
+            "--include=*.tsx",
+            "--include=*.js",
+            "--include=*.jsx",
+            "--exclude=*.min.js",
+            "--exclude-dir=.codixing",
+            "--exclude-dir=.git",
+            "--exclude-dir=.next",
+            "--exclude-dir=build",
+            "--exclude-dir=coverage",
+            "--exclude-dir=dist",
+            "--exclude-dir=node_modules",
+            "--exclude-dir=target",
+            "--",
+            pattern,
+            ".",
+        ],
         cwd=str(repo_path),
+        allowed_returncodes=(0, 1),
     )
     elapsed_ms = round(elapsed * 1000, 1)
     counts: dict[str, int] = {}
     for line in out.splitlines():
-        parts = line.split(":", 2)
-        if len(parts) >= 2:
-            fp = parts[0].lstrip("./")
-            counts[fp] = counts.get(fp, 0) + 1
-    ranked = sorted(counts.keys(), key=lambda f: counts[f], reverse=True)
+        path_and_count = line.rsplit(":", 1)
+        if len(path_and_count) != 2:
+            continue
+        fp, raw_count = path_and_count
+        try:
+            match_count = int(raw_count)
+        except ValueError:
+            continue
+        if match_count > 0:
+            counts[fp.removeprefix("./")] = match_count
+    ranked = sorted(counts, key=lambda f: (-counts[f], f))
     return ranked[:top_k], elapsed_ms
 
 
@@ -287,7 +389,22 @@ CATEGORY_STRATEGY = {
 
 
 def run_accuracy_benchmark(repo_path: Path) -> dict:
-    """Run search accuracy benchmark on OpenClaw."""
+    """Run search accuracy benchmark on a fresh hybrid OpenClaw index."""
+    clean_index(repo_path)
+    print(f"  Building deterministic hybrid index ({ACCURACY_MODEL})...")
+    run(
+        [
+            str(CODIXING),
+            "init",
+            ".",
+            "--embed",
+            "--model",
+            ACCURACY_MODEL,
+        ],
+        cwd=str(repo_path),
+        timeout=1800,
+    )
+
     queries = load_queries()
     if not queries:
         print("  No queries found in queue_v2_queries.toml", file=sys.stderr)
@@ -399,6 +516,7 @@ def run_accuracy_benchmark(repo_path: Path) -> dict:
             }
 
     return {
+        "index": {"type": "hybrid", "embedding_model": ACCURACY_MODEL},
         "queries": results,
         "summary": summary,
         "category_summary": category_summary,
@@ -411,47 +529,29 @@ def run_accuracy_benchmark(repo_path: Path) -> dict:
 def clean_index(repo_path: Path):
     """Remove .codixing index directory."""
     index_dir = repo_path / ".codixing"
-    if index_dir.exists():
-        subprocess.run(["rm", "-rf", str(index_dir)], check=True)
+    if index_dir.is_symlink():
+        index_dir.unlink()
+    elif index_dir.exists():
+        shutil.rmtree(index_dir)
 
 
 def run_embedding_speed_benchmark(repo_path: Path, repo_name: str) -> dict:
-    """Measure embedding speed: sync (1 worker) vs parallel (4 workers).
+    """Measure the supported durable hybrid-initialization path.
 
-    Runs full init with embeddings using BgeSmallEn. Compares the default
-    parallel embedding path against single-worker sync path.
-    Requires the rustqueue feature.
+    Older versions of this script varied CODIXING_EMBED_WORKERS, but the CLI
+    never consumed that environment variable, so the claimed worker comparison
+    measured identical code paths. Record only the real, validated command.
     """
     results: dict = {"repo": repo_name}
 
-    # Sync (1 worker): init with CODIXING_EMBED_WORKERS=1
     clean_index(repo_path)
-    print(f"  Embedding {repo_name} (sync, 1 worker)...")
-    env = {**dict(subprocess.os.environ), "CODIXING_EMBED_WORKERS": "1"}
-    start = time.monotonic()
-    subprocess.run(
-        [str(CODIXING), "init", ".", "--model", "bge-small-en"],
-        cwd=str(repo_path), timeout=1800, capture_output=True, env=env,
+    print(f"  Embedding {repo_name} (durable hybrid init)...")
+    _, elapsed = run(
+        [str(CODIXING), "init", ".", "--embed", "--model", "bge-small-en"],
+        cwd=str(repo_path),
+        timeout=1800,
     )
-    sync_time = time.monotonic() - start
-    results["sync_1worker_seconds"] = round(sync_time, 2)
-
-    # Parallel (4 workers)
-    clean_index(repo_path)
-    print(f"  Embedding {repo_name} (parallel, 4 workers)...")
-    env["CODIXING_EMBED_WORKERS"] = "4"
-    start = time.monotonic()
-    subprocess.run(
-        [str(CODIXING), "init", ".", "--model", "bge-small-en"],
-        cwd=str(repo_path), timeout=1800, capture_output=True, env=env,
-    )
-    parallel_time = time.monotonic() - start
-    results["parallel_4worker_seconds"] = round(parallel_time, 2)
-
-    if parallel_time > 0:
-        results["speedup"] = round(sync_time / parallel_time, 2)
-    else:
-        results["speedup"] = 0
+    results["hybrid_init_seconds"] = round(elapsed, 2)
 
     return results
 
@@ -462,7 +562,7 @@ def run_indexing_benchmark(repo_path: Path, repo_name: str) -> dict:
 
     print(f"  Indexing {repo_name} (BM25 only)...")
     _, init_time = run(
-        [str(CODIXING), "init", ".", "--no-embeddings"],
+        [str(CODIXING), "init", "."],
         cwd=str(repo_path), timeout=300,
     )
 
@@ -480,23 +580,39 @@ def run_ttfs_benchmark(repo_path: Path, repo_name: str) -> dict:
     clean_index(repo_path)
     print(f"  TTFS {repo_name} (standard init)...")
     start = time.monotonic()
-    run([str(CODIXING), "init", ".", "--no-embeddings"], cwd=str(repo_path), timeout=300)
+    run(
+        [str(CODIXING), "init", ".", "--embed"],
+        cwd=str(repo_path),
+        timeout=1800,
+    )
     run([str(CODIXING), "search", "function", "--limit", "1"], cwd=str(repo_path))
     standard_ttfs = time.monotonic() - start
 
-    # Deferred init (--defer-embeddings)
+    # BM25-first init: measure first lexical search, then continue to durable
+    # vector readiness with the documented post-hoc command.
     clean_index(repo_path)
-    print(f"  TTFS {repo_name} (deferred embeddings)...")
+    print(f"  TTFS {repo_name} (BM25 first, vectors added afterward)...")
     start = time.monotonic()
-    run([str(CODIXING), "init", ".", "--defer-embeddings"], cwd=str(repo_path), timeout=300)
+    run(
+        [str(CODIXING), "init", ".", "--embed", "--defer-embeddings"],
+        cwd=str(repo_path),
+        timeout=300,
+    )
     run([str(CODIXING), "search", "function", "--limit", "1"], cwd=str(repo_path))
-    deferred_ttfs = time.monotonic() - start
+    bm25_first_ttfs = time.monotonic() - start
+    run([str(CODIXING), "embed", "."], cwd=str(repo_path), timeout=1800)
+    posthoc_vector_ready = time.monotonic() - start
 
     return {
         "repo": repo_name,
-        "standard_ttfs_seconds": round(standard_ttfs, 2),
-        "deferred_ttfs_seconds": round(deferred_ttfs, 2),
-        "speedup": round(standard_ttfs / deferred_ttfs, 1) if deferred_ttfs > 0 else 0,
+        "hybrid_ready_ttfs_seconds": round(standard_ttfs, 2),
+        "bm25_first_ttfs_seconds": round(bm25_first_ttfs, 2),
+        "posthoc_vector_ready_seconds": round(posthoc_vector_ready, 2),
+        "first_search_speedup": (
+            round(standard_ttfs / bm25_first_ttfs, 1)
+            if bm25_first_ttfs > 0
+            else 0
+        ),
     }
 
 
@@ -504,13 +620,19 @@ def run_ttfs_benchmark(repo_path: Path, repo_name: str) -> dict:
 
 def generate_report(data: dict) -> str:
     """Generate markdown report."""
-    lines = ["# Queue Embedding v2 — Benchmark Results\n"]
+    lines = ["# Codixing Retrieval and Embedding Benchmark Results\n"]
     lines.append(f"**Date:** {time.strftime('%Y-%m-%d %H:%M')}\n")
 
     accuracy = data.get("accuracy", {})
 
     if accuracy.get("summary"):
         lines.append("## Search Accuracy (OpenClaw)\n")
+        index = accuracy.get("index", {})
+        if index:
+            lines.append(
+                f"**Index:** {index.get('type', 'unknown')} "
+                f"({index.get('embedding_model', 'unknown')})\n"
+            )
         lines.append("| Method | Precision@10 | Recall@10 | MRR |")
         lines.append("|--------|-------------|----------|-----|")
         for method, scores in accuracy["summary"].items():
@@ -581,26 +703,24 @@ def generate_report(data: dict) -> str:
 
     if "ttfs" in data and data["ttfs"]:
         lines.append("## Time to First Search\n")
-        lines.append("| Repo | Standard (s) | Deferred (s) | Speedup |")
-        lines.append("|------|-------------|--------------|---------|")
+        lines.append("| Repo | Hybrid ready (s) | BM25 first search (s) | Post-hoc vectors ready (s) | First-search speedup |")
+        lines.append("|------|------------------|-----------------------|----------------------------|----------------------|")
         for r in data["ttfs"]:
             lines.append(
-                f"| {r['repo']} | {r['standard_ttfs_seconds']} | "
-                f"{r['deferred_ttfs_seconds']} | {r['speedup']}x |"
+                f"| {r['repo']} | {r['hybrid_ready_ttfs_seconds']} | "
+                f"{r['bm25_first_ttfs_seconds']} | "
+                f"{r['posthoc_vector_ready_seconds']} | "
+                f"{r['first_search_speedup']}x |"
             )
         lines.append("")
 
     if "embedding_speed" in data and data["embedding_speed"]:
         es = data["embedding_speed"]
-        lines.append("## Embedding Speed (sync vs parallel)\n")
+        lines.append("## Durable Hybrid Initialization\n")
         lines.append(f"**Repo:** {es.get('repo', 'unknown')}\n")
-        lines.append("| Workers | Time (s) | Speedup |")
-        lines.append("|---------|---------|---------|")
-        lines.append(f"| 1 (sync) | {es.get('sync_1worker_seconds', 'N/A')} | 1.0x |")
-        lines.append(
-            f"| 4 (parallel) | {es.get('parallel_4worker_seconds', 'N/A')} | "
-            f"{es.get('speedup', 'N/A')}x |"
-        )
+        lines.append("| Supported CLI path | Time (s) |")
+        lines.append("|--------------------|----------|")
+        lines.append(f"| `init --embed --model bge-small-en` | {es.get('hybrid_init_seconds', 'N/A')} |")
         lines.append("")
 
     return "\n".join(lines)
@@ -608,7 +728,9 @@ def generate_report(data: dict) -> str:
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Queue v2 benchmark")
+    parser = argparse.ArgumentParser(
+        description="Codixing retrieval and durable-embedding benchmark"
+    )
     parser.add_argument("--repo", choices=["openclaw", "linux", "both"], default="both")
     parser.add_argument("--skip-accuracy", action="store_true",
                         help="Skip search accuracy benchmark (useful for linux)")
@@ -626,11 +748,14 @@ def main():
     if args.repo in ("linux", "both"):
         repos.append("linux")
 
-    # Check repos exist
+    # Preserve iteration order while filtering unavailable repositories.
+    available_repos = []
     for repo_name in repos:
         if not REPOS[repo_name].exists():
             print(f"WARN: {repo_name} repo not found at {REPOS[repo_name]}", file=sys.stderr)
-            repos.remove(repo_name)
+        else:
+            available_repos.append(repo_name)
+    repos = available_repos
 
     if not repos:
         print("No repos available. Exiting.", file=sys.stderr)
@@ -655,9 +780,9 @@ def main():
     for repo_name in repos:
         data["ttfs"].append(run_ttfs_benchmark(REPOS[repo_name], repo_name))
 
-    # Axis 4: Embedding Speed (sync vs parallel)
+    # Axis 4: supported durable embedding path
     if not args.skip_embedding and "openclaw" in repos:
-        print("\n=== Axis 4: Embedding Speed (sync vs parallel) ===")
+        print("\n=== Axis 4: Durable Hybrid Initialization ===")
         data["embedding_speed"] = run_embedding_speed_benchmark(REPOS["openclaw"], "openclaw")
 
     # Save results

@@ -21,6 +21,12 @@ if [ ! -d ".codixing" ]; then
   exit 0
 fi
 
+# The plugin bundles the MCP launcher, not the separate CLI used in redirect
+# suggestions. Missing optional hook dependencies must never turn Grep into a
+# dead end; /codixing-setup installs the CLI and the README documents jq.
+command -v codixing >/dev/null 2>&1 || exit 0
+command -v jq >/dev/null 2>&1 || exit 0
+
 PATTERN=$(echo "$INPUT" | jq -r '.tool_input.pattern // ""')
 GLOB=$(echo "$INPUT" | jq -r '.tool_input.glob // ""')
 PATH_ARG=$(echo "$INPUT" | jq -r '.tool_input.path // ""')
@@ -139,15 +145,30 @@ if [ "$INDEXED" = true ]; then
     SUGGESTION="codixing usages $PATTERN  OR  codixing symbols $PATTERN"
   fi
 
-  cat <<DENY_JSON
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PreToolUse",
-    "permissionDecision": "deny",
-    "additionalContext": "CODIXING DOGFOODING: Use the codixing CLI instead of Grep for code/doc/config search.\n\nSuggested command:\n  $SUGGESTION\n\nAll available commands:\n  codixing search \"<query>\"      — semantic search (code, docs, config)\n  codixing symbols <name>        — find symbol definitions\n  codixing usages <symbol>       — find call sites and imports\n  codixing callers <file>        — who imports this file\n  codixing callees <file>        — what this file imports\n  codixing graph --map           — architecture overview\n\nRun via Bash from the repo root. Passthrough exceptions: version strings, single-file targets, count mode, very short patterns."
-  }
-}
-DENY_JSON
+  CONTEXT=$(cat <<DENY_CONTEXT
+CODIXING DOGFOODING: Use the codixing CLI instead of Grep for code/doc/config search.
+
+Suggested command:
+  $SUGGESTION
+
+All available commands:
+  codixing search "<query>"      — semantic search (code, docs, config)
+  codixing symbols <name>        — find symbol definitions
+  codixing usages <symbol>       — find call sites and imports
+  codixing callers <file>        — who imports this file
+  codixing callees <file>        — what this file imports
+  codixing graph --map           — architecture overview
+
+Run via Bash from the repo root. Passthrough exceptions: version strings, single-file targets, count mode, very short patterns.
+DENY_CONTEXT
+  )
+  jq -n --arg context "$CONTEXT" '{
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      additionalContext: $context
+    }
+  }'
   exit 0
 fi
 

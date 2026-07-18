@@ -19,21 +19,21 @@ pub(crate) static CALL_PATTERN: LazyLock<regex::Regex> =
 
 /// Best-effort progress reporter for long-running tool calls.
 ///
-/// Wraps a `std::sync::mpsc::Sender` (not tokio) because tool dispatch runs
-/// inside `spawn_blocking`.  Sending failures are silently ignored — the client
-/// simply won't see the progress update.
+/// Wraps a bounded `std::sync::mpsc::SyncSender` (not tokio) because tool
+/// dispatch runs inside `spawn_blocking`. Full/disconnected channels drop
+/// best-effort updates instead of growing memory behind a slow client.
 #[derive(Clone)]
 pub struct ProgressReporter {
-    token: String,
-    sender: std::sync::mpsc::Sender<ProgressNotification>,
+    token: Value,
+    sender: std::sync::mpsc::SyncSender<ProgressNotification>,
     total: u32,
 }
 
 impl ProgressReporter {
     /// Create a new reporter.
     pub fn new(
-        token: String,
-        sender: std::sync::mpsc::Sender<ProgressNotification>,
+        token: Value,
+        sender: std::sync::mpsc::SyncSender<ProgressNotification>,
         total: u32,
     ) -> Self {
         Self {
@@ -45,7 +45,7 @@ impl ProgressReporter {
 
     /// Send a progress notification.  Best-effort: silently ignores send errors.
     pub fn report(&self, progress: u32, message: &str) {
-        let _ = self.sender.send(ProgressNotification {
+        let _ = self.sender.try_send(ProgressNotification {
             progress_token: self.token.clone(),
             progress,
             total: self.total,
@@ -57,7 +57,7 @@ impl ProgressReporter {
     /// Send a progress notification with attached structured data (e.g. partial
     /// search results).  Best-effort: silently ignores send errors.
     pub fn report_with_data(&self, progress: u32, message: &str, data: Value) {
-        let _ = self.sender.send(ProgressNotification {
+        let _ = self.sender.try_send(ProgressNotification {
             progress_token: self.token.clone(),
             progress,
             total: self.total,

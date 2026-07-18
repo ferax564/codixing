@@ -49,6 +49,30 @@ impl JsonRpcResponse {
 }
 
 impl JsonRpcError {
+    /// -32700 Parse error.
+    pub fn parse_error(msg: &str) -> Self {
+        Self {
+            jsonrpc: "2.0".to_string(),
+            id: Value::Null,
+            error: RpcError {
+                code: -32700,
+                message: msg.to_string(),
+            },
+        }
+    }
+
+    /// -32600 Invalid request.
+    pub fn invalid_request(id: Value, msg: &str) -> Self {
+        Self {
+            jsonrpc: "2.0".to_string(),
+            id,
+            error: RpcError {
+                code: -32600,
+                message: msg.to_string(),
+            },
+        }
+    }
+
     /// -32601 Method not found.
     pub fn method_not_found(id: Value, method: &str) -> Self {
         Self {
@@ -72,18 +96,6 @@ impl JsonRpcError {
             },
         }
     }
-
-    /// -32603 Internal error.
-    pub fn internal_error(id: Value, msg: &str) -> Self {
-        Self {
-            jsonrpc: "2.0".to_string(),
-            id,
-            error: RpcError {
-                code: -32603,
-                message: msg.to_string(),
-            },
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -94,7 +106,7 @@ impl JsonRpcError {
 /// tool call.  This is a JSON-RPC notification (no `id` field).
 #[derive(Debug, Clone)]
 pub struct ProgressNotification {
-    pub progress_token: String,
+    pub progress_token: Value,
     pub progress: u32,
     pub total: u32,
     pub message: String,

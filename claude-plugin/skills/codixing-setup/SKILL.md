@@ -3,7 +3,7 @@ name: codixing-setup
 description: Set up Codixing code retrieval engine for the current project. Installs the binary and indexes the codebase.
 user-invocable: true
 disable-model-invocation: false
-argument-hint: "[--embeddings] [--model bge-small-en]"
+argument-hint: "[--embed] [--model bge-small-en]"
 allowed-tools: Bash, Read, Glob
 ---
 
@@ -13,7 +13,7 @@ Set up the Codixing code retrieval engine for the current project.
 
 ## Steps
 
-### 1. Check if codixing is available
+### 1. Check whether the CLI is available
 
 ```bash
 codixing --version
@@ -21,13 +21,12 @@ codixing --version
 
 If this fails, install:
 ```bash
-curl -fsSL https://codixing.com/install.sh | sh
+curl --proto '=https' --proto-redir '=https' -fsSLo /tmp/codixing-install.sh https://codixing.com/install.sh
+sh /tmp/codixing-install.sh
 ```
 
-Or via npm:
-```bash
-npx -y codixing-mcp --version
-```
+The setup workflow needs the `codixing` CLI, so the MCP-only
+`npx -y codixing-mcp` package is not a substitute for this step.
 
 ### 2. Check for existing index
 
@@ -39,12 +38,23 @@ Look for a `.codixing/` directory in the project root. If it exists, skip to ste
 codixing init .
 ```
 
-If the user passed `--embeddings` or `--model`:
+If the user passed `--embed`:
 ```bash
-codixing init . --model $1
+codixing init . --embed
 ```
 
-This requires ONNX Runtime at `~/.local/lib/libonnxruntime.dylib` (macOS) or `~/.local/lib/libonnxruntime.so` (Linux).
+If the user selected a model, enable embeddings explicitly:
+```bash
+codixing init . --embed --model <name>
+```
+
+ONNX-based models require `ORT_DYLIB_PATH` to point to the exact shared-library
+file (`libonnxruntime.dylib`, `libonnxruntime.so*`, or `onnxruntime.dll`). Do not
+assume a fixed `~/.local/lib` location: Python wheels and release archives use
+version- and platform-specific paths. If the variable is missing, show the
+portable discovery recipe in the plugin README and verify it with
+`codixing doctor` before indexing. BM25-only and `model2vec` do not require ONNX
+Runtime.
 
 ### 4. Verify
 
@@ -61,5 +71,5 @@ Suggest the user try:
 ## Arguments
 
 - No arguments: BM25-only index (fastest, recommended)
-- `--embeddings`: Enable semantic search with default model (bge-small-en)
-- `--model <name>`: Choose embedding model (bge-small-en, bge-base-en, all-minilm-l6-v2)
+- `--embed`: Enable semantic search with the default model
+- `--model <name>`: Choose an embedding model; requires `--embed` (for example, bge-small-en, bge-base-en, or jina-embed-code)

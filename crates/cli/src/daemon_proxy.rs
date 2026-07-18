@@ -2,8 +2,8 @@
 //!
 //! The MCP server (`codixing-mcp`) can run as a background daemon that holds
 //! the engine in memory, serving JSON-RPC requests over:
-//! - a Unix domain socket at `<root>/.codixing/daemon-reviewer.sock` (Unix)
-//! - a named pipe at `\\.\pipe\codixing-<hash>-reviewer` (Windows)
+//! - a Unix domain socket at `<root>/.codixing/daemon-minimal.sock` (Unix)
+//! - a named pipe at `\\.\pipe\codixing-<hash>-minimal` (Windows)
 //!
 //! Once the daemon is warm, tool calls cost ~5-40 ms instead of ~4 s cold
 //! process startup on a 2 GB hybrid index (measured on the Linux kernel).
@@ -12,10 +12,13 @@
 //!
 //! 1. CLI command calls [`try_tools_call`] with the tool name + arguments.
 //! 2. Helper checks for a live daemon endpoint at the platform-specific path.
-//! 3. If found, opens a connection, sends an initialize + tools/call pair,
-//!    reads responses until it finds the one with `id == 2`, extracts the
-//!    text body, returns `Some(text)`.
-//! 4. If no daemon, stale endpoint, or any I/O step fails, returns `None`
+//! 3. If found, opens a connection, initializes it, switches that connection
+//!    to the read-only `reviewer` profile, then sends the requested tool call.
+//!    The daemon itself remains minimal for MCP clients, while all read-only
+//!    CLI proxy wrappers can still use the warm engine.
+//! 4. Reads responses until it finds the tool call reply, extracts the text
+//!    body, and returns `Some(text)`.
+//! 5. If no daemon, stale endpoint, or any I/O step fails, returns `None`
 //!    and the caller falls back to its existing `Engine::open()` path.
 //!
 //! ## Why blocking std instead of tokio
@@ -44,7 +47,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 #[allow(dead_code)]
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
-const DEFAULT_DAEMON_PROFILE: &str = "reviewer";
+const DEFAULT_DAEMON_PROFILE: &str = "minimal";
+const REVIEWER_PROFILE: &str = "reviewer";
+const PROFILE_RESPONSE_ID: u64 = 2;
+const CALL_RESPONSE_ID: u64 = 3;
 
 /// Attempt to call an MCP tool through the running daemon.
 ///
@@ -61,9 +67,18 @@ pub fn try_tools_call(root: &Path, tool_name: &str, arguments: Value) -> Option<
         "method": "initialize",
         "params": { "capabilities": {} }
     });
+    let select_reviewer = json!({
+        "jsonrpc": "2.0",
+        "id": PROFILE_RESPONSE_ID,
+        "method": "tools/call",
+        "params": {
+            "name": "set_mcp_profile",
+            "arguments": { "profile": REVIEWER_PROFILE },
+        }
+    });
     let call = json!({
         "jsonrpc": "2.0",
-        "id": 2,
+        "id": CALL_RESPONSE_ID,
         "method": "tools/call",
         "params": {
             "name": tool_name,
@@ -71,8 +86,9 @@ pub fn try_tools_call(root: &Path, tool_name: &str, arguments: Value) -> Option<
         }
     });
     let request = format!(
-        "{}\n{}\n",
+        "{}\n{}\n{}\n",
         serde_json::to_string(&initialize).ok()?,
+        serde_json::to_string(&select_reviewer).ok()?,
         serde_json::to_string(&call).ok()?
     );
 
@@ -91,8 +107,8 @@ fn parse_response<R: BufRead>(mut reader: R) -> Option<String> {
             return None;
         }
         let resp: Value = serde_json::from_str(line.trim()).ok()?;
-        // Skip notifications (no id) and the initialize response (id == 1).
-        if resp.get("id") != Some(&json!(2)) {
+        // Skip notifications plus initialize/profile-switch responses.
+        if resp.get("id") != Some(&json!(CALL_RESPONSE_ID)) {
             continue;
         }
         // Extract the text body. MCP result format:
@@ -122,9 +138,7 @@ fn parse_response<R: BufRead>(mut reader: R) -> Option<String> {
 fn send_jsonrpc(root: &Path, request: &[u8]) -> Option<Box<dyn BufRead + Send>> {
     use std::os::unix::net::UnixStream;
 
-    let socket_path = root
-        .join(".codixing")
-        .join(format!("daemon-{DEFAULT_DAEMON_PROFILE}.sock"));
+    let socket_path = default_daemon_endpoint(root);
     if !socket_path.exists() {
         return None;
     }
@@ -143,6 +157,12 @@ fn send_jsonrpc(root: &Path, request: &[u8]) -> Option<Box<dyn BufRead + Send>> 
     Some(Box::new(BufReader::new(stream)))
 }
 
+#[cfg(unix)]
+pub(crate) fn default_daemon_endpoint(root: &Path) -> std::path::PathBuf {
+    root.join(".codixing")
+        .join(format!("daemon-{DEFAULT_DAEMON_PROFILE}.sock"))
+}
+
 // ---------------------------------------------------------------------------
 // Windows: connect via named pipe at `\\.\pipe\codixing-<hash>-<profile>`
 // ---------------------------------------------------------------------------
@@ -155,6 +175,11 @@ fn send_jsonrpc(root: &Path, request: &[u8]) -> Option<Box<dyn BufRead + Send>> 
 fn pipe_name_for_root(root: &Path) -> String {
     let hash = stable_root_hash(root);
     format!(r"\\.\pipe\codixing-{hash:016x}-{DEFAULT_DAEMON_PROFILE}")
+}
+
+#[cfg(windows)]
+pub(crate) fn default_daemon_endpoint(root: &Path) -> String {
+    pipe_name_for_root(root)
 }
 
 #[cfg(windows)]
@@ -173,7 +198,7 @@ fn send_jsonrpc(root: &Path, request: &[u8]) -> Option<Box<dyn BufRead + Send>> 
     use std::fs::OpenOptions;
     use std::io::Read;
 
-    let pipe_name = pipe_name_for_root(root);
+    let pipe_name = default_daemon_endpoint(root);
 
     // Windows named pipes are opened like files. If the daemon is not
     // running the path doesn't exist; if it's busy serving another client
@@ -191,7 +216,7 @@ fn send_jsonrpc(root: &Path, request: &[u8]) -> Option<Box<dyn BufRead + Send>> 
     // No half-close on Windows named pipes — the daemon's JSON-RPC loop
     // handles framing by reading line-by-line, so once it sees both our
     // JSON messages (initialize + tools/call) it will respond. We
-    // explicitly read until we find our id==2 reply.
+    // explicitly read until we find our tool-call reply.
 
     // Read the full response into a buffer. The daemon writes at most a
     // few KB for our tool calls, and reading into a Vec<u8> lets us close
@@ -207,9 +232,9 @@ fn send_jsonrpc(root: &Path, request: &[u8]) -> Option<Box<dyn BufRead + Send>> 
             Ok(0) => break,
             Ok(n) => {
                 buf.extend_from_slice(&chunk[..n]);
-                // Stop once we see the id==2 response — it's on its own
+                // Stop once we see the tool-call response — it's on its own
                 // line so we can search for a newline and try to parse.
-                if contains_id2_response(&buf) {
+                if contains_call_response(&buf) {
                     break;
                 }
                 if read_start.elapsed() > max_wait {
@@ -224,13 +249,22 @@ fn send_jsonrpc(root: &Path, request: &[u8]) -> Option<Box<dyn BufRead + Send>> 
 }
 
 /// Fast-path check: has the buffer already received a JSON-RPC response
-/// with `"id":2`? Used to avoid waiting for EOF on Windows where the
+/// with the final call id? Used to avoid waiting for EOF on Windows where the
 /// daemon keeps the pipe open after responding.
-#[cfg(windows)]
-fn contains_id2_response(buf: &[u8]) -> bool {
+#[cfg_attr(not(windows), allow(dead_code))]
+fn contains_call_response(buf: &[u8]) -> bool {
     let s = std::str::from_utf8(buf).unwrap_or("");
-    for line in s.lines() {
-        if line.contains("\"id\":2") || line.contains("\"id\": 2") {
+    for line in s.split_inclusive('\n') {
+        // A named-pipe read can split a large JSON response immediately after
+        // the id. Do not stop until the complete newline-delimited frame has
+        // arrived and parsed successfully.
+        if !line.ends_with('\n') {
+            continue;
+        }
+        let Ok(response) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if response.get("id") == Some(&json!(CALL_RESPONSE_ID)) {
             return true;
         }
     }
@@ -355,4 +389,100 @@ pub fn try_grep(
     args.insert("limit".into(), json!(limit));
 
     try_tools_call(root, "grep_code", Value::Object(args))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_proxy_targets_the_minimal_default_profile() {
+        assert_eq!(DEFAULT_DAEMON_PROFILE, "minimal");
+
+        #[cfg(unix)]
+        assert!(
+            default_daemon_endpoint(Path::new("/tmp/project"))
+                .ends_with(".codixing/daemon-minimal.sock")
+        );
+    }
+
+    #[test]
+    fn proxy_switches_connection_to_reviewer_before_read_only_call() {
+        let initialize = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": { "capabilities": {} }
+        });
+        let select_reviewer = json!({
+            "jsonrpc": "2.0",
+            "id": PROFILE_RESPONSE_ID,
+            "method": "tools/call",
+            "params": {
+                "name": "set_mcp_profile",
+                "arguments": { "profile": REVIEWER_PROFILE },
+            }
+        });
+        let call = json!({
+            "jsonrpc": "2.0",
+            "id": CALL_RESPONSE_ID,
+            "method": "tools/call",
+            "params": {
+                "name": "search_usages",
+                "arguments": { "symbol": "Engine" },
+            }
+        });
+
+        let request = format!(
+            "{}\n{}\n{}\n",
+            serde_json::to_string(&initialize).unwrap(),
+            serde_json::to_string(&select_reviewer).unwrap(),
+            serde_json::to_string(&call).unwrap()
+        );
+        let messages: Vec<Value> = request
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1]["params"]["name"], "set_mcp_profile");
+        assert_eq!(messages[1]["params"]["arguments"]["profile"], "reviewer");
+        assert_eq!(messages[2]["id"], CALL_RESPONSE_ID);
+        assert_eq!(messages[2]["params"]["name"], "search_usages");
+    }
+
+    #[test]
+    fn parser_ignores_profile_response_and_returns_final_call() {
+        let responses = format!(
+            "{}\n{}\n{}\n",
+            json!({"jsonrpc":"2.0","id":1,"result":{}}),
+            json!({"jsonrpc":"2.0","id":PROFILE_RESPONSE_ID,"result":{"content":[{"type":"text","text":"reviewer"}]}}),
+            json!({"jsonrpc":"2.0","id":CALL_RESPONSE_ID,"result":{"content":[{"type":"text","text":"warm result"}],"isError":false}})
+        );
+
+        assert_eq!(
+            parse_response(std::io::Cursor::new(responses)),
+            Some("warm result".to_string())
+        );
+    }
+
+    #[test]
+    fn call_response_detector_waits_for_complete_json_line() {
+        let response = format!(
+            "{}\n",
+            json!({
+                "jsonrpc": "2.0",
+                "id": CALL_RESPONSE_ID,
+                "result": {"content": [{"type": "text", "text": "x".repeat(8192)}]}
+            })
+        );
+        let split = response.find("\"result\"").unwrap();
+
+        assert!(response[..split].contains(&format!("\"id\":{CALL_RESPONSE_ID}")));
+        assert!(
+            !contains_call_response(response[..split].as_bytes()),
+            "an id in an incomplete pipe frame must not terminate the read"
+        );
+        assert!(contains_call_response(response.as_bytes()));
+    }
 }

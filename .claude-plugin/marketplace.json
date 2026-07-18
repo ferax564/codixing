@@ -4,7 +4,7 @@
     "name": "ferax564"
   },
   "metadata": {
-    "description": "Code retrieval engine that saves your agent 73% of its tokens \u2014 ranked search, impact prediction, dependency graphs, and hybrid AST-aware retrieval across 67 MCP tools and 5 slash commands",
+    "description": "Code retrieval engine that saves your agent 73% of its tokens \u2014 ranked search, impact prediction, dependency graphs, and a profile-gated MCP catalog with 5 slash commands",
     "version": "0.45.0"
   },
   "plugins": [
@@ -14,9 +14,9 @@
         "source": "git-subdir",
         "url": "https://github.com/ferax564/codixing.git",
         "path": "claude-plugin",
-        "ref": "main"
+        "ref": "v0.45.0"
       },
-      "description": "Code retrieval engine that saves your agent 73% of its tokens. 67 MCP tools and 5 slash commands \u2014 ranked search, impact prediction, dependency graphs, and hybrid AST-aware retrieval. Runs locally, zero cloud dependencies.",
+      "description": "Code retrieval engine that saves your agent 73% of its tokens. A profile-gated MCP catalog and 5 slash commands provide ranked search, impact prediction, dependency graphs, and hybrid AST-aware retrieval. Runs locally, zero cloud dependencies.",
       "version": "0.45.0",
       "author": {
         "name": "ferax564"

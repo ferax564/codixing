@@ -117,6 +117,26 @@ fn tool_definitions_all_have_name_and_schema() {
 }
 
 #[test]
+fn code_search_schema_exposes_context_and_staleness_controls() {
+    let defs = tool_definitions();
+    let code_search = defs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "code_search")
+        .expect("code_search schema");
+    let properties = &code_search["inputSchema"]["properties"];
+    assert!(
+        properties.get("token_budget").is_some(),
+        "code_search must advertise its final response budget"
+    );
+    assert!(
+        properties.get("check_staleness").is_some(),
+        "code_search must make the repository walk explicit"
+    );
+}
+
+#[test]
 fn tool_definitions_phase10_tools_present() {
     let defs = tool_definitions();
     let names: Vec<&str> = defs
@@ -357,6 +377,72 @@ fn apply_patch_applies_add_and_remove() {
         content.contains("fn main()"),
         "Context lines should be preserved: {content}"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn mutation_tools_and_rename_reject_symlink_escapes() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("repo");
+    let outside = dir.path().join("outside.rs");
+    let dangling_target = dir.path().join("not-created.rs");
+    let mut engine = make_engine(&root);
+    fs::write(
+        &outside,
+        "pub fn compute() -> &'static str { \"secret\" }\n",
+    )
+    .unwrap();
+    fs::remove_file(root.join("src/main.rs")).unwrap();
+    symlink(&outside, root.join("src/main.rs")).unwrap();
+    symlink(&dangling_target, root.join("src/dangling.rs")).unwrap();
+
+    let (_, write_error) = files::call_write_file(
+        &mut engine,
+        &json!({"file": "src/main.rs", "content": "pub fn overwritten() {}\n"}),
+    );
+    assert!(write_error, "write_file must reject an outside symlink");
+
+    let (_, edit_error) = files::call_edit_file(
+        &mut engine,
+        &json!({
+            "file": "src/main.rs",
+            "old_string": "compute",
+            "new_string": "stolen"
+        }),
+    );
+    assert!(edit_error, "edit_file must reject an outside symlink");
+
+    let patch = "diff --git a/src/main.rs b/src/main.rs\n\
+                 --- a/src/main.rs\n\
+                 +++ b/src/main.rs\n\
+                 @@ -1 +1 @@\n\
+                 -pub fn compute() -> &'static str { \"secret\" }\n\
+                 +pub fn patched() {}\n";
+    let (_, patch_error) = files::call_apply_patch(&mut engine, &json!({"patch": patch}));
+    assert!(patch_error, "apply_patch must reject an outside symlink");
+
+    let (_, dangling_error) = files::call_write_file(
+        &mut engine,
+        &json!({"file": "src/dangling.rs", "content": "pub fn created() {}\n"}),
+    );
+    assert!(dangling_error, "write_file must reject a dangling symlink");
+
+    let (_, rename_error) = analysis::call_rename_symbol(
+        &mut engine,
+        &json!({"old_name": "compute", "new_name": "renamed_outside"}),
+    );
+    assert!(
+        !rename_error,
+        "unsafe indexed paths should be skipped cleanly"
+    );
+
+    assert_eq!(
+        fs::read_to_string(&outside).unwrap(),
+        "pub fn compute() -> &'static str { \"secret\" }\n"
+    );
+    assert!(!dangling_target.exists());
 }
 
 // -------------------------------------------------------------------------
@@ -1116,6 +1202,54 @@ fn get_complexity_nonexistent_file() {
 }
 
 #[test]
+fn get_complexity_rejects_traversal_and_absolute_paths() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("repo");
+    let outside = dir.path().join("outside.rs");
+    fs::write(&outside, "fn outside() -> bool { true }\n").unwrap();
+    let mut engine = make_engine(&root);
+
+    for candidate in ["../outside.rs".to_string(), outside.display().to_string()] {
+        let (out, err) = dispatch_tool(
+            &mut engine,
+            "get_complexity",
+            &json!({"file": candidate}),
+            None,
+        );
+        assert!(err, "outside path should be rejected: {out}");
+        assert!(
+            out.contains("outside the configured roots"),
+            "unexpected: {out}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn get_complexity_rejects_symlink_outside_root() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("repo");
+    let outside = dir.path().join("outside.rs");
+    fs::write(&outside, "fn outside() -> bool { true }\n").unwrap();
+    let mut engine = make_engine(&root);
+    symlink(&outside, root.join("src/escape.rs")).unwrap();
+
+    let (out, err) = dispatch_tool(
+        &mut engine,
+        "get_complexity",
+        &json!({"file": "src/escape.rs"}),
+        None,
+    );
+    assert!(err, "outside symlink should be rejected: {out}");
+    assert!(
+        out.contains("outside the configured roots"),
+        "unexpected: {out}"
+    );
+}
+
+#[test]
 fn get_complexity_computes_for_functions() {
     let dir = tempdir().unwrap();
     let mut engine = make_engine(dir.path());
@@ -1459,6 +1593,311 @@ fn compact_false_preserves_full_output() {
         normal_out, explicit_out,
         "compact=false should produce same output as omitting compact"
     );
+}
+
+#[test]
+fn final_envelope_uses_default_and_hard_maximum_budgets() {
+    let huge = "\u{1f642} codixing context ".repeat(20_000);
+
+    let default_limited = enforce_tool_output_budget(&huge, &json!({}));
+    assert!(default_limited.contains("truncated"));
+    assert!(
+        codixing_core::formatter::count_tokens(&default_limited) <= DEFAULT_TOOL_TOKEN_BUDGET,
+        "default envelope exceeded {} tokens",
+        DEFAULT_TOOL_TOKEN_BUDGET
+    );
+
+    let hard_limited = enforce_tool_output_budget(&huge, &json!({"token_budget": 1_000_000}));
+    assert!(hard_limited.contains("truncated"));
+    assert_eq!(
+        requested_tool_token_budget(&json!({"token_budget": 1_000_000})),
+        MAX_TOOL_TOKEN_BUDGET
+    );
+    assert!(
+        codixing_core::formatter::count_tokens(&hard_limited) <= MAX_TOOL_TOKEN_BUDGET,
+        "hard envelope exceeded {} tokens",
+        MAX_TOOL_TOKEN_BUDGET
+    );
+}
+
+#[test]
+fn final_envelope_replaces_oversized_json_with_valid_omission_object() {
+    let json_output = serde_json::to_string(&json!({
+        "schema_version": 1,
+        "items": (0..2_000)
+            .map(|i| format!("large structured item {i} 🙂"))
+            .collect::<Vec<_>>(),
+    }))
+    .unwrap();
+
+    let bounded = enforce_tool_output_budget(&json_output, &json!({"token_budget": 53}));
+    let parsed: serde_json::Value = serde_json::from_str(&bounded).unwrap();
+    assert_eq!(parsed["truncated"], true);
+    assert!(codixing_core::formatter::count_tokens(&bounded) <= 53);
+}
+
+#[test]
+fn both_dispatch_paths_apply_exact_utf8_safe_envelope() {
+    let dir = tempdir().unwrap();
+    let mut engine = make_engine(dir.path());
+    let args = json!({"query": "", "token_budget": 53});
+
+    let (read_only_out, read_only_err) = dispatch_tool_ref(&engine, "search_tools", &args, None);
+    assert!(!read_only_err, "read-only dispatch failed: {read_only_out}");
+    assert!(read_only_out.contains("truncated"));
+    assert!(
+        codixing_core::formatter::count_tokens(&read_only_out) <= 53,
+        "read-only dispatch exceeded budget: {} tokens",
+        codixing_core::formatter::count_tokens(&read_only_out)
+    );
+
+    let (write_path_out, write_path_err) = dispatch_tool(&mut engine, "search_tools", &args, None);
+    assert!(
+        !write_path_err,
+        "write dispatch path failed: {write_path_out}"
+    );
+    assert!(write_path_out.contains("truncated"));
+    assert!(
+        codixing_core::formatter::count_tokens(&write_path_out) <= 53,
+        "write dispatch path exceeded budget: {} tokens",
+        codixing_core::formatter::count_tokens(&write_path_out)
+    );
+}
+
+#[test]
+fn code_search_only_checks_staleness_when_requested() {
+    let dir = tempdir().unwrap();
+    let engine = make_engine(dir.path());
+    for i in 0..12 {
+        fs::write(
+            dir.path().join(format!("new_{i}.rs")),
+            format!("pub fn newly_added_{i}() {{}}\n"),
+        )
+        .unwrap();
+    }
+
+    let (default_out, default_err) = dispatch_tool_ref(
+        &engine,
+        "code_search",
+        &json!({"query": "compute", "strategy": "instant"}),
+        None,
+    );
+    assert!(!default_err, "default search failed: {default_out}");
+    assert!(
+        !default_out.contains("Index is stale"),
+        "default search must skip the full repository staleness walk"
+    );
+
+    let (checked_out, checked_err) = dispatch_tool_ref(
+        &engine,
+        "code_search",
+        &json!({
+            "query": "compute",
+            "strategy": "instant",
+            "check_staleness": true
+        }),
+        None,
+    );
+    assert!(!checked_err, "checked search failed: {checked_out}");
+    assert!(
+        checked_out.contains("Index is stale"),
+        "explicit staleness check should report newly added files: {checked_out}"
+    );
+}
+
+#[test]
+fn code_search_rejects_blank_and_oversized_queries() {
+    let dir = tempdir().unwrap();
+    let engine = make_engine(dir.path());
+
+    let (blank_out, blank_err) =
+        dispatch_tool_ref(&engine, "code_search", &json!({"query": "  \n\t  "}), None);
+    assert!(blank_err);
+    assert!(blank_out.contains("must not be blank"));
+
+    let oversized = "x".repeat(1_025);
+    let (oversized_out, oversized_err) =
+        dispatch_tool_ref(&engine, "code_search", &json!({"query": oversized}), None);
+    assert!(oversized_err);
+    assert!(oversized_out.contains("too long"));
+}
+
+#[test]
+fn read_only_ingress_bounds_numeric_text_and_array_arguments() {
+    let mut array = vec![json!(false), json!({"unexpected": true})];
+    array.extend((0..80).map(|i| json!(format!("src/file_{i}.rs"))));
+    let unicode_query = "🙂".repeat(MAX_TOOL_INPUT_CHARS);
+    assert!(unicode_query.len() > MAX_TOOL_INPUT_CHARS);
+
+    let bounded = bounded_read_only_args(&json!({
+        "query": unicode_query,
+        "token_budget": u64::MAX,
+        "limit": u64::MAX,
+        "max_files": u64::MAX,
+        "depth": u64::MAX,
+        "context_lines": u64::MAX,
+        "before_context": u64::MAX,
+        "after_context": u64::MAX,
+        "line_start": u64::MAX,
+        "line_end": u64::MAX,
+        "days": u64::MAX,
+        "changed_files": array,
+    }))
+    .expect("valid bounded ingress");
+
+    assert_eq!(bounded["token_budget"], MAX_TOOL_TOKEN_BUDGET);
+    assert_eq!(bounded["limit"], MAX_TOOL_RESULT_COUNT);
+    assert_eq!(bounded["max_files"], MAX_TOOL_RESULT_COUNT);
+    assert_eq!(bounded["depth"], MAX_TOOL_TRAVERSAL_DEPTH);
+    assert_eq!(bounded["context_lines"], MAX_TOOL_CONTEXT_LINES);
+    assert_eq!(bounded["before_context"], MAX_TOOL_CONTEXT_LINES);
+    assert_eq!(bounded["after_context"], MAX_TOOL_CONTEXT_LINES);
+    assert_eq!(bounded["line_start"], MAX_TOOL_LINE_NUMBER);
+    assert_eq!(bounded["line_end"], MAX_TOOL_LINE_NUMBER);
+    assert_eq!(bounded["days"], MAX_TOOL_TIME_WINDOW_DAYS);
+    let changed_files = bounded["changed_files"].as_array().unwrap();
+    assert_eq!(changed_files.len(), MAX_TOOL_ARRAY_ITEMS);
+    assert!(changed_files.iter().all(serde_json::Value::is_string));
+
+    let oversized = "🙂".repeat(MAX_TOOL_INPUT_CHARS + 1);
+    let err = bounded_read_only_args(&json!({"task": oversized})).unwrap_err();
+    assert!(err.contains("maximum: 1024 characters"));
+
+    let patch_at_limit = "p".repeat(MAX_TOOL_PATCH_CHARS);
+    assert!(bounded_read_only_args(&json!({"patch": patch_at_limit})).is_ok());
+    let oversized_patch = "p".repeat(MAX_TOOL_PATCH_CHARS + 1);
+    assert!(bounded_read_only_args(&json!({"patch": oversized_patch})).is_err());
+}
+
+#[test]
+fn generated_schemas_advertise_read_only_ingress_bounds() {
+    fn properties<'a>(defs: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+        &defs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap()["inputSchema"]["properties"]
+    }
+
+    let defs = tool_definitions();
+    let search = properties(&defs, "code_search");
+    assert_eq!(search["query"]["maxLength"], MAX_TOOL_INPUT_CHARS);
+    assert_eq!(search["limit"]["maximum"], MAX_TOOL_RESULT_COUNT);
+    assert_eq!(search["token_budget"]["maximum"], MAX_TOOL_TOKEN_BUDGET);
+
+    let grep = properties(&defs, "grep_code");
+    assert_eq!(grep["context_lines"]["maximum"], MAX_TOOL_CONTEXT_LINES);
+    assert_eq!(grep["pattern"]["maxLength"], MAX_TOOL_INPUT_CHARS);
+
+    let context_pack = properties(&defs, "agent_context_pack");
+    assert_eq!(
+        context_pack["changed_files"]["maxItems"],
+        MAX_TOOL_ARRAY_ITEMS
+    );
+    assert_eq!(
+        context_pack["changed_files"]["items"]["maxLength"],
+        MAX_TOOL_INPUT_CHARS
+    );
+
+    let transitive = properties(&defs, "get_transitive_deps");
+    assert_eq!(transitive["depth"]["maximum"], MAX_TOOL_TRAVERSAL_DEPTH);
+
+    let read_file = properties(&defs, "read_file");
+    assert_eq!(read_file["line_end"]["maximum"], MAX_TOOL_LINE_NUMBER);
+}
+
+#[test]
+fn handler_request_builders_clamp_before_core_work() {
+    let oversized = json!({"token_budget": u64::MAX, "limit": u64::MAX});
+    let (context_budget, context_limit) = context::context_request_bounds(&oversized);
+    assert_eq!(context_budget, MAX_TOOL_TOKEN_BUDGET);
+    assert_eq!(context_limit, MAX_TOOL_RESULT_COUNT);
+    assert_eq!(
+        context::context_request_bounds(&json!({})).0,
+        DEFAULT_TOOL_TOKEN_BUDGET
+    );
+    assert_eq!(
+        requested_structured_tool_token_budget(&oversized),
+        MAX_TOOL_TOKEN_BUDGET * 3 / 4
+    );
+
+    let repo_map = graph::repo_map_options(&oversized);
+    assert_eq!(repo_map.token_budget, MAX_TOOL_TOKEN_BUDGET);
+}
+
+#[test]
+fn read_file_and_core_range_are_safe_for_extreme_bounds() {
+    let dir = tempdir().unwrap();
+    let engine = make_engine(dir.path());
+    fs::write(
+        dir.path().join("src/main.rs"),
+        "🙂 very large line\n".repeat(20_000),
+    )
+    .unwrap();
+
+    let (out, err) = dispatch_tool_ref(
+        &engine,
+        "read_file",
+        &json!({
+            "file": "src/main.rs",
+            "line_start": 0,
+            "line_end": u64::MAX,
+            "token_budget": u64::MAX,
+        }),
+        None,
+    );
+    assert!(!err, "extreme read_file bounds failed: {out}");
+    assert!(codixing_core::formatter::count_tokens(&out) <= MAX_TOOL_TOKEN_BUDGET);
+
+    let full = engine
+        .read_file_range("src/main.rs", None, Some(u64::MAX))
+        .unwrap()
+        .unwrap();
+    assert!(full.contains("very large line"));
+    let reversed = engine
+        .read_file_range("src/main.rs", Some(u64::MAX), Some(0))
+        .unwrap()
+        .unwrap();
+    assert!(reversed.is_empty());
+}
+
+#[test]
+fn large_agent_context_pack_remains_valid_json_under_default_and_hard_budgets() {
+    let dir = tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("src")).unwrap();
+    for i in 0..80 {
+        fs::write(
+            dir.path().join(format!("src/generated_{i}.rs")),
+            format!("pub fn generated_{i}(value: usize) -> usize {{\n    value + {i}\n}}\n"),
+        )
+        .unwrap();
+    }
+    let engine = make_engine(dir.path());
+    let changed_files: Vec<String> = (0..80).map(|i| format!("src/generated_{i}.rs")).collect();
+
+    for args in [
+        json!({
+            "task": "understand and review every generated function and its dependencies",
+            "mode": "review",
+            "changed_files": changed_files,
+            "compact": true,
+        }),
+        json!({
+            "task": "understand and review every generated function and its dependencies",
+            "mode": "review",
+            "changed_files": (0..80).map(|i| format!("src/generated_{i}.rs")).collect::<Vec<_>>(),
+            "token_budget": u64::MAX,
+        }),
+    ] {
+        let requested_budget = requested_tool_token_budget(&args);
+        let (out, err) = dispatch_tool_ref(&engine, "agent_context_pack", &args, None);
+        assert!(!err, "agent_context_pack failed: {out}");
+        let parsed: serde_json::Value = serde_json::from_str(&out)
+            .unwrap_or_else(|e| panic!("agent context pack is invalid JSON: {e}\n{out}"));
+        assert!(parsed.is_object());
+        assert!(codixing_core::formatter::count_tokens(&out) <= requested_budget);
+    }
 }
 
 // -------------------------------------------------------------------------

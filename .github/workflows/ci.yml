@@ -95,19 +95,52 @@ jobs:
 
   vscode:
     name: VS Code Extension
+    permissions:
+      contents: read
+    uses: ./.github/workflows/vsix.yml
+    with:
+      upload_artifact: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+  msrv:
+    name: Minimum Rust 1.88
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-msrv
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
+      - name: Check workspace at declared MSRV
+        run: cargo check --workspace --all-targets --no-default-features
+
+  npm-installer:
+    name: npm Installer
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: editors/vscode
+        working-directory: npm
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-      - name: Install dependencies
-        run: npm ci
-      - name: Compile extension
-        run: npm run compile
+          node-version: '18'
+      - name: Verify release metadata and version transaction
+        working-directory: .
+        run: |
+          python3 scripts/check_version_consistency.py
+          python3 scripts/test_version_scripts.py
+          python3 scripts/test_release_order.py
+      - name: Test downloader and process forwarding
+        run: npm test
+      - name: Verify package contents
+        run: npm pack --dry-run --ignore-scripts
+      - name: Test exact npm package comparison
+        working-directory: .
+        run: bash scripts/test_compare_npm_package.sh
+      - name: Test checksum-verified shell installer
+        run: cd .. && scripts/test_install.sh
 
   audit:
     name: Security audit
@@ -164,10 +197,10 @@ jobs:
 
   release-build:
     name: Build release (${{ matrix.artifact_suffix }})
-    needs: test
-    # Only build release binaries on main pushes and tag pushes — PRs stay
-    # fast. release.yml downloads these artifacts by commit SHA on tag push.
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    needs: [test, npm-installer]
+    # Only build release binaries on main pushes — PRs stay fast. release.yml
+    # downloads these artifacts by tagged commit SHA after this job completes.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     strategy:
       fail-fast: false
       matrix:
@@ -223,7 +256,7 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then
             ext=".exe"
           fi
-          for bin in codixing codixing-mcp codixing-lsp; do
+          for bin in codixing codixing-mcp codixing-lsp codixing-server; do
             cp "target/${TARGET}/release/${bin}${ext}" \
                "staging/${bin}-${SUFFIX}${ext}"
           done

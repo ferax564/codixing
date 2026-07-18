@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -13,7 +13,9 @@ use crate::chunker::cast::CastChunker;
 use crate::config::IndexConfig;
 use crate::embedder::Embedder;
 use crate::error::{CodixingError, Result};
-use crate::graph::extract::{extract_definitions, extract_references};
+use crate::graph::extract::{
+    DefinitionInfo, ReferenceInfo, extract_definitions_from_tree, extract_references_from_tree,
+};
 use crate::graph::extractor::RawImport;
 use crate::graph::types::{ReferenceKind, SymbolKind};
 use crate::graph::{CallExtractor, CodeGraph, ImportExtractor, ImportResolver};
@@ -26,6 +28,25 @@ use crate::retriever::{ChunkMeta, ChunkMetaCompact};
 use crate::symbols::{Symbol, SymbolTable};
 use crate::vector::VectorIndex;
 
+/// Init-only symbol definition without a repeated per-item file path.
+/// The owning `DashMap` key already identifies the file.
+pub(super) struct PendingDefinition {
+    name: String,
+    kind: SymbolKind,
+    line: usize,
+}
+
+/// Init-only call reference. Non-call reference kinds are discarded before
+/// they enter the corpus-wide pending set because symbol-graph population does
+/// not consume them.
+pub(super) struct PendingCallReference {
+    target_name: String,
+    line: usize,
+}
+
+pub(super) type PendingSymbolGraph =
+    DashMap<String, (Vec<PendingDefinition>, Vec<PendingCallReference>)>;
+
 /// Shared context passed to `process_file` to avoid too-many-arguments.
 pub(super) struct IndexContext<'a> {
     pub(super) root: &'a Path,
@@ -36,17 +57,21 @@ pub(super) struct IndexContext<'a> {
     pub(super) chunk_count: &'a AtomicUsize,
     pub(super) file_chunk_map: &'a DashMap<String, usize>,
     pub(super) chunk_meta_map: &'a DashMap<u64, ChunkMeta>,
-    /// Pending chunks to embed: chunk_id → content.
+    /// Pending chunks to embed. The value is intentionally empty: embedding
+    /// reads content from `chunk_meta_map`, avoiding a second corpus-sized copy.
     pub(super) pending_embeds: &'a DashMap<u64, String>,
+    /// Whether an embedder was successfully initialized for this run.
+    pub(super) queue_embeddings: bool,
     /// Imports extracted during parsing, keyed by relative path.
     /// Reused by `build_graph` to avoid re-reading/re-parsing files.
     pub(super) pending_imports: &'a DashMap<String, (Vec<RawImport>, Language)>,
     /// Call names extracted during parsing: rel_path → Vec<callee_name>.
     /// Resolved into `EdgeKind::Calls` edges after the symbol table is complete.
     pub(super) pending_calls: &'a DashMap<String, Vec<String>>,
-    /// Full file content accumulated during parallel indexing for building
-    /// a chunk-boundary-free file trigram index.
-    pub(super) file_contents: &'a DashMap<String, Vec<u8>>,
+    /// Symbol definitions and references extracted from the parser tree during
+    /// the primary indexing pass. Reused to build the symbol graph without
+    /// re-reading and re-parsing every source file.
+    pub(super) pending_symbol_graph: &'a PendingSymbolGraph,
     /// Symbol references extracted from doc files, keyed by relative path.
     /// Resolved into `EdgeKind::DocumentedBy` edges after the symbol table is built.
     pub(super) pending_doc_refs: &'a DashMap<String, Vec<crate::language::doc::SymbolRef>>,
@@ -57,18 +82,31 @@ pub(super) struct IndexContext<'a> {
     /// invariant to canonical/non-canonical root differences between `init` and
     /// `sync`. Files with no fingerprint are simply absent (→ STRUCTURAL).
     pub(super) pending_signatures: &'a DashMap<String, u64>,
+    /// Complete successful-file hash baseline for the initial index.
+    pub(super) pending_hashes: &'a DashMap<PathBuf, crate::persistence::FileHashEntry>,
 }
 
-/// Build a [`FileTrigramIndex`] from full file content.
+/// Build a [`FileTrigramIndex`] from full files in a bounded second pass.
 ///
-/// Uses `file_contents` (complete file bytes accumulated during indexing)
-/// to avoid missing trigrams that straddle chunk boundaries.
-pub(super) fn build_file_trigram_from_content(
-    file_contents: &DashMap<String, Vec<u8>>,
+/// Files are read and released one at a time. The operating-system page cache
+/// normally makes this inexpensive immediately after indexing, while avoiding
+/// a corpus-sized `file_contents` map at peak initialization memory.
+pub(super) fn build_file_trigram_from_files(
+    files: &[PathBuf],
+    root: &Path,
+    config: &IndexConfig,
 ) -> FileTrigramIndex {
     let mut idx = FileTrigramIndex::new();
-    for entry in file_contents.iter() {
-        idx.add(entry.key(), entry.value());
+    for path in files {
+        let rel_str = config
+            .normalize_path(path)
+            .unwrap_or_else(|| normalize_path(path.strip_prefix(root).unwrap_or(path)));
+        match fs::read(path) {
+            Ok(content) => idx.add(&rel_str, &content),
+            Err(e) => {
+                debug!(path = %path.display(), error = %e, "skipping file in trigram pass");
+            }
+        }
     }
     idx
 }
@@ -112,25 +150,29 @@ pub(super) fn build_file_trigram_from_tantivy(tantivy: &TantivyIndex) -> FileTri
 
 /// Process a single file: parse → chunk → index → extract symbols.
 pub(super) fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
+    let metadata_before = file_metadata_tuple(path);
     let source = fs::read(path)?;
-    let result = ctx.parser.parse_file(path, &source)?;
+    let metadata_after = file_metadata_tuple(path);
+    let result = ctx.parser.parse_file_transient(path, &source)?;
+    let hash_entry = stable_file_hash_entry(result.content_hash, metadata_before, metadata_after);
 
     let rel_str = ctx
         .config
         .normalize_path(path)
         .unwrap_or_else(|| normalize_path(path.strip_prefix(ctx.root).unwrap_or(path)));
 
-    // Accumulate full file content for chunk-boundary-free trigram indexing.
-    ctx.file_contents.insert(rel_str.clone(), source.clone());
-
     // Doc language branch — uses DocLanguageSupport instead of tree-sitter/config.
     if result.language.is_doc() {
-        return process_doc_file(&rel_str, &source, result.language, ctx);
+        process_doc_file(&rel_str, &source, result.language, ctx)?;
+        ctx.pending_hashes.insert(path.to_path_buf(), hash_entry);
+        return Ok(());
     }
 
     // Jupyter branch — parse JSON and dispatch per-cell.
     if result.language.is_notebook() {
-        return process_jupyter_file(&rel_str, &source, ctx);
+        process_jupyter_file(&rel_str, &source, ctx)?;
+        ctx.pending_hashes.insert(path.to_path_buf(), hash_entry);
+        return Ok(());
     }
 
     let chunker = CastChunker;
@@ -164,8 +206,11 @@ pub(super) fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
             },
         );
 
-        // Queue for batch embedding.
-        ctx.pending_embeds.insert(chunk.id, chunk.content.clone());
+        // Queue only IDs when embedding is active. Content already lives in
+        // chunk_meta_map and the String value is deliberately empty.
+        if ctx.queue_embeddings {
+            ctx.pending_embeds.insert(chunk.id, String::new());
+        }
     }
 
     for entity in &result.entities {
@@ -201,6 +246,20 @@ pub(super) fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
         ctx.pending_calls.insert(rel_str.clone(), call_names);
     }
 
+    // Reuse the tree for the symbol-level graph too. The old graph phase
+    // parsed each file up to three additional times (definitions twice plus
+    // references once), which dominated initialization on large repositories.
+    if let Some(tree) = result.tree.as_ref() {
+        let (definitions, references) =
+            extract_pending_symbol_graph(tree, &source, &rel_str, &result.language);
+        if !definitions.is_empty() || !references.is_empty() {
+            ctx.pending_symbol_graph
+                .insert(rel_str.clone(), (definitions, references));
+        }
+    }
+
+    ctx.pending_hashes.insert(path.to_path_buf(), hash_entry);
+
     debug!(
         path = %rel_str,
         language = result.language.name(),
@@ -210,6 +269,58 @@ pub(super) fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
     );
 
     Ok(())
+}
+
+fn file_metadata_tuple(path: &Path) -> Option<(SystemTime, u64)> {
+    let metadata = fs::metadata(path).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
+}
+
+/// Pair a content hash only with metadata observed unchanged around its read.
+/// If either stat fails or the file changes mid-read, zero metadata forces the
+/// next sync to verify the body instead of trusting a mismatched fast-path key.
+fn stable_file_hash_entry(
+    content_hash: u64,
+    before: Option<(SystemTime, u64)>,
+    after: Option<(SystemTime, u64)>,
+) -> crate::persistence::FileHashEntry {
+    match (before, after) {
+        (Some((before_time, before_size)), Some((after_time, after_size)))
+            if before_time == after_time && before_size == after_size =>
+        {
+            crate::persistence::FileHashEntry::new(content_hash, Some(after_time), after_size)
+        }
+        _ => crate::persistence::FileHashEntry::new(content_hash, None, 0),
+    }
+}
+
+/// Extract the compact symbol-graph records retained across bulk indexing.
+/// Public extraction records include a file `String` on every item; here the
+/// caller already stores records under a per-file key, so retaining those
+/// duplicates would waste substantial memory on call-dense repositories.
+pub(super) fn extract_pending_symbol_graph(
+    tree: &tree_sitter::Tree,
+    source: &[u8],
+    file_path: &str,
+    language: &Language,
+) -> (Vec<PendingDefinition>, Vec<PendingCallReference>) {
+    let definitions = extract_definitions_from_tree(tree, source, file_path, language)
+        .into_iter()
+        .map(|definition: DefinitionInfo| PendingDefinition {
+            name: definition.name,
+            kind: definition.kind,
+            line: definition.line,
+        })
+        .collect();
+    let references = extract_references_from_tree(tree, source, file_path, language)
+        .into_iter()
+        .filter(|reference: &ReferenceInfo| reference.kind == ReferenceKind::Call)
+        .map(|reference| PendingCallReference {
+            target_name: reference.target_name,
+            line: reference.line,
+        })
+        .collect();
+    (definitions, references)
 }
 
 /// Process a doc file (Markdown, HTML): parse sections → chunk → index.
@@ -275,7 +386,9 @@ fn process_doc_file(
             },
         );
 
-        ctx.pending_embeds.insert(chunk.id, chunk.content.clone());
+        if ctx.queue_embeddings {
+            ctx.pending_embeds.insert(chunk.id, String::new());
+        }
     }
 
     debug!(
@@ -395,7 +508,9 @@ fn process_jupyter_file(rel_str: &str, source: &[u8], ctx: &IndexContext<'_>) ->
                             content: chunk.content.clone(),
                         },
                     );
-                    ctx.pending_embeds.insert(chunk.id, chunk.content.clone());
+                    if ctx.queue_embeddings {
+                        ctx.pending_embeds.insert(chunk.id, String::new());
+                    }
                 }
 
                 for entity in &entities {
@@ -455,7 +570,9 @@ fn process_jupyter_file(rel_str: &str, source: &[u8], ctx: &IndexContext<'_>) ->
                             content: chunk.content.clone(),
                         },
                     );
-                    ctx.pending_embeds.insert(chunk.id, chunk.content.clone());
+                    if ctx.queue_embeddings {
+                        ctx.pending_embeds.insert(chunk.id, String::new());
+                    }
                 }
 
                 if !symbol_refs.is_empty() {
@@ -575,14 +692,27 @@ fn embed_single_file_inner(
     root: &Path,
     file_path: &str,
     chunk_ids: &[u64],
-    sink: &mut dyn FnMut(u64, Vec<f32>, &str),
+    sink: &mut dyn FnMut(u64, Vec<f32>, &str) -> Result<()>,
 ) -> Result<(usize, bool)> {
     let mut embedded = 0;
 
     // ── Late chunking attempt ─────────────────────────────────────────
     if !contextual {
         let abs_path = root.join(file_path);
-        if let Ok(file_text) = fs::read_to_string(&abs_path) {
+        let safe_abs_path = root
+            .canonicalize()
+            .ok()
+            .and_then(|canonical_root| {
+                abs_path
+                    .canonicalize()
+                    .ok()
+                    .map(|path| (canonical_root, path))
+            })
+            .and_then(|(canonical_root, path)| path.starts_with(canonical_root).then_some(path));
+        if let Some(file_text) = safe_abs_path
+            .as_deref()
+            .and_then(|path| fs::read_to_string(path).ok())
+        {
             // Capture line_start eagerly to avoid DashMap lookups during sort.
             let mut ordered: Vec<(u64, String, u64)> = chunk_ids
                 .iter()
@@ -617,7 +747,7 @@ fn embed_single_file_inner(
                 match embedder.embed_file_late_chunking(&file_text, &byte_ranges) {
                     Ok(Some(embeddings)) => {
                         for ((id, _, _), embedding) in ordered.iter().zip(embeddings) {
-                            sink(*id, embedding, file_path);
+                            sink(*id, embedding, file_path)?;
                             embedded += 1;
                         }
                         return Ok((embedded, true));
@@ -652,7 +782,7 @@ fn embed_single_file_inner(
                 .get(chunk_id)
                 .map(|m| m.file_path.clone())
                 .unwrap_or_default();
-            sink(*chunk_id, embedding, &fp);
+            sink(*chunk_id, embedding, &fp)?;
             embedded += 1;
         }
     }
@@ -683,11 +813,7 @@ pub(super) fn embed_single_file(
         root,
         file_path,
         chunk_ids,
-        &mut |id, embedding, fp| {
-            if let Err(e) = vec_idx.add_mut(id, &embedding, fp) {
-                tracing::warn!(error = %e, chunk_id = id, "failed to add vector");
-            }
-        },
+        &mut |id, embedding, fp| vec_idx.add_mut(id, &embedding, fp),
     )
 }
 
@@ -713,6 +839,7 @@ pub(super) fn embed_file_collect(
         chunk_ids,
         &mut |id, embedding, fp| {
             collected.push((id, embedding, fp.to_string()));
+            Ok(())
         },
     )?;
     // Discard the used_late_chunking bool — callers of embed_file_collect
@@ -844,9 +971,17 @@ pub(super) fn walk_source_files(root: &Path, config: &IndexConfig) -> Result<Vec
     use ignore::WalkBuilder;
 
     let mut files = Vec::new();
+    let mut seen_canonical = HashSet::new();
 
     // Helper closure: collect matching files from a single directory tree.
     let mut collect = |walk_root: &Path| {
+        let canonical_walk_root = match walk_root.canonicalize() {
+            Ok(root) => root,
+            Err(error) => {
+                warn!(path = %walk_root.display(), %error, "cannot resolve source root, skipping");
+                return;
+            }
+        };
         for entry in WalkBuilder::new(walk_root)
             .standard_filters(true) // honour .gitignore / .ignore / global gitignore
             .hidden(true) // skip dot-files not covered by .gitignore
@@ -860,9 +995,31 @@ pub(super) fn walk_source_files(root: &Path, config: &IndexConfig) -> Result<Vec
                 }
             };
             let path = entry.path();
+            if entry
+                .file_type()
+                .is_some_and(|file_type| file_type.is_symlink())
+            {
+                debug!(path = %path.display(), "skipping symlinked source file");
+                continue;
+            }
             if !path.is_file() {
                 continue;
             }
+            let canonical_path = match path.canonicalize() {
+                Ok(path) if path.starts_with(&canonical_walk_root) => path,
+                Ok(path) => {
+                    warn!(
+                        path = %path.display(),
+                        root = %canonical_walk_root.display(),
+                        "skipping source file outside its configured root"
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    warn!(path = %path.display(), %error, "cannot resolve source file, skipping");
+                    continue;
+                }
+            };
             // Secondary guard: explicit exclude patterns (exact path component match).
             let excluded = path.components().any(|c| {
                 let s = c.as_os_str().to_string_lossy();
@@ -871,14 +1028,15 @@ pub(super) fn walk_source_files(root: &Path, config: &IndexConfig) -> Result<Vec
             if excluded {
                 continue;
             }
-            if config.languages.is_empty() {
-                if detect_language(path).is_some() {
-                    files.push(path.to_path_buf());
-                }
-            } else if let Some(lang) = detect_language(path) {
-                if config.languages.contains(&lang.name().to_lowercase()) {
-                    files.push(path.to_path_buf());
-                }
+            let supported = if config.languages.is_empty() {
+                detect_language(path).is_some()
+            } else {
+                detect_language(path).is_some_and(|language| {
+                    config.languages.contains(&language.name().to_lowercase())
+                })
+            };
+            if supported && seen_canonical.insert(canonical_path.clone()) {
+                files.push(canonical_path);
             }
         }
     };
@@ -992,106 +1150,40 @@ pub(super) fn add_doc_edges(
 
 /// Populate the symbol-level inner graph with definitions and call references.
 ///
-/// Reads each source file from `file_contents` (falling back to disk if not
-/// present), extracts function/struct/enum definitions and call references via
-/// tree-sitter, then inserts them as nodes and edges into the
-/// `CodeGraph::inner` graph.  This gives precise symbol->symbol call edges that
-/// complement the coarser file-level import/call edges.
+/// Consumes definitions and references extracted from the already-parsed trees
+/// in the primary indexing pass, then inserts them as nodes and edges into the
+/// `CodeGraph::inner` graph. This gives precise symbol->symbol call edges that
+/// complement the coarser file-level import/call edges without any extra parse.
 ///
 /// Must be called after the parallel parse phase so that all files are available.
-pub(super) fn populate_symbol_graph(
-    graph: &mut CodeGraph,
-    files: &[PathBuf],
-    root: &Path,
-    config: &IndexConfig,
-    file_contents: &DashMap<String, Vec<u8>>,
-) {
+pub(super) fn populate_symbol_graph(graph: &mut CodeGraph, symbol_data: PendingSymbolGraph) {
     use std::collections::HashMap;
 
-    /// Read file source: try `file_contents` cache first, fall back to disk.
-    fn read_source(
-        abs_path: &Path,
-        rel_str: &str,
-        file_contents: &DashMap<String, Vec<u8>>,
-    ) -> Option<String> {
-        if let Some(bytes) = file_contents.get(rel_str) {
-            return String::from_utf8(bytes.value().clone()).ok();
-        }
-        fs::read_to_string(abs_path).ok()
-    }
-
-    // Phase 1: Extract definitions from all files to build a name->NodeIndex map.
+    // Phase 1: consume each file's definitions to build the global name map,
+    // retaining only function line/node pairs plus call references for phase 2.
+    // This releases definition names/kinds and the DashMap allocation while the
+    // graph grows instead of overlapping both corpus-wide representations.
     let mut name_to_indices: HashMap<String, Vec<petgraph::graph::NodeIndex>> = HashMap::new();
+    let mut pending_references = Vec::with_capacity(symbol_data.len());
 
-    for abs_path in files {
-        let lang = match detect_language(abs_path) {
-            Some(l) => l,
-            None => continue,
-        };
-        let rel_str = config
-            .normalize_path(abs_path)
-            .unwrap_or_else(|| normalize_path(abs_path.strip_prefix(root).unwrap_or(abs_path)));
-        let source = match read_source(abs_path, &rel_str, file_contents) {
-            Some(s) => s,
-            None => continue,
-        };
-
-        let defs = extract_definitions(&source, &rel_str, &lang);
-        for def in &defs {
-            let idx = graph.add_symbol_with_line(&def.name, &rel_str, def.kind.clone(), def.line);
-            name_to_indices
-                .entry(def.name.clone())
-                .or_default()
-                .push(idx);
+    for (rel_str, (definitions, references)) in symbol_data {
+        let mut func_defs = Vec::new();
+        for def in definitions {
+            let is_function = def.kind == SymbolKind::Function;
+            let idx = graph.add_symbol_with_line(&def.name, &rel_str, def.kind, def.line);
+            name_to_indices.entry(def.name).or_default().push(idx);
+            if is_function {
+                func_defs.push((def.line, idx));
+            }
         }
+        func_defs.sort_by_key(|(line, _)| *line);
+        pending_references.push((rel_str, func_defs, references));
     }
 
-    // Phase 2: Extract references and wire call edges.
+    // Phase 2: consume references and wire call edges.
     let mut total_edges = 0usize;
-    for abs_path in files {
-        let lang = match detect_language(abs_path) {
-            Some(l) => l,
-            None => continue,
-        };
-        let rel_str = config
-            .normalize_path(abs_path)
-            .unwrap_or_else(|| normalize_path(abs_path.strip_prefix(root).unwrap_or(abs_path)));
-        let source = match read_source(abs_path, &rel_str, file_contents) {
-            Some(s) => s,
-            None => continue,
-        };
-
-        let refs = extract_references(&source, &rel_str, &lang);
-
-        // Build a map of function definitions in this file so we can attribute
-        // call references to their enclosing function.
-        let defs = extract_definitions(&source, &rel_str, &lang);
-        // Sort definitions by line for binary search.
-        let mut func_defs: Vec<(usize, petgraph::graph::NodeIndex)> =
-            defs.iter()
-                .filter(|d| d.kind == SymbolKind::Function)
-                .filter_map(|d| {
-                    name_to_indices
-                        .get(&d.name)
-                        .and_then(|indices| {
-                            indices
-                                .iter()
-                                .find(|&&idx| {
-                                    graph.inner.node_weight(idx).is_some_and(|n| {
-                                        n.file == rel_str && n.line == Some(d.line)
-                                    })
-                                })
-                                .copied()
-                        })
-                        .map(|idx| (d.line, idx))
-                })
-                .collect();
-        func_defs.sort_by_key(|(line, _)| *line);
-
-        for r in &refs {
-            if r.kind != ReferenceKind::Call {
-                continue;
-            }
+    for (rel_str, func_defs, references) in pending_references {
+        for r in references {
             // Find the enclosing function for this call site.
             let caller_idx = find_enclosing_function(&func_defs, r.line);
             let caller_idx = match caller_idx {
@@ -1182,6 +1274,58 @@ pub(super) fn find_enclosing_function(
         }
     }
     Some(func_defs[candidate_idx].1)
+}
+
+#[cfg(test)]
+mod init_hash_tests {
+    use super::{stable_file_hash_entry, walk_source_files};
+    use crate::config::IndexConfig;
+    use std::fs;
+    use std::time::{Duration, SystemTime};
+    use tempfile::tempdir;
+
+    #[test]
+    fn changing_metadata_forces_next_sync_to_verify_content() {
+        let first = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+        let second = SystemTime::UNIX_EPOCH + Duration::from_secs(11);
+        let entry = stable_file_hash_entry(42, Some((first, 100)), Some((second, 100)));
+
+        assert_eq!(entry.content_hash, 42);
+        assert_eq!(entry.mtime(), None);
+        assert_eq!(entry.size, 0);
+        assert!(entry.file_might_have_changed(Some(second), 100));
+    }
+
+    #[test]
+    fn stable_metadata_is_bound_to_the_indexed_hash() {
+        let time = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+        let entry = stable_file_hash_entry(42, Some((time, 100)), Some((time, 100)));
+
+        assert_eq!(entry.mtime(), Some(time));
+        assert_eq!(entry.size, 100);
+        assert!(!entry.file_might_have_changed(Some(time), 100));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_walk_rejects_outside_symlinks_and_deduplicates_overlapping_roots() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let src = root.join("src");
+        let outside = dir.path().join("outside.rs");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("inside.rs"), "fn inside() {}\n").unwrap();
+        fs::write(&outside, "fn outside_secret() {}\n").unwrap();
+        symlink(&outside, src.join("escape.rs")).unwrap();
+
+        let mut config = IndexConfig::new(&root);
+        config.extra_roots.push(src.clone());
+        let files = walk_source_files(&root, &config).unwrap();
+
+        assert_eq!(files, vec![src.join("inside.rs")]);
+    }
 }
 
 /// Build a dependency graph from pre-extracted import lists (populated during

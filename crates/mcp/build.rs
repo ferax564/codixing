@@ -256,7 +256,15 @@ fn generate_input_schema(tool: &ToolDef) -> String {
         if param.param_type == "array" {
             prop_parts.push(r#""type": "array""#.to_string());
             if let Some(ref items) = param.items_type {
-                prop_parts.push(format!(r#""items": {{"type": "{}"}}"#, items));
+                if tool.read_only && items == "string" {
+                    prop_parts
+                        .push(r#""items": {"type": "string", "maxLength": 1024}"#.to_string());
+                } else {
+                    prop_parts.push(format!(r#""items": {{"type": "{}"}}"#, items));
+                }
+            }
+            if tool.read_only {
+                prop_parts.push(r#""maxItems": 64"#.to_string());
             }
             prop_parts.push(format!(r#""description": "{}""#, desc_escaped));
         } else {
@@ -269,6 +277,49 @@ fn generate_input_schema(tool: &ToolDef) -> String {
                     .collect::<Vec<_>>()
                     .join(", ");
                 prop_parts.push(format!(r#""enum": [{}]"#, enum_str));
+            }
+            if tool.read_only {
+                match (param.param_type.as_str(), param.name.as_str()) {
+                    ("integer", "token_budget") => {
+                        prop_parts.push(r#""minimum": 1"#.to_string());
+                        prop_parts.push(r#""maximum": 12000"#.to_string());
+                    }
+                    ("integer", "limit" | "max_files") => {
+                        prop_parts.push(r#""minimum": 1"#.to_string());
+                        prop_parts.push(r#""maximum": 100"#.to_string());
+                    }
+                    ("integer", "offset") => {
+                        prop_parts.push(r#""minimum": 0"#.to_string());
+                        prop_parts.push(r#""maximum": 100000"#.to_string());
+                    }
+                    ("integer", "depth" | "callee_depth") => {
+                        prop_parts.push(r#""minimum": 1"#.to_string());
+                        prop_parts.push(r#""maximum": 8"#.to_string());
+                    }
+                    ("integer", "context_lines" | "before_context" | "after_context") => {
+                        prop_parts.push(r#""minimum": 0"#.to_string());
+                        prop_parts.push(r#""maximum": 5"#.to_string());
+                    }
+                    ("integer", "line" | "line_start" | "line_end") => {
+                        prop_parts.push(r#""minimum": 0"#.to_string());
+                        prop_parts.push(r#""maximum": 4294967295u64"#.to_string());
+                    }
+                    ("integer", "days" | "threshold_days") => {
+                        prop_parts.push(r#""minimum": 1"#.to_string());
+                        prop_parts.push(r#""maximum": 365000"#.to_string());
+                    }
+                    ("integer", "min_complexity") => {
+                        prop_parts.push(r#""minimum": 1"#.to_string());
+                        prop_parts.push(r#""maximum": 1000000"#.to_string());
+                    }
+                    ("string", "patch") => {
+                        prop_parts.push(r#""maxLength": 1048576"#.to_string());
+                    }
+                    ("string", _) => {
+                        prop_parts.push(r#""maxLength": 1024"#.to_string());
+                    }
+                    _ => {}
+                }
             }
             prop_parts.push(format!(r#""description": "{}""#, desc_escaped));
         }
@@ -528,6 +579,7 @@ fn main() {
         let call = match tool.calling_convention.as_str() {
             "engine_mut_args" => format!("{handler}(engine, args)"),
             "engine_mut_only" => format!("{handler}(engine)"),
+            "args_only" => format!("{handler}(args)"),
             other => panic!(
                 "Unknown calling convention for write tool '{}': {}",
                 tool.name, other

@@ -14,9 +14,9 @@ const DEFAULT_SNIPPET_MAX_LINES: usize = 20;
 ///
 /// Each chunk is formatted as a fenced code block with metadata header.
 /// If `token_budget` is `Some(n)`, chunks are added until the running token
-/// count would exceed `n`, then truncation stops.  When a budget is active,
-/// function bodies longer than [`DEFAULT_SNIPPET_MAX_LINES`] are
-/// signature-truncated to save tokens.
+/// count would exceed `n`; the last block is partially retained with a marker
+/// inside the same budget. When a budget is active, function bodies longer
+/// than [`DEFAULT_SNIPPET_MAX_LINES`] are signature-truncated to save tokens.
 ///
 /// Uses the `cl100k_base` tokenizer (GPT-4 / Claude compatible).
 pub fn format_context(results: &[SearchResult], token_budget: Option<usize>) -> String {
@@ -27,13 +27,16 @@ pub fn format_context(results: &[SearchResult], token_budget: Option<usize>) -> 
     let bpe = match cl100k_base() {
         Ok(b) => Some(b),
         Err(e) => {
-            warn!(error = %e, "failed to load cl100k tokenizer; skipping token budget");
+            warn!(
+                error = %e,
+                "failed to load cl100k tokenizer; using conservative byte budget"
+            );
             None
         }
     };
 
     let mut output = String::new();
-    let mut token_count: usize = 0;
+    let mut token_count = 0usize;
 
     for result in results {
         // When a token budget is active, apply signature-aware truncation to
@@ -57,21 +60,154 @@ pub fn format_context(results: &[SearchResult], token_budget: Option<usize>) -> 
 
         let block = render_result(effective_result);
 
-        if let (Some(bpe), Some(budget)) = (bpe.as_ref(), token_budget) {
-            let block_tokens = bpe.encode_with_special_tokens(&block).len();
-            if token_count + block_tokens > budget {
-                output.push_str(&format!(
-                    "\n<!-- truncated: token budget of {budget} reached -->\n"
-                ));
-                break;
+        if let Some(budget) = token_budget {
+            let block_tokens = match bpe.as_ref() {
+                Some(bpe) => bpe.encode_with_special_tokens(&block).len(),
+                // Every token represents at least one byte, so a byte cap is
+                // conservative when the tokenizer is unavailable.
+                None => block.len(),
+            };
+            if token_count.saturating_add(block_tokens) > budget {
+                output.push_str(&block);
+                let actual_tokens = match bpe.as_ref() {
+                    Some(bpe) => bpe.encode_with_special_tokens(&output).len(),
+                    None => output.len(),
+                };
+                if actual_tokens <= budget {
+                    // Tokens can merge across block boundaries. Keep going if
+                    // the exact combined count still fits.
+                    token_count = actual_tokens;
+                    continue;
+                }
+                let marker = format!("\n\n<!-- truncated: token budget of {budget} reached -->\n");
+                return match bpe.as_ref() {
+                    Some(bpe) => truncate_with_counter(&output, budget, &marker, &|text| {
+                        bpe.encode_with_special_tokens(text).len()
+                    }),
+                    None => truncate_to_byte_budget(&output, budget, &marker),
+                };
             }
-            token_count += block_tokens;
+            token_count = token_count.saturating_add(block_tokens);
         }
 
         output.push_str(&block);
     }
 
+    if let Some(budget) = token_budget {
+        let marker = format!("\n\n<!-- truncated: token budget of {budget} reached -->\n");
+        match bpe.as_ref() {
+            Some(bpe) => truncate_with_counter(&output, budget, &marker, &|text| {
+                bpe.encode_with_special_tokens(text).len()
+            }),
+            None => truncate_to_byte_budget(&output, budget, &marker),
+        }
+    } else {
+        output
+    }
+}
+
+/// Truncate text to an exact cl100k token budget while retaining a marker.
+///
+/// The returned string is always valid UTF-8. If truncation is required, the
+/// marker is included within `token_budget`; extremely small budgets fall back
+/// to a single ellipsis. When the tokenizer cannot be initialized, this uses a
+/// conservative one-byte-per-token ceiling rather than returning unbounded
+/// output.
+pub fn truncate_to_token_budget(text: &str, token_budget: usize, marker: &str) -> String {
+    match cl100k_base() {
+        Ok(bpe) => truncate_with_counter(text, token_budget, marker, &|value| {
+            bpe.encode_with_special_tokens(value).len()
+        }),
+        Err(e) => {
+            warn!(
+                error = %e,
+                "failed to load cl100k tokenizer; using conservative byte budget"
+            );
+            truncate_to_byte_budget(text, token_budget, marker)
+        }
+    }
+}
+
+fn truncate_with_counter<F>(text: &str, token_budget: usize, marker: &str, count: &F) -> String
+where
+    F: Fn(&str) -> usize,
+{
+    let full_tokens = count(text);
+    if full_tokens <= token_budget {
+        return text.to_string();
+    }
+    if token_budget == 0 {
+        return String::new();
+    }
+
+    let effective_marker = if count(marker) <= token_budget {
+        marker
+    } else if count("\u{2026}") <= token_budget {
+        "\u{2026}"
+    } else {
+        return String::new();
+    };
+    let marker_tokens = count(effective_marker);
+    let content_budget = token_budget.saturating_sub(marker_tokens);
+    let mut end = ((text.len() as u128 * content_budget as u128) / full_tokens.max(1) as u128)
+        .min(text.len() as u128) as usize;
+    end = floor_char_boundary(text, end);
+
+    loop {
+        let prefix = text[..end].trim_end();
+        let mut candidate = String::with_capacity(prefix.len() + effective_marker.len());
+        candidate.push_str(prefix);
+        candidate.push_str(effective_marker);
+        let candidate_tokens = count(&candidate);
+        if candidate_tokens <= token_budget {
+            return candidate;
+        }
+        if end == 0 {
+            return effective_marker.to_string();
+        }
+
+        let scaled =
+            ((end as u128 * token_budget as u128) / candidate_tokens.max(1) as u128) as usize;
+        let next = if scaled < end {
+            scaled
+        } else {
+            end.saturating_sub(1)
+        };
+        end = floor_char_boundary(text, next);
+    }
+}
+
+fn truncate_to_byte_budget(text: &str, budget: usize, marker: &str) -> String {
+    if text.len() <= budget {
+        return text.to_string();
+    }
+    if budget == 0 {
+        return String::new();
+    }
+
+    let effective_marker = if marker.len() <= budget {
+        marker
+    } else if "\u{2026}".len() <= budget {
+        "\u{2026}"
+    } else {
+        "."
+    };
+    let mut end = floor_char_boundary(text, budget.saturating_sub(effective_marker.len()));
+    let prefix = text[..end].trim_end();
+    end = prefix.len();
+
+    let mut output = String::with_capacity(end + effective_marker.len());
+    output.push_str(&text[..end]);
+    output.push_str(effective_marker);
     output
+}
+
+fn floor_char_boundary(text: &str, mut end: usize) -> usize {
+    end = end.min(text.len());
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
 }
 
 /// Truncate a code snippet intelligently based on function signatures.
@@ -410,13 +546,18 @@ fn merge_into_bands(results: &[SearchResult], gap_lines: usize) -> Vec<SearchRes
 
 /// Count the number of cl100k tokens in a string.
 ///
-/// Returns 0 if the tokenizer fails to load (logged as a warning).
+/// Falls back to UTF-8 byte length if the tokenizer fails to load. Since each
+/// cl100k token represents at least one byte, this is a conservative ceiling
+/// for callers that must never treat an oversized response as within budget.
 pub fn count_tokens(text: &str) -> usize {
     match cl100k_base() {
         Ok(bpe) => bpe.encode_with_special_tokens(text).len(),
         Err(e) => {
-            warn!(error = %e, "failed to load cl100k tokenizer");
-            0
+            warn!(
+                error = %e,
+                "failed to load cl100k tokenizer; using conservative byte count"
+            );
+            text.len()
         }
     }
 }
@@ -794,5 +935,51 @@ func ServeHTTP(w http.ResponseWriter, r *http.Request) {
             "token budget should truncate output"
         );
         assert!(budgeted.contains("truncated"));
+        assert!(
+            count_tokens(&budgeted) <= 50,
+            "marker and partial content must fit inside the budget: {} tokens\n{budgeted}",
+            count_tokens(&budgeted)
+        );
+    }
+
+    #[test]
+    fn format_context_oversized_first_result_keeps_useful_partial_content() {
+        let content = "let greeting = \"\u{4f60}\u{597d}\u{1f642}\"; ".repeat(1_000);
+        let results = vec![make_result("oversized", &content)];
+
+        let budgeted = format_context(&results, Some(80));
+
+        assert!(
+            budgeted.contains("src/lib.rs"),
+            "file header should survive"
+        );
+        assert!(
+            budgeted.contains("let greeting"),
+            "the first oversized result should contribute useful source content: {budgeted}"
+        );
+        assert!(budgeted.contains("truncated"));
+        assert!(
+            count_tokens(&budgeted) <= 80,
+            "formatted context exceeded its exact budget: {} tokens",
+            count_tokens(&budgeted)
+        );
+    }
+
+    #[test]
+    fn token_truncation_preserves_unicode_and_keeps_marker_inside_budget() {
+        let input = format!(
+            "prefix {} suffix",
+            "\u{1f642}\u{4f60}\u{597d}\u{1f680}".repeat(500)
+        );
+        let marker = "\n[output truncated]\n";
+        let budgeted = truncate_to_token_budget(&input, 37, marker);
+
+        assert!(budgeted.starts_with("prefix"));
+        assert!(budgeted.ends_with(marker));
+        assert!(
+            count_tokens(&budgeted) <= 37,
+            "Unicode truncation exceeded the exact budget: {} tokens",
+            count_tokens(&budgeted)
+        );
     }
 }

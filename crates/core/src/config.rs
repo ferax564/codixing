@@ -458,13 +458,19 @@ impl IndexConfig {
     /// Resolve a normalized relative path back to an absolute filesystem path.
     ///
     /// Tries the primary root first, then each extra root (stripping the prefix).
-    /// Returns `None` if the path cannot be mapped to any root.
+    /// Returns `None` if the path is absolute, contains a parent traversal, does
+    /// not exist, or resolves through a symlink outside its selected root.
     pub fn resolve_path(&self, rel_path: &str) -> Option<PathBuf> {
+        let rel = Path::new(rel_path);
+        if !safe_relative_path(rel) {
+            return None;
+        }
+
         // Try primary root directly.
-        let primary_abs = self.root.join(rel_path);
-        if primary_abs.exists() {
+        if let Some(primary_abs) = resolve_within(&self.root, rel, false) {
             return Some(primary_abs);
         }
+
         // Try extra roots: strip the prefix (base name) and check.
         for extra in &self.extra_roots {
             let prefix = extra
@@ -473,19 +479,143 @@ impl IndexConfig {
                 .unwrap_or_else(|| extra.to_string_lossy().into_owned());
             let with_slash = format!("{}/", prefix);
             if let Some(stripped) = rel_path.strip_prefix(&with_slash) {
-                let candidate = extra.join(stripped);
-                if candidate.exists() {
+                if let Some(candidate) = resolve_within(extra, Path::new(stripped), false) {
                     return Some(candidate);
                 }
             }
         }
         None
     }
+
+    /// Resolve a caller-supplied relative path for a filesystem mutation.
+    ///
+    /// Unlike [`Self::resolve_path`], the final component may not exist yet.
+    /// Every existing prefix is canonicalized, including dangling symlinks,
+    /// before the missing suffix is appended. This prevents an in-root symlink
+    /// from redirecting a create or overwrite outside the configured roots.
+    pub fn resolve_path_for_write(&self, rel_path: &str) -> Option<PathBuf> {
+        let rel = Path::new(rel_path);
+        if !safe_relative_path(rel) {
+            return None;
+        }
+
+        let primary_candidate = self.root.join(rel);
+        if std::fs::symlink_metadata(&primary_candidate).is_ok() {
+            return resolve_within(&self.root, rel, true);
+        }
+
+        let first_component = rel.components().find_map(|component| match component {
+            std::path::Component::Normal(component) => Some(component),
+            _ => None,
+        });
+        let primary_claims_prefix = first_component
+            .map(|component| self.root.join(component))
+            .is_some_and(|path| std::fs::symlink_metadata(path).is_ok());
+
+        for extra in &self.extra_roots {
+            let prefix = extra
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| extra.to_string_lossy().into_owned());
+            let stripped = if rel_path == prefix {
+                Some("")
+            } else {
+                rel_path.strip_prefix(&format!("{prefix}/"))
+            };
+            let Some(stripped) = stripped else {
+                continue;
+            };
+            let extra_rel = Path::new(stripped);
+            let extra_candidate = extra.join(extra_rel);
+            if std::fs::symlink_metadata(&extra_candidate).is_ok() || !primary_claims_prefix {
+                return resolve_within(extra, extra_rel, true);
+            }
+        }
+
+        resolve_within(&self.root, rel, true)
+    }
+
+    /// Resolve an absolute caller-supplied path inside any configured root.
+    ///
+    /// `allow_missing` is used by deletion/index-maintenance paths whose target
+    /// may already be gone. Missing suffixes are accepted only after the nearest
+    /// existing ancestor has been canonicalized and proven contained.
+    pub fn resolve_absolute_path(&self, path: &Path, allow_missing: bool) -> Option<PathBuf> {
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return None;
+        }
+        resolve_absolute_with_roots(self.all_roots().map(PathBuf::as_path), path, allow_missing)
+    }
+}
+
+fn safe_relative_path(path: &Path) -> bool {
+    !path.is_absolute()
+        && !path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+}
+
+fn resolve_within(root: &Path, rel: &Path, allow_missing: bool) -> Option<PathBuf> {
+    let candidate = root.join(rel);
+    resolve_absolute_with_roots(std::iter::once(root), &candidate, allow_missing)
+}
+
+fn resolve_absolute_with_roots<'a>(
+    roots: impl Iterator<Item = &'a Path>,
+    candidate: &Path,
+    allow_missing: bool,
+) -> Option<PathBuf> {
+    let canonical_roots: Vec<PathBuf> = roots.filter_map(|root| root.canonicalize().ok()).collect();
+    if canonical_roots.is_empty() {
+        return None;
+    }
+
+    let mut existing = candidate.to_path_buf();
+    let mut missing_suffix = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(&existing) {
+            Ok(_) => break,
+            Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {
+                let name = existing.file_name()?.to_os_string();
+                missing_suffix.push(name);
+                if !existing.pop() {
+                    return None;
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+
+    // `canonicalize` intentionally follows the existing component. A dangling
+    // symlink therefore fails closed instead of being mistaken for a missing
+    // ordinary path whose target could be created outside the root.
+    let mut resolved = existing.canonicalize().ok()?;
+    if !canonical_roots
+        .iter()
+        .any(|canonical_root| resolved.starts_with(canonical_root))
+    {
+        return None;
+    }
+    for component in missing_suffix.iter().rev() {
+        resolved.push(component);
+    }
+    Some(resolved)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     fn json_round_trip() {
@@ -516,5 +646,105 @@ mod tests {
     fn chunk_config_default_overlap_ratio_is_zero() {
         let config = ChunkConfig::default();
         assert_eq!(config.overlap_ratio, 0.0);
+    }
+
+    #[test]
+    fn resolve_path_rejects_absolute_and_parent_escape() {
+        let parent = tempdir().unwrap();
+        let root = parent.path().join("project");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("inside.rs"), "fn inside() {}\n").unwrap();
+        let outside = parent.path().join("secret.txt");
+        fs::write(&outside, "secret\n").unwrap();
+
+        let config = IndexConfig::new(root.canonicalize().unwrap());
+        assert_eq!(
+            config.resolve_path("inside.rs"),
+            Some(root.join("inside.rs").canonicalize().unwrap())
+        );
+        assert_eq!(config.resolve_path("../secret.txt"), None);
+        assert_eq!(config.resolve_path(outside.to_str().unwrap()), None);
+    }
+
+    #[test]
+    fn resolve_path_preserves_prefixed_extra_roots() {
+        let parent = tempdir().unwrap();
+        let root = parent.path().join("project");
+        let extra = parent.path().join("shared-lib");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&extra).unwrap();
+        fs::write(extra.join("shared.rs"), "fn shared() {}\n").unwrap();
+
+        let mut config = IndexConfig::new(root.canonicalize().unwrap());
+        config.extra_roots.push(extra.canonicalize().unwrap());
+        assert_eq!(
+            config.resolve_path("shared-lib/shared.rs"),
+            Some(extra.join("shared.rs").canonicalize().unwrap())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_path_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempdir().unwrap();
+        let root = parent.path().join("project");
+        fs::create_dir(&root).unwrap();
+        let outside = parent.path().join("secret.txt");
+        fs::write(&outside, "secret\n").unwrap();
+        symlink(&outside, root.join("linked-secret")).unwrap();
+
+        let config = IndexConfig::new(root.canonicalize().unwrap());
+        assert_eq!(config.resolve_path("linked-secret"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_resolution_rejects_existing_and_dangling_symlink_escapes() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempdir().unwrap();
+        let root = parent.path().join("project");
+        let outside_dir = parent.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside_dir).unwrap();
+        fs::write(outside_dir.join("secret.rs"), "secret\n").unwrap();
+        symlink(&outside_dir, root.join("outside-link")).unwrap();
+        symlink(outside_dir.join("not-created.rs"), root.join("dangling.rs")).unwrap();
+
+        let config = IndexConfig::new(root.canonicalize().unwrap());
+        assert_eq!(
+            config.resolve_path_for_write("outside-link/secret.rs"),
+            None
+        );
+        assert_eq!(config.resolve_path_for_write("dangling.rs"), None);
+        assert_eq!(
+            config.resolve_path_for_write("src/new.rs"),
+            Some(root.canonicalize().unwrap().join("src/new.rs"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_resolution_rejects_missing_child_below_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempdir().unwrap();
+        let root = parent.path().join("project");
+        let outside = parent.path().join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+
+        let config = IndexConfig::new(root.canonicalize().unwrap());
+        assert_eq!(
+            config.resolve_absolute_path(&root.join("escape/new.rs"), true),
+            None
+        );
+        assert_eq!(
+            config.resolve_absolute_path(&root.join("inside/new.rs"), true),
+            Some(root.canonicalize().unwrap().join("inside/new.rs"))
+        );
     }
 }

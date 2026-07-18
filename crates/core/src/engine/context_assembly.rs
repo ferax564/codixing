@@ -261,10 +261,12 @@ fn shrink_primary_to_window(
     let primary_target = budget.saturating_sub(budget / 5).max(1);
 
     // Re-read the file as raw lines so we can grow a symmetric window.
-    let abs = engine
-        .config
-        .resolve_path(file)
-        .unwrap_or_else(|| engine.config.root.join(file));
+    // `file` can originate from the MCP reviewer.  Never fall back to a raw
+    // join here: that would undo `resolve_path`'s traversal and symlink checks
+    // when strict mode re-reads the source to shrink an oversized chunk.
+    let Some(abs) = engine.config.resolve_path(file) else {
+        return;
+    };
     let file_text = match std::fs::read_to_string(&abs) {
         Ok(t) => t,
         Err(_) => return,
@@ -1073,6 +1075,70 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn primary_for_shrink_test() -> SearchResult {
+        SearchResult {
+            chunk_id: "original:0".into(),
+            file_path: "original.rs".into(),
+            language: "rust".into(),
+            score: 1.0,
+            line_start: 0,
+            line_end: 0,
+            signature: String::new(),
+            scope_chain: Vec::new(),
+            content: "original content".into(),
+        }
+    }
+
+    #[test]
+    fn strict_window_does_not_read_traversal_or_absolute_paths() {
+        use crate::{Engine, IndexConfig};
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        let outside = dir.path().join("outside.rs");
+        fs::write(&outside, "outside sentinel\nsecond line\n").unwrap();
+
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+        let engine = Engine::init(&root, config).unwrap();
+
+        for candidate in ["../outside.rs".to_string(), outside.display().to_string()] {
+            let mut primary = primary_for_shrink_test();
+            shrink_primary_to_window(&mut primary, &candidate, 0, 100, &engine);
+            assert_eq!(
+                primary.content, "original content",
+                "strict window unexpectedly read {candidate}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn strict_window_does_not_follow_symlink_outside_root() {
+        use crate::{Engine, IndexConfig};
+        use std::fs;
+        use std::os::unix::fs::symlink;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        let outside = dir.path().join("outside.rs");
+        fs::write(&outside, "outside sentinel\nsecond line\n").unwrap();
+        symlink(&outside, root.join("escape.rs")).unwrap();
+
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+        let engine = Engine::init(&root, config).unwrap();
+        let mut primary = primary_for_shrink_test();
+
+        shrink_primary_to_window(&mut primary, "escape.rs", 0, 100, &engine);
+        assert_eq!(primary.content, "original content");
+    }
 
     #[test]
     fn estimate_tokens_basic() {

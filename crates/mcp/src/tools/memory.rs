@@ -7,6 +7,8 @@ use serde_json::{Value, json};
 
 use codixing_core::Engine;
 
+use super::MAX_TOOL_ARRAY_ITEMS;
+
 /// A typed relation between two memory entries.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct Relation {
@@ -120,6 +122,7 @@ pub(crate) fn call_recall(engine: &Engine, args: &Value) -> (String, bool) {
         .map(|arr| {
             arr.iter()
                 .filter_map(|t| t.as_str().map(|s| s.to_lowercase()))
+                .take(MAX_TOOL_ARRAY_ITEMS)
                 .collect()
         })
         .unwrap_or_default();

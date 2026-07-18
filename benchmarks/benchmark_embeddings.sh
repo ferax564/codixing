@@ -38,7 +38,7 @@ echo "================================================================"
 echo "BASELINE: BM25-only (no embeddings)"
 echo "================================================================"
 rm -rf .codixing
-BM25_INIT_MS=$(ms_cmd '"$CODIXING" init . --no-embeddings')
+BM25_INIT_MS=$(ms_cmd '"$CODIXING" init .')
 echo "Init time: ${BM25_INIT_MS}ms"
 
 echo "Search latency (instant/BM25):"
@@ -68,9 +68,17 @@ benchmark_model() {
   rm -rf .codixing
 
   echo -n "Initialising with $model_name..."
-  local start_ms init_ms
+  local start_ms init_ms init_log
+  init_log=$(mktemp)
   start_ms=$(date +%s%N)
-  "$CODIXING" init . --model "$model_flag" 2>&1 | grep -oP 'Indexed.*' || true
+  if ! "$CODIXING" init . --embed --model "$model_flag" >"$init_log" 2>&1; then
+    echo "FAILED: embedding initialization did not complete for $model_name" >&2
+    sed -n '1,120p' "$init_log" >&2
+    rm -f "$init_log"
+    return 1
+  fi
+  grep -oP 'Indexed.*' "$init_log" | tail -1 || true
+  rm -f "$init_log"
   init_ms=$(( ($(date +%s%N) - start_ms) / 1000000 ))
   echo "Init total: ${init_ms}ms ($(( init_ms / 1000 ))s)"
 

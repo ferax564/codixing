@@ -6,7 +6,7 @@ resolver = "3"
 version = "0.45.0"
 edition = "2024"
 license = "Apache-2.0"
-rust-version = "1.85"
+rust-version = "1.88"
 repository = "https://github.com/ferax564/codixing"
 homepage = "https://codixing.com"
 

@@ -235,19 +235,22 @@ impl Engine {
     /// documents (virtual files) removed. Mirrors the removal half of
     /// [`Engine::reindex_file_impl`] but for virtual paths.
     fn remove_external_prefix(&mut self, prefix: &str) -> Result<usize> {
-        // Collect the virtual paths and chunk content to clean up before removal.
+        // Collect virtual paths and hydrate only their chunk bodies before the
+        // stored Tantivy documents are removed. Reopened BM25 indexes keep
+        // compact metadata without duplicate body strings.
         let mut files: HashSet<String> = HashSet::new();
-        let mut removed_chunks: Vec<(u64, String)> = Vec::new();
+        let mut removed_chunk_ids: HashSet<u64> = HashSet::new();
         for entry in self.chunk_meta.iter() {
             let meta = entry.value();
             if meta.file_path.starts_with(prefix) {
                 files.insert(meta.file_path.clone());
-                removed_chunks.push((meta.chunk_id, meta.content.clone()));
+                removed_chunk_ids.insert(meta.chunk_id);
             }
         }
         if files.is_empty() {
             return Ok(0);
         }
+        let removed_chunk_contents = self.hydrate_chunk_contents(&removed_chunk_ids)?;
 
         for rel in &files {
             self.tantivy.remove_file(rel)?;
@@ -267,7 +270,7 @@ impl Engine {
         }
         self.chunk_meta
             .retain(|_, v| !v.file_path.starts_with(prefix));
-        for (id, content) in &removed_chunks {
+        for (id, content) in &removed_chunk_contents {
             self.trigram.get_mut().unwrap().remove(*id, content);
         }
         Ok(files.len())

@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -9,6 +10,63 @@ use crate::error::{CodixingError, Result};
 use crate::index::trigram::build_query_plan;
 
 use super::{Engine, GrepMatch, GrepOptions};
+
+/// Hard ceiling for the source body returned by [`Engine::read_file_range`].
+///
+/// MCP's largest response envelope is 48 KiB-equivalent (`12_000 * 4`), so a
+/// 64 KiB core ceiling leaves enough headroom for that layer to recognize and
+/// annotate truncation while preventing a hostile single-line/minified file
+/// from allocating without bound in lower-level callers.
+const MAX_READ_FILE_RANGE_BYTES: usize = 64 * 1024;
+const READ_FILE_RANGE_TRUNCATION_MARKER: &str =
+    "\n\n<!-- truncated: file range exceeded 64 KiB safety limit -->";
+
+/// Scan one LF-delimited logical line without ever allocating the line itself.
+///
+/// Selected bytes are appended directly to `output` up to `output_limit`.
+/// Returning `truncated = true` means more bytes existed in this line than fit.
+/// A CR immediately before LF is removed to match [`str::lines`] semantics.
+fn read_logical_line<R: BufRead>(
+    reader: &mut R,
+    mut output: Option<&mut Vec<u8>>,
+    output_limit: usize,
+) -> std::io::Result<(bool, bool)> {
+    let mut saw_bytes = false;
+
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            return Ok((saw_bytes, false));
+        }
+
+        let newline = buffer.iter().position(|byte| *byte == b'\n');
+        let segment_len = newline.unwrap_or(buffer.len());
+        let consumed = newline.map_or(segment_len, |position| position + 1);
+        saw_bytes |= segment_len > 0 || newline.is_some();
+
+        let mut truncated = false;
+        if let Some(destination) = output.as_deref_mut() {
+            let available = output_limit.saturating_sub(destination.len());
+            let copied = available.min(segment_len);
+            destination.extend_from_slice(&buffer[..copied]);
+            truncated = copied < segment_len;
+        }
+
+        reader.consume(consumed);
+
+        if truncated {
+            return Ok((true, true));
+        }
+        if newline.is_some() {
+            if let Some(destination) = output.as_deref_mut() {
+                if destination.last() == Some(&b'\r') {
+                    destination.pop();
+                }
+            }
+            return Ok((true, false));
+        }
+    }
+}
 
 impl Engine {
     // -------------------------------------------------------------------------
@@ -50,19 +108,87 @@ impl Engine {
         line_start: Option<u64>,
         line_end: Option<u64>,
     ) -> Result<Option<String>> {
-        let abs = self
-            .config
-            .resolve_path(path)
-            .unwrap_or_else(|| self.config.root.join(path));
-        if !abs.exists() {
+        let Some(abs) = self.config.resolve_path(path) else {
             return Ok(None);
+        };
+        let start = line_start.unwrap_or(0);
+        if line_end.is_some_and(|end| end < start) {
+            return Ok(Some(String::new()));
         }
-        let content = fs::read_to_string(&abs)?;
-        let lines: Vec<&str> = content.lines().collect();
-        let total = lines.len() as u64;
-        let start = line_start.unwrap_or(0).min(total) as usize;
-        let end = line_end.map(|e| (e + 1).min(total)).unwrap_or(total) as usize;
-        Ok(Some(lines[start..end].join("\n")))
+
+        let file = fs::File::open(abs)?;
+        let mut reader = BufReader::new(file);
+        let body_limit =
+            MAX_READ_FILE_RANGE_BYTES.saturating_sub(READ_FILE_RANGE_TRUNCATION_MARKER.len());
+        let mut body = Vec::with_capacity(body_limit.min(8 * 1024));
+        let mut line_number = 0u64;
+        let mut selected_lines = 0usize;
+        let mut truncated = false;
+
+        loop {
+            if line_number >= start {
+                if line_end.is_some_and(|end| line_number > end) {
+                    break;
+                }
+
+                // `join("\n")` inserts a separator only when another logical
+                // line actually exists. Peek before a full-buffer read so an
+                // additional empty line cannot be silently omitted at the cap.
+                if selected_lines > 0 && body.len() >= body_limit {
+                    truncated = !reader.fill_buf()?.is_empty();
+                    break;
+                }
+
+                let separator_added = selected_lines > 0;
+                if separator_added {
+                    body.push(b'\n');
+                }
+                let (has_line, line_truncated) =
+                    read_logical_line(&mut reader, Some(&mut body), body_limit)?;
+                if !has_line {
+                    if separator_added {
+                        body.pop();
+                    }
+                    break;
+                }
+                selected_lines += 1;
+                if line_truncated {
+                    truncated = true;
+                    break;
+                }
+            } else {
+                let (has_line, _) = read_logical_line(&mut reader, None, 0)?;
+                if !has_line {
+                    break;
+                }
+            }
+
+            if line_end == Some(line_number) {
+                break;
+            }
+            line_number = line_number.saturating_add(1);
+        }
+
+        let body = match String::from_utf8(body) {
+            Ok(body) => body,
+            Err(error) if truncated && error.utf8_error().error_len().is_none() => {
+                let valid_up_to = error.utf8_error().valid_up_to();
+                let mut bytes = error.into_bytes();
+                bytes.truncate(valid_up_to);
+                String::from_utf8(bytes).expect("validated UTF-8 prefix")
+            }
+            Err(error) => {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, error).into());
+            }
+        };
+
+        if truncated {
+            let mut output = body;
+            output.push_str(READ_FILE_RANGE_TRUNCATION_MARKER);
+            Ok(Some(output))
+        } else {
+            Ok(Some(body))
+        }
     }
 
     /// Read the complete source of the first symbol whose name matches `name`.
@@ -219,9 +345,10 @@ impl Engine {
                 return;
             }
 
-            let abs = config
-                .resolve_path(rel_path)
-                .unwrap_or_else(|| config.root.join(rel_path.as_str()));
+            let Some(abs) = config.resolve_path(rel_path) else {
+                warn!(file = %rel_path, "grep_code: skipping path outside configured roots");
+                return;
+            };
             let content = match fs::read_to_string(&abs) {
                 Ok(c) => c,
                 Err(e) => {
@@ -375,9 +502,9 @@ impl Engine {
             if done.load(Ordering::Relaxed) {
                 return;
             }
-            let abs = config
-                .resolve_path(rel_path)
-                .unwrap_or_else(|| config.root.join(rel_path.as_str()));
+            let Some(abs) = config.resolve_path(rel_path) else {
+                return;
+            };
             let content = match fs::read_to_string(&abs) {
                 Ok(c) => c,
                 Err(_) => return,
@@ -425,5 +552,121 @@ impl Engine {
         });
         matches.truncate(limit);
         Ok(matches)
+    }
+}
+
+#[cfg(test)]
+mod path_containment_tests {
+    use super::*;
+    use crate::config::IndexConfig;
+    use tempfile::tempdir;
+
+    #[test]
+    fn read_file_range_cannot_escape_project_root() {
+        let parent = tempdir().unwrap();
+        let root = parent.path().join("project");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("inside.rs"), "fn inside() {}\n").unwrap();
+        fs::write(parent.path().join("secret.txt"), "secret\n").unwrap();
+
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+        let engine = Engine::init(&root, config).unwrap();
+
+        assert!(
+            engine
+                .read_file_range("inside.rs", None, None)
+                .unwrap()
+                .unwrap()
+                .contains("inside")
+        );
+        assert_eq!(
+            engine.read_file_range("../secret.txt", None, None).unwrap(),
+            None
+        );
+        assert_eq!(
+            engine
+                .read_file_range(
+                    parent.path().join("secret.txt").to_str().unwrap(),
+                    None,
+                    None
+                )
+                .unwrap(),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_file_range_cannot_follow_symlink_outside_project_root() {
+        use std::os::unix::fs::symlink;
+
+        let parent = tempdir().unwrap();
+        let root = parent.path().join("project");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("inside.rs"), "fn inside() {}\n").unwrap();
+        let outside = parent.path().join("secret.txt");
+        fs::write(&outside, "secret\n").unwrap();
+
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+        let engine = Engine::init(&root, config).unwrap();
+        symlink(&outside, root.join("linked-secret")).unwrap();
+
+        assert_eq!(
+            engine.read_file_range("linked-secret", None, None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn read_file_range_streams_ranges_with_str_lines_newline_semantics() {
+        let parent = tempdir().unwrap();
+        let root = parent.path().join("project");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("lines.rs"), "zero\r\none\n\nthree\n").unwrap();
+
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+        let engine = Engine::init(&root, config).unwrap();
+
+        assert_eq!(
+            engine.read_file_range("lines.rs", None, None).unwrap(),
+            Some("zero\none\n\nthree".to_string())
+        );
+        assert_eq!(
+            engine
+                .read_file_range("lines.rs", Some(1), Some(2))
+                .unwrap(),
+            Some("one\n".to_string())
+        );
+        assert_eq!(
+            engine
+                .read_file_range("lines.rs", Some(3), Some(1))
+                .unwrap(),
+            Some(String::new())
+        );
+    }
+
+    #[test]
+    fn read_file_range_bounds_a_single_minified_line() {
+        let parent = tempdir().unwrap();
+        let root = parent.path().join("project");
+        fs::create_dir(&root).unwrap();
+        let mut minified = "x".repeat(2 * 1024 * 1024);
+        minified.push_str("TAIL_SENTINEL");
+        fs::write(root.join("minified.js"), minified).unwrap();
+
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+        let engine = Engine::init(&root, config).unwrap();
+        let output = engine
+            .read_file_range("minified.js", None, None)
+            .unwrap()
+            .unwrap();
+
+        assert!(output.len() <= MAX_READ_FILE_RANGE_BYTES);
+        assert!(output.contains("file range exceeded 64 KiB safety limit"));
+        assert!(!output.contains("TAIL_SENTINEL"));
     }
 }

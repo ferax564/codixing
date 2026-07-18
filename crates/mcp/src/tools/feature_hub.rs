@@ -4,12 +4,14 @@ use serde_json::Value;
 
 use codixing_core::{Engine, SearchQuery, Strategy};
 
+use super::requested_result_count;
+
 pub(crate) fn call_feature_hub(engine: &Engine, args: &Value) -> (String, bool) {
     let query = match args.get("query").and_then(|v| v.as_str()) {
         Some(q) => q,
         None => return ("Error: `query` parameter is required.".to_string(), true),
     };
-    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+    let limit = requested_result_count(args, "limit", 5);
 
     // Phase 1: Search for core files related to the feature.
     let search_query = SearchQuery::new(query)

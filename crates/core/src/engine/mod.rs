@@ -34,7 +34,7 @@ pub use impact::{ChangeImpact, compute_change_impact};
 pub use import::ImportStats;
 pub use symbol_graph::{ReferenceOptions, SymbolReference};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::SystemTime;
@@ -275,36 +275,47 @@ fn git_head_commit(root: &Path) -> Option<String> {
 /// Returns `(modified_or_added, deleted)` path lists (absolute).
 /// Returns `None` if git is unavailable or the command fails.
 fn git_diff_since(root: &Path, since_commit: &str) -> Option<(Vec<PathBuf>, Vec<PathBuf>)> {
+    // This value normally comes from `git rev-parse HEAD`, but the persisted
+    // metadata is still untrusted input. Accept only object-id syntax so it can
+    // never be interpreted as a command-line option or revision expression.
+    if !(7..=64).contains(&since_commit.len())
+        || !since_commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
     let out = std::process::Command::new("git")
-        .args(["diff", "--name-status", since_commit])
+        .args(["diff", "--name-status", "-z", since_commit, "--"])
         .current_dir(root)
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
-    let text = String::from_utf8(out.stdout).ok()?;
-
     let mut modified = Vec::new();
     let mut deleted = Vec::new();
-    for line in text.lines() {
-        let mut parts = line.split('\t');
-        let status = parts.next()?;
+    let mut fields = out.stdout.split(|byte| *byte == 0);
+    loop {
+        let status = fields.next()?;
+        if status.is_empty() {
+            break;
+        }
+        let status = std::str::from_utf8(status).ok()?;
         match status.chars().next()? {
             'D' => {
-                let path_str = parts.next()?.trim();
+                let path_str = std::str::from_utf8(fields.next()?).ok()?;
                 deleted.push(root.join(path_str));
             }
-            // Rename/copy records are: Rxxx <old> <new> / Cxxx <old> <new>
+            // With `-z`, rename/copy records are three NUL-separated fields:
+            // status, old path, new path. File names are never quoted or trimmed.
             'R' | 'C' => {
-                let old_path = parts.next()?.trim();
-                let new_path = parts.next()?.trim();
+                let old_path = std::str::from_utf8(fields.next()?).ok()?;
+                let new_path = std::str::from_utf8(fields.next()?).ok()?;
                 deleted.push(root.join(old_path));
                 modified.push(root.join(new_path));
             }
             // A=Added, M=Modified, T=Type changed, etc.
             _ => {
-                let path_str = parts.next()?.trim();
+                let path_str = std::str::from_utf8(fields.next()?).ok()?;
                 modified.push(root.join(path_str));
             }
         }
@@ -324,9 +335,6 @@ pub struct Engine {
     pub(super) file_chunk_counts: HashMap<String, usize>,
     /// Optional fastembed model for vector embeddings.
     pub(super) embedder: Option<Arc<Embedder>>,
-    /// Optional RustQueue instance for queue-based embedding.
-    #[cfg(feature = "rustqueue")]
-    pub(super) embed_queue: Option<Arc<rustqueue::RustQueue>>,
     /// Optional usearch HNSW vector index.
     ///
     /// Wrapped in `Arc<RwLock<...>>` so that a background embedding thread
@@ -626,14 +634,7 @@ impl Engine {
     /// Used when `chunk_meta.content` is empty (compact persistence mode).
     /// Returns the content string, or `None` if the chunk is not found.
     pub fn get_chunk_content(&self, chunk_id: u64) -> Option<String> {
-        let ids: std::collections::HashSet<u64> = [chunk_id].into_iter().collect();
-        let docs = self.tantivy.lookup_chunks_by_ids(&ids).ok()?;
-        let fields = self.tantivy.fields();
-        docs.into_iter().next().and_then(|doc| {
-            doc.get_first(fields.content)
-                .and_then(|v| tantivy::schema::Value::as_str(&v))
-                .map(|s| s.to_string())
-        })
+        self.tantivy.lookup_chunk_content(chunk_id).ok().flatten()
     }
 
     /// Retrieve chunk content, first checking the in-memory `chunk_meta` map
@@ -645,6 +646,47 @@ impl Engine {
             }
         }
         self.get_chunk_content(chunk_id)
+    }
+
+    /// Resolve a set of chunk bodies before mutating Tantivy.
+    ///
+    /// BM25-only engines intentionally discard the duplicate bodies held in
+    /// `chunk_meta` after init. Mutation paths still need those bodies to
+    /// remove the old chunk IDs from the trigram index, so hydrate only the
+    /// requested missing values in one indexed lookup. Returning an error for
+    /// a missing body keeps the live indexes unchanged instead of silently
+    /// leaking stale trigram postings.
+    pub(super) fn hydrate_chunk_contents(
+        &self,
+        chunk_ids: &HashSet<u64>,
+    ) -> crate::error::Result<HashMap<u64, String>> {
+        let mut contents = HashMap::with_capacity(chunk_ids.len());
+        let mut missing = HashSet::new();
+
+        for &chunk_id in chunk_ids {
+            match self.chunk_meta.get(&chunk_id) {
+                Some(meta) if !meta.content.is_empty() => {
+                    contents.insert(chunk_id, meta.content.clone());
+                }
+                _ => {
+                    missing.insert(chunk_id);
+                }
+            }
+        }
+
+        if !missing.is_empty() {
+            contents.extend(self.tantivy.lookup_chunk_contents(&missing)?);
+        }
+
+        if contents.len() != chunk_ids.len() {
+            return Err(CodixingError::Index(format!(
+                "could not hydrate {} of {} chunk bodies before index mutation; run `codixing init` to rebuild the index",
+                chunk_ids.len().saturating_sub(contents.len()),
+                chunk_ids.len()
+            )));
+        }
+
+        Ok(contents)
     }
 
     /// Get combined callers + callees for a file (used for graph-propagated session boost).
@@ -738,6 +780,21 @@ impl Engine {
             .as_ref()
             .map(|s| s.is_ready())
             .unwrap_or(true) // No background embed = always ready
+    }
+
+    /// True when embedding reached a terminal error or could not initialize.
+    ///
+    /// The latter case has no background state: initialization deliberately
+    /// leaves the BM25 index usable when a model/runtime is unavailable. CLI
+    /// callers that explicitly requested `--embed` still need an honest
+    /// failure signal instead of reporting that vectors completed.
+    pub fn embeddings_failed(&self) -> bool {
+        let background_failed = self
+            .embed_state
+            .as_ref()
+            .map(|state| state.has_failed())
+            .unwrap_or(false);
+        background_failed || (self.config.embedding.enabled && self.embedder.is_none())
     }
 
     /// Block until background embeddings complete. No-op if already done.
@@ -862,6 +919,17 @@ pub trait Processor {
         assert_eq!(stats.file_count, 2, "expected 2 source files");
         assert!(stats.chunk_count > 0, "expected at least 1 chunk");
         assert!(stats.symbol_count > 0, "expected at least 1 symbol");
+        assert!(
+            engine.parser.cache().is_empty(),
+            "bulk init should release parsed trees after indexing"
+        );
+        assert!(
+            engine
+                .chunk_meta
+                .iter()
+                .all(|entry| entry.value().content.is_empty()),
+            "returned compact metadata should hydrate content from Tantivy"
+        );
     }
 
     #[test]
@@ -1372,14 +1440,25 @@ pub fn unique_reload_function() -> bool {
         config.embedding.enabled = false;
         let engine = Engine::init(&root, config).unwrap();
 
-        // Verify each chunk's content_hash matches xxh3 of its content.
-        for entry in engine.chunk_meta.iter() {
-            let meta = entry.value();
-            let expected = xxhash_rust::xxh3::xxh3_64(meta.content.as_bytes());
+        // BM25 init drops duplicate in-memory bodies, so hydrate from Tantivy
+        // before checking each compact metadata record.
+        let chunks: Vec<(u64, u64, String)> = engine
+            .chunk_meta
+            .iter()
+            .map(|entry| {
+                let meta = entry.value();
+                (meta.chunk_id, meta.content_hash, meta.file_path.clone())
+            })
+            .collect();
+        for (chunk_id, content_hash, file_path) in chunks {
+            let content = engine
+                .resolve_chunk_content(chunk_id)
+                .expect("chunk content should hydrate from Tantivy");
+            let expected = xxhash_rust::xxh3::xxh3_64(content.as_bytes());
             assert_eq!(
-                meta.content_hash, expected,
+                content_hash, expected,
                 "content_hash mismatch for chunk {} in {}",
-                meta.chunk_id, meta.file_path
+                chunk_id, file_path
             );
         }
 

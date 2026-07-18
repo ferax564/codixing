@@ -37,7 +37,7 @@ enum = ["locate", "understand", "edit", "review", "test", "migrate", "incident"]
 
 [tools.params.token_budget]
 type = "integer"
-description = "Approximate maximum tokens for the JSON context pack (default: 6000)"
+description = "Maximum serialized response tokens (default: 4000, hard max: 12000). The context payload reserves space for JSON structure and pretty-printing."
 
 [tools.params.changed_files]
 type = "array"

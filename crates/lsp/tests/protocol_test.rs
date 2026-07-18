@@ -331,6 +331,62 @@ fn initialize_handshake_returns_capabilities() {
 }
 
 #[test]
+fn semantic_tokens_rejects_absolute_traversal_and_symlink_uris_outside_workspace() {
+    with_test_budget(|| {
+        use codixing_core::{EmbeddingConfig, Engine, IndexConfig};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("repo");
+        let src_dir = root.join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(src_dir.join("lib.rs"), FIXTURE_SRC).unwrap();
+        let outside = dir.path().join("outside.rs");
+        std::fs::write(&outside, "pub fn outside_secret() -> u64 { 42 }\n").unwrap();
+
+        let mut config = IndexConfig::new(&root);
+        config.embedding = EmbeddingConfig {
+            enabled: false,
+            ..EmbeddingConfig::default()
+        };
+        drop(Engine::init(&root, config).expect("engine init"));
+
+        let mut harness = LspHarness::spawn(&root);
+        let _init = initialize(&mut harness, &root);
+
+        let absolute_uri = path_to_uri(&outside);
+        let traversal_uri = path_to_uri(&src_dir.join("../../outside.rs"));
+        for uri in [absolute_uri, traversal_uri] {
+            let resp = harness.request(
+                "textDocument/semanticTokens/full",
+                json!({"textDocument": {"uri": uri}}),
+            );
+            assert!(
+                resp.get("result").is_some_and(Value::is_null),
+                "outside URI must not be read: {resp}"
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let escape = src_dir.join("escape.rs");
+            symlink(&outside, &escape).unwrap();
+            let resp = harness.request(
+                "textDocument/semanticTokens/full",
+                json!({"textDocument": {"uri": path_to_uri(&escape)}}),
+            );
+            assert!(
+                resp.get("result").is_some_and(Value::is_null),
+                "outside symlink URI must not be read: {resp}"
+            );
+        }
+
+        harness.shutdown();
+    });
+}
+
+#[test]
 fn hover_returns_markdown_on_rust_symbol() {
     with_test_budget(|| {
         let (dir, rs) = build_fixture();

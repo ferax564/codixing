@@ -8,6 +8,10 @@ use serde_json::Value;
 use codixing_core::complexity::{count_cyclomatic_complexity, risk_band};
 use codixing_core::{Engine, EntityKind, RepoMapOptions, SearchQuery};
 
+use super::{
+    MAX_TOOL_ARRAY_ITEMS, MAX_TOOL_RESULT_COUNT, requested_bounded_usize, requested_result_count,
+};
+
 pub(crate) fn call_index_status(engine: &Engine) -> (String, bool) {
     let stats = engine.stats();
     let config = engine.config();
@@ -201,12 +205,10 @@ pub(crate) fn call_rename_symbol(engine: &mut Engine, args: &Value) -> (String, 
                     .map(|ff| f.contains(ff.as_str()))
                     .unwrap_or(true)
             })
-            .map(|rel| {
-                engine
-                    .config()
-                    .resolve_path(&rel)
-                    .unwrap_or_else(|| engine.config().root.join(rel))
-            })
+            // Indexed paths are persisted state, not a filesystem authority.
+            // A stale/corrupt entry or an in-root symlink must never turn a
+            // project-wide rename into a write outside the configured roots.
+            .filter_map(|rel| engine.config().resolve_path(&rel))
             .collect()
     };
 
@@ -525,7 +527,7 @@ pub(crate) fn call_find_similar(engine: &Engine, args: &Value) -> (String, bool)
         Some(s) => s.to_string(),
         None => return ("Missing required argument: symbol".to_string(), true),
     };
-    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    let limit = requested_result_count(args, "limit", 10);
 
     // Read the symbol source to use as a query.
     let src = match engine.read_symbol_source(&symbol, None) {
@@ -549,7 +551,8 @@ pub(crate) fn call_find_similar(engine: &Engine, args: &Value) -> (String, bool)
         .collect::<Vec<_>>()
         .join(" ");
 
-    let sq = SearchQuery::new(&query_text).with_limit(limit + 1);
+    let sq = SearchQuery::new(&query_text)
+        .with_limit(limit.saturating_add(1).min(MAX_TOOL_RESULT_COUNT));
     let results = match engine.search(sq) {
         Ok(r) => r,
         Err(e) => return (format!("Search error: {e}"), true),
@@ -593,13 +596,14 @@ pub(crate) fn call_get_complexity(engine: &Engine, args: &Value) -> (String, boo
         Some(f) => f.to_string(),
         None => return ("Missing required argument: file".to_string(), true),
     };
-    let min_cc = args
-        .get("min_complexity")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(1) as usize;
+    let min_cc = requested_bounded_usize(args, "min_complexity", 1, 1, 1_000_000);
 
-    let root = engine.config().root.clone();
-    let abs_path = root.join(&file);
+    let Some(abs_path) = engine.config().resolve_path(&file) else {
+        return (
+            format!("Cannot read '{file}': path does not exist or is outside the configured roots"),
+            true,
+        );
+    };
 
     let source = match std::fs::read_to_string(&abs_path) {
         Ok(s) => s,
@@ -685,7 +689,11 @@ pub(crate) fn call_review_context(engine: &Engine, args: &Value) -> (String, boo
         if let Some(rest) = line.strip_prefix("+++ b/") {
             current_file = rest.trim().to_string();
             if !changed_files.contains(&current_file) {
-                changed_files.push(current_file.clone());
+                if changed_files.len() < MAX_TOOL_ARRAY_ITEMS {
+                    changed_files.push(current_file.clone());
+                } else {
+                    current_file.clear();
+                }
             }
         } else if line.starts_with("@@ ") {
             let parts: Vec<&str> = line.split_whitespace().collect();
@@ -699,7 +707,7 @@ pub(crate) fn call_review_context(engine: &Engine, args: &Value) -> (String, boo
                 current_line = hunk_start;
             }
         } else if line.starts_with('+') && !line.starts_with("+++") {
-            if hunk_start > 0 {
+            if hunk_start > 0 && !current_file.is_empty() {
                 hunk_ranges.push((current_file.clone(), hunk_start, current_line));
             }
             current_line += 1;
@@ -972,7 +980,7 @@ pub(crate) fn call_find_examples(engine: &Engine, args: &Value) -> (String, bool
         None => return ("Error: 'symbol' parameter is required".to_string(), true),
     };
 
-    let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
+    let limit = requested_result_count(args, "limit", 5);
 
     let examples = engine.find_usage_examples(symbol, limit);
 
