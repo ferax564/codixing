@@ -735,10 +735,10 @@ fn parse_git_history(stdout: &str, include_files: bool) -> Vec<CommitEntryRespon
         }
     }
 
-    if let Some(header) = current_header {
-        if let Some(commit) = build_commit_entry(&header, &current_files, include_files) {
-            commits.push(commit);
-        }
+    if let Some(header) = current_header
+        && let Some(commit) = build_commit_entry(&header, &current_files, include_files)
+    {
+        commits.push(commit);
     }
 
     commits

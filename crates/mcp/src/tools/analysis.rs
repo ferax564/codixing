@@ -476,10 +476,10 @@ pub(crate) fn call_find_tests(engine: &Engine, args: &Value) -> (String, bool) {
     let file_filter = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
 
     // Fast-path: when a source file is given, try the test-mapping index first.
-    if !file_filter.is_empty() {
-        if let Some(result) = find_tests_via_mapping(engine, file_filter, pattern) {
-            return result;
-        }
+    if !file_filter.is_empty()
+        && let Some(result) = find_tests_via_mapping(engine, file_filter, pattern)
+    {
+        return result;
     }
 
     // Fallback: symbol-based discovery.
@@ -849,10 +849,10 @@ pub(crate) fn call_generate_onboarding(engine: &mut Engine) -> (String, bool) {
     doc.push_str("\n\n---\n*Regenerate with:* `codixing-mcp generate_onboarding`\n");
 
     // Write to disk.
-    if let Some(parent) = output_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            return (format!("Failed to create .codixing/ directory: {e}"), true);
-        }
+    if let Some(parent) = output_path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        return (format!("Failed to create .codixing/ directory: {e}"), true);
     }
     if let Err(e) = std::fs::write(&output_path, &doc) {
         return (format!("Failed to write ONBOARDING.md: {e}"), true);

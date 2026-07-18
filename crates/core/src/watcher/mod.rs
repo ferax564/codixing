@@ -176,12 +176,11 @@ impl FileWatcher {
     /// Check if a path should be excluded based on config patterns.
     fn is_excluded(&self, path: &Path) -> bool {
         for component in path.components() {
-            if let std::path::Component::Normal(name) = component {
-                if let Some(name_str) = name.to_str() {
-                    if self.exclude_patterns.contains(name_str) {
-                        return true;
-                    }
-                }
+            if let std::path::Component::Normal(name) = component
+                && let Some(name_str) = name.to_str()
+                && self.exclude_patterns.contains(name_str)
+            {
+                return true;
             }
         }
         false

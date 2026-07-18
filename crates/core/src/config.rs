@@ -478,10 +478,10 @@ impl IndexConfig {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| extra.to_string_lossy().into_owned());
             let with_slash = format!("{}/", prefix);
-            if let Some(stripped) = rel_path.strip_prefix(&with_slash) {
-                if let Some(candidate) = resolve_within(extra, Path::new(stripped), false) {
-                    return Some(candidate);
-                }
+            if let Some(stripped) = rel_path.strip_prefix(&with_slash)
+                && let Some(candidate) = resolve_within(extra, Path::new(stripped), false)
+            {
+                return Some(candidate);
             }
         }
         None

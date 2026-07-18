@@ -89,18 +89,18 @@ fn match_entity_kind(kind: &str, node: &Node, source: &[u8]) -> Option<EntityKin
         "function_definition" => Some(EntityKind::Function),
         "struct_specifier" => {
             // Only at top level (not inside a typedef)
-            if let Some(parent) = node.parent() {
-                if parent.kind() == "type_definition" {
-                    return None; // Will be handled by type_definition
-                }
+            if let Some(parent) = node.parent()
+                && parent.kind() == "type_definition"
+            {
+                return None; // Will be handled by type_definition
             }
             Some(EntityKind::Struct)
         }
         "enum_specifier" => {
-            if let Some(parent) = node.parent() {
-                if parent.kind() == "type_definition" {
-                    return None;
-                }
+            if let Some(parent) = node.parent()
+                && parent.kind() == "type_definition"
+            {
+                return None;
             }
             Some(EntityKind::Enum)
         }
@@ -185,13 +185,12 @@ fn find_declarator_name(node: &Node, source: &[u8]) -> Option<String> {
         if child.kind() == "identifier" {
             return Some(node_text(&child, source).to_string());
         }
-        if child.kind() == "function_declarator"
+        if (child.kind() == "function_declarator"
             || child.kind() == "pointer_declarator"
-            || child.kind() == "array_declarator"
+            || child.kind() == "array_declarator")
+            && let Some(name) = find_declarator_name(&child, source)
         {
-            if let Some(name) = find_declarator_name(&child, source) {
-                return Some(name);
-            }
+            return Some(name);
         }
     }
     None

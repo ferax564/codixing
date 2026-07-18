@@ -524,18 +524,18 @@ fn merge_into_bands(results: &[SearchResult], gap_lines: usize) -> Vec<SearchRes
 
         let mut bands: Vec<SearchResult> = Vec::new();
         for r in sorted {
-            if let Some(last) = bands.last_mut() {
-                if r.line_start <= last.line_end + gap_lines as u64 {
-                    // Extend the current band.
-                    if r.line_end > last.line_end {
-                        last.content = format!("{}\n{}", last.content, r.content);
-                        last.line_end = r.line_end;
-                    }
-                    if r.score > last.score {
-                        last.score = r.score;
-                    }
-                    continue;
+            if let Some(last) = bands.last_mut()
+                && r.line_start <= last.line_end + gap_lines as u64
+            {
+                // Extend the current band.
+                if r.line_end > last.line_end {
+                    last.content = format!("{}\n{}", last.content, r.content);
+                    last.line_end = r.line_end;
                 }
+                if r.score > last.score {
+                    last.score = r.score;
+                }
+                continue;
             }
             bands.push((*r).clone());
         }

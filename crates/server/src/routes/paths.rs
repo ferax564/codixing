@@ -79,10 +79,10 @@ fn normalize_against_known_roots(config: &IndexConfig, abs_path: &Path) -> Optio
     }
 
     let canonical_primary = config.root.canonicalize().ok();
-    if let Some(primary_root) = canonical_primary {
-        if let Ok(rel) = abs_path.strip_prefix(&primary_root) {
-            return Some(rel.to_string_lossy().replace('\\', "/"));
-        }
+    if let Some(primary_root) = canonical_primary
+        && let Ok(rel) = abs_path.strip_prefix(&primary_root)
+    {
+        return Some(rel.to_string_lossy().replace('\\', "/"));
     }
 
     for extra_root in &config.extra_roots {
@@ -91,13 +91,13 @@ fn normalize_against_known_roots(config: &IndexConfig, abs_path: &Path) -> Optio
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| extra_root.to_string_lossy().into_owned());
         let canonical_extra = extra_root.canonicalize().ok();
-        if let Some(extra_root) = canonical_extra {
-            if let Ok(rel) = abs_path.strip_prefix(&extra_root) {
-                return Some(format!(
-                    "{prefix}/{}",
-                    rel.to_string_lossy().replace('\\', "/")
-                ));
-            }
+        if let Some(extra_root) = canonical_extra
+            && let Ok(rel) = abs_path.strip_prefix(&extra_root)
+        {
+            return Some(format!(
+                "{prefix}/{}",
+                rel.to_string_lossy().replace('\\', "/")
+            ));
         }
     }
 

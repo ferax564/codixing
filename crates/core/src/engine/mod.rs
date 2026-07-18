@@ -640,10 +640,10 @@ impl Engine {
     /// Retrieve chunk content, first checking the in-memory `chunk_meta` map
     /// and falling back to Tantivy stored fields if the content is empty.
     pub fn resolve_chunk_content(&self, chunk_id: u64) -> Option<String> {
-        if let Some(meta) = self.chunk_meta.get(&chunk_id) {
-            if !meta.content.is_empty() {
-                return Some(meta.content.clone());
-            }
+        if let Some(meta) = self.chunk_meta.get(&chunk_id)
+            && !meta.content.is_empty()
+        {
+            return Some(meta.content.clone());
         }
         self.get_chunk_content(chunk_id)
     }
@@ -836,12 +836,12 @@ impl Drop for Engine {
         // and persist the vector index. Only explicit shutdown_embeddings()
         // should cancel. The thread holds Arc clones of shared state, so it
         // will complete safely even after Engine is dropped.
-        if let Some(state) = &self.embed_state {
-            if !state.is_ready() {
-                tracing::debug!(
-                    "Engine dropped while background embedding in progress — thread will continue"
-                );
-            }
+        if let Some(state) = &self.embed_state
+            && !state.is_ready()
+        {
+            tracing::debug!(
+                "Engine dropped while background embedding in progress — thread will continue"
+            );
         }
     }
 }

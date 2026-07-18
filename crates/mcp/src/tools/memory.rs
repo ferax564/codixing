@@ -325,10 +325,8 @@ pub(crate) fn call_enrich_docs(engine: &mut Engine, args: &Value) -> (String, bo
     };
 
     // Return cached if available and not forced.
-    if !force {
-        if let Some(cached) = docs.get(&symbol) {
-            return (format!("## Doc for `{symbol}` (cached)\n\n{cached}"), false);
-        }
+    if !force && let Some(cached) = docs.get(&symbol) {
+        return (format!("## Doc for `{symbol}` (cached)\n\n{cached}"), false);
     }
 
     // Read symbol source.

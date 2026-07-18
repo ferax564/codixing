@@ -344,13 +344,13 @@ pub(crate) fn call_write_file(engine: &mut Engine, args: &Value) -> (String, boo
         Err(e) => return (e, true),
     };
 
-    if let Some(parent) = abs_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            return (
-                format!("Failed to create directories for '{file}': {e}"),
-                true,
-            );
-        }
+    if let Some(parent) = abs_path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        return (
+            format!("Failed to create directories for '{file}': {e}"),
+            true,
+        );
     }
 
     if let Err(e) = std::fs::write(&abs_path, content) {
@@ -812,13 +812,13 @@ fn parse_unified_diff(patch: &str) -> Result<Vec<FilePatch>, String> {
                 current_hunks.push(hunk);
             }
             // Flush previous file.
-            if let Some(path) = current_path.take() {
-                if !current_hunks.is_empty() {
-                    file_patches.push(FilePatch {
-                        path,
-                        hunks: std::mem::take(&mut current_hunks),
-                    });
-                }
+            if let Some(path) = current_path.take()
+                && !current_hunks.is_empty()
+            {
+                file_patches.push(FilePatch {
+                    path,
+                    hunks: std::mem::take(&mut current_hunks),
+                });
             }
             current_path = Some(rest.trim().to_string());
         } else if line.starts_with("--- ") {
@@ -858,13 +858,13 @@ fn parse_unified_diff(patch: &str) -> Result<Vec<FilePatch>, String> {
     if let Some(hunk) = current_hunk.take() {
         current_hunks.push(hunk);
     }
-    if let Some(path) = current_path.take() {
-        if !current_hunks.is_empty() {
-            file_patches.push(FilePatch {
-                path,
-                hunks: current_hunks,
-            });
-        }
+    if let Some(path) = current_path.take()
+        && !current_hunks.is_empty()
+    {
+        file_patches.push(FilePatch {
+            path,
+            hunks: current_hunks,
+        });
     }
 
     Ok(file_patches)

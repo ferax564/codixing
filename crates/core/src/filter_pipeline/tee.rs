@@ -73,12 +73,11 @@ pub fn cleanup_tee(tee_dir: &Path) {
             if !meta.is_file() {
                 continue;
             }
-            if let Ok(modified) = meta.modified() {
-                if let Ok(age) = now.duration_since(modified) {
-                    if age > max_age {
-                        let _ = std::fs::remove_file(entry.path());
-                    }
-                }
+            if let Ok(modified) = meta.modified()
+                && let Ok(age) = now.duration_since(modified)
+                && age > max_age
+            {
+                let _ = std::fs::remove_file(entry.path());
             }
         }
     }

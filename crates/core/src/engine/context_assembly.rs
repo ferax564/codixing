@@ -638,13 +638,13 @@ impl Engine {
                     .to_string(),
             );
         }
-        if let Some(level) = risk_level.as_deref() {
-            if matches!(level.to_ascii_lowercase().as_str(), "high" | "critical") {
-                risks.push(
-                    "High risk level requested; prefer patch preview, impact analysis, and full tests."
-                        .to_string(),
-                );
-            }
+        if let Some(level) = risk_level.as_deref()
+            && matches!(level.to_ascii_lowercase().as_str(), "high" | "critical")
+        {
+            risks.push(
+                "High risk level requested; prefer patch preview, impact analysis, and full tests."
+                    .to_string(),
+            );
         }
 
         let first_path = must_read

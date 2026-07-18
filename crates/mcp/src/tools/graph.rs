@@ -329,16 +329,16 @@ pub(crate) fn call_predict_impact(
     let mut changed_symbols: Vec<String> = Vec::new();
     for line in patch.lines() {
         // Unified diff function context: @@ -a,b +c,d @@ fn function_name
-        if let Some(rest) = line.strip_prefix("@@") {
-            if let Some(ctx) = rest.rsplit_once("@@").map(|(_, c)| c.trim()) {
-                // Extract function/method name from context line.
-                let name = extract_symbol_from_hunk_header(ctx);
-                if let Some(name) = name
-                    && changed_symbols.len() < MAX_TOOL_ARRAY_ITEMS
-                    && !changed_symbols.contains(&name)
-                {
-                    changed_symbols.push(name);
-                }
+        if let Some(rest) = line.strip_prefix("@@")
+            && let Some(ctx) = rest.rsplit_once("@@").map(|(_, c)| c.trim())
+        {
+            // Extract function/method name from context line.
+            let name = extract_symbol_from_hunk_header(ctx);
+            if let Some(name) = name
+                && changed_symbols.len() < MAX_TOOL_ARRAY_ITEMS
+                && !changed_symbols.contains(&name)
+            {
+                changed_symbols.push(name);
             }
         }
     }
@@ -458,27 +458,27 @@ fn extract_symbol_from_hunk_header(ctx: &str) -> Option<String> {
         .iter()
         .position(|&t| t == "fn" || t == "def" || t == "function" || t == "func");
 
-    if let Some(pos) = fn_kw_pos {
-        if let Some(name_token) = tokens.get(pos + 1) {
-            // Strip generics and parens: `foo(` -> `foo`, `foo<T>` -> `foo`
-            let name = name_token
-                .split(&['(', '<', ':'][..])
-                .next()
-                .unwrap_or(name_token);
-            if !name.is_empty() {
-                return Some(name.to_string());
-            }
+    if let Some(pos) = fn_kw_pos
+        && let Some(name_token) = tokens.get(pos + 1)
+    {
+        // Strip generics and parens: `foo(` -> `foo`, `foo<T>` -> `foo`
+        let name = name_token
+            .split(&['(', '<', ':'][..])
+            .next()
+            .unwrap_or(name_token);
+        if !name.is_empty() {
+            return Some(name.to_string());
         }
     }
 
     // Fallback: look for `name(` pattern (common in C/C++/Java/Go).
     // Matches tokens like `myFunction(` at the start of the line.
-    if let Some(first) = tokens.first() {
-        if let Some(name) = first.strip_suffix('(') {
-            if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                return Some(name.to_string());
-            }
-        }
+    if let Some(first) = tokens.first()
+        && let Some(name) = first.strip_suffix('(')
+        && !name.is_empty()
+        && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+    {
+        return Some(name.to_string());
     }
 
     None

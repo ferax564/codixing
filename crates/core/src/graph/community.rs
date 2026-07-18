@@ -53,12 +53,12 @@ pub fn detect_communities(graph: &CodeGraph) -> CommunityResult {
         if from.starts_with("__ext__:") || to.starts_with("__ext__:") {
             continue;
         }
-        if let (Some(&fi), Some(&ti)) = (path_to_idx.get(from), path_to_idx.get(to)) {
-            if fi != ti {
-                *adj[fi].entry(ti).or_insert(0.0) += 1.0;
-                *adj[ti].entry(fi).or_insert(0.0) += 1.0;
-                total_weight += 1.0; // Each directed edge contributes 1 to total (undirected: 2m)
-            }
+        if let (Some(&fi), Some(&ti)) = (path_to_idx.get(from), path_to_idx.get(to))
+            && fi != ti
+        {
+            *adj[fi].entry(ti).or_insert(0.0) += 1.0;
+            *adj[ti].entry(fi).or_insert(0.0) += 1.0;
+            total_weight += 1.0; // Each directed edge contributes 1 to total (undirected: 2m)
         }
     }
 

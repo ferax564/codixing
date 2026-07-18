@@ -209,10 +209,10 @@ impl Engine {
             } else {
                 // A stale prior artifact would be loaded as current data, so a
                 // cleanup failure is fatal just like a failed write.
-                if let Err(e) = std::fs::remove_file(store.concepts_path()) {
-                    if e.kind() != std::io::ErrorKind::NotFound {
-                        return Err(e.into());
-                    }
+                if let Err(e) = std::fs::remove_file(store.concepts_path())
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    return Err(e.into());
                 }
                 None
             }
@@ -235,10 +235,10 @@ impl Engine {
                 std::fs::write(store.reformulations_path(), &bytes)?;
                 Some(reform)
             } else {
-                if let Err(e) = std::fs::remove_file(store.reformulations_path()) {
-                    if e.kind() != std::io::ErrorKind::NotFound {
-                        return Err(e.into());
-                    }
+                if let Err(e) = std::fs::remove_file(store.reformulations_path())
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    return Err(e.into());
                 }
                 None
             }
@@ -264,10 +264,10 @@ impl Engine {
         store.save_symbols_bytes(&sym_bytes)?;
 
         // Also write the mmap-format v2 for zero-deserialization open().
-        if let Some(in_mem) = symbols.as_in_memory() {
-            if let Err(e) = write_mmap_symbols(in_mem, &store.symbols_v2_path()) {
-                warn!(error = %e, "failed to write symbols_v2.bin (non-fatal)");
-            }
+        if let Some(in_mem) = symbols.as_in_memory()
+            && let Err(e) = write_mmap_symbols(in_mem, &store.symbols_v2_path())
+        {
+            warn!(error = %e, "failed to write symbols_v2.bin (non-fatal)");
         }
 
         // `process_file` records every successfully indexed file directly.

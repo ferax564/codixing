@@ -68,14 +68,14 @@ impl Engine {
         }
 
         // Handle explicit multi-query RRF fusion (queries param from MCP/API).
-        if let Some(ref queries) = query.queries {
-            if queries.len() >= 2 {
-                let mut fused = self.search_multi(queries, &query)?;
-                let ctx = self.search_context(&query_str, strategy);
-                pipeline.run(&mut fused, &ctx)?;
-                apply_doc_filter(&mut fused, doc_filter, &source_filter);
-                return Ok(fused);
-            }
+        if let Some(ref queries) = query.queries
+            && queries.len() >= 2
+        {
+            let mut fused = self.search_multi(queries, &query)?;
+            let ctx = self.search_context(&query_str, strategy);
+            pipeline.run(&mut fused, &ctx)?;
+            apply_doc_filter(&mut fused, doc_filter, &source_filter);
+            return Ok(fused);
         }
 
         let mut results = match strategy {
@@ -308,10 +308,10 @@ impl Engine {
                 doc_filter: None,
                 source_filter: None,
             };
-            if let Ok(results) = self.search_first_pass(&sub_query) {
-                if !results.is_empty() {
-                    all_results.push(results);
-                }
+            if let Ok(results) = self.search_first_pass(&sub_query)
+                && !results.is_empty()
+            {
+                all_results.push(results);
             }
         }
 
@@ -350,10 +350,10 @@ impl Engine {
                 .iter()
                 .filter_map(|chunk_id| {
                     let meta = self.chunk_meta.get(chunk_id)?;
-                    if let Some(ref filter) = query.file_filter {
-                        if !meta.file_path.contains(filter.as_str()) {
-                            return None;
-                        }
+                    if let Some(ref filter) = query.file_filter
+                        && !meta.file_path.contains(filter.as_str())
+                    {
+                        return None;
                     }
                     meta.content.is_empty().then_some(*chunk_id)
                 })
@@ -363,10 +363,10 @@ impl Engine {
             for &chunk_id in candidate_batch {
                 if let Some(meta) = self.chunk_meta.get(&chunk_id) {
                     // Apply file filter if set.
-                    if let Some(ref filter) = query.file_filter {
-                        if !meta.file_path.contains(filter.as_str()) {
-                            continue;
-                        }
+                    if let Some(ref filter) = query.file_filter
+                        && !meta.file_path.contains(filter.as_str())
+                    {
+                        continue;
                     }
                     // Get content for verification: from meta if available, else from Tantivy.
                     let content = if meta.content.is_empty() {
@@ -893,10 +893,10 @@ impl Engine {
                     doc_filter: None,
                     source_filter: None,
                 };
-                if let Ok(results) = self.search_first_pass(&sub_query) {
-                    if !results.is_empty() {
-                        all_results.push(results);
-                    }
+                if let Ok(results) = self.search_first_pass(&sub_query)
+                    && !results.is_empty()
+                {
+                    all_results.push(results);
                 }
             }
 
@@ -1311,12 +1311,12 @@ pub(super) fn apply_header_demotion(results: &mut [SearchResult], changed: &mut 
     for r in results.iter_mut() {
         if is_header(&r.file_path) {
             let basename = r.file_path.rsplit('/').next().unwrap_or(&r.file_path);
-            if let Some((stem, _)) = basename.rsplit_once('.') {
-                if impl_basenames.contains(stem) {
-                    r.score *= HEADER_DEMOTION_EXACT;
-                    *changed = true;
-                    continue;
-                }
+            if let Some((stem, _)) = basename.rsplit_once('.')
+                && impl_basenames.contains(stem)
+            {
+                r.score *= HEADER_DEMOTION_EXACT;
+                *changed = true;
+                continue;
             }
             // Mild demotion: impl files exist but this header has no matching .cc
             r.score *= HEADER_DEMOTION_MILD;
@@ -1555,10 +1555,10 @@ fn generate_reformulations_with_synonyms(
     let mut reformulations = generate_reformulations(query);
 
     // Append synonym-expanded variant if it adds new terms.
-    if let Some(expanded) = expand_synonyms(query) {
-        if expanded != query {
-            reformulations.push(expanded);
-        }
+    if let Some(expanded) = expand_synonyms(query)
+        && expanded != query
+    {
+        reformulations.push(expanded);
     }
 
     // Append top-3 code pattern tokens as a single query string.

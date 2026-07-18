@@ -338,10 +338,10 @@ impl Engine {
 
         for file in &all_files {
             // Apply include/exclude filters.
-            if let Some(ref inc) = options.include_pattern {
-                if !file.contains(inc.as_str()) {
-                    continue;
-                }
+            if let Some(ref inc) = options.include_pattern
+                && !file.contains(inc.as_str())
+            {
+                continue;
             }
             if options
                 .exclude_patterns

@@ -78,10 +78,10 @@ impl ImportResolver {
         // `self::` and `super::` are anchored at the importing file's module,
         // not the crate root — resolve them precisely before falling back to
         // the crate-root prefix scan.
-        if import.starts_with("self::") || import.starts_with("super::") {
-            if let Some(resolved) = self.resolve_rust_anchored(import, source_file) {
-                return Some(resolved);
-            }
+        if (import.starts_with("self::") || import.starts_with("super::"))
+            && let Some(resolved) = self.resolve_rust_anchored(import, source_file)
+        {
+            return Some(resolved);
         }
 
         // Strip leading `crate::` or `super::` to get a module path.
@@ -100,10 +100,11 @@ impl ImportResolver {
         // e.g. source "crates/core/src/engine.rs" → crate_root "crates/core/src"
         // so we also try "crates/core/src/graph/extractor.rs" for `crate::graph::extractor`.
         let mut prefixes: Vec<String> = vec!["src".to_string(), "lib".to_string()];
-        if let Some(root) = crate_src_root(source_file) {
-            if root != "src" && root != "lib" {
-                prefixes.push(root);
-            }
+        if let Some(root) = crate_src_root(source_file)
+            && root != "src"
+            && root != "lib"
+        {
+            prefixes.push(root);
         }
         prefixes.push(String::new()); // bare path (no prefix) last
 

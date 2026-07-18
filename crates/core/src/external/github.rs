@@ -111,10 +111,10 @@ fn parse_item(item: &Value) -> Option<ExternalDocument> {
 /// First non-empty string value among the candidate keys.
 fn str_field(obj: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
     for key in keys {
-        if let Some(s) = obj.get(*key).and_then(Value::as_str) {
-            if !s.is_empty() {
-                return Some(s.to_string());
-            }
+        if let Some(s) = obj.get(*key).and_then(Value::as_str)
+            && !s.is_empty()
+        {
+            return Some(s.to_string());
         }
     }
     None
@@ -126,10 +126,10 @@ fn author_login(obj: &serde_json::Map<String, Value>) -> String {
     for key in ["author", "user"] {
         match obj.get(key) {
             Some(Value::Object(a)) => {
-                if let Some(login) = a.get("login").and_then(Value::as_str) {
-                    if !login.is_empty() {
-                        return login.to_string();
-                    }
+                if let Some(login) = a.get("login").and_then(Value::as_str)
+                    && !login.is_empty()
+                {
+                    return login.to_string();
                 }
             }
             Some(Value::String(s)) if !s.is_empty() => return s.clone(),

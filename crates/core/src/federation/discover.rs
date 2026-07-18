@@ -187,52 +187,45 @@ fn discover_cargo_workspace(root: &Path, projects: &mut Vec<DiscoveredProject>) 
 fn discover_npm_workspaces(root: &Path, projects: &mut Vec<DiscoveredProject>) {
     // Try package.json "workspaces" field first
     let pkg_json = root.join("package.json");
-    if pkg_json.is_file() {
-        if let Ok(content) = std::fs::read_to_string(&pkg_json) {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(workspaces) = json.get("workspaces").and_then(|w| w.as_array()) {
-                    for ws in workspaces {
-                        if let Some(pattern) = ws.as_str() {
-                            expand_workspace_glob(
-                                root,
-                                pattern,
-                                ProjectType::NpmWorkspace,
-                                projects,
-                            );
-                        }
-                    }
-                    return; // Found npm workspaces, skip pnpm check
-                }
+    if pkg_json.is_file()
+        && let Ok(content) = std::fs::read_to_string(&pkg_json)
+        && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+        && let Some(workspaces) = json.get("workspaces").and_then(|w| w.as_array())
+    {
+        for ws in workspaces {
+            if let Some(pattern) = ws.as_str() {
+                expand_workspace_glob(root, pattern, ProjectType::NpmWorkspace, projects);
             }
         }
+        return; // Found npm workspaces, skip pnpm check
     }
 
     // Try pnpm-workspace.yaml
     let pnpm_yaml = root.join("pnpm-workspace.yaml");
-    if pnpm_yaml.is_file() {
-        if let Ok(content) = std::fs::read_to_string(&pnpm_yaml) {
-            // Simple line-based parser for pnpm-workspace.yaml:
-            //   packages:
-            //     - 'packages/*'
-            //     - 'apps/*'
-            let mut in_packages = false;
-            for line in content.lines() {
-                let trimmed = line.trim();
-                if trimmed == "packages:" {
-                    in_packages = true;
-                    continue;
-                }
-                if in_packages {
-                    if trimmed.starts_with("- ") {
-                        let pattern = trimmed
-                            .trim_start_matches("- ")
-                            .trim_matches('\'')
-                            .trim_matches('"');
-                        expand_workspace_glob(root, pattern, ProjectType::PnpmWorkspace, projects);
-                    } else if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                        // New top-level key, stop parsing packages
-                        break;
-                    }
+    if pnpm_yaml.is_file()
+        && let Ok(content) = std::fs::read_to_string(&pnpm_yaml)
+    {
+        // Simple line-based parser for pnpm-workspace.yaml:
+        //   packages:
+        //     - 'packages/*'
+        //     - 'apps/*'
+        let mut in_packages = false;
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed == "packages:" {
+                in_packages = true;
+                continue;
+            }
+            if in_packages {
+                if trimmed.starts_with("- ") {
+                    let pattern = trimmed
+                        .trim_start_matches("- ")
+                        .trim_matches('\'')
+                        .trim_matches('"');
+                    expand_workspace_glob(root, pattern, ProjectType::PnpmWorkspace, projects);
+                } else if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                    // New top-level key, stop parsing packages
+                    break;
                 }
             }
         }

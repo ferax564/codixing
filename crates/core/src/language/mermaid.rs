@@ -109,30 +109,28 @@ fn extract_mermaid_entities(text: &str) -> Vec<SemanticEntity> {
         }
 
         // Class diagram: `class ClassName`
-        if in_class_diagram {
-            if let Some(rest) = trimmed.strip_prefix("class ") {
-                // `class Foo {` or `class Foo`
-                let name = rest
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or(rest)
-                    .trim_end_matches('{')
-                    .trim();
-                if !name.is_empty() {
-                    entities.push(SemanticEntity {
-                        kind: EntityKind::Class,
-                        name: name.to_string(),
-                        signature: Some(trimmed.to_string()),
-                        doc_comment: preceding_comment(&lines, i),
-                        byte_range: byte_start..byte_end,
-                        line_range: i..i + 1,
-                        scope: vec![],
-                        visibility: Visibility::default(),
-                        type_relations: Vec::new(),
-                    });
-                }
-                continue;
+        if in_class_diagram && let Some(rest) = trimmed.strip_prefix("class ") {
+            // `class Foo {` or `class Foo`
+            let name = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or(rest)
+                .trim_end_matches('{')
+                .trim();
+            if !name.is_empty() {
+                entities.push(SemanticEntity {
+                    kind: EntityKind::Class,
+                    name: name.to_string(),
+                    signature: Some(trimmed.to_string()),
+                    doc_comment: preceding_comment(&lines, i),
+                    byte_range: byte_start..byte_end,
+                    line_range: i..i + 1,
+                    scope: vec![],
+                    visibility: Visibility::default(),
+                    type_relations: Vec::new(),
+                });
             }
+            continue;
         }
 
         // Node definitions: id[label], id(label), id{label}, id((label))
@@ -146,10 +144,9 @@ fn extract_mermaid_entities(text: &str) -> Vec<SemanticEntity> {
             && !trimmed.starts_with("style")
             && !trimmed.starts_with("linkStyle")
             && !trimmed.starts_with("click")
+            && let Some(entity) = parse_node_definition(trimmed, i, byte_start, byte_end, &lines)
         {
-            if let Some(entity) = parse_node_definition(trimmed, i, byte_start, byte_end, &lines) {
-                entities.push(entity);
-            }
+            entities.push(entity);
         }
     }
 

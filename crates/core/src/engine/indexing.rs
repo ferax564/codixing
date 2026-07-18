@@ -1265,10 +1265,10 @@ pub(super) fn find_enclosing_function(
     // Verify the call site line is before the next function's start line.
     // If there is a next function, the call must be before its start;
     // otherwise it's at file scope between two functions.
-    if let Some((next_start, _)) = func_defs.get(pos) {
-        if line >= *next_start {
-            return None;
-        }
+    if let Some((next_start, _)) = func_defs.get(pos)
+        && line >= *next_start
+    {
+        return None;
     }
     Some(func_defs[candidate_idx].1)
 }

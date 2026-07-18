@@ -97,10 +97,10 @@ impl Retriever for VectorRetriever<'_> {
             .iter()
             .filter_map(|(chunk_id, _)| {
                 let meta = self.chunk_meta.get(chunk_id)?;
-                if let Some(ref filter) = query.file_filter {
-                    if !meta.file_path.contains(filter.as_str()) {
-                        return None;
-                    }
+                if let Some(ref filter) = query.file_filter
+                    && !meta.file_path.contains(filter.as_str())
+                {
+                    return None;
                 }
                 meta.content.is_empty().then_some(*chunk_id)
             })

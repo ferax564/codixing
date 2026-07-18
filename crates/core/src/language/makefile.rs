@@ -81,91 +81,57 @@ fn extract_makefile_entities(text: &str) -> Vec<SemanticEntity> {
 
         // Variable assignment: must not start with tab (recipe line) and must
         // contain one of =, :=, ?=, +=, !=
-        if !line.starts_with('\t') {
-            if let Some((var_name, op)) = parse_variable_assignment(trimmed) {
-                if !var_name.is_empty() && !var_name.starts_with('.') && !var_name.contains(':') {
-                    let doc_comment = preceding_comment(&lines, i);
-                    let value_start = trimmed.find(op).unwrap_or(0) + op.len();
-                    let value = trimmed.get(value_start..).unwrap_or("").trim();
-                    let display_val = if value.len() > 60 {
-                        format!("{}...", &value[..57])
-                    } else {
-                        value.to_string()
-                    };
-                    entities.push(SemanticEntity {
-                        kind: EntityKind::Variable,
-                        name: var_name.to_string(),
-                        signature: Some(format!("{} {} {}", var_name, op, display_val)),
-                        doc_comment,
-                        byte_range: byte_start..byte_end,
-                        line_range: i..i + 1,
-                        scope: vec![],
-                        visibility: Visibility::default(),
-                        type_relations: Vec::new(),
-                    });
-                    continue;
-                }
-            }
+        if !line.starts_with('\t')
+            && let Some((var_name, op)) = parse_variable_assignment(trimmed)
+            && !var_name.is_empty()
+            && !var_name.starts_with('.')
+            && !var_name.contains(':')
+        {
+            let doc_comment = preceding_comment(&lines, i);
+            let value_start = trimmed.find(op).unwrap_or(0) + op.len();
+            let value = trimmed.get(value_start..).unwrap_or("").trim();
+            let display_val = if value.len() > 60 {
+                format!("{}...", &value[..57])
+            } else {
+                value.to_string()
+            };
+            entities.push(SemanticEntity {
+                kind: EntityKind::Variable,
+                name: var_name.to_string(),
+                signature: Some(format!("{} {} {}", var_name, op, display_val)),
+                doc_comment,
+                byte_range: byte_start..byte_end,
+                line_range: i..i + 1,
+                scope: vec![],
+                visibility: Visibility::default(),
+                type_relations: Vec::new(),
+            });
+            continue;
         }
 
         // Target: non-indented line containing `:` that's not a variable assignment.
         // Must not start with a tab.
-        if !line.starts_with('\t') && !line.starts_with(' ') {
-            if let Some(colon_pos) = trimmed.find(':') {
-                // Skip if it looks like a variable assignment (we already handled those above).
-                let after_colon = &trimmed[colon_pos..];
-                if after_colon.starts_with(":=") || after_colon.starts_with("::") {
-                    continue;
-                }
+        if !line.starts_with('\t')
+            && !line.starts_with(' ')
+            && let Some(colon_pos) = trimmed.find(':')
+        {
+            // Skip if it looks like a variable assignment (we already handled those above).
+            let after_colon = &trimmed[colon_pos..];
+            if after_colon.starts_with(":=") || after_colon.starts_with("::") {
+                continue;
+            }
 
-                let target_part = trimmed[..colon_pos].trim();
-                // Skip .PHONY itself but extract its targets list.
-                if target_part == ".PHONY" {
-                    let phony_targets = trimmed[colon_pos + 1..].trim();
-                    // The actual targets will be picked up as target rules elsewhere.
-                    // Just note the .PHONY declaration.
-                    if !phony_targets.is_empty() {
-                        entities.push(SemanticEntity {
-                            kind: EntityKind::Variable,
-                            name: ".PHONY".to_string(),
-                            signature: Some(trimmed.to_string()),
-                            doc_comment: preceding_comment(&lines, i),
-                            byte_range: byte_start..byte_end,
-                            line_range: i..i + 1,
-                            scope: vec![],
-                            visibility: Visibility::default(),
-                            type_relations: Vec::new(),
-                        });
-                    }
-                    continue;
-                }
-
-                // Skip other special targets (.DEFAULT, .SUFFIXES, etc.) except as entities.
-                if target_part.starts_with('.') {
-                    continue;
-                }
-
-                // Could be multiple targets: `all clean: ...`
-                for target in target_part.split_whitespace() {
-                    // Skip variables like $(FOO).
-                    if target.starts_with('$') {
-                        continue;
-                    }
-                    let deps = trimmed[colon_pos + 1..].trim();
-                    let sig = if deps.is_empty() {
-                        format!("{}:", target)
-                    } else {
-                        let display_deps = if deps.len() > 60 {
-                            format!("{}...", &deps[..57])
-                        } else {
-                            deps.to_string()
-                        };
-                        format!("{}: {}", target, display_deps)
-                    };
+            let target_part = trimmed[..colon_pos].trim();
+            // Skip .PHONY itself but extract its targets list.
+            if target_part == ".PHONY" {
+                let phony_targets = trimmed[colon_pos + 1..].trim();
+                // The actual targets will be picked up as target rules elsewhere.
+                // Just note the .PHONY declaration.
+                if !phony_targets.is_empty() {
                     entities.push(SemanticEntity {
-                        kind: EntityKind::Function,
-                        name: target.to_string(),
-                        signature: Some(sig),
+                        kind: EntityKind::Variable,
+                        name: ".PHONY".to_string(),
+                        signature: Some(trimmed.to_string()),
                         doc_comment: preceding_comment(&lines, i),
                         byte_range: byte_start..byte_end,
                         line_range: i..i + 1,
@@ -174,6 +140,42 @@ fn extract_makefile_entities(text: &str) -> Vec<SemanticEntity> {
                         type_relations: Vec::new(),
                     });
                 }
+                continue;
+            }
+
+            // Skip other special targets (.DEFAULT, .SUFFIXES, etc.) except as entities.
+            if target_part.starts_with('.') {
+                continue;
+            }
+
+            // Could be multiple targets: `all clean: ...`
+            for target in target_part.split_whitespace() {
+                // Skip variables like $(FOO).
+                if target.starts_with('$') {
+                    continue;
+                }
+                let deps = trimmed[colon_pos + 1..].trim();
+                let sig = if deps.is_empty() {
+                    format!("{}:", target)
+                } else {
+                    let display_deps = if deps.len() > 60 {
+                        format!("{}...", &deps[..57])
+                    } else {
+                        deps.to_string()
+                    };
+                    format!("{}: {}", target, display_deps)
+                };
+                entities.push(SemanticEntity {
+                    kind: EntityKind::Function,
+                    name: target.to_string(),
+                    signature: Some(sig),
+                    doc_comment: preceding_comment(&lines, i),
+                    byte_range: byte_start..byte_end,
+                    line_range: i..i + 1,
+                    scope: vec![],
+                    visibility: Visibility::default(),
+                    type_relations: Vec::new(),
+                });
             }
         }
     }

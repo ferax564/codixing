@@ -373,15 +373,13 @@ impl Engine {
                         if let Some(vec) = existing_vec {
                             old_chunk_hashes
                                 .insert(meta.content_hash, (meta.chunk_id, vec.clone()));
-                            if cosmetic {
-                                if let Some(key) =
+                            if cosmetic
+                                && let Some(key) =
                                     chunk_stable_key(&meta.scope_chain, &meta.entity_names)
-                                {
-                                    if old_stable_keys.insert(key, vec).is_some() {
-                                        // Two old chunks collide on this key — ambiguous.
-                                        stable_key_dupes.insert(key);
-                                    }
-                                }
+                                && old_stable_keys.insert(key, vec).is_some()
+                            {
+                                // Two old chunks collide on this key — ambiguous.
+                                stable_key_dupes.insert(key);
                             }
                         }
                     }
@@ -571,10 +569,8 @@ impl Engine {
                     .iter()
                     .map(|&i| {
                         let c = &chunks[i];
-                        if contextual {
-                            if let Some(meta) = self.chunk_meta.get(&c.id) {
-                                return make_embed_text(&meta, true);
-                            }
+                        if contextual && let Some(meta) = self.chunk_meta.get(&c.id) {
+                            return make_embed_text(&meta, true);
                         }
                         c.content.clone()
                     })
@@ -684,10 +680,10 @@ impl Engine {
                 };
                 let callee_base = r.target_name.rsplit("::").next().unwrap_or(&r.target_name);
                 // Look up the callee in local definitions first.
-                if let Some(&target_idx) = local_indices.get(callee_base) {
-                    if caller_idx != target_idx {
-                        graph.add_reference(caller_idx, target_idx, ReferenceKind::Call);
-                    }
+                if let Some(&target_idx) = local_indices.get(callee_base)
+                    && caller_idx != target_idx
+                {
+                    graph.add_reference(caller_idx, target_idx, ReferenceKind::Call);
                 }
                 // Cross-file resolution is skipped here; will be done on next full reindex.
             }
@@ -1038,10 +1034,10 @@ impl Engine {
             // don't additionally gate on `old_hashes` (whose keys can differ in
             // canonical-vs-config-root form between `init` and `sync`). A
             // brand-new file simply has no stored fingerprint → STRUCTURAL.
-            if let Some(&old_fp) = old_signatures.get(&rel_key) {
-                if old_fp == fp {
-                    cosmetic.insert(change.path.clone());
-                }
+            if let Some(&old_fp) = old_signatures.get(&rel_key)
+                && old_fp == fp
+            {
+                cosmetic.insert(change.path.clone());
             }
         }
 
@@ -1332,14 +1328,14 @@ impl Engine {
                 Err(_) => (None, 0),
             };
 
-            if let Some(cached) = old_hashes.get(abs_path) {
-                if !cached.file_might_have_changed(current_mtime, current_size) {
-                    // mtime+size unchanged — skip the expensive content hash.
-                    unchanged += 1;
-                    skipped_by_mtime += 1;
-                    current_hashes.push((abs_path.clone(), cached.clone()));
-                    continue;
-                }
+            if let Some(cached) = old_hashes.get(abs_path)
+                && !cached.file_might_have_changed(current_mtime, current_size)
+            {
+                // mtime+size unchanged — skip the expensive content hash.
+                unchanged += 1;
+                skipped_by_mtime += 1;
+                current_hashes.push((abs_path.clone(), cached.clone()));
+                continue;
             }
 
             // Phase 2: File potentially changed — read and compute xxh3.
@@ -1732,13 +1728,13 @@ impl Engine {
                 Err(_) => (None, 0),
             };
 
-            if let Some(cached) = old_hashes.get(abs_path) {
-                if !cached.file_might_have_changed(current_mtime, current_size) {
-                    unchanged += 1;
-                    skipped_by_mtime += 1;
-                    current_hashes.push((abs_path.clone(), cached.clone()));
-                    continue;
-                }
+            if let Some(cached) = old_hashes.get(abs_path)
+                && !cached.file_might_have_changed(current_mtime, current_size)
+            {
+                unchanged += 1;
+                skipped_by_mtime += 1;
+                current_hashes.push((abs_path.clone(), cached.clone()));
+                continue;
             }
 
             let content = fs::read(abs_path)?;
@@ -2030,10 +2026,10 @@ impl Engine {
         self.store.save_symbols_bytes(&sym_bytes)?;
 
         // Also write mmap-format v2 for zero-deserialization open().
-        if let Some(in_mem) = self.symbols.as_in_memory() {
-            if let Err(e) = write_mmap_symbols(in_mem, &self.store.symbols_v2_path()) {
-                warn!(error = %e, "failed to write symbols_v2.bin (non-fatal)");
-            }
+        if let Some(in_mem) = self.symbols.as_in_memory()
+            && let Err(e) = write_mmap_symbols(in_mem, &self.store.symbols_v2_path())
+        {
+            warn!(error = %e, "failed to write symbols_v2.bin (non-fatal)");
         }
 
         // Persist chunk_meta in compact format (without content).
@@ -2094,10 +2090,10 @@ impl Engine {
         self.store.save_symbols_bytes(&sym_bytes)?;
 
         // Also write mmap-format v2 for zero-deserialization open().
-        if let Some(in_mem) = self.symbols.as_in_memory() {
-            if let Err(e) = write_mmap_symbols(in_mem, &self.store.symbols_v2_path()) {
-                warn!(error = %e, "failed to write symbols_v2.bin (non-fatal)");
-            }
+        if let Some(in_mem) = self.symbols.as_in_memory()
+            && let Err(e) = write_mmap_symbols(in_mem, &self.store.symbols_v2_path())
+        {
+            warn!(error = %e, "failed to write symbols_v2.bin (non-fatal)");
         }
 
         let meta_bytes = serialize_chunk_meta_compact(&self.chunk_meta)?;

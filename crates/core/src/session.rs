@@ -232,10 +232,10 @@ impl SessionState {
                     | SessionEventKind::FileWrite(p) => Some(p.clone()),
                     _ => None,
                 };
-                if let Some(p) = path {
-                    if !files.iter().any(|(_, f)| f == &p) {
-                        files.push((event.seq, p));
-                    }
+                if let Some(p) = path
+                    && !files.iter().any(|(_, f)| f == &p)
+                {
+                    files.push((event.seq, p));
                 }
             }
         }
@@ -257,10 +257,10 @@ impl SessionState {
                 if event.timestamp < cutoff {
                     break;
                 }
-                if let SessionEventKind::SymbolLookup { name, file } = &event.kind {
-                    if !symbols.iter().any(|(_, n, _)| n == name) {
-                        symbols.push((event.seq, name.clone(), file.clone()));
-                    }
+                if let SessionEventKind::SymbolLookup { name, file } = &event.kind
+                    && !symbols.iter().any(|(_, n, _)| n == name)
+                {
+                    symbols.push((event.seq, name.clone(), file.clone()));
                 }
             }
         }
@@ -314,10 +314,10 @@ impl SessionState {
         }
 
         // Apply progressive focus boost.
-        if let Some(focus) = self.focus_directory.get(&self.session_id) {
-            if file_path.starts_with(focus.as_str()) {
-                boost += FOCUS_BOOST;
-            }
+        if let Some(focus) = self.focus_directory.get(&self.session_id)
+            && file_path.starts_with(focus.as_str())
+        {
+            boost += FOCUS_BOOST;
         }
 
         boost
@@ -549,16 +549,16 @@ impl SessionState {
         if let Some(events) = self.events.get(&self.session_id) {
             for sym in symbols {
                 for event in events.iter().rev() {
-                    if let SessionEventKind::SymbolLookup { name, .. } = &event.kind {
-                        if name == sym {
-                            let mins = now
-                                .duration_since(event.timestamp)
-                                .unwrap_or_default()
-                                .as_secs()
-                                / 60;
-                            result.push((sym.clone(), mins));
-                            break;
-                        }
+                    if let SessionEventKind::SymbolLookup { name, .. } = &event.kind
+                        && name == sym
+                    {
+                        let mins = now
+                            .duration_since(event.timestamp)
+                            .unwrap_or_default()
+                            .as_secs()
+                            / 60;
+                        result.push((sym.clone(), mins));
+                        break;
                     }
                 }
             }

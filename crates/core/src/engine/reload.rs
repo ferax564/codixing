@@ -31,10 +31,10 @@ impl Engine {
         }
 
         // Rate-limit checks.
-        if let Some(last_check) = self.last_staleness_check {
-            if last_check.elapsed() < self.reload_interval {
-                return Ok(false);
-            }
+        if let Some(last_check) = self.last_staleness_check
+            && last_check.elapsed() < self.reload_interval
+        {
+            return Ok(false);
         }
         self.last_staleness_check = Some(std::time::Instant::now());
 
@@ -126,23 +126,23 @@ impl Engine {
         };
 
         // Reload vector index if it exists and we have an embedder.
-        if let Some(ref emb) = self.embedder {
-            if VectorIndex::artifacts_exist(
+        if let Some(ref emb) = self.embedder
+            && VectorIndex::artifacts_exist(
                 &self.store.vector_index_path(),
                 &self.store.file_chunks_path(),
+            )
+        {
+            match VectorIndex::load(
+                &self.store.vector_index_path(),
+                &self.store.file_chunks_path(),
+                emb.dims,
+                self.config.embedding.quantize,
             ) {
-                match VectorIndex::load(
-                    &self.store.vector_index_path(),
-                    &self.store.file_chunks_path(),
-                    emb.dims,
-                    self.config.embedding.quantize,
-                ) {
-                    Ok(vec_idx) => {
-                        *self.vector.write().unwrap_or_else(|e| e.into_inner()) = Some(vec_idx);
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "failed to reload vector index");
-                    }
+                Ok(vec_idx) => {
+                    *self.vector.write().unwrap_or_else(|e| e.into_inner()) = Some(vec_idx);
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to reload vector index");
                 }
             }
         }

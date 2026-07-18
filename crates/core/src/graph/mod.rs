@@ -346,14 +346,13 @@ impl CodeGraph {
             // petgraph swap_remove_node swaps the last node into position `idx`.
             // We must update path_to_node for the swapped node.
             let last_idx = NodeIndex::new(self.graph.node_count().saturating_sub(1));
-            if idx != last_idx {
-                if let Some(swapped_path) = self
+            if idx != last_idx
+                && let Some(swapped_path) = self
                     .graph
                     .node_weight(last_idx)
                     .map(|n| n.file_path.clone())
-                {
-                    self.path_to_node.insert(swapped_path, idx);
-                }
+            {
+                self.path_to_node.insert(swapped_path, idx);
             }
             self.graph.remove_node(idx);
         }
@@ -695,12 +694,12 @@ impl CodeGraph {
         for node in &data.nodes {
             g.get_or_insert_node(&node.file_path, node.language);
             // Restore persisted PageRank and degree counts.
-            if let Some(idx) = g.path_to_node.get(&node.file_path).copied() {
-                if let Some(n) = g.graph.node_weight_mut(idx) {
-                    n.pagerank = node.pagerank;
-                    n.out_degree = node.out_degree;
-                    n.in_degree = node.in_degree;
-                }
+            if let Some(idx) = g.path_to_node.get(&node.file_path).copied()
+                && let Some(n) = g.graph.node_weight_mut(idx)
+            {
+                n.pagerank = node.pagerank;
+                n.out_degree = node.out_degree;
+                n.in_degree = node.in_degree;
             }
         }
         for (from, to, edge) in data.edges {
@@ -884,10 +883,10 @@ impl CodeGraph {
                 .inner
                 .edges_directed(target, petgraph::Direction::Incoming)
             {
-                if *edge.weight() == types::ReferenceKind::Call {
-                    if let Some(caller_node) = self.inner.node_weight(edge.source()) {
-                        callers.push((caller_node.file.clone(), caller_node.name.clone()));
-                    }
+                if *edge.weight() == types::ReferenceKind::Call
+                    && let Some(caller_node) = self.inner.node_weight(edge.source())
+                {
+                    callers.push((caller_node.file.clone(), caller_node.name.clone()));
                 }
             }
         }
@@ -919,10 +918,10 @@ impl CodeGraph {
                 .inner
                 .edges_directed(src, petgraph::Direction::Outgoing)
             {
-                if *edge.weight() == types::ReferenceKind::Call {
-                    if let Some(target_node) = self.inner.node_weight(edge.target()) {
-                        callees.push(target_node.name.clone());
-                    }
+                if *edge.weight() == types::ReferenceKind::Call
+                    && let Some(target_node) = self.inner.node_weight(edge.target())
+                {
+                    callees.push(target_node.name.clone());
                 }
             }
         }
@@ -1022,10 +1021,10 @@ impl CodeGraph {
         let result = community::detect_communities(self);
         // Store community assignments on nodes.
         for (path, &community_id) in &result.assignments {
-            if let Some(&idx) = self.path_to_node.get(path.as_str()) {
-                if let Some(node) = self.graph.node_weight_mut(idx) {
-                    node.community = Some(community_id);
-                }
+            if let Some(&idx) = self.path_to_node.get(path.as_str())
+                && let Some(node) = self.graph.node_weight_mut(idx)
+            {
+                node.community = Some(community_id);
             }
         }
         result
@@ -1075,10 +1074,10 @@ impl CodeGraph {
             .graph
             .neighbors_directed(idx, petgraph::Direction::Outgoing);
         for nb in incoming.chain(outgoing) {
-            if let Some(node) = self.graph.node_weight(nb) {
-                if !node.file_path.starts_with("__ext__:") {
-                    seen.insert(node.file_path.clone());
-                }
+            if let Some(node) = self.graph.node_weight(nb)
+                && !node.file_path.starts_with("__ext__:")
+            {
+                seen.insert(node.file_path.clone());
             }
         }
         seen.into_iter().collect()

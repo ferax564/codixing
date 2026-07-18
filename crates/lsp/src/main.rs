@@ -1106,10 +1106,10 @@ impl CodixingBackend {
         }
 
         // Prefer exact name match in the current file.
-        if let Some(ref rel) = current_file {
-            if let Some(s) = all.iter().find(|s| s.name == word && s.file_path == *rel) {
-                return Some(s.clone());
-            }
+        if let Some(ref rel) = current_file
+            && let Some(s) = all.iter().find(|s| s.name == word && s.file_path == *rel)
+        {
+            return Some(s.clone());
         }
 
         // Exact name match globally (definition-like kinds first).

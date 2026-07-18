@@ -242,10 +242,10 @@ fn match_entity_kind(
 fn is_arrow_function(node: &Node, _source: &[u8]) -> bool {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if child.kind() == "variable_declarator" {
-            if let Some(value) = child.child_by_field_name("value") {
-                return value.kind() == "arrow_function";
-            }
+        if child.kind() == "variable_declarator"
+            && let Some(value) = child.child_by_field_name("value")
+        {
+            return value.kind() == "arrow_function";
         }
     }
     false
@@ -370,10 +370,10 @@ fn extract_ts_signature(node: &Node, source: &[u8]) -> Option<String> {
 /// A declaration is public if its parent is an `export_statement`.
 /// Otherwise it defaults to private.
 fn extract_ts_visibility(node: &Node) -> Visibility {
-    if let Some(parent) = node.parent() {
-        if parent.kind() == "export_statement" {
-            return Visibility::Public;
-        }
+    if let Some(parent) = node.parent()
+        && parent.kind() == "export_statement"
+    {
+        return Visibility::Public;
     }
     Visibility::Private
 }

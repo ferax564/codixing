@@ -150,10 +150,10 @@ pub fn parse_html_sections(html: &str) -> Vec<DocSection> {
                 }
                 // Detect element type.
                 let el_type = detect_element_type(tag, &el);
-                if let Some(et) = el_type {
-                    if !current_elements.contains(&et) {
-                        current_elements.push(et);
-                    }
+                if let Some(et) = el_type
+                    && !current_elements.contains(&et)
+                {
+                    current_elements.push(et);
                 }
             }
         } else if let Some(text) = child.value().as_text() {

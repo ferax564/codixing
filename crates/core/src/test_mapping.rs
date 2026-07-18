@@ -252,55 +252,55 @@ pub fn discover_test_mappings(
         }
 
         // Strategy A: Import analysis (highest confidence when available).
-        if let Some(deps) = import_deps {
-            if let Some(imports) = deps.get(file.as_str()) {
-                for imported in imports {
-                    // Only map to files that are in our indexed set and not test files themselves.
-                    if files.contains(imported) && !is_test_file(imported) {
-                        let key = (file.clone(), imported.clone());
-                        let mapping = TestMapping {
-                            test_file: file.clone(),
-                            source_file: imported.clone(),
-                            confidence: 0.95,
-                            reason: format!("Test file imports {imported}"),
-                        };
-                        best.entry(key)
-                            .and_modify(|existing| {
-                                if mapping.confidence > existing.confidence {
-                                    *existing = mapping.clone();
-                                }
-                            })
-                            .or_insert(mapping);
-                    }
+        if let Some(deps) = import_deps
+            && let Some(imports) = deps.get(file.as_str())
+        {
+            for imported in imports {
+                // Only map to files that are in our indexed set and not test files themselves.
+                if files.contains(imported) && !is_test_file(imported) {
+                    let key = (file.clone(), imported.clone());
+                    let mapping = TestMapping {
+                        test_file: file.clone(),
+                        source_file: imported.clone(),
+                        confidence: 0.95,
+                        reason: format!("Test file imports {imported}"),
+                    };
+                    best.entry(key)
+                        .and_modify(|existing| {
+                            if mapping.confidence > existing.confidence {
+                                *existing = mapping.clone();
+                            }
+                        })
+                        .or_insert(mapping);
                 }
             }
         }
 
         // Strategy B: Naming/directory convention.
-        if let Some((source, confidence)) = find_best_source_match(file, files) {
-            if !is_test_file(&source) {
-                let key = (file.clone(), source.clone());
-                let reason = if confidence >= 0.9 {
-                    "Naming convention match (same directory)".to_string()
-                } else if confidence >= 0.8 {
-                    "Directory convention match".to_string()
-                } else {
-                    "Filename match (different directory)".to_string()
-                };
-                let mapping = TestMapping {
-                    test_file: file.clone(),
-                    source_file: source,
-                    confidence,
-                    reason,
-                };
-                best.entry(key)
-                    .and_modify(|existing| {
-                        if mapping.confidence > existing.confidence {
-                            *existing = mapping.clone();
-                        }
-                    })
-                    .or_insert(mapping);
-            }
+        if let Some((source, confidence)) = find_best_source_match(file, files)
+            && !is_test_file(&source)
+        {
+            let key = (file.clone(), source.clone());
+            let reason = if confidence >= 0.9 {
+                "Naming convention match (same directory)".to_string()
+            } else if confidence >= 0.8 {
+                "Directory convention match".to_string()
+            } else {
+                "Filename match (different directory)".to_string()
+            };
+            let mapping = TestMapping {
+                test_file: file.clone(),
+                source_file: source,
+                confidence,
+                reason,
+            };
+            best.entry(key)
+                .and_modify(|existing| {
+                    if mapping.confidence > existing.confidence {
+                        *existing = mapping.clone();
+                    }
+                })
+                .or_insert(mapping);
         }
     }
 

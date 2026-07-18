@@ -98,14 +98,14 @@ fn split_camel(word: &str) -> Vec<String> {
         }
 
         // Transition: uppercase -> uppercase -> lowercase (HTTPServer: split before 'S')
-        if prev.is_uppercase() && cur.is_uppercase() {
-            if let Some(&n) = next {
-                if n.is_lowercase() {
-                    parts.push(std::mem::take(&mut current));
-                    current.push(cur);
-                    continue;
-                }
-            }
+        if prev.is_uppercase()
+            && cur.is_uppercase()
+            && let Some(&n) = next
+            && n.is_lowercase()
+        {
+            parts.push(std::mem::take(&mut current));
+            current.push(cur);
+            continue;
         }
 
         current.push(cur);
@@ -668,10 +668,10 @@ impl TantivyIndex {
         let mut results = Vec::with_capacity(top_docs.len());
         for (score, doc_address) in top_docs {
             let retrieved_doc: tantivy::TantivyDocument = searcher.doc(doc_address)?;
-            if let Some(chunk_id_value) = retrieved_doc.get_first(self.fields.chunk_id) {
-                if let Some(chunk_id_str) = chunk_id_value.as_str() {
-                    results.push((chunk_id_str.to_string(), score));
-                }
+            if let Some(chunk_id_value) = retrieved_doc.get_first(self.fields.chunk_id)
+                && let Some(chunk_id_str) = chunk_id_value.as_str()
+            {
+                results.push((chunk_id_str.to_string(), score));
             }
         }
 

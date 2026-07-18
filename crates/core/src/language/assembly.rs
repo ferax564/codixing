@@ -88,37 +88,38 @@ fn extract_assembly_entities(text: &str) -> Vec<SemanticEntity> {
 
         // Label: identifier followed by `:` with optional trailing content.
         // Must start at column 0 (labels are unindented in gas syntax).
-        if !line.starts_with(' ') && !line.starts_with('\t') {
-            if let Some(label_name) = parse_label(trimmed) {
-                // Skip local labels (numeric or starting with `.L`).
-                if label_name.starts_with(".L") || label_name.chars().all(|c| c.is_ascii_digit()) {
-                    continue;
-                }
-
-                // `line_starts[i]` points at this line's first byte in the
-                // original source. `line.len()` excludes the line terminator,
-                // so `start + len` lands on the LF / CR without including it.
-                let byte_start = line_starts[i];
-                let byte_end = byte_start + line.len();
-
-                let visibility = if global_names.contains(label_name) {
-                    Visibility::Public
-                } else {
-                    Visibility::Private
-                };
-
-                entities.push(SemanticEntity {
-                    kind: EntityKind::Function,
-                    name: label_name.to_string(),
-                    signature: Some(format!("{label_name}:")),
-                    doc_comment: preceding_comment(&lines, i),
-                    byte_range: byte_start..byte_end,
-                    line_range: i..i + 1,
-                    scope: vec![],
-                    visibility,
-                    type_relations: Vec::new(),
-                });
+        if !line.starts_with(' ')
+            && !line.starts_with('\t')
+            && let Some(label_name) = parse_label(trimmed)
+        {
+            // Skip local labels (numeric or starting with `.L`).
+            if label_name.starts_with(".L") || label_name.chars().all(|c| c.is_ascii_digit()) {
+                continue;
             }
+
+            // `line_starts[i]` points at this line's first byte in the
+            // original source. `line.len()` excludes the line terminator,
+            // so `start + len` lands on the LF / CR without including it.
+            let byte_start = line_starts[i];
+            let byte_end = byte_start + line.len();
+
+            let visibility = if global_names.contains(label_name) {
+                Visibility::Public
+            } else {
+                Visibility::Private
+            };
+
+            entities.push(SemanticEntity {
+                kind: EntityKind::Function,
+                name: label_name.to_string(),
+                signature: Some(format!("{label_name}:")),
+                doc_comment: preceding_comment(&lines, i),
+                byte_range: byte_start..byte_end,
+                line_range: i..i + 1,
+                scope: vec![],
+                visibility,
+                type_relations: Vec::new(),
+            });
         }
     }
 

@@ -58,10 +58,10 @@ fn read_logical_line<R: BufRead>(
             return Ok((true, true));
         }
         if newline.is_some() {
-            if let Some(destination) = output.as_deref_mut() {
-                if destination.last() == Some(&b'\r') {
-                    destination.pop();
-                }
+            if let Some(destination) = output.as_deref_mut()
+                && destination.last() == Some(&b'\r')
+            {
+                destination.pop();
             }
             return Ok((true, false));
         }
@@ -316,10 +316,10 @@ impl Engine {
         let candidate_paths: Vec<&String> = rel_paths
             .iter()
             .filter(|p| {
-                if let Some(ref candidates) = candidate_set {
-                    if !candidates.contains(p.as_str()) {
-                        return false;
-                    }
+                if let Some(ref candidates) = candidate_set
+                    && !candidates.contains(p.as_str())
+                {
+                    return false;
                 }
                 if let Some(ref pat) = glob_pat {
                     let filename = std::path::Path::new(p.as_str())
@@ -476,10 +476,10 @@ impl Engine {
         let candidate_paths: Vec<&String> = rel_paths
             .iter()
             .filter(|p| {
-                if let Some(ref candidates) = candidate_set {
-                    if !candidates.contains(p.as_str()) {
-                        return false;
-                    }
+                if let Some(ref candidates) = candidate_set
+                    && !candidates.contains(p.as_str())
+                {
+                    return false;
                 }
                 if let Some(ref pat) = glob_pat {
                     let filename = std::path::Path::new(p.as_str())

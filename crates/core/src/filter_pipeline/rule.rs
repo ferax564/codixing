@@ -129,15 +129,15 @@ impl FilterRule {
         if self.match_tool != "*" && self.match_tool != tool_name {
             return false;
         }
-        if let Some(re) = &self.match_output {
-            if !re.is_match(output) {
-                return false;
-            }
+        if let Some(re) = &self.match_output
+            && !re.is_match(output)
+        {
+            return false;
         }
-        if let Some(min) = self.match_min_lines {
-            if output.lines().take(min).count() < min {
-                return false;
-            }
+        if let Some(min) = self.match_min_lines
+            && output.lines().take(min).count() < min
+        {
+            return false;
         }
         true
     }

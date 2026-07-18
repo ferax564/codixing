@@ -1422,11 +1422,9 @@ fn cmd_search(
             && doc_filter.is_none()
             && source_filter.is_none()
             && matches!(strategy, StrategyArg::Auto);
-        if can_use_daemon {
-            if let Some(text) = daemon_proxy::try_search(&root, &query, limit) {
-                print!("{text}");
-                return Ok(());
-            }
+        if can_use_daemon && let Some(text) = daemon_proxy::try_search(&root, &query, limit) {
+            print!("{text}");
+            return Ok(());
         }
     }
 
@@ -1586,8 +1584,11 @@ fn cmd_grep(args: GrepArgs) -> Result<()> {
     // an exact total when --count / --files-with-matches has no explicit
     // limit. Proxying those modes would make the answer depend on whether a
     // warm daemon happened to be running.
-    if !args.json && args.file.is_none() && !args.count && !args.files_with_matches {
-        if let Some(text) = daemon_proxy::try_grep(
+    if !args.json
+        && args.file.is_none()
+        && !args.count
+        && !args.files_with_matches
+        && let Some(text) = daemon_proxy::try_grep(
             &root,
             &args.pattern,
             args.literal,
@@ -1599,13 +1600,13 @@ fn cmd_grep(args: GrepArgs) -> Result<()> {
             args.count,
             args.files_with_matches,
             effective_limit,
-        ) {
-            print!("{text}");
-            if !text.ends_with('\n') {
-                println!();
-            }
-            return Ok(());
+        )
+    {
+        print!("{text}");
+        if !text.ends_with('\n') {
+            println!();
         }
+        return Ok(());
     }
 
     let engine = Engine::open(&root).with_context(|| {
@@ -1686,11 +1687,12 @@ fn cmd_symbols(filter: String, file: Option<String>, count: bool) -> Result<()> 
 
     // Fast path: proxy through the daemon if one is running.
     // Skip daemon proxy for --count: we need the raw symbol list to count accurately.
-    if !filter.is_empty() && !count {
-        if let Some(text) = daemon_proxy::try_symbols(&root, &filter, file.as_deref()) {
-            print!("{text}");
-            return Ok(());
-        }
+    if !filter.is_empty()
+        && !count
+        && let Some(text) = daemon_proxy::try_symbols(&root, &filter, file.as_deref())
+    {
+        print!("{text}");
+        return Ok(());
     }
 
     let engine = Engine::open(&root).with_context(|| {
@@ -1789,11 +1791,10 @@ fn cmd_graph(
         && obsidian.is_none()
         && !communities
         && surprises.is_none()
+        && let Some(text) = daemon_proxy::try_repo_map(&root, Some(token_budget))
     {
-        if let Some(text) = daemon_proxy::try_repo_map(&root, Some(token_budget)) {
-            print!("{text}");
-            return Ok(());
-        }
+        print!("{text}");
+        return Ok(());
     }
 
     let mut engine = Engine::open(&root).with_context(|| {
@@ -2014,14 +2015,14 @@ fn cmd_callers(file: String, depth: usize) -> Result<()> {
     // Fast path: proxy through the daemon when asking for direct callers only
     // (depth <= 1). Transitive callers require multi-hop graph traversal that
     // the daemon's `file_callers` tool doesn't expose, so those fall through.
-    if depth <= 1 {
-        if let Some(text) = daemon_proxy::try_callers(&root, &file) {
-            return emit_daemon_file_list(
-                text,
-                &format!("No callers found for \"{file}\"."),
-                "caller(s) found",
-            );
-        }
+    if depth <= 1
+        && let Some(text) = daemon_proxy::try_callers(&root, &file)
+    {
+        return emit_daemon_file_list(
+            text,
+            &format!("No callers found for \"{file}\"."),
+            "caller(s) found",
+        );
     }
 
     let engine = Engine::open(&root).with_context(|| {
@@ -2086,14 +2087,14 @@ fn cmd_callees(file: String, depth: usize) -> Result<()> {
     // Fast path: proxy through the daemon when asking for direct callees only
     // (depth <= 1). Transitive callees require multi-hop traversal not exposed
     // by the `file_callees` tool, so those fall through to in-process.
-    if depth <= 1 {
-        if let Some(text) = daemon_proxy::try_callees(&root, &file) {
-            return emit_daemon_file_list(
-                text,
-                &format!("No dependencies found for \"{file}\""),
-                "dependency/dependencies found",
-            );
-        }
+    if depth <= 1
+        && let Some(text) = daemon_proxy::try_callees(&root, &file)
+    {
+        return emit_daemon_file_list(
+            text,
+            &format!("No dependencies found for \"{file}\""),
+            "dependency/dependencies found",
+        );
     }
 
     let engine = Engine::open(&root).with_context(|| {
@@ -3184,11 +3185,9 @@ fn cmd_impact(file: String, json: bool) -> Result<()> {
     // Fast path: proxy through the daemon (plain output only — JSON mode
     // needs the structured ChangeImpact type, which the MCP text body
     // loses).
-    if !json {
-        if let Some(text) = daemon_proxy::try_impact(&root, &file) {
-            print!("{text}");
-            return Ok(());
-        }
+    if !json && let Some(text) = daemon_proxy::try_impact(&root, &file) {
+        print!("{text}");
+        return Ok(());
     }
 
     let engine = Engine::open(&root).with_context(|| {
@@ -3644,15 +3643,15 @@ fn cmd_doctor(path: PathBuf, json: bool) -> Result<()> {
         }
     );
 
-    if let Some(meta) = report["index"]["meta"].as_object() {
-        if meta.get("error").is_none() {
-            println!(
-                "Indexed files: {} | chunks: {} | symbols: {}",
-                meta["file_count"].as_u64().unwrap_or(0),
-                meta["chunk_count"].as_u64().unwrap_or(0),
-                meta["symbol_count"].as_u64().unwrap_or(0)
-            );
-        }
+    if let Some(meta) = report["index"]["meta"].as_object()
+        && meta.get("error").is_none()
+    {
+        println!(
+            "Indexed files: {} | chunks: {} | symbols: {}",
+            meta["file_count"].as_u64().unwrap_or(0),
+            meta["chunk_count"].as_u64().unwrap_or(0),
+            meta["symbol_count"].as_u64().unwrap_or(0)
+        );
     }
 
     if !audit.essentials_missing.is_empty() {
