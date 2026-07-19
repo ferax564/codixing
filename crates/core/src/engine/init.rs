@@ -124,6 +124,7 @@ impl Engine {
         config.root = root.clone();
         let starting_git_commit = git_head_commit(&root);
 
+        let writer_lock = IndexStore::acquire_writer_lock(&root)?;
         let mut store = IndexStore::begin_generation(&root, &config)?;
         let tantivy =
             TantivyIndex::create_in_dir_with_config(&store.tantivy_dir(), config.bm25.clone())?;
@@ -347,7 +348,6 @@ impl Engine {
         // searchable artifact and freshness baseline is durable may stale
         // transaction state from an older index be cleared.
         store.clear_tree_hash_delta()?;
-        store.clear_all_dirty_paths()?;
 
         info!(
             files = indexed_files.len(),
@@ -363,6 +363,12 @@ impl Engine {
         // active-generation manifest is atomically replaced. Any earlier error
         // leaves the previous generation untouched and searchable.
         store.publish_generation()?;
+        if let Err(error) = store.clear_all_dirty_paths() {
+            // The manifest is already durable. A stale journal can only cause
+            // conservative replay on the next writer; it must not turn a
+            // successful rebuild into a reported failure.
+            warn!(%error, "published rebuild journal cleanup deferred");
+        }
 
         // Shared vector slot — starts as None. The background thread will
         // populate it and swap it in when embedding completes.
@@ -385,14 +391,16 @@ impl Engine {
                 let file_chunks_path = store.file_chunks_path().to_path_buf();
                 let vector_index_path = store.vector_index_path().to_path_buf();
                 let background_generation_lease = store.background_generation_lease();
+                let background_writer_lock = writer_lock.try_clone();
 
-                let handle = match background_generation_lease {
-                    Ok(background_generation_lease) => {
+                let handle = match (background_generation_lease, background_writer_lock) {
+                    (Ok(background_generation_lease), Ok(background_writer_lock)) => {
                         let background_task = move || {
                             // Keep the generation searchable and its files in
-                            // place even if the Engine is dropped or a newer
-                            // generation is published before embedding ends.
+                            // place, and retain the stable writer lease, even if
+                            // the Engine is dropped before embedding ends.
                             let _background_generation_lease = background_generation_lease;
+                            let _background_writer_lock = background_writer_lock;
                             let result =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     match VectorIndex::new(dims, quantize) {
@@ -464,10 +472,18 @@ impl Engine {
                                 .spawn(background_task),
                         )
                     }
-                    Err(error) => {
+                    (Err(error), _) => {
                         warn!(
                             error = %error,
                             "failed to acquire generation lease for background embedding"
+                        );
+                        state.mark_failed();
+                        None
+                    }
+                    (_, Err(error)) => {
+                        warn!(
+                            error = %error,
+                            "failed to retain writer lease for background embedding"
                         );
                         state.mark_failed();
                         None
@@ -558,6 +574,8 @@ impl Engine {
             embed_state,
             concept_reranker: std::sync::OnceLock::new(),
             filter_pipeline,
+            writer_lock: Some(writer_lock),
+            pending_checkpoint: super::sync::ApplyChangesOutcome::default(),
         })
     }
 
@@ -598,6 +616,11 @@ impl Engine {
         // root is the truth.
         config.root = root.clone();
 
+        // Claim the stable writer lease before Tantivy's generation-local
+        // lock. Without it, a process pinned to generation A could continue
+        // mutating A after another process publishes generation B.
+        let writer_lock = IndexStore::try_acquire_writer_lock(&root)?;
+
         // Try read-write first, retrying briefly on lock conflict to absorb
         // the common intra-process drop-then-reopen race. Fall back to
         // read-only only after the retry budget is exhausted.
@@ -609,6 +632,9 @@ impl Engine {
         let mut last_err: Option<CodixingError> = None;
         let mut acquired: Option<TantivyIndex> = None;
         for attempt in 0..10u32 {
+            if writer_lock.is_none() {
+                break;
+            }
             match TantivyIndex::open_in_dir_with_config(&store.tantivy_dir(), bm25_config.clone()) {
                 Ok(idx) => {
                     acquired = Some(idx);
@@ -632,6 +658,7 @@ impl Engine {
                         error = %e,
                         "index format incompatible with current Tantivy version — rebuilding automatically"
                     );
+                    drop(writer_lock);
                     return Self::init(root, config);
                 }
                 Err(e) => return Err(e),
@@ -788,7 +815,7 @@ impl Engine {
             crate::vector::publication_token(&store.vector_index_path(), &store.file_chunks_path())
         });
 
-        Ok(Self {
+        let mut engine = Self {
             config,
             store,
             parser,
@@ -814,7 +841,17 @@ impl Engine {
             embed_state: None,
             concept_reranker: std::sync::OnceLock::new(),
             filter_pipeline,
-        })
+            writer_lock: if read_only { None } else { writer_lock },
+            pending_checkpoint: super::sync::ApplyChangesOutcome::default(),
+        };
+
+        // A writable engine repairs an interrupted working generation before
+        // it can serve requests. Read-only engines remain free to serve the
+        // previous immutable active snapshot while another process recovers.
+        if !engine.read_only {
+            engine.apply_changes(&[])?;
+        }
+        Ok(engine)
     }
 
     /// Open an existing index in **read-only mode**.
@@ -982,6 +1019,8 @@ impl Engine {
             embed_state: None,
             concept_reranker: std::sync::OnceLock::new(),
             filter_pipeline,
+            writer_lock: None,
+            pending_checkpoint: super::sync::ApplyChangesOutcome::default(),
         })
     }
 

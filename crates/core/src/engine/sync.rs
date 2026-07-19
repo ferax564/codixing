@@ -62,11 +62,12 @@ pub struct SyncOptions {
 }
 
 #[derive(Default)]
-struct ApplyChangesOutcome {
+pub(super) struct ApplyChangesOutcome {
     cosmetic_skipped: usize,
     successful_paths: std::collections::HashSet<std::path::PathBuf>,
     successful_hashes: std::collections::HashMap<std::path::PathBuf, Option<FileHashEntry>>,
     successful_signatures: std::collections::HashMap<std::path::PathBuf, Option<u64>>,
+    retry_changes: std::collections::HashMap<std::path::PathBuf, crate::watcher::ChangeKind>,
     failures: Vec<String>,
 }
 
@@ -82,6 +83,29 @@ struct ReindexMutation {
 const HASH_DELTA_COMPACT_THRESHOLD: usize = 4_096;
 
 impl ApplyChangesOutcome {
+    fn merge(&mut self, mut other: Self) {
+        // A path may be edited repeatedly inside one deferred checkpoint. The
+        // most recent outcome is authoritative: a later failure must revoke an
+        // earlier success, and a later success must clear the retry marker.
+        let failed_paths: Vec<_> = other.retry_changes.keys().cloned().collect();
+        for path in &failed_paths {
+            self.successful_paths.remove(path);
+            self.successful_hashes.remove(path);
+            self.successful_signatures.remove(path);
+        }
+        for path in &other.successful_paths {
+            self.retry_changes.remove(path);
+        }
+        self.cosmetic_skipped += other.cosmetic_skipped;
+        self.successful_paths.extend(other.successful_paths.drain());
+        self.successful_hashes
+            .extend(other.successful_hashes.drain());
+        self.successful_signatures
+            .extend(other.successful_signatures.drain());
+        self.retry_changes.extend(other.retry_changes.drain());
+        self.failures.append(&mut other.failures);
+    }
+
     fn failure_error(&self) -> Option<CodixingError> {
         (!self.failures.is_empty()).then(|| {
             CodixingError::Index(format!(
@@ -793,28 +817,96 @@ impl Engine {
         crate::watcher::FileWatcher::new(&self.config.root, &self.config)
     }
 
-    /// Apply a batch of file changes to the index.
-    ///
-    /// Processes all files first (parse, chunk, embed), then issues a single
-    /// Tantivy commit for the entire batch, then runs PageRank exactly once.
-    /// For N-file batches (e.g. after `git pull`) this reduces N fsyncs to 1.
-    pub fn apply_changes(&mut self, changes: &[crate::watcher::FileChange]) -> Result<()> {
+    /// Fork the active immutable snapshot before the first mutation in a
+    /// batch. A working generation keeps the rebuild lock until publication;
+    /// subsequent editor events reuse it without another tree fork.
+    pub(super) fn ensure_working_generation(&mut self) -> Result<()> {
+        if self.store.owns_rebuild_lock() {
+            return Ok(());
+        }
+        if self.writer_lock.is_none() {
+            return Err(CodixingError::ReadOnly);
+        }
+
+        // Background embedding may still be publishing vector sidecars into
+        // the freshly initialized generation. Join it before taking the
+        // copy-on-write snapshot so every inherited artifact is coherent.
+        self.wait_for_embeddings();
+        let working_store = self.store.begin_checkpoint()?;
+        let working_tantivy = crate::index::TantivyIndex::open_in_dir_with_config(
+            &working_store.tantivy_dir(),
+            self.config.bm25.clone(),
+        )?;
+
+        let old_tantivy = std::mem::replace(&mut self.tantivy, working_tantivy);
+        let old_store = std::mem::replace(&mut self.store, working_store);
+        drop(old_tantivy);
+        drop(old_store);
+        Ok(())
+    }
+
+    /// Persist repository-wide derived artifacts once per checkpoint rather
+    /// than once per editor event. Tantivy, symbols, chunk metadata, and graph
+    /// overlays remain queryable in memory while this work is deferred.
+    pub(super) fn persist_checkpoint_artifacts(&mut self) -> Result<()> {
+        let _ = self.get_file_trigram();
+        let file_trigram = self.file_trigram.get_mut().ok_or_else(|| {
+            CodixingError::Index("file trigram failed to initialize for checkpoint".to_string())
+        })?;
+        file_trigram.compact_tombstones();
+        file_trigram.save_binary(&self.store.file_trigram_path())?;
+        // The shared file-level artifact now serves raw grep and transformed
+        // exact-search recall. Drop any legacy duplicate inherited by the COW
+        // fork before publishing the checkpoint.
+        match std::fs::remove_file(self.store.chunk_trigram_path()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+
+        if let Some(ref mut graph) = self.graph {
+            let scores = compute_pagerank(
+                graph,
+                self.config.graph.damping,
+                self.config.graph.iterations,
+            );
+            graph.apply_pagerank(&scores);
+            let flat = graph.to_flat();
+            self.store.save_graph(&flat)?;
+            self.store.save_symbol_graph(graph)?;
+        }
+
+        self.rebuild_semantic_artifacts()?;
+        self.save()
+    }
+
+    /// Apply changed files to the unpublished working generation without
+    /// rebuilding repository-wide sidecars. The daemon uses this hot path and
+    /// calls [`Self::checkpoint_pending_changes`] after an idle window.
+    pub fn apply_changes_deferred(&mut self, changes: &[crate::watcher::FileChange]) -> Result<()> {
         if self.read_only {
             return Err(CodixingError::ReadOnly);
         }
         use crate::watcher::{ChangeKind, FileChange};
 
-        // Replay any transaction left dirty by a crash or transient failure.
-        // This is O(K) in pending paths and makes the next watcher batch (or an
-        // explicit empty recovery call) self-healing without a full O(N) sync.
+        let retry_failed_batch = !self.pending_checkpoint.failures.is_empty();
         let mut combined = std::collections::BTreeMap::new();
-        for path in self.store.load_dirty_paths()? {
-            let kind = if path.is_file() && self.config.is_indexable_path(&path) {
-                ChangeKind::Modified
-            } else {
-                ChangeKind::RemovedDirectory
-            };
-            combined.insert(path, kind);
+        if !self.store.owns_rebuild_lock()
+            || retry_failed_batch
+            || self.pending_checkpoint.successful_paths.is_empty()
+        {
+            for path in self.store.load_dirty_paths()? {
+                let kind = if path.is_file() && self.config.is_indexable_path(&path) {
+                    ChangeKind::Modified
+                } else {
+                    ChangeKind::RemovedDirectory
+                };
+                combined.insert(path, kind);
+            }
+        }
+        if retry_failed_batch {
+            combined.extend(self.pending_checkpoint.retry_changes.drain());
+            self.pending_checkpoint = ApplyChangesOutcome::default();
         }
         for change in changes {
             let kind = if matches!(change.kind, ChangeKind::Modified)
@@ -833,15 +925,48 @@ impl Engine {
             .into_iter()
             .map(|(path, kind)| FileChange { path, kind })
             .collect();
-        // No cosmetic classification — every modified file re-embeds as usual.
-        let outcome = self.apply_changes_classified(&changes, &std::collections::HashMap::new())?;
-        // `apply_changes_classified` commits the hot indexes, while `save`
-        // publishes symbols, metadata, vectors, and the remaining sidecars.
-        // Only then may successful paths publish their small freshness overlay
-        // and leave the write-ahead dirty journal.
-        self.save()?;
-        self.persist_exact_signatures(&outcome)?;
-        let successful_delta: Vec<_> = outcome
+        let outcome =
+            match self.apply_changes_classified(&changes, &std::collections::HashMap::new()) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    let mut failed = ApplyChangesOutcome::default();
+                    failed.retry_changes.extend(
+                        changes
+                            .iter()
+                            .map(|change| (change.path.clone(), change.kind.clone())),
+                    );
+                    failed.failures.push(format!("batch: {error}"));
+                    self.pending_checkpoint.merge(failed);
+                    return Err(error);
+                }
+            };
+        let failure = outcome.failure_error();
+        self.pending_checkpoint.merge(outcome);
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Durably publish a deferred batch. `active-generation.json` is replaced
+    /// last; until then, all other processes continue to read the old complete
+    /// generation. Direct mutation APIs call this synchronously.
+    pub fn checkpoint_pending_changes(&mut self) -> Result<()> {
+        if self.read_only {
+            return Err(CodixingError::ReadOnly);
+        }
+        let batch_failure = self.pending_checkpoint.failure_error();
+        if self.pending_checkpoint.successful_paths.is_empty() {
+            return match batch_failure {
+                Some(error) => Err(error),
+                None => Ok(()),
+            };
+        }
+
+        self.persist_checkpoint_artifacts()?;
+        self.persist_exact_signatures(&self.pending_checkpoint)?;
+        let successful_delta: Vec<_> = self
+            .pending_checkpoint
             .successful_hashes
             .iter()
             .map(|(path, entry)| (path.clone(), entry.clone()))
@@ -850,10 +975,38 @@ impl Engine {
             self.store.update_tree_hash_delta(&successful_delta)?;
             self.compact_hash_delta_if_needed()?;
         }
-        self.store.clear_dirty_paths(&outcome.successful_paths)?;
-        match outcome.failure_error() {
+
+        let successful_paths = self.pending_checkpoint.successful_paths.clone();
+        self.store
+            .prepare_dirty_paths_for_publication(&successful_paths)?;
+        self.store.publish_generation()?;
+        self.pending_checkpoint = ApplyChangesOutcome::default();
+        if let Err(error) = self.store.clear_dirty_paths(&successful_paths) {
+            // The manifest is already durable: publication succeeded. The
+            // generation-bound journal self-identifies as complete on the next
+            // open, so cleanup must never turn this into a retriable failure
+            // that could mutate the newly active generation in place.
+            warn!(%error, "published checkpoint journal cleanup deferred");
+        }
+        match batch_failure {
             Some(error) => Err(error),
             None => Ok(()),
+        }
+    }
+
+    /// Apply a batch of file changes to the index.
+    ///
+    /// Processes all files first (parse, chunk, embed), then issues a single
+    /// Tantivy commit for the entire batch, then runs PageRank exactly once.
+    /// For N-file batches (e.g. after `git pull`) this reduces N fsyncs to 1.
+    pub fn apply_changes(&mut self, changes: &[crate::watcher::FileChange]) -> Result<()> {
+        let deferred_error = self.apply_changes_deferred(changes).err();
+        match self.checkpoint_pending_changes() {
+            Err(error) => Err(error),
+            Ok(()) => match deferred_error {
+                Some(error) => Err(error),
+                None => Ok(()),
+            },
         }
     }
 
@@ -979,7 +1132,6 @@ impl Engine {
         if self.read_only {
             return Err(CodixingError::ReadOnly);
         }
-        self.symbols.ensure_mutable();
         use crate::watcher::ChangeKind;
 
         if changes.is_empty() {
@@ -989,8 +1141,12 @@ impl Engine {
         let resolved_changes = self.resolve_change_paths(changes)?;
         let expanded_changes = self.expand_directory_changes(&resolved_changes)?;
         let changes = expanded_changes.as_slice();
+        if changes.is_empty() {
+            return Ok(ApplyChangesOutcome::default());
+        }
 
-        self.invalidate_semantic_artifacts()?;
+        self.ensure_working_generation()?;
+        self.symbols.ensure_mutable();
 
         // Snapshot callers before any direct mutation. Removing a graph node
         // also removes its incoming edges, so discovering cascades afterwards
@@ -1029,6 +1185,7 @@ impl Engine {
         let mut pending_paths: Vec<_> = changes.iter().map(|change| change.path.clone()).collect();
         pending_paths.extend(cascade_paths.iter().cloned());
         self.store.mark_dirty_paths(&pending_paths)?;
+        self.invalidate_semantic_artifacts()?;
 
         let mut outcome = ApplyChangesOutcome::default();
 
@@ -1054,6 +1211,9 @@ impl Engine {
                         Err(e) => {
                             warn!(path = %change.path.display(), error = %e, "failed to reindex");
                             outcome
+                                .retry_changes
+                                .insert(change.path.clone(), change.kind.clone());
+                            outcome
                                 .failures
                                 .push(format!("{}: {e}", change.path.display()));
                         }
@@ -1071,12 +1231,18 @@ impl Engine {
                         Err(e) => {
                             warn!(path = %change.path.display(), error = %e, "failed to remove");
                             outcome
+                                .retry_changes
+                                .insert(change.path.clone(), change.kind.clone());
+                            outcome
                                 .failures
                                 .push(format!("{}: {e}", change.path.display()));
                         }
                     }
                 }
                 ChangeKind::CreatedDirectory => {
+                    outcome
+                        .retry_changes
+                        .insert(change.path.clone(), change.kind.clone());
                     outcome.failures.push(format!(
                         "{}: created directory was not expanded",
                         change.path.display()
@@ -1109,6 +1275,9 @@ impl Engine {
                     Err(e) => {
                         warn!(path = %path.display(), error = %e, "cascade-reindex caller failed");
                         outcome
+                            .retry_changes
+                            .insert(path.clone(), ChangeKind::Modified);
+                        outcome
                             .failures
                             .push(format!("cascade {}: {e}", path.display()));
                     }
@@ -1124,6 +1293,17 @@ impl Engine {
             .iter()
             .any(|failure| failure.starts_with("cascade"))
         {
+            outcome.retry_changes.extend(
+                changes
+                    .iter()
+                    .map(|change| (change.path.clone(), change.kind.clone())),
+            );
+            outcome.retry_changes.extend(
+                cascade_paths
+                    .iter()
+                    .cloned()
+                    .map(|path| (path, ChangeKind::Modified)),
+            );
             outcome.successful_paths.clear();
             outcome.successful_hashes.clear();
             outcome.successful_signatures.clear();
@@ -1133,26 +1313,8 @@ impl Engine {
         // Single Tantivy commit for all pending adds + deletes.
         self.tantivy.commit()?;
 
-        // file_trigram already updated incrementally per-file above.
-        // Persist the updated index.
-        self.get_file_trigram()
-            .save_binary(&self.store.file_trigram_path())?;
-
-        // Single PageRank recompute for the entire batch.
-        if let Some(ref mut graph) = self.graph {
-            let scores = compute_pagerank(
-                graph,
-                self.config.graph.damping,
-                self.config.graph.iterations,
-            );
-            graph.apply_pagerank(&scores);
-            let flat = graph.to_flat();
-            self.store.save_graph(&flat)?;
-            self.store.save_symbol_graph(graph)?;
-        }
-
-        self.rebuild_semantic_artifacts()?;
-
+        // Repository-wide PageRank, semantic artifacts, and full mmap/bitcode
+        // sidecars are intentionally deferred to the checkpoint boundary.
         Ok(outcome)
     }
 
@@ -1508,7 +1670,6 @@ impl Engine {
         if self.read_only {
             return Err(CodixingError::ReadOnly);
         }
-        self.symbols.ensure_mutable();
         self.migrate_graph_schema_if_outdated()?;
         let previous_git_commit = self.store.load_meta()?.git_commit;
         let scanned_git_commit = git_head_commit(&self.config.root);
@@ -1641,9 +1802,12 @@ impl Engine {
         let cosmetic_count = cosmetic.len();
 
         let mut cosmetic_skipped = 0usize;
+        let mut batch_failure = None;
+        let mut published_paths = HashSet::new();
         if !changes.is_empty() {
             let outcome = self.apply_changes_classified(&changes, &cosmetic)?;
             cosmetic_skipped = outcome.cosmetic_skipped;
+            batch_failure = outcome.failure_error();
             // Sidecars are publication markers for change detection. Write
             // signatures first, then hashes last, and advance each only for
             // files whose index mutation succeeded.
@@ -1654,27 +1818,24 @@ impl Engine {
                 &outcome.successful_hashes,
             );
             let persist_result = (|| -> Result<()> {
-                self.save()?;
+                self.persist_checkpoint_artifacts()?;
                 self.persist_signatures_after_apply(&changes, &outcome, &seen)?;
-                self.fold_hash_snapshot(&authoritative_hashes)?;
-                self.store.clear_dirty_paths(&outcome.successful_paths)
+                self.fold_hash_snapshot(&authoritative_hashes)
             })();
             if let Err(error) = persist_result {
                 self.restore_git_commit(previous_git_commit.as_deref())?;
                 self.filter_pipeline.cleanup();
                 return Err(error);
             }
-            if let Some(error) = outcome.failure_error() {
-                self.restore_git_commit(previous_git_commit.as_deref())?;
-                self.filter_pipeline.cleanup();
-                return Err(error);
-            }
+            published_paths = outcome.successful_paths.clone();
         } else {
             // Even if nothing changed content-wise, update the v2 hashes
             // to capture any mtime+size updates (e.g. file was touched).
             if had_hash_delta {
+                self.ensure_working_generation()?;
                 self.fold_hash_snapshot(&current_hashes)?;
             } else if skipped_by_mtime != unchanged {
+                self.ensure_working_generation()?;
                 self.store.save_tree_hashes_v2(&current_hashes)?;
             }
             info!("index already up-to-date");
@@ -1688,13 +1849,33 @@ impl Engine {
         // The full filesystem scan covered the whole configured corpus. Publish
         // its git position only after every searchable artifact and freshness
         // sidecar is durable.
+        if batch_failure.is_some() {
+            self.restore_git_commit(previous_git_commit.as_deref())?;
+        }
         if let Some(scanned_git_commit) = scanned_git_commit.as_deref()
             && git_head_commit(&self.config.root).as_deref() == Some(scanned_git_commit)
+            && previous_git_commit.as_deref() != Some(scanned_git_commit)
+            && batch_failure.is_none()
         {
+            self.ensure_working_generation()?;
             self.restore_git_commit(Some(scanned_git_commit))?;
         }
 
+        if self.store.owns_rebuild_lock() {
+            self.store
+                .prepare_dirty_paths_for_publication(&published_paths)?;
+            self.store.publish_generation()?;
+            self.pending_checkpoint = ApplyChangesOutcome::default();
+            if let Err(error) = self.store.clear_dirty_paths(&published_paths) {
+                warn!(%error, "published sync journal cleanup deferred");
+            }
+        }
+
         self.filter_pipeline.cleanup();
+
+        if let Some(error) = batch_failure {
+            return Err(error);
+        }
 
         Ok(SyncStats {
             added,
@@ -1812,6 +1993,13 @@ impl Engine {
         if self.read_only {
             return Err(CodixingError::ReadOnly);
         }
+
+        // Flush both in-memory deferred work and any durable retry journal
+        // before graph-only mutation starts. This keeps graph rebuilds from
+        // hiding or stranding filesystem changes in an existing checkpoint.
+        self.apply_changes(&[])?;
+        self.ensure_working_generation()?;
+        self.symbols.ensure_mutable();
 
         self.invalidate_semantic_artifacts()?;
 
@@ -1934,6 +2122,9 @@ impl Engine {
         }
 
         self.rebuild_semantic_artifacts()?;
+
+        self.save()?;
+        self.store.publish_generation()?;
 
         info!("graph rebuild complete");
         Ok(())
@@ -2079,9 +2270,12 @@ impl Engine {
         let (cosmetic, _classified_signatures) = self.classify_changes(&changes, &old_signatures);
 
         let mut cosmetic_skipped = 0usize;
+        let mut batch_failure = None;
+        let mut published_paths = HashSet::new();
         if !changes.is_empty() {
             let outcome = self.apply_changes_classified(&changes, &cosmetic)?;
             cosmetic_skipped = outcome.cosmetic_skipped;
+            batch_failure = outcome.failure_error();
             on_progress("persisting index");
             let authoritative_hashes = merge_hashes_after_apply(
                 &old_hashes,
@@ -2090,35 +2284,51 @@ impl Engine {
                 &outcome.successful_hashes,
             );
             let persist_result = (|| -> Result<()> {
-                self.save()?;
+                self.persist_checkpoint_artifacts()?;
                 self.persist_signatures_after_apply(&changes, &outcome, &seen)?;
-                self.fold_hash_snapshot(&authoritative_hashes)?;
-                self.store.clear_dirty_paths(&outcome.successful_paths)
+                self.fold_hash_snapshot(&authoritative_hashes)
             })();
             if let Err(error) = persist_result {
                 self.restore_git_commit(previous_git_commit.as_deref())?;
                 self.filter_pipeline.cleanup();
                 return Err(error);
             }
-            if let Some(error) = outcome.failure_error() {
-                self.restore_git_commit(previous_git_commit.as_deref())?;
-                self.filter_pipeline.cleanup();
-                return Err(error);
-            }
+            published_paths = outcome.successful_paths.clone();
         } else if had_hash_delta {
+            self.ensure_working_generation()?;
             self.fold_hash_snapshot(&current_hashes)?;
         } else if skipped_by_mtime != unchanged {
+            self.ensure_working_generation()?;
             self.store.save_tree_hashes_v2(&current_hashes)?;
         }
 
+        if batch_failure.is_some() {
+            self.restore_git_commit(previous_git_commit.as_deref())?;
+        }
         if let Some(scanned_git_commit) = scanned_git_commit.as_deref()
             && git_head_commit(&self.config.root).as_deref() == Some(scanned_git_commit)
+            && previous_git_commit.as_deref() != Some(scanned_git_commit)
+            && batch_failure.is_none()
         {
+            self.ensure_working_generation()?;
             self.restore_git_commit(Some(scanned_git_commit))?;
+        }
+        if self.store.owns_rebuild_lock() {
+            self.store
+                .prepare_dirty_paths_for_publication(&published_paths)?;
+            self.store.publish_generation()?;
+            self.pending_checkpoint = ApplyChangesOutcome::default();
+            if let Err(error) = self.store.clear_dirty_paths(&published_paths) {
+                warn!(%error, "published progress sync journal cleanup deferred");
+            }
         }
         on_progress("sync complete");
 
         self.filter_pipeline.cleanup();
+
+        if let Some(error) = batch_failure {
+            return Err(error);
+        }
 
         Ok(SyncStats {
             added,
@@ -2325,8 +2535,9 @@ impl Engine {
         if !changes.is_empty() {
             let outcome =
                 self.apply_changes_classified(&changes, &std::collections::HashMap::new())?;
+            let batch_failure = outcome.failure_error();
             let persist_result = (|| -> Result<()> {
-                self.save()?;
+                self.persist_checkpoint_artifacts()?;
 
                 // Publish fingerprints from the exact parse that produced the
                 // searchable artifacts, never from the earlier git/scan view.
@@ -2338,26 +2549,35 @@ impl Engine {
                     .map(|(path, entry)| (path.clone(), entry.clone()))
                     .collect();
                 self.store.update_tree_hash_delta(&successful_delta)?;
-                self.compact_hash_delta_if_needed()?;
-                self.store.clear_dirty_paths(&outcome.successful_paths)
+                self.compact_hash_delta_if_needed()
             })();
             if let Err(error) = persist_result {
                 self.restore_git_commit(Some(&stored_commit))?;
                 return Err(error);
             }
-            if let Some(error) = outcome.failure_error() {
-                // `save()` records the current HEAD. A partially successful batch
-                // cannot claim that commit: keeping the old marker makes the full
-                // git delta (and therefore every failed file) retriable.
+            if batch_failure.is_some() {
                 self.restore_git_commit(Some(&stored_commit))?;
+            } else {
+                self.restore_git_commit(Some(&head))?;
+            }
+            self.store
+                .prepare_dirty_paths_for_publication(&outcome.successful_paths)?;
+            self.store.publish_generation()?;
+            self.pending_checkpoint = ApplyChangesOutcome::default();
+            if let Err(error) = self.store.clear_dirty_paths(&outcome.successful_paths) {
+                warn!(%error, "published git sync journal cleanup deferred");
+            }
+            if let Some(error) = batch_failure {
                 return Err(error);
             }
-            self.restore_git_commit(Some(&head))?;
         } else {
             // Diff produced no indexable changes (e.g. only docs/assets changed).
             // Still update the stored commit so next call is a true no-op.
+            self.ensure_working_generation()?;
             self.save()?;
             self.restore_git_commit(Some(&head))?;
+            self.store.publish_generation()?;
+            self.pending_checkpoint = ApplyChangesOutcome::default();
         }
 
         Ok(GitSyncStats {
@@ -2380,21 +2600,33 @@ impl Engine {
         if self.read_only {
             return Err(CodixingError::ReadOnly);
         }
-        // Full-fidelity mmap is the sole current symbol artifact. A legacy
-        // symbols.bin remains readable until the first successful mutation,
-        // then is removed only after its v2 replacement is durable.
+        // Public callers historically used `save()` immediately after init.
+        // A published snapshot is already durable; rewriting it would violate
+        // the immutable-generation invariant. Internal checkpoint callers own
+        // the rebuild lock and therefore persist into unpublished W.
+        if !self.store.owns_rebuild_lock() {
+            return Ok(());
+        }
+
+        // Full-fidelity mmap is the sole current symbol artifact. Materialize
+        // only a transient checkpoint snapshot when the live table is
+        // mmap-backed with a bounded mutation overlay.
         if let Some(in_mem) = self.symbols.as_in_memory() {
             write_mmap_symbols(in_mem, &self.store.symbols_v2_path())?;
-            match std::fs::remove_file(self.store.symbols_path()) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    warn!(
-                        %error,
-                        path = %self.store.symbols_path().display(),
-                        "full-fidelity mmap symbols were saved but legacy symbols.bin could not be removed"
-                    );
-                }
+        } else {
+            let snapshot =
+                crate::symbols::InMemorySymbolTable::from_symbols(self.symbols.all_symbols());
+            write_mmap_symbols(&snapshot, &self.store.symbols_v2_path())?;
+        }
+        match std::fs::remove_file(self.store.symbols_path()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                warn!(
+                    %error,
+                    path = %self.store.symbols_path().display(),
+                    "full-fidelity mmap symbols were saved but legacy symbols.bin could not be removed"
+                );
             }
         }
 

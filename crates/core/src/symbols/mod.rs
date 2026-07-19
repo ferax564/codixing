@@ -2,7 +2,7 @@ pub mod mmap;
 pub mod persistence;
 pub mod writer;
 
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::language::{EntityKind, Language, TypeRelation, Visibility};
@@ -48,6 +48,98 @@ pub struct InMemorySymbolTable {
     sorted_names_dirty: std::sync::atomic::AtomicBool,
     public_lines_by_file: std::sync::RwLock<std::collections::HashMap<String, Vec<usize>>>,
     public_lines_dirty: std::sync::atomic::AtomicBool,
+}
+
+/// Changed-file overlay for an immutable mmap symbol snapshot.
+///
+/// Reindexing one file tombstones that file in the base and stores only its
+/// replacement symbols in `additions`. This keeps the editor hot path
+/// proportional to the changed file instead of decoding the whole table.
+pub struct MmapSymbolOverlay {
+    base: mmap::MmapSymbolTable,
+    additions: InMemorySymbolTable,
+    removed_files: DashSet<String>,
+}
+
+impl MmapSymbolOverlay {
+    fn new(base: mmap::MmapSymbolTable) -> Self {
+        Self {
+            base,
+            additions: InMemorySymbolTable::new(),
+            removed_files: DashSet::new(),
+        }
+    }
+
+    fn insert(&self, symbol: Symbol) {
+        self.additions.insert(symbol);
+    }
+
+    fn remove_file(&self, file_path: &str) {
+        self.removed_files.insert(file_path.to_string());
+        self.additions.remove_file(file_path);
+    }
+
+    fn merge_visible(&self, mut base: Vec<Symbol>, additions: Vec<Symbol>) -> Vec<Symbol> {
+        base.retain(|symbol| !self.removed_files.contains(&symbol.file_path));
+        base.extend(additions);
+        base
+    }
+
+    fn lookup(&self, name: &str) -> Vec<Symbol> {
+        self.merge_visible(self.base.lookup(name), self.additions.lookup(name))
+    }
+
+    fn lookup_prefix(&self, prefix: &str) -> Vec<Symbol> {
+        self.merge_visible(
+            self.base.lookup_prefix(prefix),
+            self.additions.lookup_prefix(prefix),
+        )
+    }
+
+    fn has_public_symbol_in_range(&self, file_path: &str, line_start: u64, line_end: u64) -> bool {
+        self.additions
+            .has_public_symbol_in_range(file_path, line_start, line_end)
+            || (!self.removed_files.contains(file_path)
+                && self
+                    .base
+                    .has_public_symbol_in_range(file_path, line_start, line_end))
+    }
+
+    fn filter(&self, pattern: &str, file: Option<&str>) -> Vec<Symbol> {
+        self.merge_visible(
+            self.base.filter(pattern, file),
+            self.additions.filter(pattern, file),
+        )
+    }
+
+    fn visit_symbols(&self, mut visitor: impl FnMut(&Symbol)) {
+        self.base.visit_symbols(|symbol| {
+            if !self.removed_files.contains(&symbol.file_path) {
+                visitor(symbol);
+            }
+        });
+        self.additions.visit_symbols(visitor);
+    }
+
+    fn all_symbols(&self) -> Vec<Symbol> {
+        let mut symbols = Vec::new();
+        self.visit_symbols(|symbol| symbols.push(symbol.clone()));
+        symbols
+    }
+
+    fn len(&self) -> usize {
+        let mut names = std::collections::HashSet::new();
+        self.visit_symbols(|symbol| {
+            names.insert(symbol.name.clone());
+        });
+        names.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        let mut found = false;
+        self.visit_symbols(|_| found = true);
+        !found
+    }
 }
 
 impl InMemorySymbolTable {
@@ -288,15 +380,16 @@ impl Default for InMemorySymbolTable {
 /// Symbol table that is either mutable in-memory (`DashMap`) or read-only
 /// memory-mapped (`symbols_v2.bin`).
 ///
-/// All read methods dispatch to the active variant. Mutation methods
-/// (`insert`, `remove_file`) require the `InMemory` variant and will
-/// panic if called on the `Mmap` variant (callers must convert first
-/// via [`SymbolTable::ensure_mutable`]).
+/// All read methods dispatch to the active variant. Mutation methods work on
+/// `InMemory` and `Overlay`; callers with a raw mmap table must first call
+/// [`SymbolTable::ensure_mutable`].
 pub enum SymbolTable {
     /// Mutable variant used during `init` and `sync`.
     InMemory(InMemorySymbolTable),
     /// Read-only memory-mapped variant used during `open`.
     Mmap(mmap::MmapSymbolTable),
+    /// Mutable changed-file overlay over an mmap base.
+    Overlay(MmapSymbolOverlay),
 }
 
 impl SymbolTable {
@@ -305,15 +398,16 @@ impl SymbolTable {
         Self::InMemory(InMemorySymbolTable::new())
     }
 
-    /// Insert a symbol (requires InMemory variant).
+    /// Insert a symbol into a mutable variant.
     ///
     /// # Panics
     ///
-    /// Panics if this is the `Mmap` variant. Call [`ensure_mutable`] first.
+    /// Panics if this is the raw `Mmap` variant. Call [`ensure_mutable`] first.
     pub fn insert(&self, symbol: Symbol) {
         match self {
             Self::InMemory(t) => t.insert(symbol),
             Self::Mmap(_) => panic!("cannot insert into mmap symbol table — call ensure_mutable()"),
+            Self::Overlay(t) => t.insert(symbol),
         }
     }
 
@@ -328,6 +422,7 @@ impl SymbolTable {
             Self::Mmap(_) => {
                 panic!("cannot remove from mmap symbol table — call ensure_mutable()")
             }
+            Self::Overlay(t) => t.remove_file(file_path),
         }
     }
 
@@ -336,6 +431,7 @@ impl SymbolTable {
         match self {
             Self::InMemory(t) => t.lookup(name),
             Self::Mmap(t) => t.lookup(name),
+            Self::Overlay(t) => t.lookup(name),
         }
     }
 
@@ -344,6 +440,7 @@ impl SymbolTable {
         match self {
             Self::InMemory(t) => t.lookup_prefix(prefix),
             Self::Mmap(t) => t.lookup_prefix(prefix),
+            Self::Overlay(t) => t.lookup_prefix(prefix),
         }
     }
 
@@ -359,6 +456,9 @@ impl SymbolTable {
                 table.has_public_symbol_in_range(file_path, line_start, line_end)
             }
             Self::Mmap(table) => table.has_public_symbol_in_range(file_path, line_start, line_end),
+            Self::Overlay(table) => {
+                table.has_public_symbol_in_range(file_path, line_start, line_end)
+            }
         }
     }
 
@@ -367,6 +467,7 @@ impl SymbolTable {
         match self {
             Self::InMemory(t) => t.filter(pattern, file),
             Self::Mmap(t) => t.filter(pattern, file),
+            Self::Overlay(t) => t.filter(pattern, file),
         }
     }
 
@@ -375,6 +476,7 @@ impl SymbolTable {
         match self {
             Self::InMemory(t) => t.len(),
             Self::Mmap(t) => t.len(),
+            Self::Overlay(t) => t.len(),
         }
     }
 
@@ -383,6 +485,7 @@ impl SymbolTable {
         match self {
             Self::InMemory(t) => t.is_empty(),
             Self::Mmap(t) => t.is_empty(),
+            Self::Overlay(t) => t.is_empty(),
         }
     }
 
@@ -391,6 +494,7 @@ impl SymbolTable {
         match self {
             Self::InMemory(t) => t.all_symbols(),
             Self::Mmap(t) => t.all_symbols(),
+            Self::Overlay(t) => t.all_symbols(),
         }
     }
 
@@ -399,6 +503,7 @@ impl SymbolTable {
         match self {
             Self::InMemory(table) => table.visit_symbols(visitor),
             Self::Mmap(table) => table.visit_symbols(visitor),
+            Self::Overlay(table) => table.visit_symbols(visitor),
         }
     }
 
@@ -407,28 +512,30 @@ impl SymbolTable {
         Self::InMemory(InMemorySymbolTable::from_symbols(symbols))
     }
 
-    /// Convert an `Mmap` variant to `InMemory` so mutation methods work.
+    /// Convert an `Mmap` variant to a changed-file overlay so mutation works.
     ///
-    /// If already `InMemory`, this is a no-op. If `Mmap`, reads all symbols
-    /// from the mmap and rebuilds the `DashMap`.
+    /// If already mutable, this is a no-op. The mmap base remains mapped and
+    /// only later additions/tombstones consume heap memory.
     pub fn ensure_mutable(&mut self) {
-        if matches!(self, Self::InMemory(_)) {
+        if matches!(self, Self::InMemory(_) | Self::Overlay(_)) {
             return;
         }
-        let all = self.all_symbols();
-        *self = Self::from_symbols(all);
+        let old = std::mem::replace(self, Self::InMemory(InMemorySymbolTable::new()));
+        if let Self::Mmap(base) = old {
+            *self = Self::Overlay(MmapSymbolOverlay::new(base));
+        }
     }
 
     /// Returns `true` if this is the in-memory variant.
     pub fn is_in_memory(&self) -> bool {
-        matches!(self, Self::InMemory(_))
+        matches!(self, Self::InMemory(_) | Self::Overlay(_))
     }
 
     /// Returns a reference to the inner `InMemorySymbolTable`, if applicable.
     pub fn as_in_memory(&self) -> Option<&InMemorySymbolTable> {
         match self {
             Self::InMemory(t) => Some(t),
-            Self::Mmap(_) => None,
+            Self::Mmap(_) | Self::Overlay(_) => None,
         }
     }
 }
@@ -948,11 +1055,14 @@ mod tests {
     }
 
     #[test]
-    fn mmap_ensure_mutable_converts() {
+    fn mmap_ensure_mutable_uses_a_filtered_overlay() {
         let in_mem = InMemorySymbolTable::new();
+        let mut removed_public = make_symbol("x", "a.rs", EntityKind::Function, Language::Rust);
+        removed_public.visibility = Visibility::Public;
+        in_mem.insert(removed_public);
         in_mem.insert(make_symbol(
             "x",
-            "a.rs",
+            "keep.rs",
             EntityKind::Function,
             Language::Rust,
         ));
@@ -968,10 +1078,23 @@ mod tests {
         table.ensure_mutable();
         assert!(table.is_in_memory());
         assert_eq!(table.len(), 1);
+        assert!(matches!(table, SymbolTable::Overlay(_)));
+        assert!(table.has_public_symbol_in_range("a.rs", 0, 10));
 
-        // Now we can mutate
-        table.insert(make_symbol("y", "b.rs", EntityKind::Struct, Language::Rust));
+        // Mutations stay in the bounded overlay: a base file is tombstoned,
+        // unaffected mmap symbols remain visible, and additions are merged.
+        table.remove_file("a.rs");
+        assert!(!table.has_public_symbol_in_range("a.rs", 0, 10));
+        let mut added_public = make_symbol("y", "b.rs", EntityKind::Struct, Language::Rust);
+        added_public.visibility = Visibility::Public;
+        table.insert(added_public);
+        assert!(table.has_public_symbol_in_range("b.rs", 0, 10));
         assert_eq!(table.len(), 2);
+        let x = table.lookup("x");
+        assert_eq!(x.len(), 1);
+        assert_eq!(x[0].file_path, "keep.rs");
+        assert_eq!(table.lookup("y").len(), 1);
+        assert!(table.all_symbols().iter().all(|s| s.file_path != "a.rs"));
     }
 
     #[test]

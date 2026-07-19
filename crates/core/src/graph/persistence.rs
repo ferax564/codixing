@@ -17,7 +17,7 @@ pub fn save_graph_binary(graph: &CodeGraph, path: &Path) -> Result<()> {
     let sg = graph.to_serializable();
     let bytes = bitcode::serialize(&sg)
         .map_err(|e| CodixingError::Serialization(format!("failed to serialize graph: {e}")))?;
-    fs::write(path, bytes)?;
+    crate::persistence::atomic_write(path, bytes)?;
     Ok(())
 }
 

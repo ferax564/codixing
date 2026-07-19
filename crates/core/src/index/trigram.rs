@@ -582,7 +582,7 @@ impl TrigramIndex {
         let bytes = bitcode::serialize(&data).map_err(|e| {
             CodixingError::Serialization(format!("failed to serialize trigram index: {e}"))
         })?;
-        std::fs::write(path, bytes)?;
+        crate::persistence::atomic_write(path, bytes)?;
         Ok(())
     }
 
@@ -653,7 +653,7 @@ impl TrigramIndex {
             }
         }
 
-        std::fs::write(path, buf)?;
+        crate::persistence::atomic_write(path, buf)?;
         Ok(())
     }
 
@@ -779,7 +779,7 @@ impl TrigramIndex {
             buf.extend_from_slice(blob);
         }
 
-        std::fs::write(path, buf)?;
+        crate::persistence::atomic_write(path, buf)?;
         Ok(())
     }
 
@@ -938,7 +938,7 @@ impl TrigramIndex {
         }
 
         debug_assert_eq!(buf.len(), total_size);
-        std::fs::write(path, buf)?;
+        crate::persistence::atomic_write(path, buf)?;
         Ok(())
     }
 
@@ -1640,21 +1640,54 @@ impl FileTrigramIndex {
 
     /// Remove a single file from the index.
     ///
-    /// Removes the file from all posting lists and tombstones its entry.
-    /// This is O(unique_trigrams_in_index) — fast enough for single-file
-    /// operations; batch operations should rebuild from scratch instead.
+    /// Tombstones the file in O(1). Posting-list compaction is deliberately
+    /// deferred to the checkpoint boundary, so one editor save never scans the
+    /// repository-wide trigram map.
     pub fn remove_file(&mut self, path: &str) {
         let file_idx = match self.file_index.remove(path) {
             Some(idx) => idx,
             None => return,
         };
-        // Tombstone the files entry.
         self.files[file_idx as usize] = String::new();
-        // Remove from all posting lists; drop empty ones.
+    }
+
+    /// Remove tombstoned file IDs from every posting list and densely remap
+    /// survivors. This global O(index) work belongs at the durable checkpoint,
+    /// never on the changed-file hot path.
+    pub(crate) fn compact_tombstones(&mut self) {
+        if self.files.len() == self.file_index.len() {
+            return;
+        }
+
+        let mut remap = vec![None; self.files.len()];
+        let mut files = Vec::with_capacity(self.file_index.len());
+        for (old_idx, path) in self.files.iter().enumerate() {
+            if path.is_empty() {
+                continue;
+            }
+            let new_idx = files.len() as u32;
+            remap[old_idx] = Some(new_idx);
+            files.push(path.clone());
+        }
+
         self.index.retain(|_, list| {
-            list.retain(|&id| id != file_idx);
+            let mut write = 0usize;
+            for read in 0..list.len() {
+                if let Some(new_idx) = remap.get(list[read] as usize).copied().flatten() {
+                    list[write] = new_idx;
+                    write += 1;
+                }
+            }
+            list.truncate(write);
             !list.is_empty()
         });
+
+        self.file_index = files
+            .iter()
+            .enumerate()
+            .map(|(idx, path)| (path.clone(), idx as u32))
+            .collect();
+        self.files = files;
     }
 
     /// Execute a [`QueryPlan`] against this index.
@@ -1709,7 +1742,7 @@ impl FileTrigramIndex {
         let bytes = bitcode::serialize(&data).map_err(|e| {
             CodixingError::Serialization(format!("failed to serialize file trigram index: {e}"))
         })?;
-        std::fs::write(path, bytes)?;
+        crate::persistence::atomic_write(path, bytes)?;
         Ok(())
     }
 
@@ -2302,6 +2335,45 @@ mod tests {
         let candidates = idx.candidates_for_literal(b"target").unwrap();
         assert_eq!(candidates, vec!["b.rs"]);
         assert_eq!(idx.file_count(), 1);
+    }
+
+    #[test]
+    fn file_trigram_tombstones_compact_at_checkpoint_and_round_trip() {
+        let mut idx = FileTrigramIndex::new();
+        idx.add("removed.rs", b"fn obsolete_target() {}");
+        idx.add("kept.rs", b"fn obsolete_target() { live(); }");
+
+        idx.remove_file("removed.rs");
+        assert_eq!(
+            idx.candidates_for_literal(b"obsolete_target").unwrap(),
+            vec!["kept.rs"]
+        );
+        idx.add("removed.rs", b"fn replacement_target() {}");
+        assert_eq!(
+            idx.candidates_for_literal(b"obsolete_target").unwrap(),
+            vec!["kept.rs"]
+        );
+        assert_eq!(
+            idx.candidates_for_literal(b"replacement_target").unwrap(),
+            vec!["removed.rs"]
+        );
+
+        idx.compact_tombstones();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("file_trigram.bin");
+        idx.save_binary(&path).unwrap();
+        let loaded = FileTrigramIndex::load_binary(&path).unwrap();
+        assert_eq!(loaded.file_count(), 2);
+        assert_eq!(
+            loaded.candidates_for_literal(b"obsolete_target").unwrap(),
+            vec!["kept.rs"]
+        );
+        assert_eq!(
+            loaded
+                .candidates_for_literal(b"replacement_target")
+                .unwrap(),
+            vec!["removed.rs"]
+        );
     }
 
     #[test]

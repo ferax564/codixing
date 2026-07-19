@@ -21,7 +21,6 @@ use tracing::{debug, warn};
 use crate::chunker::doc::chunk_doc;
 use crate::error::{CodixingError, Result};
 use crate::external::{EXTERNAL_PATH_PREFIX, ExternalDocument};
-use crate::graph::compute_pagerank;
 use crate::language::{Language, detect_language};
 use crate::retriever::ChunkMeta;
 
@@ -57,6 +56,12 @@ impl Engine {
         }
         // Don't race the background embedder against our vector writes.
         self.wait_for_embeddings();
+        // Never mix an external import into an unpublished watcher batch.
+        // Replay durable retries and publish pending filesystem changes first,
+        // then fork a fresh working generation so readers retain their complete
+        // immutable snapshot.
+        self.apply_changes(&[])?;
+        self.ensure_working_generation()?;
         // Force the shared file trigram to load before we mutate it.
         let _ = self.get_file_trigram();
 
@@ -205,23 +210,13 @@ impl Engine {
                     }
                 }
             }
-            let scores = compute_pagerank(
-                graph,
-                self.config.graph.damping,
-                self.config.graph.iterations,
-            );
-            graph.apply_pagerank(&scores);
         }
 
-        // ── Commit + persist ─────────────────────────────────────────────
+        // ── Commit + publish ─────────────────────────────────────────────
         self.tantivy.commit()?;
-        self.persist_incremental()?;
-        if let Err(e) = self
-            .get_file_trigram()
-            .save_binary(&self.store.file_trigram_path())
-        {
-            warn!(error = %e, "failed to persist file trigram after import");
-        }
+        self.persist_checkpoint_artifacts()?;
+        self.store.publish_generation()?;
+
         debug!(
             documents = stats.documents,
             chunks = stats.chunks,

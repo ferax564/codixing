@@ -2,6 +2,7 @@ use std::fs;
 
 use codixing_core::index::TantivyIndex;
 use codixing_core::persistence::IndexStore;
+use codixing_core::watcher::{ChangeKind, FileChange};
 use codixing_core::{Engine, IndexConfig, SearchQuery, Strategy};
 use tempfile::tempdir;
 
@@ -9,6 +10,33 @@ fn no_embed_config(root: &std::path::Path) -> IndexConfig {
     let mut config = IndexConfig::new(root);
     config.embedding.enabled = false;
     config
+}
+
+fn instant_has(engine: &Engine, query: &str) -> bool {
+    !engine
+        .search(
+            SearchQuery::new(query)
+                .with_strategy(Strategy::Instant)
+                .with_limit(20),
+        )
+        .unwrap()
+        .is_empty()
+}
+
+fn notebook_with_code(code: &str) -> String {
+    serde_json::json!({
+        "cells": [{
+            "cell_type": "code",
+            "execution_count": null,
+            "metadata": {},
+            "outputs": [],
+            "source": [code]
+        }],
+        "metadata": {},
+        "nbformat": 4,
+        "nbformat_minor": 5
+    })
+    .to_string()
 }
 
 fn tantivy_documents(root: &std::path::Path) -> Vec<(u64, String)> {
@@ -449,4 +477,305 @@ fn rebuild_rejects_symlinked_generations_directory() {
     let error = IndexStore::begin_generation(root, &no_embed_config(root)).unwrap_err();
     assert!(error.to_string().contains("real directory"));
     assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn no_op_sync_keeps_the_active_generation() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("lib.rs"), "pub fn no_op_generation() {}\n").unwrap();
+    let mut engine = Engine::init(root, no_embed_config(root)).unwrap();
+    let before = IndexStore::active_generation(root).unwrap();
+
+    let stats = engine.sync().unwrap();
+
+    assert_eq!(stats.added + stats.modified + stats.removed, 0);
+    assert_eq!(IndexStore::active_generation(root).unwrap(), before);
+}
+
+#[test]
+fn direct_change_publishes_once_and_retains_the_old_reader_snapshot() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let source = root.join("lib.rs");
+    fs::write(&source, "pub fn checkpoint_old_value() -> usize { 1 }\n").unwrap();
+    let mut writer = Engine::init(root, no_embed_config(root)).unwrap();
+    let old_reader = Engine::open_read_only(root).unwrap();
+    let before = IndexStore::active_generation(root).unwrap();
+
+    fs::write(&source, "pub fn checkpoint_new_value() -> usize { 2 }\n").unwrap();
+    writer
+        .apply_changes(&[FileChange {
+            path: source,
+            kind: ChangeKind::Modified,
+        }])
+        .unwrap();
+
+    let after = IndexStore::active_generation(root).unwrap();
+    assert_ne!(after, before);
+    assert!(instant_has(&writer, "checkpoint_new_value"));
+    assert!(instant_has(&old_reader, "checkpoint_old_value"));
+    assert!(!instant_has(&old_reader, "checkpoint_new_value"));
+    let new_reader = Engine::open_read_only(root).unwrap();
+    assert!(instant_has(&new_reader, "checkpoint_new_value"));
+}
+
+#[test]
+fn deferred_changes_are_invisible_until_checkpoint_publication() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let source = root.join("lib.rs");
+    fs::write(&source, "pub fn deferred_old_value() -> usize { 1 }\n").unwrap();
+    let mut writer = Engine::init(root, no_embed_config(root)).unwrap();
+    let retained_reader = Engine::open_read_only(root).unwrap();
+    let before = IndexStore::active_generation(root).unwrap();
+
+    fs::write(&source, "pub fn deferred_new_value() -> usize { 2 }\n").unwrap();
+    writer
+        .apply_changes_deferred(&[FileChange {
+            path: source,
+            kind: ChangeKind::Modified,
+        }])
+        .unwrap();
+
+    assert_eq!(IndexStore::active_generation(root).unwrap(), before);
+    assert!(instant_has(&writer, "deferred_new_value"));
+    assert!(instant_has(&retained_reader, "deferred_old_value"));
+    let pre_checkpoint_reader = Engine::open_read_only(root).unwrap();
+    assert!(instant_has(&pre_checkpoint_reader, "deferred_old_value"));
+    assert!(!instant_has(&pre_checkpoint_reader, "deferred_new_value"));
+
+    writer.checkpoint_pending_changes().unwrap();
+    assert_ne!(IndexStore::active_generation(root).unwrap(), before);
+    let published_reader = Engine::open_read_only(root).unwrap();
+    assert!(instant_has(&published_reader, "deferred_new_value"));
+    assert!(instant_has(&retained_reader, "deferred_old_value"));
+}
+
+#[test]
+fn stable_writer_lease_allows_only_one_mutating_engine() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let source = root.join("lib.rs");
+    fs::write(&source, "pub fn single_writer_old_value() {}\n").unwrap();
+    drop(Engine::init(root, no_embed_config(root)).unwrap());
+
+    let mut writer = Engine::open(root).unwrap();
+    assert!(!writer.is_read_only());
+    fs::write(&source, "pub fn single_writer_new_value() {}\n").unwrap();
+    writer
+        .apply_changes_deferred(&[FileChange {
+            path: source,
+            kind: ChangeKind::Modified,
+        }])
+        .unwrap();
+
+    // The writer now owns an unpublished working generation and no longer
+    // holds Tantivy's lock on the active generation. The stable repository
+    // lease must still prevent a second mutating engine from opening A.
+    let contender = Engine::open(root).unwrap();
+    assert!(contender.is_read_only());
+    drop(contender);
+    drop(writer);
+
+    let next_writer = Engine::open(root).unwrap();
+    assert!(!next_writer.is_read_only());
+}
+
+#[test]
+fn pending_journal_replays_after_an_unpublished_writer_is_dropped() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let source = root.join("lib.rs");
+    fs::write(&source, "pub fn recovery_old_value() -> usize { 1 }\n").unwrap();
+    drop(Engine::init(root, no_embed_config(root)).unwrap());
+    let before = IndexStore::active_generation(root).unwrap();
+
+    let mut interrupted = Engine::open(root).unwrap();
+    fs::write(&source, "pub fn recovery_new_value() -> usize { 2 }\n").unwrap();
+    interrupted
+        .apply_changes_deferred(&[FileChange {
+            path: source,
+            kind: ChangeKind::Modified,
+        }])
+        .unwrap();
+    let journal = IndexStore::open(root).unwrap().dirty_paths_path();
+    assert!(journal.is_file());
+    assert_eq!(IndexStore::active_generation(root).unwrap(), before);
+    drop(interrupted);
+
+    let recovered = Engine::open(root).unwrap();
+    assert!(!recovered.is_read_only());
+    assert!(instant_has(&recovered, "recovery_new_value"));
+    assert_ne!(IndexStore::active_generation(root).unwrap(), before);
+    assert!(!journal.exists());
+}
+
+#[test]
+fn partial_checkpoint_publishes_successes_and_retries_only_failures() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let source = root.join("lib.rs");
+    let notebook = root.join("analysis.ipynb");
+    fs::write(&source, "pub fn partial_old_value() -> usize { 1 }\n").unwrap();
+    fs::write(&notebook, notebook_with_code("value = 1\n")).unwrap();
+    let mut writer = Engine::init(root, no_embed_config(root)).unwrap();
+    let before = IndexStore::active_generation(root).unwrap();
+
+    fs::write(&source, "pub fn partial_new_value() -> usize { 2 }\n").unwrap();
+    fs::write(&notebook, notebook_with_code("value = 2\n")).unwrap();
+    let notebook = notebook.canonicalize().unwrap();
+    let error = writer
+        .apply_changes(&[
+            FileChange {
+                path: source,
+                kind: ChangeKind::Modified,
+            },
+            FileChange {
+                path: notebook.clone(),
+                kind: ChangeKind::Modified,
+            },
+        ])
+        .unwrap_err();
+    assert!(error.to_string().contains("analysis.ipynb"));
+
+    assert_ne!(IndexStore::active_generation(root).unwrap(), before);
+    let published = Engine::open_read_only(root).unwrap();
+    assert!(instant_has(&published, "partial_new_value"));
+    assert_eq!(
+        IndexStore::open_read_only(root)
+            .unwrap()
+            .load_dirty_paths()
+            .unwrap(),
+        vec![notebook]
+    );
+    assert!(
+        writer
+            .apply_changes(&[])
+            .unwrap_err()
+            .to_string()
+            .contains("analysis.ipynb")
+    );
+}
+
+#[test]
+fn latest_deferred_failure_revokes_an_earlier_success_for_the_same_path() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let source = root.join("lib.rs");
+    fs::write(&source, "pub fn latest_old_value() -> usize { 1 }\n").unwrap();
+    let mut writer = Engine::init(root, no_embed_config(root)).unwrap();
+    let before = IndexStore::active_generation(root).unwrap();
+
+    fs::write(
+        &source,
+        "pub fn latest_intermediate_value() -> usize { 2 }\n",
+    )
+    .unwrap();
+    writer
+        .apply_changes_deferred(&[FileChange {
+            path: source.clone(),
+            kind: ChangeKind::Modified,
+        }])
+        .unwrap();
+
+    fs::remove_file(&source).unwrap();
+    fs::create_dir(&source).unwrap();
+    assert!(
+        writer
+            .apply_changes_deferred(&[FileChange {
+                path: source.clone(),
+                kind: ChangeKind::Modified,
+            }])
+            .is_err()
+    );
+    assert!(writer.checkpoint_pending_changes().is_err());
+    assert_eq!(IndexStore::active_generation(root).unwrap(), before);
+    assert_eq!(
+        IndexStore::open_read_only(root)
+            .unwrap()
+            .load_dirty_paths()
+            .unwrap(),
+        vec![source.canonicalize().unwrap()]
+    );
+
+    fs::remove_dir(&source).unwrap();
+    fs::write(&source, "pub fn latest_recovered_value() -> usize { 3 }\n").unwrap();
+    writer.apply_changes(&[]).unwrap();
+    let published = Engine::open_read_only(root).unwrap();
+    assert!(instant_has(&published, "latest_recovered_value"));
+}
+
+#[test]
+fn graph_rebuild_flushes_deferred_changes_before_its_own_publication() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let source = root.join("lib.rs");
+    fs::write(&source, "pub fn graph_flush_old_value() -> usize { 1 }\n").unwrap();
+    let mut writer = Engine::init(root, no_embed_config(root)).unwrap();
+    let before = IndexStore::active_generation(root).unwrap();
+
+    fs::write(&source, "pub fn graph_flush_new_value() -> usize { 2 }\n").unwrap();
+    writer
+        .apply_changes_deferred(&[FileChange {
+            path: source,
+            kind: ChangeKind::Modified,
+        }])
+        .unwrap();
+    assert_eq!(IndexStore::active_generation(root).unwrap(), before);
+
+    writer.rebuild_graph_from_disk().unwrap();
+    assert_ne!(IndexStore::active_generation(root).unwrap(), before);
+    let published = Engine::open_read_only(root).unwrap();
+    assert!(instant_has(&published, "graph_flush_new_value"));
+}
+
+#[test]
+fn graph_rebuild_reports_an_all_failed_deferred_batch() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let notebook = root.join("analysis.ipynb");
+    fs::write(&notebook, notebook_with_code("value = 1\n")).unwrap();
+    let mut writer = Engine::init(root, no_embed_config(root)).unwrap();
+    let before = IndexStore::active_generation(root).unwrap();
+
+    fs::write(&notebook, notebook_with_code("value = 2\n")).unwrap();
+    assert!(
+        writer
+            .apply_changes_deferred(&[FileChange {
+                path: notebook,
+                kind: ChangeKind::Modified,
+            }])
+            .is_err()
+    );
+    assert!(writer.rebuild_graph_from_disk().is_err());
+    assert_eq!(IndexStore::active_generation(root).unwrap(), before);
+}
+
+#[test]
+fn first_checkpoint_migrates_a_legacy_v1_only_hash_index() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let source = root.join("lib.rs");
+    fs::write(&source, "pub fn legacy_hash_value() -> usize { 1 }\n").unwrap();
+    drop(Engine::init(root, no_embed_config(root)).unwrap());
+
+    let store = IndexStore::open(root).unwrap();
+    fs::remove_file(store.tree_hashes_v2_path()).unwrap();
+    drop(store);
+
+    let mut writer = Engine::open(root).unwrap();
+    fs::write(&source, "pub fn migrated_hash_value() -> usize { 2 }\n").unwrap();
+    writer
+        .apply_changes(&[FileChange {
+            path: source,
+            kind: ChangeKind::Modified,
+        }])
+        .unwrap();
+
+    let active = IndexStore::open(root).unwrap();
+    assert!(active.tree_hashes_v2_path().is_file());
+    drop(active);
+    let published = Engine::open_read_only(root).unwrap();
+    assert!(instant_has(&published, "migrated_hash_value"));
 }

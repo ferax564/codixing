@@ -97,6 +97,14 @@ fn sync_tree(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn remove_file_durable(path: &Path) -> std::io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => sync_directory(path.parent().unwrap_or_else(|| Path::new("."))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 /// Directory name for the Codixing index store.
 const CODEFORGE_DIR: &str = ".codixing";
 const CONFIG_FILE: &str = "config.json";
@@ -131,6 +139,12 @@ const ACTIVE_GENERATION_FILE: &str = "active-generation.json";
 const GENERATION_PREFIX: &str = "gen-";
 const GENERATION_LAYOUT_VERSION: u32 = 1;
 const REBUILD_LOCK_FILE: &str = "rebuild.lock";
+const WRITER_LOCK_FILE: &str = "writer.lock";
+const TANTIVY_MUTABLE_CONTROL_FILES: [&str; 2] = ["meta.json", ".managed.json"];
+/// Hard links are the normal checkpoint COW mechanism. If an unusual
+/// filesystem rejects them, bound the aggregate fallback copy so a tiny
+/// metadata checkpoint can never silently duplicate a multi-GB index.
+const MAX_CHECKPOINT_FALLBACK_COPY_BYTES: u64 = 64 * 1024 * 1024;
 const GENERATION_LEASE_FILE: &str = "generation.lease";
 /// Sidecar file mapping each indexed file to its signature fingerprint (a stable
 /// hash over symbol signatures / imports / exports). Stored separately from
@@ -529,6 +543,150 @@ pub struct IndexStore {
     generation_lease: Option<fs::File>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MutationJournal {
+    version: u32,
+    base_generation: Option<String>,
+    working_generation: Option<String>,
+    paths: Vec<PathBuf>,
+    /// Paths that still need replay if `working_generation` becomes active.
+    /// Before the outcome is known this conservatively contains every path.
+    retry_after_publish: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MutationJournalV1 {
+    version: u32,
+    base_generation: Option<String>,
+    working_generation: Option<String>,
+    paths: Vec<PathBuf>,
+}
+
+const MUTATION_JOURNAL_VERSION: u32 = 2;
+
+fn decode_mutation_journal(bytes: &[u8]) -> Result<MutationJournal> {
+    if let Ok(journal) = bitcode::deserialize::<MutationJournal>(bytes) {
+        if journal.version != MUTATION_JOURNAL_VERSION {
+            return Err(CodixingError::Serialization(format!(
+                "unsupported mutation journal version {}",
+                journal.version
+            )));
+        }
+        return Ok(journal);
+    }
+    if let Ok(journal) = bitcode::deserialize::<MutationJournalV1>(bytes)
+        && journal.version == 1
+    {
+        // Version 1 could not distinguish a crash before publication from one
+        // after publication. Replaying all paths is conservative and prevents
+        // an upgrade from losing a failed mutation.
+        return Ok(MutationJournal {
+            version: MUTATION_JOURNAL_VERSION,
+            base_generation: journal.base_generation,
+            working_generation: journal.working_generation,
+            retry_after_publish: journal.paths.clone(),
+            paths: journal.paths,
+        });
+    }
+    if let Ok(paths) = bitcode::deserialize::<Vec<PathBuf>>(bytes) {
+        return Ok(MutationJournal {
+            version: MUTATION_JOURNAL_VERSION,
+            base_generation: None,
+            working_generation: None,
+            retry_after_publish: paths.clone(),
+            paths,
+        });
+    }
+    Err(CodixingError::Serialization(
+        "failed to deserialize mutation journal".to_string(),
+    ))
+}
+
+fn clone_tree_copy_on_write(
+    source: &Path,
+    destination: &Path,
+    legacy_root: bool,
+    fallback_copy_bytes: &mut u64,
+) -> Result<()> {
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.ends_with(".lock")
+            || name_str == GENERATION_LEASE_FILE
+            || (legacy_root
+                && (name_str == GENERATIONS_DIR
+                    || name_str == ACTIVE_GENERATION_FILE
+                    || name_str == DIRTY_PATHS_FILE))
+        {
+            continue;
+        }
+
+        let source_path = entry.path();
+        let destination_path = destination.join(&name);
+        let metadata = fs::symlink_metadata(&source_path)?;
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            return Err(CodixingError::Config(format!(
+                "refusing to clone symlinked index artifact: {}",
+                source_path.display()
+            )));
+        }
+        if file_type.is_dir() {
+            fs::create_dir(&destination_path)?;
+            clone_tree_copy_on_write(&source_path, &destination_path, false, fallback_copy_bytes)?;
+        } else if file_type.is_file() {
+            // Tantivy 0.25 replaces these controls atomically, creates segment
+            // files with `create_new`, and removes segments by unlinking. Copy
+            // the controls anyway so a future truncating writer cannot reach
+            // A through a shared inode; immutable segments remain hard-linked.
+            let tantivy_control = source
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name == TANTIVY_DIR)
+                && TANTIVY_MUTABLE_CONTROL_FILES
+                    .iter()
+                    .any(|control| name_str.as_ref() == *control);
+            if tantivy_control || fs::hard_link(&source_path, &destination_path).is_err() {
+                copy_checkpoint_file(
+                    &source_path,
+                    &destination_path,
+                    metadata.len(),
+                    fallback_copy_bytes,
+                )?;
+            }
+        } else {
+            return Err(CodixingError::Config(format!(
+                "unsupported index artifact type: {}",
+                source_path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn copy_checkpoint_file(
+    source: &Path,
+    destination: &Path,
+    bytes: u64,
+    fallback_copy_bytes: &mut u64,
+) -> Result<()> {
+    let copied = fallback_copy_bytes.checked_add(bytes).ok_or_else(|| {
+        CodixingError::Config(
+            "checkpoint fallback copy size overflowed; run a full rebuild".to_string(),
+        )
+    })?;
+    if copied > MAX_CHECKPOINT_FALLBACK_COPY_BYTES {
+        return Err(CodixingError::Config(format!(
+            "checkpoint would copy more than {} MiB because hard links are unavailable or an explicitly detached control file is too large (run `codixing init` for a fresh generation)",
+            MAX_CHECKPOINT_FALLBACK_COPY_BYTES / (1024 * 1024)
+        )));
+    }
+    fs::copy(source, destination)?;
+    *fallback_copy_bytes = copied;
+    Ok(())
+}
+
 /// An extra shared lease retained by work that can outlive its [`Engine`],
 /// such as background embedding. When the work finishes, an inactive
 /// generation is reclaimed immediately instead of waiting for another init.
@@ -640,6 +798,104 @@ impl IndexStore {
         Ok(store)
     }
 
+    /// Acquire the repository-wide writer lease without blocking.
+    ///
+    /// Tantivy's own lock is generation-local, so it cannot prevent an older
+    /// writer from mutating generation A while another process prepares or
+    /// publishes generation B. This stable control-directory lock serializes
+    /// every writable Engine across generation switches.
+    pub(crate) fn try_acquire_writer_lock(root: &Path) -> Result<Option<fs::File>> {
+        let control_dir = root.join(CODEFORGE_DIR);
+        fs::create_dir_all(&control_dir)?;
+        require_real_directory(&control_dir, "index control directory")?;
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(control_dir.join(WRITER_LOCK_FILE))?;
+        if FileExt::try_lock_exclusive(&lock)? {
+            Ok(Some(lock))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Acquire the repository-wide writer lease, waiting for the current
+    /// writer to finish. Full initialization uses this blocking form.
+    pub(crate) fn acquire_writer_lock(root: &Path) -> Result<fs::File> {
+        let control_dir = root.join(CODEFORGE_DIR);
+        fs::create_dir_all(&control_dir)?;
+        require_real_directory(&control_dir, "index control directory")?;
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(control_dir.join(WRITER_LOCK_FILE))?;
+        FileExt::lock_exclusive(&lock)?;
+        Ok(lock)
+    }
+
+    /// Fork the currently loaded snapshot into an unpublished working
+    /// generation. Regular files are hard-linked when the filesystem permits,
+    /// so the fork is metadata-proportional; all writers replace files
+    /// atomically, providing file-level copy-on-write isolation.
+    pub(crate) fn begin_checkpoint(&self) -> Result<Self> {
+        let control_dir = self.control_dir();
+        let generations_dir = control_dir.join(GENERATIONS_DIR);
+        fs::create_dir_all(&generations_dir)?;
+        require_real_directory(&control_dir, "index control directory")?;
+        require_real_directory(&generations_dir, "index generations directory")?;
+
+        let rebuild_lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(control_dir.join(REBUILD_LOCK_FILE))?;
+        FileExt::lock_exclusive(&rebuild_lock)?;
+
+        let active_generation = Self::active_generation(&self.root)?;
+        if active_generation != self.generation {
+            return Err(CodixingError::Config(
+                "active index generation changed before checkpoint fork; reopen and retry"
+                    .to_string(),
+            ));
+        }
+
+        cleanup_abandoned_generations(&control_dir, std::time::Duration::ZERO);
+        let generation = new_generation_name();
+        let index_dir = generations_dir.join(&generation);
+        fs::create_dir(&index_dir)?;
+        let mut fallback_copy_bytes = 0u64;
+        if let Err(error) = clone_tree_copy_on_write(
+            &self.index_dir,
+            &index_dir,
+            self.generation.is_none(),
+            &mut fallback_copy_bytes,
+        ) {
+            let _ = fs::remove_dir_all(&index_dir);
+            return Err(error);
+        }
+        // The lease file is intentionally excluded from the COW clone. This is
+        // a brand-new unpublished generation, so create its independent lease
+        // before exposing the working store to the engine.
+        let generation_lease = acquire_or_create_generation_lease(&index_dir)?;
+
+        Ok(Self {
+            root: self.root.clone(),
+            index_dir,
+            generation: Some(generation),
+            rebuild_lock: Some(rebuild_lock),
+            generation_lease: Some(generation_lease),
+        })
+    }
+
+    pub(crate) fn owns_rebuild_lock(&self) -> bool {
+        self.rebuild_lock.is_some()
+    }
+
     /// Hold this generation open for background work that may outlive the
     /// owning engine. The returned guard also performs deferred cleanup if a
     /// newer generation becomes active before the work finishes.
@@ -683,6 +939,16 @@ impl IndexStore {
             CodixingError::Config("cannot publish a legacy index store as a generation".to_string())
         })?;
         validate_generation_name(generation)?;
+
+        // A legacy index may have only the v1 content-hash baseline. Direct
+        // incremental checkpoints write their successful changes to the small
+        // delta, so materialize the supported v1 baseline once before the v2
+        // publication validator runs. Missing both formats remains corruption
+        // and is still rejected below.
+        if !self.tree_hashes_v2_path().is_file() && self.tree_hashes_path().is_file() {
+            let hashes = self.load_tree_hashes_v2()?;
+            self.save_tree_hashes_v2(&hashes)?;
+        }
         self.validate_for_publication()?;
 
         // Flush the generation directory before publishing the pointer. The
@@ -704,7 +970,10 @@ impl IndexStore {
                 "failed to serialize active generation manifest: {e}"
             ))
         })?;
-        atomic_write(control_dir.join(ACTIVE_GENERATION_FILE), bytes)?;
+        // The directory fsync is part of the commit point. Otherwise a crash
+        // could roll the rename back after cleanup removed the old active
+        // generation.
+        atomic_write_durable(control_dir.join(ACTIVE_GENERATION_FILE), bytes)?;
 
         // Cleanup is deliberately non-fatal after the commit point. A failed
         // cleanup costs disk but must not turn a successful atomic activation
@@ -1113,7 +1382,7 @@ impl IndexStore {
 
     /// Path to the incremental-mutation write-ahead journal.
     pub fn dirty_paths_path(&self) -> PathBuf {
-        self.codixing_dir().join(DIRTY_PATHS_FILE)
+        self.control_dir().join(DIRTY_PATHS_FILE)
     }
 
     /// Path to the incremental hash overlay.
@@ -1481,12 +1750,56 @@ impl IndexStore {
     pub fn load_dirty_paths(&self) -> Result<Vec<PathBuf>> {
         let path = self.dirty_paths_path();
         if !path.exists() {
-            return Ok(Vec::new());
+            // Migrate the generation-local path-only journal written by older
+            // versions. It is intentionally read but not removed until a
+            // successful checkpoint publishes the replay.
+            let legacy_path = self.codixing_dir().join(DIRTY_PATHS_FILE);
+            if legacy_path == path || !legacy_path.exists() {
+                return Ok(Vec::new());
+            }
+            let bytes = fs::read(legacy_path)?;
+            return bitcode::deserialize(&bytes).map_err(|e| {
+                CodixingError::Serialization(format!(
+                    "failed to deserialize legacy dirty paths: {e}"
+                ))
+            });
         }
         let bytes = fs::read(path)?;
-        bitcode::deserialize(&bytes).map_err(|e| {
-            CodixingError::Serialization(format!("failed to deserialize dirty paths: {e}"))
-        })
+        let journal = decode_mutation_journal(&bytes)?;
+
+        // Publication is the durable commit point. If the process died after
+        // switching the manifest but before normalizing the journal, replay
+        // only paths whose mutation failed. Before the switch, replay every
+        // path because none of the working generation is visible yet.
+        let active_generation = Self::active_generation(&self.root)?;
+        if journal.working_generation == active_generation {
+            if !journal.retry_after_publish.is_empty() {
+                return Ok(journal.retry_after_publish);
+            }
+            let cleanup = (|| -> std::io::Result<()> {
+                remove_file_durable(&self.dirty_paths_path())?;
+                let legacy_path = self.codixing_dir().join(DIRTY_PATHS_FILE);
+                if legacy_path != self.dirty_paths_path() {
+                    remove_file_durable(&legacy_path)?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = cleanup {
+                tracing::warn!(
+                    %error,
+                    "completed mutation journal could not be removed; ignoring stale journal"
+                );
+            }
+            return Ok(Vec::new());
+        }
+        if journal.base_generation != active_generation {
+            tracing::warn!(
+                journal_base = ?journal.base_generation,
+                active = ?active_generation,
+                "mutation journal base changed; replaying paths against the current active snapshot"
+            );
+        }
+        Ok(journal.paths)
     }
 
     /// Atomically add paths to the incremental-mutation journal.
@@ -1499,35 +1812,99 @@ impl IndexStore {
         dirty.extend(paths.iter().cloned());
         let mut dirty: Vec<_> = dirty.into_iter().collect();
         dirty.sort_unstable();
-        let bytes = bitcode::serialize(&dirty).map_err(|e| {
-            CodixingError::Serialization(format!("failed to serialize dirty paths: {e}"))
+        let journal = MutationJournal {
+            version: MUTATION_JOURNAL_VERSION,
+            base_generation: Self::active_generation(&self.root)?,
+            working_generation: self.generation.clone(),
+            retry_after_publish: dirty.clone(),
+            paths: dirty,
+        };
+        let bytes = bitcode::serialize(&journal).map_err(|e| {
+            CodixingError::Serialization(format!("failed to serialize mutation journal: {e}"))
         })?;
         atomic_write_durable(self.dirty_paths_path(), bytes)?;
         Ok(())
     }
 
-    /// Atomically clear paths after every corresponding sidecar is durable.
-    pub fn clear_dirty_paths(&self, published: &std::collections::HashSet<PathBuf>) -> Result<()> {
-        if published.is_empty() || !self.dirty_paths_path().exists() {
+    /// Record the exact retry set before the manifest publication commit.
+    ///
+    /// Keeping both the original path set and the post-publication retry set
+    /// makes the manifest itself the crash-window discriminator: an abandoned
+    /// working generation replays all paths, while an activated generation
+    /// replays only failed paths.
+    pub fn prepare_dirty_paths_for_publication(
+        &self,
+        published: &std::collections::HashSet<PathBuf>,
+    ) -> Result<()> {
+        let path = self.dirty_paths_path();
+        if !path.exists() {
             return Ok(());
+        }
+        let bytes = fs::read(&path)?;
+        let mut journal = decode_mutation_journal(&bytes)?;
+        if journal.working_generation != self.generation {
+            return Err(CodixingError::Config(
+                "mutation journal does not belong to the working generation".to_string(),
+            ));
+        }
+        journal.retry_after_publish = journal
+            .paths
+            .iter()
+            .filter(|path| !published.contains(*path))
+            .cloned()
+            .collect();
+        journal.retry_after_publish.sort_unstable();
+        journal.retry_after_publish.dedup();
+        let bytes = bitcode::serialize(&journal).map_err(|e| {
+            CodixingError::Serialization(format!("failed to serialize mutation journal: {e}"))
+        })?;
+        atomic_write_durable(path, bytes)?;
+        Ok(())
+    }
+
+    /// Normalize the retry set after a successful manifest publication.
+    pub fn clear_dirty_paths(&self, published: &std::collections::HashSet<PathBuf>) -> Result<()> {
+        if published.is_empty() {
+            return Ok(());
+        }
+        let active_generation = Self::active_generation(&self.root)?;
+        if self.generation != active_generation {
+            return Err(CodixingError::Config(
+                "mutation paths may only be cleared after generation publication".to_string(),
+            ));
         }
         let mut dirty = self.load_dirty_paths()?;
         dirty.retain(|path| !published.contains(path));
         dirty.sort_unstable();
-        let bytes = bitcode::serialize(&dirty).map_err(|e| {
-            CodixingError::Serialization(format!("failed to serialize dirty paths: {e}"))
-        })?;
-        atomic_write_durable(self.dirty_paths_path(), bytes)?;
+        if dirty.is_empty() {
+            remove_file_durable(&self.dirty_paths_path())?;
+            let legacy_path = self.codixing_dir().join(DIRTY_PATHS_FILE);
+            if legacy_path != self.dirty_paths_path() {
+                remove_file_durable(&legacy_path)?;
+            }
+        } else {
+            let journal = MutationJournal {
+                version: MUTATION_JOURNAL_VERSION,
+                base_generation: active_generation,
+                working_generation: None,
+                retry_after_publish: dirty.clone(),
+                paths: dirty,
+            };
+            let bytes = bitcode::serialize(&journal).map_err(|e| {
+                CodixingError::Serialization(format!("failed to serialize mutation journal: {e}"))
+            })?;
+            atomic_write_durable(self.dirty_paths_path(), bytes)?;
+        }
         Ok(())
     }
 
     /// Reset the mutation journal after a complete authoritative rebuild.
     pub fn clear_all_dirty_paths(&self) -> Result<()> {
-        let empty: Vec<PathBuf> = Vec::new();
-        let bytes = bitcode::serialize(&empty).map_err(|e| {
-            CodixingError::Serialization(format!("failed to serialize dirty paths: {e}"))
-        })?;
-        atomic_write_durable(self.dirty_paths_path(), bytes)?;
+        remove_file_durable(&self.dirty_paths_path())?;
+        let legacy_path = self.codixing_dir().join(DIRTY_PATHS_FILE);
+        if legacy_path != self.dirty_paths_path() {
+            remove_file_durable(&legacy_path)?;
+        }
         Ok(())
     }
 
@@ -1949,5 +2326,38 @@ mod tests {
         assert_eq!(loaded[0].1.content_hash, 0xDEADBEEF);
         assert_eq!(loaded[0].1.mtime_secs, 0);
         assert_eq!(loaded[0].1.size, 0);
+    }
+
+    #[test]
+    fn legacy_flat_path_only_journal_loads_from_the_control_path() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let store = IndexStore::init(root, &IndexConfig::new(root)).unwrap();
+        let expected = vec![root.join("src/lib.rs"), root.join("src/main.rs")];
+        let bytes = bitcode::serialize(&expected).unwrap();
+        atomic_write_durable(store.dirty_paths_path(), bytes).unwrap();
+
+        assert_eq!(store.load_dirty_paths().unwrap(), expected);
+        let published = expected.iter().cloned().collect();
+        store.clear_dirty_paths(&published).unwrap();
+        assert!(!store.dirty_paths_path().exists());
+    }
+
+    #[test]
+    fn version_one_mutation_journal_migrates_conservatively() {
+        let expected = vec![PathBuf::from("src/lib.rs"), PathBuf::from("src/main.rs")];
+        let legacy = MutationJournalV1 {
+            version: 1,
+            base_generation: Some("generation-a".to_string()),
+            working_generation: Some("generation-b".to_string()),
+            paths: expected.clone(),
+        };
+
+        let decoded = decode_mutation_journal(&bitcode::serialize(&legacy).unwrap()).unwrap();
+        assert_eq!(decoded.version, MUTATION_JOURNAL_VERSION);
+        assert_eq!(decoded.base_generation, legacy.base_generation);
+        assert_eq!(decoded.working_generation, legacy.working_generation);
+        assert_eq!(decoded.paths, expected);
+        assert_eq!(decoded.retry_after_publish, expected);
     }
 }

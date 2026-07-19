@@ -390,6 +390,13 @@ pub struct Engine {
     pub(super) concept_reranker: std::sync::OnceLock<Option<Arc<Reranker>>>,
     /// TOML-based output filter pipeline with tee recovery.
     filter_pipeline: FilterPipeline,
+    /// Stable control-directory writer lease. Tantivy locks only one
+    /// generation, so this lock is what serializes writers across checkpoint
+    /// publication and prevents an obsolete generation from being mutated.
+    pub(super) writer_lock: Option<std::fs::File>,
+    /// Changed-file results accumulated by the daemon's deferred hot path.
+    /// Repository-wide sidecars are rebuilt once when the batch checkpoints.
+    pub(in crate::engine) pending_checkpoint: sync::ApplyChangesOutcome,
     /// Keep the store last so its generation lease is released only after
     /// Tantivy readers and memory maps have closed. This is required for safe
     /// cleanup of superseded generations on Windows.

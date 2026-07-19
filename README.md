@@ -60,6 +60,11 @@ most 32 vocabulary terms are paired per file, 12 expansions are retained per
 term, and concept clusters retain at most 32 symbols / 16 files. Their v2 files
 intern repeated paths and names, and every sync invalidates them before a bounded
 rebuild so large-repo searches never use stale semantic mappings.
+Once initialized, MCP watcher updates stay proportional to the edited files:
+changes accumulate in an unpublished copy-on-write generation and publish after
+2 seconds idle, 30 seconds maximum, or 256 paths. Existing readers keep their
+complete old snapshot, interrupted batches replay automatically, and a true
+no-op sync does not create another generation.
 
 ---
 
@@ -378,6 +383,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Streaming embeddings** — Fixed-window batch processing (256 chunks) with progress reporting; incremental vector reuse via content hashing
 - **Federation auto-discovery** — Auto-detects Cargo, npm, pnpm, Go workspaces, git submodules, and nested projects; lazy federation keeps a bounded stable resident set and searches overflow projects through short-lived read-only engines instead of churning the whole cache
 - **Read-only concurrent access** — CLI analysis/search commands and federated project members open the index without probing or owning the Tantivy writer lock, so reads start immediately alongside sync/indexing; periodic reload detects writer updates automatically
+- **Changed-file checkpoints** — Incremental updates hard-link immutable artifacts into an unpublished generation, retain a mmap-backed symbol overlay and tombstoned file-trigram updates while edits arrive, then atomically publish once per 2 s idle / 30 s maximum / 256-path batch. A durable path journal recovers interrupted work; unsupported hard-link filesystems fail before copying more than 64 MiB instead of silently duplicating a multi-GB index
 - **Incremental embedding** — `sync` skips re-embedding unchanged chunks (content hash comparison)
 - **Cosmetic-edit embedding reuse** — `sync` computes a deterministic per-file *signature fingerprint* (symbol signatures, imports, exports) from the AST; when a file's content changed but its fingerprint did not (a comment/whitespace/internal-logic edit), it refreshes BM25/symbols but reuses the cached embedding vectors instead of recomputing them. Conservative: any file without a stable fingerprint re-embeds
 - **Progress notifications** — Long-running MCP tools emit `notifications/progress` with streaming partial results so agents see live status

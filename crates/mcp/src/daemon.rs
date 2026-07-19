@@ -27,6 +27,9 @@ static LAST_ACTIVITY: AtomicU64 = AtomicU64::new(0);
 
 /// Idle timeout: daemon exits after 30 minutes with no client connections.
 const IDLE_TIMEOUT_MS: u64 = 30 * 60 * 1000;
+const CHECKPOINT_IDLE: Duration = Duration::from_secs(2);
+const CHECKPOINT_MAX_AGE: Duration = Duration::from_secs(30);
+const CHECKPOINT_MAX_PATHS: usize = 256;
 
 pub(crate) fn touch_activity() {
     let now = SystemTime::now()
@@ -78,7 +81,8 @@ pub(crate) async fn run_daemon(
 
     // Spawn an idle-timeout watchdog: check every 60s and exit if no client
     // activity for IDLE_TIMEOUT_MS (30 minutes).
-    tokio::spawn(async {
+    let engine_for_idle = Arc::clone(&engine);
+    tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
             interval.tick().await;
@@ -88,6 +92,12 @@ pub(crate) async fn run_daemon(
                 .unwrap()
                 .as_millis() as u64;
             if now.saturating_sub(last) > IDLE_TIMEOUT_MS {
+                let mut engine = engine_for_idle
+                    .write()
+                    .unwrap_or_else(|error| error.into_inner());
+                if let Err(error) = engine.checkpoint_pending_changes() {
+                    warn!(%error, "daemon: final idle checkpoint failed; recovery journal retained");
+                }
                 info!("daemon idle for >30 min — shutting down");
                 std::process::exit(0);
             }
@@ -133,10 +143,30 @@ pub(crate) async fn run_daemon(
 
         info!(root = %config.root.display(), "daemon: file watcher started");
 
+        let mut pending_since: Option<std::time::Instant> = None;
+        let mut pending_paths = 0usize;
         loop {
             // Poll with a 2-second timeout so the thread isn't pinned at 100% CPU.
             let changes = watcher.poll_changes(Duration::from_secs(2));
             if changes.is_empty() {
+                if pending_since.is_some_and(|started| started.elapsed() >= CHECKPOINT_IDLE) {
+                    let mut eng = engine_for_watch
+                        .write()
+                        .unwrap_or_else(|error| error.into_inner());
+                    // `apply_changes` always attempts publication even when a
+                    // retried path fails, so successful siblings cannot remain
+                    // stranded behind one persistent error.
+                    match eng.apply_changes(&[]) {
+                        Ok(()) => {
+                            pending_since = None;
+                            pending_paths = 0;
+                            info!("daemon: idle index checkpoint published");
+                        }
+                        Err(error) => {
+                            warn!(%error, "daemon: idle index checkpoint failed; will retry");
+                        }
+                    }
+                }
                 continue;
             }
 
@@ -171,9 +201,28 @@ pub(crate) async fn run_daemon(
                 count = all_changes.len(),
                 "daemon: file changes detected, updating index"
             );
+            let changed_path_count = all_changes.len();
             let mut eng = engine_for_watch.write().unwrap_or_else(|e| e.into_inner());
-            if let Err(e) = eng.apply_changes(&all_changes) {
-                warn!(error = %e, "daemon: apply_changes failed");
+            let apply_result = eng.apply_changes_deferred(&all_changes);
+            pending_since.get_or_insert_with(std::time::Instant::now);
+            pending_paths = pending_paths.saturating_add(changed_path_count);
+            if let Err(error) = apply_result {
+                warn!(%error, "daemon: deferred apply failed; journal retained for retry");
+            }
+
+            let checkpoint_due = pending_paths >= CHECKPOINT_MAX_PATHS
+                || pending_since.is_some_and(|started| started.elapsed() >= CHECKPOINT_MAX_AGE);
+            if checkpoint_due {
+                match eng.checkpoint_pending_changes() {
+                    Ok(()) => {
+                        pending_since = None;
+                        pending_paths = 0;
+                        info!("daemon: bounded index checkpoint published");
+                    }
+                    Err(error) => {
+                        warn!(%error, "daemon: bounded index checkpoint failed; will retry");
+                    }
+                }
             }
         }
     });

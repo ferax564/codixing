@@ -66,6 +66,9 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 - `crates/mcp/` — MCP server (`codixing-mcp`) with generated tool definitions and profile-filtered discovery (`tool_defs/*.toml`)
 - `crates/server/` — HTTP API server (`codixing-server`), REST endpoints with SSE streaming for sync
 - `crates/core/src/federation/` — cross-repo federated search (`--federation config.json`)
+- `crates/core/src/persistence/` — immutable generation publication, stable
+  single-writer lease, copy-on-write incremental checkpoints, and durable
+  changed-path recovery journal
 - `crates/lsp/` — LSP server (`codixing-lsp`), hover/go-to-def/refs/symbols/call hierarchy/complexity diagnostics/rename/semantic tokens
 - `claude-plugin/` — Claude Code plugin with 5 skills + MCP server config
 - `.codixing/` — index control files plus atomically activated data generations
@@ -302,6 +305,14 @@ The Codixing index lives in `.codixing/`. After significant file changes, sync i
 ```bash
 ./target/release/codixing sync .
 ```
+
+The MCP daemon batches watcher mutations into an unpublished checkpoint and
+publishes after 2 seconds idle, 30 seconds maximum age, or 256 changed paths.
+Do not write generation artifacts in place: fork through `IndexStore`, replace
+mutable sidecars atomically, and make the active-generation manifest the last
+durable write. A no-op sync must not fork or publish. On filesystems without
+hard-link support, incremental fallback copying is capped at 64 MiB; use a full
+`codixing init` rather than duplicating a large index.
 
 To rebuild from scratch (BgeSmallEn is the recommended model — fastest init, good retrieval):
 ```bash
