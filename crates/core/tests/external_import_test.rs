@@ -148,7 +148,7 @@ fn reimport_replaces_prior_documents_for_the_source() {
     let (_dir, mut engine) = init_repo();
 
     let v1 = r#"[
-      {"number": 1, "title": "One", "body": "first", "state": "open"},
+      {"number": 1, "title": "One", "body": "legacyexternalmarker", "state": "open"},
       {"number": 2, "title": "Two", "body": "second", "state": "open"}
     ]"#;
     let s1 = engine
@@ -156,9 +156,15 @@ fn reimport_replaces_prior_documents_for_the_source() {
         .unwrap();
     assert_eq!(s1.documents, 2);
     assert_eq!(s1.replaced, 0);
+    assert!(
+        !engine
+            .search(SearchQuery::new("legacyexternalmarker").with_strategy(Strategy::Exact))
+            .unwrap()
+            .is_empty()
+    );
 
     // Re-import a smaller set: the old github docs are cleared first.
-    let v2 = r#"[{"number": 1, "title": "One revised", "body": "rewritten", "state": "closed"}]"#;
+    let v2 = r#"[{"number": 1, "title": "One revised", "body": "replacementexternalmarker", "state": "closed"}]"#;
     let s2 = engine
         .import_external(codixing_core::external::github::parse_bytes(v2.as_bytes()).unwrap())
         .unwrap();
@@ -178,6 +184,20 @@ fn reimport_replaces_prior_documents_for_the_source() {
         all.iter()
             .all(|r| r.file_path != "_external/github/issue-2.md"),
         "issue-2 should have been removed on re-import"
+    );
+    assert!(
+        engine
+            .search(SearchQuery::new("legacyexternalmarker").with_strategy(Strategy::Exact))
+            .unwrap()
+            .is_empty(),
+        "exact search must remove the replaced external body"
+    );
+    assert!(
+        !engine
+            .search(SearchQuery::new("replacementexternalmarker").with_strategy(Strategy::Exact))
+            .unwrap()
+            .is_empty(),
+        "exact search must include the replacement external body"
     );
 }
 

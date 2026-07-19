@@ -1463,12 +1463,23 @@ impl FileTrigramIndex {
     /// Scan, sort, and deduplicate one file's trigrams without touching the
     /// shared index. Init workers use this before taking the short merge lock.
     pub(crate) fn prepare_trigrams(content: &[u8]) -> Vec<[u8; 3]> {
-        if content.len() < 3 {
-            return Vec::new();
+        Self::prepare_contents(std::iter::once(content))
+    }
+
+    /// Scan several representations of one file and return their deduplicated
+    /// trigram union. Exact search uses this to cover parser-produced chunk
+    /// text while grep retains the trigrams from the original source bytes.
+    pub(crate) fn prepare_contents<'a>(
+        contents: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Vec<[u8; 3]> {
+        let mut trigrams = Vec::new();
+        for content in contents {
+            trigrams.extend(
+                content
+                    .windows(3)
+                    .map(|window| [window[0], window[1], window[2]]),
+            );
         }
-        let mut trigrams: Vec<[u8; 3]> = (0..content.len() - 2)
-            .map(|i| [content[i], content[i + 1], content[i + 2]])
-            .collect();
         trigrams.sort_unstable();
         trigrams.dedup();
         trigrams
@@ -1539,6 +1550,54 @@ impl FileTrigramIndex {
                 })
                 .collect(),
         )
+    }
+
+    /// Visit candidate file paths for a literal without materializing a
+    /// corpus-sized candidate vector.
+    ///
+    /// Returns `Ok(None)` when `literal` is shorter than three bytes and a
+    /// trigram pre-filter cannot be applied. Otherwise every live file that
+    /// contains all required trigrams is passed to `visit` exactly once.
+    /// Callers must still verify the full literal against stored content,
+    /// because trigram intersection can produce false positives.
+    pub(crate) fn visit_literal_candidates<'a>(
+        &'a self,
+        literal: &[u8],
+        mut visit: impl FnMut(&'a str) -> Result<()>,
+    ) -> Result<Option<()>> {
+        if literal.len() < 3 {
+            return Ok(None);
+        }
+
+        let mut trigrams: Vec<[u8; 3]> = (0..literal.len() - 2)
+            .map(|i| [literal[i], literal[i + 1], literal[i + 2]])
+            .collect();
+        trigrams.sort_unstable();
+        trigrams.dedup();
+
+        let mut lists: Vec<&Vec<u32>> = Vec::with_capacity(trigrams.len());
+        for trigram in &trigrams {
+            let Some(list) = self.index.get(trigram) else {
+                return Ok(Some(()));
+            };
+            lists.push(list);
+        }
+        lists.sort_unstable_by_key(|list| list.len());
+
+        let (shortest, remaining) = lists.split_first().expect("literal has a trigram");
+        for &file_id in shortest.iter() {
+            if remaining
+                .iter()
+                .all(|list| list.binary_search(&file_id).is_ok())
+            {
+                let path = self.files[file_id as usize].as_str();
+                if !path.is_empty() {
+                    visit(path)?;
+                }
+            }
+        }
+
+        Ok(Some(()))
     }
 
     /// Returns candidate file paths given a set of trigrams that **all** must
@@ -1932,6 +1991,103 @@ mod tests {
         let candidates = idx.search("HashMap");
         // search() returns candidate chunk IDs (deduplicated).
         assert_eq!(candidates, vec![1]);
+    }
+
+    #[test]
+    fn streaming_file_candidates_match_collecting_api() {
+        let mut idx = FileTrigramIndex::new();
+        idx.add("src/a.rs", b"aaaa shared_literal");
+        idx.add("src/b.rs", b"prefix shared_literal suffix");
+        idx.add("src/c.rs", b"unrelated");
+
+        let mut expected = idx
+            .candidates_for_literal(b"shared_literal")
+            .unwrap()
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let mut streamed = Vec::new();
+        assert!(
+            idx.visit_literal_candidates(b"shared_literal", |path| {
+                streamed.push(path.to_string());
+                Ok(())
+            })
+            .unwrap()
+            .is_some()
+        );
+        expected.sort_unstable();
+        streamed.sort_unstable();
+
+        assert_eq!(streamed, expected);
+    }
+
+    #[test]
+    fn streaming_file_candidates_deduplicate_repeated_trigrams_and_skip_tombstones() {
+        let mut idx = FileTrigramIndex::new();
+        idx.add("src/removed.rs", b"aaaaaaaa");
+        idx.add("src/live.rs", b"aaaaaaaa");
+        idx.remove_file("src/removed.rs");
+
+        let mut streamed = Vec::new();
+        idx.visit_literal_candidates(b"aaaaaa", |path| {
+            streamed.push(path.to_string());
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(streamed, vec!["src/live.rs"]);
+    }
+
+    #[test]
+    fn streaming_file_candidates_report_short_literal_fallback() {
+        let mut idx = FileTrigramIndex::new();
+        idx.add("src/a.rs", b"ab");
+        let mut visited = false;
+
+        let applied = idx
+            .visit_literal_candidates(b"ab", |_| {
+                visited = true;
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(applied.is_none());
+        assert!(!visited);
+    }
+
+    #[test]
+    fn file_trigram_unions_raw_and_transformed_content_and_replaces_the_path() {
+        let mut idx = FileTrigramIndex::new();
+        let raw = b"encoded: decoded\\u0020marker".as_slice();
+        let transformed = b"decoded marker".as_slice();
+        let trigrams = FileTrigramIndex::prepare_contents([raw, transformed]);
+        idx.add_prepared("analysis.ipynb", &trigrams);
+
+        assert_eq!(
+            idx.candidates_for_literal(b"decoded marker").unwrap(),
+            vec!["analysis.ipynb"]
+        );
+        assert_eq!(
+            idx.candidates_for_literal(b"decoded\\u0020marker").unwrap(),
+            vec!["analysis.ipynb"]
+        );
+
+        idx.remove_file("analysis.ipynb");
+        let replacement = FileTrigramIndex::prepare_contents([
+            b"encoded: replacement\\u0020marker".as_slice(),
+            b"replacement marker",
+        ]);
+        idx.add_prepared("analysis.ipynb", &replacement);
+
+        assert!(
+            idx.candidates_for_literal(b"decoded marker")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            idx.candidates_for_literal(b"replacement marker").unwrap(),
+            vec!["analysis.ipynb"]
+        );
     }
 
     #[test]

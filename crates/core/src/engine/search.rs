@@ -11,6 +11,22 @@ use crate::retriever::{DocFilter, Retriever, SearchQuery, SearchResult, SourceFi
 use super::Engine;
 use super::pipeline::{SearchContext, SearchPipeline};
 
+/// Quote user text before passing an exact-search fallback through Tantivy's
+/// query parser. Exact queries are literals, so characters such as `:` must
+/// never be interpreted as field syntax.
+fn quote_query_literal(query: &str) -> String {
+    let mut quoted = String::with_capacity(query.len() + 2);
+    quoted.push('"');
+    for character in query.chars() {
+        if matches!(character, '\\' | '"') {
+            quoted.push('\\');
+        }
+        quoted.push(character);
+    }
+    quoted.push('"');
+    quoted
+}
+
 impl Engine {
     /// Search the index using the strategy specified in `query`.
     ///
@@ -362,88 +378,102 @@ impl Engine {
         Ok(fused)
     }
 
-    /// Trigram-index fast-path for exact identifier lookups.
+    /// File-trigram fast-path for exact identifier lookups.
     ///
-    /// Phase 1: query the trigram inverted index for sub-millisecond exact
-    ///          substring matching.
+    /// Phase 1: stream candidate files from the file trigram index and hydrate
+    ///          only their chunks from Tantivy.
     /// Phase 2: if trigram yields < 3 results, fall back to BM25 and merge.
     ///
-    /// Results are hydrated from chunk_meta and scored by match count.
+    /// Results are verified against stored chunk content and scored by match count.
     fn search_exact(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
-        let candidate_ids = self.get_trigram().search(&query.query);
-
-        // Verify candidates and count actual substring matches using chunk content.
-        // Hydrate in bounded batches: a common identifier can hit millions of
-        // chunks in a monorepo, and materializing every stored body at once
-        // defeats compact metadata even though the caller only needs top-k.
-        const HYDRATE_BATCH_SIZE: usize = 2_048;
+        const FILE_BATCH_SIZE: usize = 64;
         let retained_limit = query.limit.max(3);
         let mut results: Vec<SearchResult> = Vec::new();
-        for candidate_batch in candidate_ids.chunks(HYDRATE_BATCH_SIZE) {
-            let missing_content_ids: std::collections::HashSet<u64> = candidate_batch
-                .iter()
-                .filter_map(|chunk_id| {
-                    let meta = self.chunk_meta.get(chunk_id)?;
-                    if let Some(ref filter) = query.file_filter
-                        && !meta.file_path.contains(filter.as_str())
-                    {
-                        return None;
-                    }
-                    meta.content.is_empty().then_some(*chunk_id)
-                })
-                .collect();
-            let hydrated_contents = self.tantivy.lookup_chunk_contents(&missing_content_ids)?;
 
-            for &chunk_id in candidate_batch {
-                if let Some(meta) = self.chunk_meta.get(&chunk_id) {
-                    // Apply file filter if set.
-                    if let Some(ref filter) = query.file_filter
-                        && !meta.file_path.contains(filter.as_str())
-                    {
-                        continue;
-                    }
-                    // Get content for verification: from meta if available, else from Tantivy.
-                    let content = if meta.content.is_empty() {
-                        hydrated_contents
-                            .get(&chunk_id)
-                            .cloned()
-                            .unwrap_or_default()
-                    } else {
-                        meta.content.clone()
-                    };
-                    // Verify actual substring match and count occurrences.
-                    let hit_count = content.matches(&query.query).count();
-                    if hit_count == 0 {
-                        continue; // Trigram false positive.
-                    }
-                    results.push(SearchResult {
-                        chunk_id: format!("{chunk_id}"),
-                        file_path: meta.file_path.clone(),
-                        language: meta.language.clone(),
-                        score: hit_count as f32,
-                        line_start: meta.line_start,
-                        line_end: meta.line_end,
-                        signature: meta.signature.clone(),
-                        scope_chain: meta.scope_chain.clone(),
-                        content,
-                    });
+        let mut candidate_files = Vec::with_capacity(FILE_BATCH_SIZE);
+        let flush_candidates =
+            |candidate_files: &mut Vec<String>, results: &mut Vec<SearchResult>| -> Result<()> {
+                self.tantivy
+                    .visit_chunks_by_file_paths(candidate_files, |chunk_id, content| {
+                        let Some(meta) = self.chunk_meta.get(&chunk_id) else {
+                            return Ok(());
+                        };
+                        if let Some(ref filter) = query.file_filter
+                            && !meta.file_path.contains(filter.as_str())
+                        {
+                            return Ok(());
+                        }
+
+                        let hit_count = content.matches(&query.query).count();
+                        if hit_count == 0 {
+                            return Ok(());
+                        }
+                        results.push(SearchResult {
+                            chunk_id: format!("{chunk_id}"),
+                            file_path: meta.file_path.clone(),
+                            language: meta.language.clone(),
+                            score: hit_count as f32,
+                            line_start: meta.line_start,
+                            line_end: meta.line_end,
+                            signature: meta.signature.clone(),
+                            scope_chain: meta.scope_chain.clone(),
+                            content,
+                        });
+
+                        // Keep result bodies bounded even when one selected
+                        // file contains a very large number of matching chunks.
+                        if results.len() > retained_limit.saturating_mul(2) {
+                            results.sort_by(|a, b| {
+                                b.score
+                                    .partial_cmp(&a.score)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                    .then_with(|| a.file_path.cmp(&b.file_path))
+                                    .then_with(|| a.line_start.cmp(&b.line_start))
+                                    .then_with(|| a.chunk_id.cmp(&b.chunk_id))
+                            });
+                            results.truncate(retained_limit);
+                        }
+                        Ok(())
+                    })?;
+                candidate_files.clear();
+                Ok(())
+            };
+
+        // Raw source bytes are indexed before lossy UTF-8 conversion. A query
+        // containing the replacement character can therefore appear in stored
+        // chunk text without appearing in the raw-byte trigram index. Preserve
+        // exact-search semantics by scanning known files for this rare case.
+        if query.query.contains('\u{FFFD}') {
+            for file_path in self.file_chunk_counts.keys() {
+                if let Some(ref filter) = query.file_filter
+                    && !file_path.contains(filter.as_str())
+                {
+                    continue;
+                }
+                candidate_files.push(file_path.clone());
+                if candidate_files.len() == FILE_BATCH_SIZE {
+                    flush_candidates(&mut candidate_files, &mut results)?;
                 }
             }
-
-            // Bound retained result bodies while preserving the globally best
-            // scores seen so far. Keep at least three so BM25 fallback semantics
-            // remain unchanged when a caller requests fewer than three hits.
-            if results.len() > retained_limit.saturating_mul(2) {
-                results.sort_by(|a, b| {
-                    b.score
-                        .partial_cmp(&a.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| a.file_path.cmp(&b.file_path))
-                        .then_with(|| a.line_start.cmp(&b.line_start))
-                        .then_with(|| a.chunk_id.cmp(&b.chunk_id))
-                });
-                results.truncate(retained_limit);
-            }
+        } else {
+            self.get_file_trigram().visit_literal_candidates(
+                query.query.as_bytes(),
+                |file_path| {
+                    if let Some(ref filter) = query.file_filter
+                        && !file_path.contains(filter.as_str())
+                    {
+                        return Ok(());
+                    }
+                    candidate_files.push(file_path.to_string());
+                    if candidate_files.len() == FILE_BATCH_SIZE {
+                        flush_candidates(&mut candidate_files, &mut results)?;
+                    }
+                    Ok(())
+                },
+            )?;
+        }
+        if !candidate_files.is_empty() {
+            flush_candidates(&mut candidate_files, &mut results)?;
         }
 
         // Sort by score descending.
@@ -459,6 +489,7 @@ impl Engine {
         // If trigram yields < 3 results, augment with BM25.
         if results.len() < 3 {
             let bm25_query = SearchQuery {
+                query: quote_query_literal(&query.query),
                 strategy: Strategy::Instant,
                 ..query.clone()
             };

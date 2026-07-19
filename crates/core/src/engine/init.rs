@@ -180,40 +180,20 @@ impl Engine {
             .into_inner()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        // Build graph and the chunk trigram index in parallel — they read from
-        // shared DashMaps but don't write to each other. The file trigram index
-        // was populated from each exact source read during the primary pass.
-        let (graph, trigram_idx) = rayon::join(
-            || {
-                // Graph construction
-                if config.graph.enabled {
-                    let mut g =
-                        build_graph(&indexed_files, &root, &config, &parser, &pending_imports);
-                    // Resolve call-site edges using the now-complete symbol table.
-                    add_call_edges(&mut g, &symbols, &pending_calls);
-                    // Resolve doc symbol references into DocumentedBy edges.
-                    add_doc_edges(&mut g, &symbols, &pending_doc_refs);
-                    // Populate the symbol-level inner graph with function-level call edges.
-                    populate_symbol_graph(&mut g, pending_symbol_graph);
-                    let scores =
-                        compute_pagerank(&g, config.graph.damping, config.graph.iterations);
-                    g.apply_pagerank(&scores);
-                    Some(g)
-                } else {
-                    None
-                }
-            },
-            || {
-                // Trigram index construction (chunk + file level)
-                let mut tri = crate::index::TrigramIndex::new();
-                tri.build_batch(
-                    chunk_meta_map
-                        .iter()
-                        .map(|e| (*e.key(), e.value().content.clone())),
-                );
-                tri
-            },
-        );
+        // Build the graph after parsing. The file trigram index was populated
+        // from each exact source read during the primary pass and now serves
+        // both grep pre-filtering and exact-search candidate selection.
+        let graph = if config.graph.enabled {
+            let mut g = build_graph(&indexed_files, &root, &config, &parser, &pending_imports);
+            add_call_edges(&mut g, &symbols, &pending_calls);
+            add_doc_edges(&mut g, &symbols, &pending_doc_refs);
+            populate_symbol_graph(&mut g, pending_symbol_graph);
+            let scores = compute_pagerank(&g, config.graph.damping, config.graph.iterations);
+            g.apply_pagerank(&scores);
+            Some(g)
+        } else {
+            None
+        };
 
         // These parse-phase caches have reached their final consumers. Free
         // them before concept/reformulation construction and persistence so
@@ -230,7 +210,7 @@ impl Engine {
         }
 
         // BM25-only init has finished every consumer of in-memory source bodies
-        // (Tantivy and both trigram indexes are complete). Release that corpus
+        // (Tantivy and the file trigram index are complete). Release that corpus
         // copy before semantic construction so their bounded maps do not stack
         // on top of the largest resident allocation.
         if embedder.is_none() {
@@ -243,11 +223,7 @@ impl Engine {
         // mappings behind.
         super::semantic_artifacts::rebuild_semantic_artifacts(&store, &symbols, graph.as_ref())?;
 
-        // Persist trigram indexes.
-        trigram_idx.save_mmap_binary_v3(
-            &store.chunk_trigram_path(),
-            crate::index::trigram::PostingCodec::DeltaVarint,
-        )?;
+        // Persist the shared file-level trigram index.
         ft_idx.save_binary(&store.file_trigram_path())?;
 
         let (graph_nodes, graph_edges) = graph
@@ -503,12 +479,10 @@ impl Engine {
         let session = Arc::new(SessionState::with_root(true, &root));
         session.cleanup_old_sessions();
 
-        // The freshly-built auxiliary indexes have already been persisted.
-        // Release their construction-time HashMaps and let the existing lazy
-        // loaders reopen them on demand (the chunk trigram then uses mmap).
-        drop(trigram_idx);
+        // The freshly-built auxiliary index has already been persisted.
+        // Release its construction-time HashMaps and let the lazy loader
+        // reopen it on demand.
         drop(ft_idx);
-        let trigram = std::sync::OnceLock::new();
         let file_trigram = std::sync::OnceLock::new();
 
         let filter_pipeline = FilterPipeline::load(&store.control_dir());
@@ -530,7 +504,6 @@ impl Engine {
             concept_index: std::sync::OnceLock::new(),
             reformulations: std::sync::OnceLock::new(),
             reranker,
-            trigram,
             session,
             shared_session: SharedSession::with_persistence_or_default(&shared_session_path),
             read_only: false,
@@ -792,11 +765,7 @@ impl Engine {
             .ok()
             .and_then(|m| m.modified().ok());
 
-        // Trigram indexes are lazy-loaded on first use via OnceLock.
-        // The 175MB chunk trigram takes ~55s to deserialize — too slow for
-        // eager loading. Stays lazy so open() is fast; only paid on first
-        // exact-strategy search.
-        let trigram = std::sync::OnceLock::new();
+        // The shared file trigram is lazy-loaded on first grep/exact search.
         let file_trigram = std::sync::OnceLock::new();
         let filter_pipeline = FilterPipeline::load(&store.control_dir());
         let shared_session_path = store.control_dir().join("shared_session.jsonl");
@@ -815,7 +784,6 @@ impl Engine {
             concept_index,
             reformulations,
             reranker,
-            trigram,
             session,
             shared_session: SharedSession::with_persistence_or_default(&shared_session_path),
             read_only,
@@ -1006,7 +974,7 @@ impl Engine {
             .ok()
             .and_then(|m| m.modified().ok());
 
-        // Trigram indexes are lazy-loaded on first use via OnceLock.
+        // The shared file trigram is lazy-loaded on first grep/exact search.
         let filter_pipeline = FilterPipeline::load(&store.control_dir());
         let shared_session_path = store.control_dir().join("shared_session.jsonl");
 
@@ -1024,7 +992,6 @@ impl Engine {
             concept_index,
             reformulations,
             reranker,
-            trigram: std::sync::OnceLock::new(),
             session,
             shared_session: SharedSession::with_persistence_or_default(&shared_session_path),
             read_only: true,

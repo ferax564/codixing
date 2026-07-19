@@ -321,7 +321,7 @@ ORT_DYLIB_PATH=/absolute/path/to/libonnxruntime.so \
 | 10K files | Regex (`process_widget_\d+`) | 2.6ms | 1.2ms | ~1× (matches all files) |
 | 20 files | Literal (`process_batch`) | 258µs | 263µs | ~1× (too few files) |
 
-Trigram pre-filtering provides massive speedups for **selective** patterns (identifiers, specific strings) at scale. Patterns that match most files see no benefit — this is expected and correct (the trigram index can't eliminate candidates that genuinely match).
+Trigram pre-filtering provides massive speedups for **selective** patterns (identifiers, specific strings) at scale. Patterns that match most files see no benefit — this is expected and correct (the trigram index can't eliminate candidates that genuinely match). The persisted file-level index is shared by `grep` and `Strategy::Exact`; exact search streams candidate paths in bounded batches and verifies stored Tantivy chunks. Fresh indexes do not write a separate `chunk_trigram.bin`.
 
 ### Release-to-release perf comparison
 

@@ -4,9 +4,9 @@ use std::sync::Mutex;
 
 use tantivy::collector::TopDocs;
 use tantivy::query::{QueryParser, TermSetQuery};
-use tantivy::schema::{Field, Value};
+use tantivy::schema::{Field, IndexRecordOption, Value};
 use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
-use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, Term, doc};
+use tantivy::{DocSet, Index, IndexReader, IndexWriter, ReloadPolicy, TERMINATED, Term, doc};
 
 use crate::chunker::Chunk;
 use crate::config::Bm25Config;
@@ -794,6 +794,59 @@ impl TantivyIndex {
         Ok(self.lookup_chunk_contents(&ids)?.remove(&chunk_id))
     }
 
+    /// Visit every live chunk whose exact file path is in `file_paths`.
+    ///
+    /// Walks the exact-path posting lists directly, so memory stays bounded by
+    /// one hydrated stored document rather than a `TopDocs` heap containing
+    /// every chunk in the selected files.
+    pub(crate) fn visit_chunks_by_file_paths(
+        &self,
+        file_paths: &[String],
+        mut visit: impl FnMut(u64, String) -> Result<()>,
+    ) -> Result<()> {
+        if file_paths.is_empty() {
+            return Ok(());
+        }
+
+        let searcher = self.reader.searcher();
+        let unique_paths: HashSet<&str> = file_paths.iter().map(String::as_str).collect();
+        let terms: Vec<Term> = unique_paths
+            .iter()
+            .map(|path| Term::from_field_text(self.fields.file_path_exact, path))
+            .collect();
+
+        for segment_reader in searcher.segment_readers() {
+            let inverted_index = segment_reader.inverted_index(self.fields.file_path_exact)?;
+            let store_reader = segment_reader.get_store_reader(1)?;
+
+            for term in &terms {
+                let Some(mut postings) =
+                    inverted_index.read_postings(term, IndexRecordOption::Basic)?
+                else {
+                    continue;
+                };
+                let mut doc_id = postings.doc();
+                while doc_id != TERMINATED {
+                    if !segment_reader.is_deleted(doc_id) {
+                        let doc: tantivy::TantivyDocument = store_reader.get(doc_id)?;
+                        if let (Some(chunk_id), Some(content)) = (
+                            doc.get_first(self.fields.chunk_id)
+                                .and_then(|value| value.as_str())
+                                .and_then(|value| value.parse::<u64>().ok()),
+                            doc.get_first(self.fields.content)
+                                .and_then(|value| value.as_str()),
+                        ) {
+                            visit(chunk_id, content.to_string())?;
+                        }
+                    }
+                    doc_id = postings.advance();
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Read all chunk IDs and their content from the index.
     ///
     /// Used during init to batch-embed chunks into a vector index.
@@ -830,8 +883,23 @@ impl TantivyIndex {
     /// Used to rebuild file-level trigram indexes when chunk_meta content is
     /// empty (compact persistence mode).
     pub fn all_file_path_content_pairs(&self) -> Result<Vec<(String, String)>> {
-        let searcher = self.reader.searcher();
         let mut results = Vec::new();
+
+        self.visit_all_file_path_content_pairs(|file_path, content| {
+            results.push((file_path.to_string(), content.to_string()));
+            Ok(())
+        })?;
+
+        Ok(results)
+    }
+
+    /// Visit every live `(file_path, content)` pair without retaining a copy
+    /// of the complete stored corpus.
+    pub(crate) fn visit_all_file_path_content_pairs(
+        &self,
+        mut visit: impl FnMut(&str, &str) -> Result<()>,
+    ) -> Result<()> {
+        let searcher = self.reader.searcher();
 
         for segment_reader in searcher.segment_readers() {
             let store_reader = segment_reader.get_store_reader(1)?;
@@ -843,20 +911,18 @@ impl TantivyIndex {
                 let file_path = doc
                     .get_first(self.fields.file_path)
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                    .unwrap_or("");
                 let content = doc
                     .get_first(self.fields.content)
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                    .unwrap_or("");
                 if !file_path.is_empty() && !content.is_empty() {
-                    results.push((file_path, content));
+                    visit(file_path, content)?;
                 }
             }
         }
 
-        Ok(results)
+        Ok(())
     }
 }
 
@@ -1068,6 +1134,58 @@ mod tests {
         assert!(idx.lookup_chunks_by_ids(&requested).unwrap().is_empty());
         assert!(idx.lookup_chunk_contents(&requested).unwrap().is_empty());
         assert_eq!(idx.lookup_chunk_content(21).unwrap(), None);
+    }
+
+    #[test]
+    fn visit_chunks_by_file_paths_streams_every_selected_chunk() {
+        let idx = TantivyIndex::create_in_ram().unwrap();
+        idx.add_chunk(&make_chunk(31, "src/a.rs", "fn selected_one() {}"))
+            .unwrap();
+        idx.add_chunk(&make_chunk(32, "src/a.rs", "fn selected_two() {}"))
+            .unwrap();
+        idx.add_chunk(&make_chunk(33, "src/b.rs", "fn unselected() {}"))
+            .unwrap();
+        idx.commit().unwrap();
+
+        let mut found = Vec::new();
+        idx.visit_chunks_by_file_paths(
+            &["src/a.rs".to_string(), "src/a.rs".to_string()],
+            |id, content| {
+                found.push((id, content));
+                Ok(())
+            },
+        )
+        .unwrap();
+        found.sort_unstable_by_key(|(id, _)| *id);
+
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].0, 31);
+        assert_eq!(found[1].0, 32);
+        assert!(found.iter().all(|(_, content)| !content.is_empty()));
+    }
+
+    #[test]
+    fn visit_chunks_by_file_paths_omits_deleted_and_handles_empty_input() {
+        let idx = TantivyIndex::create_in_ram().unwrap();
+        idx.add_chunk(&make_chunk(41, "src/deleted.rs", "fn gone() {}"))
+            .unwrap();
+        idx.commit().unwrap();
+        idx.remove_file("src/deleted.rs").unwrap();
+        idx.commit().unwrap();
+
+        let mut visits = 0;
+        idx.visit_chunks_by_file_paths(&["src/deleted.rs".to_string()], |_, _| {
+            visits += 1;
+            Ok(())
+        })
+        .unwrap();
+        idx.visit_chunks_by_file_paths(&[], |_, _| {
+            visits += 1;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(visits, 0);
     }
 
     // --- Field-weighted BM25 tests ---

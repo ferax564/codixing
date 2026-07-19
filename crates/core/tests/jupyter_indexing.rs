@@ -139,6 +139,40 @@ fn jupyter_output_and_raw_cells_do_not_contaminate_chunks() {
 }
 
 #[test]
+fn exact_search_indexes_decoded_notebook_cell_text_after_reopen() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let escaped_notebook = r#"{
+      "nbformat": 4,
+      "nbformat_minor": 5,
+      "metadata": {"kernelspec": {"language": "python", "name": "python3"}},
+      "cells": [{
+        "cell_type": "markdown",
+        "id": "decoded",
+        "source": "decoded\u0020notebookmarker"
+      }]
+    }"#;
+    fs::write(root.join("escaped.ipynb"), escaped_notebook).unwrap();
+
+    drop(Engine::init(root, bm25_config(root)).unwrap());
+    let engine = Engine::open(root).unwrap();
+    let hits = engine
+        .search(
+            SearchQuery::new("decoded notebookmarker")
+                .with_limit(10)
+                .with_strategy(Strategy::Exact),
+        )
+        .unwrap();
+    let hit = hits
+        .iter()
+        .find(|hit| hit.file_path == "escaped.ipynb")
+        .expect("decoded notebook cell should be an exact-search candidate");
+
+    assert_eq!(hit.score, 1.0, "result must come from exact verification");
+    assert!(hit.content.contains("decoded notebookmarker"));
+}
+
+#[test]
 fn malformed_notebook_does_not_abort_init() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();

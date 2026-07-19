@@ -8,9 +8,7 @@ use crate::symbols::persistence::deserialize_symbols;
 use crate::vector::VectorIndex;
 
 use super::Engine;
-use super::indexing::{
-    build_file_trigram_from_tantivy, deserialize_chunk_meta, rebuild_trigram_from_tantivy,
-};
+use super::indexing::{build_file_trigram_from_tantivy, deserialize_chunk_meta};
 
 impl Engine {
     /// Set the minimum interval between reload-staleness checks.
@@ -120,8 +118,21 @@ impl Engine {
                 .or_insert(0) += 1;
         }
 
-        // Rebuild file trigram index from Tantivy (chunk_meta may have empty content).
-        let ft = build_file_trigram_from_tantivy(&self.tantivy);
+        // Refresh first so the rebuild observes the newest committed segments.
+        self.tantivy.refresh_reader()?;
+
+        // Reload the published shared trigram artifact so raw-source grep
+        // trigrams and parser-transformed exact-search trigrams stay intact.
+        // Tantivy remains a recovery fallback for missing or corrupt artifacts.
+        let ft = match crate::index::trigram::FileTrigramIndex::load_binary(
+            &self.store.file_trigram_path(),
+        ) {
+            Ok(index) => index,
+            Err(error) => {
+                warn!(error = %error, "failed to reload file trigram — rebuilding from Tantivy");
+                build_file_trigram_from_tantivy(&self.tantivy)
+            }
+        };
         self.file_trigram = std::sync::OnceLock::new();
         let _ = self.file_trigram.set(ft);
 
@@ -168,17 +179,6 @@ impl Engine {
                 }
             }
         }
-
-        // Refresh the Tantivy reader FIRST so the trigram rebuild below reads
-        // the newest committed segments. Previously this was done after the
-        // rebuild, which meant the caches were populated from the old
-        // pre-sync segment view — stale for ~one reload cycle.
-        self.tantivy.refresh_reader()?;
-
-        // Rebuild trigram index from Tantivy content (chunk_meta may have empty content).
-        let t = rebuild_trigram_from_tantivy(&self.tantivy);
-        self.trigram = std::sync::OnceLock::new();
-        let _ = self.trigram.set(t);
 
         // Reset lazy caches so the next access re-reads fresh data from disk.
         self.concept_index = std::sync::OnceLock::new();

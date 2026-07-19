@@ -357,9 +357,6 @@ pub struct Engine {
     pub(super) reformulations: std::sync::OnceLock<Option<reformulation::LearnedReformulations>>,
     /// Optional cross-encoder reranker (BGE-Reranker-Base) for the `deep` strategy.
     pub(super) reranker: Option<Arc<Reranker>>,
-    /// Trigram index for sub-millisecond exact substring search (Strategy::Exact).
-    /// Lazy-loaded from disk on first use via OnceLock.
-    pub(super) trigram: std::sync::OnceLock<crate::index::TrigramIndex>,
     /// Session state for tracking agent interactions.
     session: Arc<SessionState>,
     /// Shared session store for multi-agent context sharing.
@@ -445,23 +442,6 @@ impl Engine {
     pub(super) fn get_recency_map(&self) -> &std::collections::HashMap<String, i64> {
         self.recency_map
             .get_or_init(|| recency::build_recency_map(self.store.root(), 180))
-    }
-
-    /// Get or lazily load the chunk-level trigram index from disk.
-    pub(super) fn get_trigram(&self) -> &crate::index::TrigramIndex {
-        self.trigram.get_or_init(|| {
-            if self.store.chunk_trigram_path().exists() {
-                match crate::index::TrigramIndex::load_binary(&self.store.chunk_trigram_path()) {
-                    Ok(idx) => idx,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to load chunk trigram; rebuilding");
-                        rebuild_trigram_from_tantivy(&self.tantivy)
-                    }
-                }
-            } else {
-                rebuild_trigram_from_tantivy(&self.tantivy)
-            }
-        })
     }
 
     /// Get or lazily load the file-level trigram index from disk.
@@ -661,14 +641,13 @@ impl Engine {
         self.get_chunk_content(chunk_id)
     }
 
-    /// Resolve a set of chunk bodies before mutating Tantivy.
+    /// Resolve a set of chunk bodies from compact metadata or Tantivy.
     ///
     /// BM25-only engines intentionally discard the duplicate bodies held in
-    /// `chunk_meta` after init. Mutation paths still need those bodies to
-    /// remove the old chunk IDs from the trigram index, so hydrate only the
-    /// requested missing values in one indexed lookup. Returning an error for
-    /// a missing body keeps the live indexes unchanged instead of silently
-    /// leaking stale trigram postings.
+    /// `chunk_meta` after init. Embedding maintenance may still need selected
+    /// bodies, so hydrate only the requested missing values in one indexed
+    /// lookup. Returning an error for a missing body keeps maintenance from
+    /// silently producing an incomplete vector update.
     pub(super) fn hydrate_chunk_contents(
         &self,
         chunk_ids: &HashSet<u64>,

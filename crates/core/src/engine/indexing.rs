@@ -149,7 +149,7 @@ pub(super) struct IndexContext<'a> {
     pub(super) pending_signatures: &'a DashMap<String, u64>,
     /// Complete successful-file hash baseline for the initial index.
     pub(super) pending_hashes: &'a DashMap<PathBuf, crate::persistence::FileHashEntry>,
-    /// Full-file trigram index built from the exact bounded source read.
+    /// Shared per-file trigram union for raw-source grep and exact chunk search.
     ///
     /// The source scan happens before this short lock, so parallel workers do
     /// not retain a second corpus-sized copy or serialize parsing/chunking.
@@ -166,39 +166,44 @@ fn add_file_trigrams(ctx: &IndexContext<'_>, path: &str, source: &[u8]) {
         .add_prepared(path, &trigrams);
 }
 
-/// Build a chunk [`TrigramIndex`] from Tantivy stored fields.
-///
-/// Used as a fallback when the persisted chunk trigram index is missing and
-/// chunk_meta has empty content (compact persistence mode).
-pub(super) fn rebuild_trigram_from_tantivy(tantivy: &TantivyIndex) -> crate::index::TrigramIndex {
-    let mut t = crate::index::TrigramIndex::new();
-    match tantivy.all_chunk_ids_and_content() {
-        Ok(pairs) => {
-            t.build_batch(pairs.into_iter());
-        }
-        Err(e) => {
-            warn!(error = %e, "failed to read Tantivy content for trigram rebuild");
-        }
-    }
-    t
+/// Add every stored chunk representation for one file to the shared trigram
+/// index. Parser-produced text can differ from the raw container bytes (for
+/// example decoded notebook cells, extracted PDF text, or normalized HTML),
+/// so exact search needs their union while grep still relies on the raw scan.
+/// Byte-identical source-range chunks are skipped because their trigrams are
+/// already present in the raw representation.
+fn add_chunk_trigrams(
+    ctx: &IndexContext<'_>,
+    path: &str,
+    source: &[u8],
+    chunks: &[crate::chunker::Chunk],
+) {
+    let trigrams = FileTrigramIndex::prepare_contents(
+        chunks
+            .iter()
+            .filter(|chunk| {
+                source.get(chunk.byte_start..chunk.byte_end) != Some(chunk.content.as_bytes())
+            })
+            .map(|chunk| chunk.content.as_bytes()),
+    );
+    ctx.file_trigram
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .add_prepared(path, &trigrams);
 }
 
 /// Build a [`FileTrigramIndex`] from Tantivy stored fields.
 ///
-/// Groups chunk content by file path and builds the file-level trigram index.
-/// Used as a fallback when persisted file trigram is missing and chunk_meta
-/// has empty content (compact persistence mode).
+/// Streams stored chunks into the file-level trigram index. This is the
+/// fallback when its persisted artifact is missing or corrupt, and avoids a
+/// second corpus-sized vector of source bodies during recovery.
 pub(super) fn build_file_trigram_from_tantivy(tantivy: &TantivyIndex) -> FileTrigramIndex {
     let mut idx = FileTrigramIndex::new();
-    match tantivy.all_file_path_content_pairs() {
-        Ok(pairs) => {
-            for (file_path, content) in &pairs {
-                idx.add(file_path, content.as_bytes());
-            }
-        }
-        Err(e) => {
-            warn!(error = %e, "failed to read Tantivy content for file trigram rebuild");
-        }
+    if let Err(e) = tantivy.visit_all_file_path_content_pairs(|file_path, content| {
+        idx.add(file_path, content.as_bytes());
+        Ok(())
+    }) {
+        warn!(error = %e, "failed to read Tantivy content for file trigram rebuild");
     }
     idx
 }
@@ -321,6 +326,7 @@ pub(super) fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
         }
     }
 
+    add_chunk_trigrams(ctx, &rel_str, &source, &chunks);
     add_file_trigrams(ctx, &rel_str, &source);
     ctx.pending_hashes.insert(path.to_path_buf(), hash_entry);
 
@@ -455,6 +461,8 @@ fn process_doc_file(
         }
     }
 
+    add_chunk_trigrams(ctx, rel_str, source, &chunks);
+
     debug!(
         path = %rel_str,
         language = language.name(),
@@ -577,6 +585,8 @@ fn process_jupyter_file(rel_str: &str, source: &[u8], ctx: &IndexContext<'_>) ->
                     }
                 }
 
+                add_chunk_trigrams(ctx, rel_str, source, &chunks);
+
                 for entity in &entities {
                     let mut sym = symbol_from_entity(entity, rel_str, cell_lang);
                     let mut scope = vec![cell_scope.clone()];
@@ -638,6 +648,8 @@ fn process_jupyter_file(rel_str: &str, source: &[u8], ctx: &IndexContext<'_>) ->
                         ctx.pending_embeds.insert(chunk.id, String::new());
                     }
                 }
+
+                add_chunk_trigrams(ctx, rel_str, source, &chunks);
 
                 if !symbol_refs.is_empty() {
                     ctx.pending_doc_refs

@@ -57,8 +57,7 @@ impl Engine {
         }
         // Don't race the background embedder against our vector writes.
         self.wait_for_embeddings();
-        // Force lazy trigram indexes to load before we mutate them.
-        let _ = self.get_trigram();
+        // Force the shared file trigram to load before we mutate it.
         let _ = self.get_file_trigram();
 
         let mut stats = ImportStats::default();
@@ -137,14 +136,24 @@ impl Engine {
                     chunk.content.clone()
                 };
                 self.chunk_meta.insert(chunk.id, meta);
-                self.trigram
-                    .get_mut()
-                    .unwrap()
-                    .add(chunk.id, &chunk.content);
                 to_embed.push((chunk.id, rel.clone(), embed_text));
             }
 
-            self.file_trigram.get_mut().unwrap().add(&rel, source_bytes);
+            let trigrams = crate::index::trigram::FileTrigramIndex::prepare_contents(
+                std::iter::once(source_bytes).chain(
+                    chunks
+                        .iter()
+                        .filter(|chunk| {
+                            source_bytes.get(chunk.byte_start..chunk.byte_end)
+                                != Some(chunk.content.as_bytes())
+                        })
+                        .map(|chunk| chunk.content.as_bytes()),
+                ),
+            );
+            self.file_trigram
+                .get_mut()
+                .unwrap()
+                .add_prepared(&rel, &trigrams);
             self.file_chunk_counts.insert(rel.clone(), chunks.len());
 
             if !symbol_refs.is_empty() {
@@ -213,13 +222,6 @@ impl Engine {
         {
             warn!(error = %e, "failed to persist file trigram after import");
         }
-        if let Err(e) = self.get_trigram().save_mmap_binary_v3(
-            &self.store.chunk_trigram_path(),
-            crate::index::trigram::PostingCodec::DeltaVarint,
-        ) {
-            warn!(error = %e, "failed to persist chunk trigram after import");
-        }
-
         debug!(
             documents = stats.documents,
             chunks = stats.chunks,
@@ -235,23 +237,17 @@ impl Engine {
     /// documents (virtual files) removed. Mirrors the removal half of
     /// [`Engine::reindex_file_impl`] but for virtual paths.
     fn remove_external_prefix(&mut self, prefix: &str) -> Result<usize> {
-        // Collect virtual paths and hydrate only their chunk bodies before the
-        // stored Tantivy documents are removed. Reopened BM25 indexes keep
-        // compact metadata without duplicate body strings.
+        // Collect the virtual paths represented by compact chunk metadata.
         let mut files: HashSet<String> = HashSet::new();
-        let mut removed_chunk_ids: HashSet<u64> = HashSet::new();
         for entry in self.chunk_meta.iter() {
             let meta = entry.value();
             if meta.file_path.starts_with(prefix) {
                 files.insert(meta.file_path.clone());
-                removed_chunk_ids.insert(meta.chunk_id);
             }
         }
         if files.is_empty() {
             return Ok(0);
         }
-        let removed_chunk_contents = self.hydrate_chunk_contents(&removed_chunk_ids)?;
-
         for rel in &files {
             self.tantivy.remove_file(rel)?;
             self.file_trigram.get_mut().unwrap().remove_file(rel);
@@ -270,9 +266,6 @@ impl Engine {
         }
         self.chunk_meta
             .retain(|_, v| !v.file_path.starts_with(prefix));
-        for (id, content) in &removed_chunk_contents {
-            self.trigram.get_mut().unwrap().remove(*id, content);
-        }
         Ok(files.len())
     }
 }

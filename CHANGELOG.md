@@ -20,17 +20,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Explicit read-only opens never rebuild an incompatible index; they now return
   a clear error directing the caller to run a writable `codixing init`.
 
-- **Compact v3 chunk-trigram persistence for large repositories** — current
-  `init`, `sync`, and import writes now encode posting lists with dense
-  generation-local u32 ordinals and keep stable hash-derived u64 chunk IDs in
-  a sorted mmap table. This removes the production v1 raw-u64 fallback, uses
-  at most half the bytes on the representative hash-ID regression corpus, and
-  translates ordinals directly into the final query result allocation (no
-  heap copy of the ID table). v1 and v2 files remain readable; the next index
-  write migrates them, or `codixing init .` can reclaim the space immediately.
-  v3 validates flags, fixed sections, canonical entry/blob layout, exact file
-   size, posting totals, stable-ID ordering, and an ID-table checksum before
-   exposing the mmap.
+- **One shared trigram index for grep and exact search** — fresh indexes no
+  longer build or persist the corpus-scale `chunk_trigram.bin` duplicate.
+  `file_trigram.bin` now holds the union of raw source bytes and any
+  parser-transformed stored chunk text. Exact search streams file candidates
+  in bounded batches, asks Tantivy for every live chunk in those files, then
+  preserves the existing full-substring verification, hit-count ranking,
+  filters, and BM25 fallback. Init, sync, import, reload, and publication
+  validation now maintain only the shared file-level artifact. Existing
+  chunk-trigram files are ignored safely by new binaries and reclaimed by the
+  next full `codixing init`.
 
 - **Bounded, fresh semantic artifacts for huge repositories** — concept and
   learned-reformulation construction now ranks and caps source vocabulary,

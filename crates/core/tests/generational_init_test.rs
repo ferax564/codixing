@@ -57,6 +57,27 @@ fn repeated_identical_init_replaces_instead_of_appending() {
 }
 
 #[test]
+fn fresh_generation_uses_one_shared_trigram_artifact() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("lib.rs"),
+        "pub fn shared_trigram_sentinel() -> usize { 1 }\n",
+    )
+    .unwrap();
+
+    drop(Engine::init(root, no_embed_config(root)).unwrap());
+    let store = IndexStore::open(root).unwrap();
+
+    assert!(store.file_trigram_path().is_file());
+    assert!(
+        !store.chunk_trigram_path().exists(),
+        "fresh generations must not duplicate exact-search postings"
+    );
+    store.validate_for_publication().unwrap();
+}
+
+#[test]
 fn rebuild_does_not_retain_deleted_source_documents() {
     let dir = tempdir().unwrap();
     let root = dir.path();

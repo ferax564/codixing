@@ -440,16 +440,6 @@ impl Engine {
             old_stable_keys.remove(k);
         }
 
-        // Hydrate old bodies before deleting their stored Tantivy documents.
-        // BM25 init intentionally leaves compact metadata bodies empty, but the
-        // trigram index needs the original text to remove every old posting.
-        let old_chunk_ids: std::collections::HashSet<u64> = self
-            .chunk_meta
-            .iter()
-            .filter_map(|entry| (entry.value().file_path == rel_str).then_some(*entry.key()))
-            .collect();
-        let old_chunk_contents = self.hydrate_chunk_contents(&old_chunk_ids)?;
-
         // Remove old data.
         self.tantivy.remove_file(&rel_str)?;
         self.symbols.remove_file(&rel_str);
@@ -467,12 +457,7 @@ impl Engine {
                 vec_idx.remove_file(&rel_str)?;
             }
         }
-        // Remove old chunk metadata and every posting derived from its hydrated
-        // body. Hydration happens above, before the Tantivy delete is queued.
-        self.chunk_meta.retain(|k, _| !old_chunk_ids.contains(k));
-        for (id, content) in &old_chunk_contents {
-            self.trigram.get_mut().unwrap().remove(*id, content);
-        }
+        self.chunk_meta.retain(|_, meta| meta.file_path != rel_str);
 
         let chunker = CastChunker;
         let chunks = chunker.chunk(
@@ -502,12 +487,6 @@ impl Engine {
                     content: chunk.content.clone(),
                 },
             );
-
-            // Update trigram index for Strategy::Exact fast-path.
-            self.trigram
-                .get_mut()
-                .unwrap()
-                .add(chunk.id, &chunk.content);
         }
 
         for entity in &result.entities {
@@ -635,9 +614,24 @@ impl Engine {
 
         self.file_chunk_counts.insert(rel_str.clone(), chunks.len());
 
-        // Incremental file trigram update: remove old, add new from full content.
-        self.file_trigram.get_mut().unwrap().remove_file(&rel_str);
-        self.file_trigram.get_mut().unwrap().add(&rel_str, &source);
+        // Replace the path atomically from the caller's perspective with the
+        // union of exact source bytes (grep) and parser-produced chunk text
+        // (exact search). Preparing outside the mutation avoids retaining old
+        // postings while scanning the new representations.
+        let trigrams = crate::index::trigram::FileTrigramIndex::prepare_contents(
+            std::iter::once(source.as_slice()).chain(
+                chunks
+                    .iter()
+                    .filter(|chunk| {
+                        source.get(chunk.byte_start..chunk.byte_end)
+                            != Some(chunk.content.as_bytes())
+                    })
+                    .map(|chunk| chunk.content.as_bytes()),
+            ),
+        );
+        let file_trigram = self.file_trigram.get_mut().unwrap();
+        file_trigram.remove_file(&rel_str);
+        file_trigram.add_prepared(&rel_str, &trigrams);
 
         // Update graph edges for this file using the already-parsed tree.
         // PageRank is only recomputed when do_graph_finalize=true (single-file
@@ -758,13 +752,6 @@ impl Engine {
                 abs_path.display()
             ))
         })?;
-        let old_chunk_ids: std::collections::HashSet<u64> = self
-            .chunk_meta
-            .iter()
-            .filter_map(|entry| (entry.value().file_path == rel_str).then_some(*entry.key()))
-            .collect();
-        let old_chunk_contents = self.hydrate_chunk_contents(&old_chunk_ids)?;
-
         self.tantivy.remove_file(&rel_str)?;
         self.symbols.remove_file(&rel_str);
         self.parser.invalidate(&abs_path);
@@ -776,12 +763,7 @@ impl Engine {
                 vec_idx.remove_file(&rel_str)?;
             }
         }
-        // Remove compact metadata and the old trigram postings using the
-        // bodies hydrated before Tantivy deletion.
-        self.chunk_meta.retain(|k, _| !old_chunk_ids.contains(k));
-        for (id, content) in &old_chunk_contents {
-            self.trigram.get_mut().unwrap().remove(*id, content);
-        }
+        self.chunk_meta.retain(|_, meta| meta.file_path != rel_str);
         // Incremental file trigram removal.
         self.file_trigram.get_mut().unwrap().remove_file(&rel_str);
 
@@ -1039,8 +1021,7 @@ impl Engine {
         }
         let cascade_paths: Vec<_> = cascade_paths.into_iter().collect();
 
-        // Force-init lazy trigram indexes so they're available for mutation.
-        let _ = self.get_trigram();
+        // Force-init the shared file trigram so it is available for mutation.
         let _ = self.get_file_trigram();
 
         // Journal every changed path before mutating search artifacts. The tiny
@@ -1157,10 +1138,6 @@ impl Engine {
         // Persist the updated index.
         self.get_file_trigram()
             .save_binary(&self.store.file_trigram_path())?;
-        self.get_trigram().save_mmap_binary_v3(
-            &self.store.chunk_trigram_path(),
-            crate::index::trigram::PostingCodec::DeltaVarint,
-        )?;
 
         // Single PageRank recompute for the entire batch.
         if let Some(ref mut graph) = self.graph {
@@ -2476,6 +2453,7 @@ mod sigfp_tests {
 
     use super::*;
     use crate::config::IndexConfig;
+    use crate::retriever::{SearchQuery, Strategy};
     use std::collections::HashMap;
     use std::fs;
     use tempfile::tempdir;
@@ -2829,7 +2807,7 @@ pub struct Config {
     }
 
     #[test]
-    fn fresh_bm25_reindex_removes_old_trigram_postings() {
+    fn fresh_bm25_reindex_updates_exact_search() {
         let dir = tempdir().unwrap();
         let root = dir.path();
         let path = root.join("src/main.rs");
@@ -2843,33 +2821,99 @@ pub struct Config {
                 .all(|entry| entry.value().content.is_empty()),
             "BM25 init should retain only compact chunk metadata"
         );
-        assert!(!engine.get_trigram().search("OLDMARKERABC").is_empty());
+        assert!(
+            !engine
+                .search(SearchQuery::new("OLDMARKERABC").with_strategy(Strategy::Exact))
+                .unwrap()
+                .is_empty()
+        );
 
         write_main(root, "pub fn marker() { let _ = \"NEWMARKERXYZ\"; }\n");
         engine.reindex_file(&path).unwrap();
 
         assert!(
-            engine.get_trigram().search("OLDMARKERABC").is_empty(),
-            "reindex must remove postings derived from the compact old chunk"
+            engine
+                .search(SearchQuery::new("OLDMARKERABC").with_strategy(Strategy::Exact))
+                .unwrap()
+                .is_empty(),
+            "reindex must remove the compact old chunk from exact search"
         );
-        assert!(!engine.get_trigram().search("NEWMARKERXYZ").is_empty());
+        assert!(
+            !engine
+                .search(SearchQuery::new("NEWMARKERXYZ").with_strategy(Strategy::Exact))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
-    fn fresh_bm25_remove_file_removes_old_trigram_postings() {
+    fn fresh_bm25_remove_file_updates_exact_search() {
         let dir = tempdir().unwrap();
         let root = dir.path();
         let path = root.join("src/main.rs");
         write_main(root, "pub fn marker() { let _ = \"DELETEMARKER\"; }\n");
 
         let mut engine = Engine::init(root, IndexConfig::new(root)).unwrap();
-        assert!(!engine.get_trigram().search("DELETEMARKER").is_empty());
+        assert!(
+            !engine
+                .search(SearchQuery::new("DELETEMARKER").with_strategy(Strategy::Exact))
+                .unwrap()
+                .is_empty()
+        );
 
         engine.remove_file(&path).unwrap();
 
         assert!(
-            engine.get_trigram().search("DELETEMARKER").is_empty(),
-            "file removal must remove postings derived from compact metadata"
+            engine
+                .search(SearchQuery::new("DELETEMARKER").with_strategy(Strategy::Exact))
+                .unwrap()
+                .is_empty(),
+            "file removal must remove compact metadata from exact search"
+        );
+    }
+
+    #[test]
+    fn reindex_replaces_parser_transformed_file_trigrams() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let path = root.join("src/main.rs");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            b"pub fn marker() { let _ = \"OLD\xffTRANSFORMED\"; }\n",
+        )
+        .unwrap();
+
+        let mut engine = Engine::init(root, IndexConfig::new(root)).unwrap();
+        let old_query = "OLD\u{FFFD}TRANSFORMED";
+        assert_eq!(
+            engine
+                .get_file_trigram()
+                .candidates_for_literal(old_query.as_bytes())
+                .unwrap(),
+            vec!["src/main.rs"]
+        );
+
+        fs::write(
+            &path,
+            b"pub fn marker() { let _ = \"NEW\xffTRANSFORMED\"; }\n",
+        )
+        .unwrap();
+        engine.reindex_file(&path).unwrap();
+
+        assert!(
+            engine
+                .get_file_trigram()
+                .candidates_for_literal(old_query.as_bytes())
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            engine
+                .get_file_trigram()
+                .candidates_for_literal("NEW\u{FFFD}TRANSFORMED".as_bytes())
+                .unwrap(),
+            vec!["src/main.rs"]
         );
     }
 

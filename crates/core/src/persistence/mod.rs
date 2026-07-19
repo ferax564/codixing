@@ -717,7 +717,6 @@ impl IndexStore {
         let required = [
             self.symbols_path(),
             self.chunk_meta_path(),
-            self.chunk_trigram_path(),
             self.file_trigram_path(),
             self.tree_hashes_v2_path(),
         ];
