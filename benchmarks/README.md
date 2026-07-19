@@ -73,7 +73,8 @@ cannot cover. It generates an owned synthetic Rust repository and records:
 - fresh BM25-ready initialization wall time, peak RSS, and Linux PSS/I/O;
 - steady logical and allocated index bytes with hardlink de-duplication and a
   generation-aware artifact breakdown;
-- cold-process and warm resident-server query p50/p95;
+- cold-process and warm resident-server query p50/p95, plus cold and resident
+  RSS/PSS;
 - no-op, one-file, and one-percent sync wall time and bytes rewritten;
 - synthetic exact-query Recall@10/MRR, with a normalized external-quality hook.
 
@@ -97,6 +98,7 @@ python3 benchmarks/large_repo_gate.py \
   --baseline /path/to/current-main-100k.json \
   --max-init-ratio 0.50 \
   --max-rss-ratio 0.50 \
+  --max-resident-rss-ratio 0.50 \
   --max-disk-ratio 0.50 \
   --max-cold-query-p95-ratio 0.50 \
   --max-warm-query-p95-ratio 0.50 \

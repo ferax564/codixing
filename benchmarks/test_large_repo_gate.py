@@ -99,6 +99,7 @@ class LargeRepoGateTests(unittest.TestCase):
         ratios = {
             "max_init_ratio": 0.5,
             "max_rss_ratio": 0.5,
+            "max_resident_rss_ratio": 0.5,
             "max_disk_ratio": 0.5,
             "max_one_file_rewrite_ratio": 0.5,
             "min_quality_ratio": 0.99,
@@ -198,7 +199,10 @@ class LargeRepoGateTests(unittest.TestCase):
                 "disk": {"total_bytes": disk, "allocated_bytes": disk},
                 "queries": {
                     "cold": {"p95_ms": 10.0},
-                    "warm": {"client_round_trip": {"p95_ms": 5.0}},
+                    "warm": {
+                        "client_round_trip": {"p95_ms": 5.0},
+                        "server_process": {"peak_rss_bytes": rss},
+                    },
                 },
                 "sync": {
                     "one_file": {

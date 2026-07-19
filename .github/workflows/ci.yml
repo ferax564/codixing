@@ -351,6 +351,7 @@ jobs:
             --baseline large-repo-baseline.json \
             --max-init-ratio 0.50 \
             --max-rss-ratio 0.50 \
+            --max-resident-rss-ratio 0.50 \
             --max-disk-ratio 0.50 \
             --max-cold-query-p95-ratio 0.50 \
             --max-warm-query-p95-ratio 0.50 \

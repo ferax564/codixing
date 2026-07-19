@@ -524,6 +524,8 @@ def cold_queries(
     profile: Profile,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     latencies: list[float] = []
+    peak_rss_values: list[int] = []
+    peak_pss_values: list[int] = []
     observed: dict[int, list[dict[str, Any]]] = {}
     for run in range(runs):
         case_index = run % len(cases)
@@ -544,6 +546,10 @@ def cold_queries(
             monitor_interval_ms=profile.monitor_interval_ms,
         )
         latencies.append(measured.wall_time_ms)
+        if measured.peak_rss_bytes is not None:
+            peak_rss_values.append(measured.peak_rss_bytes)
+        if measured.peak_pss_bytes is not None:
+            peak_pss_values.append(measured.peak_pss_bytes)
         observed.setdefault(case_index, _parse_search_json(measured.stdout))
 
     quality = []
@@ -569,7 +575,10 @@ def cold_queries(
             observed[index] = _parse_search_json(measured.stdout)
         rr = reciprocal_rank(observed[index], case["expected_file"])
         quality.append({**case, "reciprocal_rank": rr, "found": rr > 0})
-    return latency_summary(latencies), quality
+    summary = latency_summary(latencies)
+    summary["peak_rss_bytes"] = max(peak_rss_values, default=None)
+    summary["peak_pss_bytes"] = max(peak_pss_values, default=None)
+    return summary, quality
 
 
 def _free_port() -> int:
@@ -608,8 +617,21 @@ def warm_queries(
         text=True,
     )
     url = f"http://127.0.0.1:{port}"
+    rss_samples: list[int] = []
+    pss_samples: list[int] = []
+
+    def sample_server_memory() -> None:
+        if not sys.platform.startswith("linux"):
+            return
+        rss, pss, _, _ = _linux_process_stats(process.pid)
+        if rss is not None:
+            rss_samples.append(rss)
+        if pss is not None:
+            pss_samples.append(pss)
+
     deadline = time.monotonic() + min(timeout_s, 120)
     while True:
+        sample_server_memory()
         if process.poll() is not None:
             stdout, stderr = process.communicate()
             raise RuntimeError(f"server exited during startup\n{stdout}\n{stderr}")
@@ -630,6 +652,9 @@ def warm_queries(
                 f"{url}/search",
                 {"query": case["query"], "limit": 10, "strategy": case["strategy"]},
             )
+            sample_server_memory()
+        steady_rss = rss_samples[-1] if rss_samples else None
+        steady_pss = pss_samples[-1] if pss_samples else None
         client_latencies: list[float] = []
         engine_latencies: list[float] = []
         for index in range(runs):
@@ -644,10 +669,18 @@ def warm_queries(
                 response.get("elapsed_ms"), (int, float)
             ):
                 engine_latencies.append(float(response["elapsed_ms"]))
+            sample_server_memory()
         return {
             "client_round_trip": latency_summary(client_latencies),
             "engine_reported": latency_summary(engine_latencies),
             "server_command": command,
+            "server_process": {
+                "steady_rss_bytes": steady_rss,
+                "steady_pss_bytes": steady_pss,
+                "peak_rss_bytes": max(rss_samples, default=None),
+                "peak_pss_bytes": max(pss_samples, default=None),
+                "source": "linux_proc_poll" if rss_samples else None,
+            },
         }
     finally:
         process.terminate()
@@ -828,6 +861,10 @@ def compare_to_baseline(
     mapping = {
         "max_init_ratio": ("metrics.init.wall_time_ms", "max"),
         "max_rss_ratio": ("metrics.init.peak_rss_bytes", "max"),
+        "max_resident_rss_ratio": (
+            "metrics.queries.warm.server_process.peak_rss_bytes",
+            "max",
+        ),
         "max_disk_ratio": ("metrics.disk.allocated_bytes", "max"),
         "max_cold_query_p95_ratio": ("metrics.queries.cold.p95_ms", "max"),
         "max_warm_query_p95_ratio": (
@@ -909,6 +946,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--max-init-ratio", type=float, default=1.0)
     parser.add_argument("--max-rss-ratio", type=float, default=1.0)
+    parser.add_argument("--max-resident-rss-ratio", type=float, default=1.0)
     parser.add_argument("--max-disk-ratio", type=float, default=1.0)
     parser.add_argument("--max-cold-query-p95-ratio", type=float, default=1.0)
     parser.add_argument("--max-warm-query-p95-ratio", type=float, default=1.0)
@@ -1078,6 +1116,7 @@ def main() -> int:
             ratios = {
                 "max_init_ratio": args.max_init_ratio,
                 "max_rss_ratio": args.max_rss_ratio,
+                "max_resident_rss_ratio": args.max_resident_rss_ratio,
                 "max_disk_ratio": args.max_disk_ratio,
                 "max_cold_query_p95_ratio": args.max_cold_query_p95_ratio,
                 "max_warm_query_p95_ratio": args.max_warm_query_p95_ratio,
