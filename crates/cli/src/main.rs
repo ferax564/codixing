@@ -1197,6 +1197,20 @@ fn default_thread_cap() -> usize {
     }
 }
 
+/// Open an index for a command that cannot mutate index state.
+///
+/// Read commands must never probe the Tantivy writer lock first: doing so
+/// adds the writer retry backoff to every concurrent CLI invocation and can
+/// make a healthy read take more than a second while `sync` is running.
+fn open_read_engine(root: &Path) -> Result<Engine> {
+    Engine::open_read_only(root).with_context(|| {
+        format!(
+            "no index found at {} — run `codixing init` first",
+            root.display()
+        )
+    })
+}
+
 /// Check if an error indicates write-lock contention and print a helpful message.
 fn check_write_lock_error(err: &anyhow::Error) -> bool {
     let msg = format!("{err:#}");
@@ -1309,6 +1323,12 @@ fn cmd_init(
         eprintln!(
             "note: --reranker and --defer-embeddings are no-ops without --embed. \
              Pass --embed to build vector embeddings."
+        );
+    }
+
+    if codixing_core::persistence::IndexStore::audit_layout(&root).is_complete() {
+        eprintln!(
+            "Rebuilding into a new generation; the current index stays searchable until validation succeeds. Temporary disk usage may approach twice the current index size."
         );
     }
 
@@ -1438,12 +1458,7 @@ fn cmd_search(
         }
     }
 
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let resolved_strategy = strategy.resolve(&engine, &query);
     let mut sq = SearchQuery::new(&query)
@@ -1619,12 +1634,7 @@ fn cmd_grep(args: GrepArgs) -> Result<()> {
         return Ok(());
     }
 
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let opts = GrepOptions {
         pattern: args.pattern.clone(),
@@ -1705,12 +1715,7 @@ fn cmd_symbols(filter: String, file: Option<String>, count: bool) -> Result<()> 
         return Ok(());
     }
 
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let symbols = engine
         .symbols(&filter, file.as_deref())
@@ -1807,12 +1812,7 @@ fn cmd_graph(
         return Ok(());
     }
 
-    let mut engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let mut engine = open_read_engine(&root)?;
 
     if map {
         let opts = RepoMapOptions {
@@ -2000,12 +2000,7 @@ fn cmd_graph(
 
 fn cmd_path(from: String, to: String) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     match engine.shortest_path(&from, &to) {
         Some(path) => {
@@ -2035,12 +2030,7 @@ fn cmd_callers(file: String, depth: usize) -> Result<()> {
         );
     }
 
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let callers = if depth <= 1 {
         engine.callers(&file)
@@ -2107,12 +2097,7 @@ fn cmd_callees(file: String, depth: usize) -> Result<()> {
         );
     }
 
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let callees = if depth <= 1 {
         engine.callees(&file)
@@ -2129,12 +2114,7 @@ fn cmd_callees(file: String, depth: usize) -> Result<()> {
 
 fn cmd_dependencies(file: String, depth: usize) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let deps = engine.dependencies(&file, depth);
     print_file_list(
@@ -2155,12 +2135,7 @@ fn cmd_cross_imports(
     use codixing_core::graph::EdgeKind;
 
     let root = std::env::current_dir().context("cannot determine current directory")?;
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let kinds: Vec<EdgeKind> = if include_calls {
         vec![EdgeKind::Resolved, EdgeKind::External, EdgeKind::Calls]
@@ -2252,12 +2227,7 @@ fn cmd_usages(
         }
     }
 
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     if complete {
         use codixing_core::ReferenceOptions;
@@ -2707,8 +2677,7 @@ fn cmd_bench_embed(path: PathBuf, force: bool, json: bool) -> Result<()> {
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
 
-    let engine =
-        Engine::open(&root).with_context(|| "no index found — run `codixing init` first")?;
+    let engine = open_read_engine(&root)?;
 
     let pending = if force {
         // Re-embed all chunks, whether or not they already have vectors.
@@ -3066,12 +3035,7 @@ fn cmd_audit(
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
 
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let options = FreshnessOptions {
         threshold_days,
@@ -3174,12 +3138,7 @@ fn cmd_impact(file: String, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let impact = engine.change_impact(&file);
 
@@ -3224,12 +3183,7 @@ fn cmd_impact(file: String, json: bool) -> Result<()> {
 
 fn cmd_api(file: String, json: bool) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let symbols = engine.api_surface(&file);
 
@@ -3265,12 +3219,7 @@ fn cmd_api(file: String, json: bool) -> Result<()> {
 
 fn cmd_types(symbol: String, json: bool) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let symbols = engine
         .symbols(&symbol, None)
@@ -3319,12 +3268,7 @@ fn cmd_types(symbol: String, json: bool) -> Result<()> {
 
 fn cmd_examples(symbol: String, limit: usize, json: bool) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let examples = engine.find_usage_examples(&symbol, limit);
 
@@ -3370,12 +3314,7 @@ fn cmd_context(
     json: bool,
 ) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let ctx =
         engine.assemble_context_for_location_with_mode(&file, line, token_budget, budget_mode);
@@ -3474,12 +3413,7 @@ fn cmd_agent_context_pack(
     risk_level: Option<String>,
 ) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let pack = engine.agent_context_pack(
         &task,
@@ -3571,6 +3505,13 @@ fn cmd_doctor(path: PathBuf, json: bool) -> Result<()> {
         "index": {
             "status": status,
             "dir_exists": audit.dir_exists,
+            "layout": {
+                "kind": audit.layout_kind,
+                "active_generation": audit.active_generation,
+                "generation_count": audit.generation_count,
+                "abandoned_generations": paths_to_strings(&audit.abandoned_generations),
+                "error": audit.layout_error,
+            },
             "essential_missing": paths_to_strings(&audit.essentials_missing),
             "essential_present": paths_to_strings(&audit.essentials_present),
             "optional_artifacts": paths_to_strings(&audit.optional_present),
@@ -3596,6 +3537,14 @@ fn cmd_doctor(path: PathBuf, json: bool) -> Result<()> {
     println!("Binary: codixing {}", env!("CARGO_PKG_VERSION"));
     println!("Root: {}", report["root"].as_str().unwrap_or(""));
     println!("Index: {status}");
+    let layout_kind = report["index"]["layout"]["kind"]
+        .as_str()
+        .unwrap_or("unknown");
+    if let Some(active) = report["index"]["layout"]["active_generation"].as_str() {
+        println!("Index layout: {layout_kind} ({active})");
+    } else {
+        println!("Index layout: {layout_kind}");
+    }
     println!("Index disk: {}", format_bytes(disk_bytes));
     println!("Git staleness: {stale_status}");
     if let Some(head) = report["index"]["staleness"]["git_head"].as_str() {

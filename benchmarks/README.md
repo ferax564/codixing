@@ -65,6 +65,57 @@ codebase-memory-mcp: 20 queries, Recall@10 0.374, MRR 0.243
 grep:                20 queries, Recall@10 0.191, MRR 0.168
 ```
 
+## Large-repository performance gate
+
+`large_repo_gate.py` measures the end-to-end costs that Criterion microbenches
+cannot cover. It generates an owned synthetic Rust repository and records:
+
+- fresh BM25-ready initialization wall time, peak RSS, and Linux PSS/I/O;
+- steady index bytes, source amplification, and a top-level artifact breakdown;
+- cold-process and warm resident-server query p50/p95;
+- no-op, one-file, and one-percent sync wall time and bytes rewritten;
+- synthetic exact-query Recall@10/MRR, with a normalized external-quality hook.
+
+The result is versioned JSON. The built-in profiles are `pr` (250 files),
+`10k`, and `100k`; `--files` and `--query-runs` support targeted experiments.
+
+```bash
+cargo build --release -p codixing -p codixing-server
+python3 benchmarks/large_repo_gate.py \
+  --profile pr \
+  --output /tmp/codixing-large-repo.json
+```
+
+The script does not invent a universal baseline. To prove the current 2x
+speed/50% memory/50% disk goals, capture the baseline and treatment on the same
+machine and OS, with the same profile and worker count, then run:
+
+```bash
+python3 benchmarks/large_repo_gate.py \
+  --profile 100k \
+  --baseline /path/to/current-main-100k.json \
+  --max-init-ratio 0.50 \
+  --max-rss-ratio 0.50 \
+  --max-disk-ratio 0.50 \
+  --max-cold-query-p95-ratio 0.50 \
+  --max-warm-query-p95-ratio 0.50 \
+  --max-one-file-sync-ratio 0.50 \
+  --max-one-file-rewrite-ratio 0.50 \
+  --min-quality-ratio 0.99 \
+  --output /tmp/codixing-treatment-100k.json
+```
+
+Without `--baseline`, the JSON says `performance_gate.status = "recorded"`;
+that is evidence capture, not a performance claim. Synthetic exact probes still
+gate correctness. Supply `--quality-file` with a JSON array of `query`,
+`expected_file`, and optional `strategy` fields to use a custom query set that
+matches the generated fixture. For a representative repository
+evaluation run by another harness, pass normalized
+`--external-quality-result quality.json` containing `mrr`, `recall_at_10`, and
+an optional `source`/`task_count`. That external MRR becomes the baseline
+comparison metric while the generated exact probes continue to gate basic
+correctness.
+
 `claude-context` was not benchmarked locally because it requires Node.js
 20-23 plus OpenAI and Zilliz/Milvus credentials; this machine currently has
 Node.js 25.6.1 and no benchmark credentials configured.

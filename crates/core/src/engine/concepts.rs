@@ -12,7 +12,8 @@
 //! 3. **Identifier decomposition** — splits `camelCase`/`snake_case`
 //!    identifiers into parts and groups symbols sharing common parts.
 
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -110,6 +111,160 @@ impl ConceptIndex {
     pub fn is_empty(&self) -> bool {
         self.clusters.is_empty()
     }
+
+    /// Encode the v2 persisted representation. Strings are interned once and
+    /// all maps are emitted in lexical order, cutting repeated path/symbol
+    /// storage while making bytes reproducible across process hash seeds.
+    pub(super) fn encode_persisted(&self) -> std::result::Result<Vec<u8>, String> {
+        let compact = CompactConceptIndex::from_index(self)?;
+        let payload = bitcode::serialize(&compact).map_err(|error| error.to_string())?;
+        let mut bytes = Vec::with_capacity(CONCEPT_FORMAT_MAGIC.len() + payload.len());
+        bytes.extend_from_slice(CONCEPT_FORMAT_MAGIC);
+        bytes.extend_from_slice(&payload);
+        Ok(bytes)
+    }
+
+    /// Decode v2, falling back to the legacy directly-serialized structure so
+    /// existing indexes remain readable until the next sync rewrites them.
+    pub(super) fn decode_persisted(bytes: &[u8]) -> std::result::Result<Self, String> {
+        if let Some(payload) = bytes.strip_prefix(CONCEPT_FORMAT_MAGIC) {
+            let compact: CompactConceptIndex =
+                bitcode::deserialize(payload).map_err(|error| error.to_string())?;
+            compact.into_index()
+        } else {
+            bitcode::deserialize(bytes).map_err(|error| error.to_string())
+        }
+    }
+}
+
+const CONCEPT_FORMAT_MAGIC: &[u8] = b"CXCP2\0";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CompactConceptCluster {
+    name: u32,
+    symbols: Vec<u32>,
+    files: Vec<u32>,
+    score: f32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CompactConceptIndex {
+    strings: Vec<String>,
+    clusters: Vec<CompactConceptCluster>,
+    terms: Vec<(u32, Vec<u32>)>,
+}
+
+impl CompactConceptIndex {
+    fn from_index(index: &ConceptIndex) -> std::result::Result<Self, String> {
+        let mut strings = BTreeSet::new();
+        for cluster in &index.clusters {
+            strings.insert(cluster.name.clone());
+            strings.extend(cluster.symbols.iter().cloned());
+            strings.extend(cluster.files.iter().cloned());
+        }
+        strings.extend(index.term_to_clusters.keys().cloned());
+        let strings: Vec<String> = strings.into_iter().collect();
+        let ids: BTreeMap<&str, u32> = strings
+            .iter()
+            .enumerate()
+            .map(|(idx, value)| {
+                u32::try_from(idx)
+                    .map(|idx| (value.as_str(), idx))
+                    .map_err(|_| "concept string table exceeds u32".to_string())
+            })
+            .collect::<std::result::Result<_, _>>()?;
+        let id = |value: &str| {
+            ids.get(value)
+                .copied()
+                .ok_or_else(|| format!("missing interned concept string: {value}"))
+        };
+        let clusters = index
+            .clusters
+            .iter()
+            .map(|cluster| {
+                Ok(CompactConceptCluster {
+                    name: id(&cluster.name)?,
+                    symbols: cluster
+                        .symbols
+                        .iter()
+                        .map(|value| id(value))
+                        .collect::<std::result::Result<_, _>>()?,
+                    files: cluster
+                        .files
+                        .iter()
+                        .map(|value| id(value))
+                        .collect::<std::result::Result<_, _>>()?,
+                    score: cluster.score,
+                })
+            })
+            .collect::<std::result::Result<_, String>>()?;
+        let mut term_entries: Vec<_> = index.term_to_clusters.iter().collect();
+        term_entries.sort_by(|a, b| a.0.cmp(b.0));
+        let terms = term_entries
+            .into_iter()
+            .map(|(term, clusters)| {
+                let clusters = clusters
+                    .iter()
+                    .map(|&idx| {
+                        u32::try_from(idx)
+                            .map_err(|_| "concept cluster index exceeds u32".to_string())
+                    })
+                    .collect::<std::result::Result<_, _>>()?;
+                Ok((id(term)?, clusters))
+            })
+            .collect::<std::result::Result<_, String>>()?;
+        Ok(Self {
+            strings,
+            clusters,
+            terms,
+        })
+    }
+
+    fn into_index(self) -> std::result::Result<ConceptIndex, String> {
+        let resolve = |id: u32| {
+            self.strings
+                .get(id as usize)
+                .cloned()
+                .ok_or_else(|| format!("concept string id {id} is out of bounds"))
+        };
+        let clusters = self
+            .clusters
+            .into_iter()
+            .map(|cluster| {
+                Ok(ConceptCluster {
+                    name: resolve(cluster.name)?,
+                    symbols: cluster
+                        .symbols
+                        .into_iter()
+                        .map(resolve)
+                        .collect::<std::result::Result<_, _>>()?,
+                    files: cluster
+                        .files
+                        .into_iter()
+                        .map(resolve)
+                        .collect::<std::result::Result<_, _>>()?,
+                    score: cluster.score,
+                })
+            })
+            .collect::<std::result::Result<Vec<_>, String>>()?;
+        let mut term_to_clusters = HashMap::new();
+        for (term, indices) in self.terms {
+            let term = resolve(term)?;
+            let mut decoded = Vec::with_capacity(indices.len());
+            for idx in indices {
+                let idx = idx as usize;
+                if idx >= clusters.len() {
+                    return Err(format!("concept cluster id {idx} is out of bounds"));
+                }
+                decoded.push(idx);
+            }
+            term_to_clusters.insert(term, decoded);
+        }
+        Ok(ConceptIndex {
+            clusters,
+            term_to_clusters,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -122,7 +277,26 @@ struct SymbolRecord {
     name: String,
     file: String,
     doc_words: Vec<String>,
+    part_count: usize,
 }
+
+/// Safety limits for the derived semantic concept artifact.
+///
+/// These caps are deliberately fixed invariants. Concept data is an auxiliary
+/// search signal, so allowing generated identifiers or documentation to grow it
+/// without bound is a poor trade: the primary BM25/symbol indexes remain
+/// complete while this layer keeps the strongest, most discriminative evidence.
+pub const MAX_CONCEPT_SOURCE_SYMBOLS: usize = 100_000;
+pub const MAX_CONCEPT_CLUSTERS: usize = 16_384;
+pub const MAX_SYMBOLS_PER_CLUSTER: usize = 32;
+pub const MAX_FILES_PER_CLUSTER: usize = 16;
+pub const MAX_DOC_WORDS_PER_SYMBOL: usize = 8;
+pub const MAX_IDENTIFIER_PARTS_PER_SYMBOL: usize = 8;
+pub const MAX_CONCEPT_TERMS: usize = 32_768;
+pub const MAX_CLUSTERS_PER_TERM: usize = 8;
+const MAX_CONCEPT_WORD_BYTES: usize = 64;
+const MAX_COOCCURRENCES: usize = 262_144;
+const MAX_EMBEDDING_BUCKET_SIZE: usize = 64;
 
 /// Phase-4 embedding-cluster merge parameters.
 ///
@@ -163,18 +337,42 @@ impl ConceptIndexBuilder {
 
     /// Register a symbol with its file location and optional doc comment.
     pub fn add_symbol(&mut self, name: &str, file: &str, doc_comment: Option<&str>) {
-        let doc_words = doc_comment.map(extract_concept_words).unwrap_or_default();
+        let doc_words = doc_comment
+            .map(|doc| extract_ranked_concept_words(doc, MAX_DOC_WORDS_PER_SYMBOL))
+            .unwrap_or_default();
         self.symbols.push(SymbolRecord {
             name: name.to_string(),
             file: file.to_string(),
             doc_words,
+            part_count: decompose_identifier(name).len(),
         });
+        // Prune in batches so peak construction memory is at most twice the
+        // documented source cap. Richly documented/decomposable symbols rank
+        // ahead of generated one-part names; lexical ties are deterministic.
+        if self.symbols.len() >= MAX_CONCEPT_SOURCE_SYMBOLS.saturating_mul(2) {
+            retain_best_symbol_records(&mut self.symbols);
+        }
+    }
+
+    /// Return the file set from the bounded source reservoir. This lets graph
+    /// enrichment scan only files that can still contribute a concept cluster.
+    pub(super) fn source_files(&mut self) -> Vec<String> {
+        retain_best_symbol_records(&mut self.symbols);
+        self.symbols
+            .iter()
+            .map(|record| record.file.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     /// Record that two files co-occur (e.g. one imports the other).
     pub fn add_cooccurrence(&mut self, file_a: &str, file_b: &str) {
         self.cooccurrences
             .push((file_a.to_string(), file_b.to_string()));
+        if self.cooccurrences.len() >= MAX_COOCCURRENCES.saturating_mul(2) {
+            retain_best_cooccurrences(&mut self.cooccurrences);
+        }
     }
 
     /// Enable Phase 4 cluster merging with the supplied symbol embeddings
@@ -211,7 +409,14 @@ impl ConceptIndexBuilder {
     ///    clusters containing the documented symbol.
     /// 3. **Import co-occurrence** — expand each cluster's file set with
     ///    co-occurring files.
-    pub fn build(self) -> ConceptIndex {
+    pub fn build(mut self) -> ConceptIndex {
+        retain_best_symbol_records(&mut self.symbols);
+        retain_best_cooccurrences(&mut self.cooccurrences);
+        self.symbols.sort_by(|a, b| {
+            (&a.file, &a.name, &a.doc_words).cmp(&(&b.file, &b.name, &b.doc_words))
+        });
+        self.symbols
+            .dedup_by(|a, b| a.file == b.file && a.name == b.name);
         if self.symbols.is_empty() {
             return ConceptIndex::default();
         }
@@ -229,7 +434,11 @@ impl ConceptIndexBuilder {
             .iter()
             .enumerate()
             .map(|(idx, rec)| {
-                let parts = decompose_identifier(&rec.name);
+                let mut parts = decompose_identifier(&rec.name);
+                parts.sort();
+                parts.dedup();
+                parts.sort_by_key(|part| (Reverse(part.len()), part.clone()));
+                parts.truncate(MAX_IDENTIFIER_PARTS_PER_SYMBOL);
                 for part in &parts {
                     term_to_symbol_indices
                         .entry(part.clone())
@@ -244,7 +453,17 @@ impl ConceptIndexBuilder {
         let mut clusters: Vec<ConceptCluster> = Vec::new();
         let mut seen_term_sets: HashMap<String, usize> = HashMap::new(); // cluster dedup
 
-        for (term, sym_indices) in &term_to_symbol_indices {
+        let mut identifier_terms: Vec<(&String, &Vec<usize>)> =
+            term_to_symbol_indices.iter().collect();
+        identifier_terms.sort_by(|a, b| {
+            b.1.len()
+                .cmp(&a.1.len())
+                .then_with(|| b.0.len().cmp(&a.0.len()))
+                .then_with(|| a.0.cmp(b.0))
+        });
+        identifier_terms.truncate(MAX_CONCEPT_CLUSTERS / 2);
+
+        for (term, sym_indices) in identifier_terms {
             if sym_indices.len() < 2 {
                 continue; // skip singleton terms
             }
@@ -253,6 +472,9 @@ impl ConceptIndexBuilder {
             let mut sorted_indices = sym_indices.clone();
             sorted_indices.sort_unstable();
             sorted_indices.dedup();
+            ranked_symbol_indices(&mut sorted_indices, &self.symbols);
+            sorted_indices.truncate(MAX_SYMBOLS_PER_CLUSTER);
+            sorted_indices.sort_unstable();
             let dedup_key = format!("{sorted_indices:?}");
 
             if let Some(&existing_idx) = seen_term_sets.get(&dedup_key) {
@@ -269,6 +491,7 @@ impl ConceptIndexBuilder {
                 .iter()
                 .map(|&i| self.symbols[i].name.clone())
                 .collect();
+            symbol_names.sort();
             symbol_names.dedup();
 
             let mut file_set: Vec<String> = sorted_indices
@@ -308,7 +531,16 @@ impl ConceptIndexBuilder {
             }
         }
 
-        for (doc_term, sym_indices) in &doc_term_to_symbols {
+        let mut doc_terms: Vec<(&String, &Vec<usize>)> = doc_term_to_symbols.iter().collect();
+        doc_terms.sort_by(|a, b| {
+            b.1.len()
+                .cmp(&a.1.len())
+                .then_with(|| b.0.len().cmp(&a.0.len()))
+                .then_with(|| a.0.cmp(b.0))
+        });
+        doc_terms.truncate(MAX_CONCEPT_CLUSTERS / 2);
+
+        for (doc_term, sym_indices) in doc_terms {
             if sym_indices.len() < 2 {
                 // Even single-symbol doc terms are useful — they create a
                 // concept→symbol bridge that wouldn't exist from identifiers
@@ -318,6 +550,9 @@ impl ConceptIndexBuilder {
             let mut sorted_indices = sym_indices.clone();
             sorted_indices.sort_unstable();
             sorted_indices.dedup();
+            ranked_symbol_indices(&mut sorted_indices, &self.symbols);
+            sorted_indices.truncate(MAX_SYMBOLS_PER_CLUSTER);
+            sorted_indices.sort_unstable();
 
             // Check if a cluster with exactly this symbol set already exists
             let dedup_key = format!("{sorted_indices:?}");
@@ -329,6 +564,7 @@ impl ConceptIndexBuilder {
                 .iter()
                 .map(|&i| self.symbols[i].name.clone())
                 .collect();
+            symbol_names.sort();
             symbol_names.dedup();
 
             let mut file_set: Vec<String> = sorted_indices
@@ -349,6 +585,9 @@ impl ConceptIndexBuilder {
                 files: file_set,
                 score,
             });
+            if clusters.len() >= MAX_CONCEPT_CLUSTERS {
+                break;
+            }
         }
 
         // -----------------------------------------------------------------
@@ -356,7 +595,7 @@ impl ConceptIndexBuilder {
         // -----------------------------------------------------------------
 
         // Build a file → co-occurring files map
-        let mut cooccur_map: HashMap<&str, Vec<&str>> = HashMap::new();
+        let mut cooccur_map: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         for (a, b) in &self.cooccurrences {
             cooccur_map.entry(a.as_str()).or_default().push(b.as_str());
             cooccur_map.entry(b.as_str()).or_default().push(a.as_str());
@@ -373,6 +612,7 @@ impl ConceptIndexBuilder {
             }
             expanded_files.sort_unstable();
             expanded_files.dedup();
+            expanded_files.truncate(MAX_FILES_PER_CLUSTER);
             cluster.files = expanded_files;
         }
 
@@ -380,12 +620,21 @@ impl ConceptIndexBuilder {
         // Phase 4: Embedding-based cluster merge (v0.40)
         // -----------------------------------------------------------------
         //
-        // Single-link agglomerative merge at centroid-cosine >= threshold,
-        // cap = max combined symbol count. O(C^2) — on linux-kernel scale
-        // a HNSW top-K probe is the documented follow-up.
+        // Deterministic sign-projection buckets with bounded local comparisons
+        // replace the former all-pairs scan. `cap` still limits the combined
+        // symbol count of any merged cluster.
         if let Some((embeddings, config)) = self.embed_cluster.as_ref() {
             merge_clusters_by_embedding(&mut clusters, embeddings, config.threshold, config.cap);
         }
+
+        clusters.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.symbols.cmp(&b.symbols))
+                .then_with(|| a.files.cmp(&b.files))
+        });
+        clusters.truncate(MAX_CONCEPT_CLUSTERS);
 
         // -----------------------------------------------------------------
         // Phase 5: Build term → cluster index
@@ -478,9 +727,29 @@ impl ConceptIndexBuilder {
         let _ = seen_term_sets;
 
         // Dedup the cluster index lists
+        // Rank and cap every posting list. Generic terms no longer point at
+        // thousands of clusters, but retain the highest-cohesion matches.
         for indices in term_to_clusters.values_mut() {
-            indices.sort_unstable();
+            indices.sort_by(|&a, &b| {
+                clusters[b]
+                    .score
+                    .total_cmp(&clusters[a].score)
+                    .then_with(|| clusters[a].name.cmp(&clusters[b].name))
+            });
             indices.dedup();
+            indices.truncate(MAX_CLUSTERS_PER_TERM);
+        }
+
+        if term_to_clusters.len() > MAX_CONCEPT_TERMS {
+            let mut ranked: Vec<(String, Vec<usize>)> = term_to_clusters.into_iter().collect();
+            ranked.sort_by(|a, b| {
+                b.1.len()
+                    .cmp(&a.1.len())
+                    .then_with(|| b.0.len().cmp(&a.0.len()))
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            ranked.truncate(MAX_CONCEPT_TERMS);
+            term_to_clusters = ranked.into_iter().collect();
         }
 
         // Drop the intermediate decomposed data.
@@ -493,13 +762,50 @@ impl ConceptIndexBuilder {
     }
 }
 
-/// Single-link agglomerative merge on concept clusters using chunk embeddings.
+fn retain_best_symbol_records(records: &mut Vec<SymbolRecord>) {
+    if records.len() <= MAX_CONCEPT_SOURCE_SYMBOLS {
+        return;
+    }
+    records.sort_by(|a, b| {
+        b.doc_words
+            .len()
+            .cmp(&a.doc_words.len())
+            .then_with(|| b.part_count.cmp(&a.part_count))
+            .then_with(|| a.file.cmp(&b.file))
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.doc_words.cmp(&b.doc_words))
+    });
+    records.truncate(MAX_CONCEPT_SOURCE_SYMBOLS);
+}
+
+fn retain_best_cooccurrences(cooccurrences: &mut Vec<(String, String)>) {
+    for (a, b) in cooccurrences.iter_mut() {
+        if b < a {
+            std::mem::swap(a, b);
+        }
+    }
+    cooccurrences.sort();
+    cooccurrences.dedup();
+    cooccurrences.truncate(MAX_COOCCURRENCES);
+}
+
+fn ranked_symbol_indices(indices: &mut [usize], symbols: &[SymbolRecord]) {
+    indices.sort_by(|&a, &b| {
+        symbols[b]
+            .doc_words
+            .len()
+            .cmp(&symbols[a].doc_words.len())
+            .then_with(|| symbols[a].name.cmp(&symbols[b].name))
+            .then_with(|| symbols[a].file.cmp(&symbols[b].file))
+    });
+}
+
+/// Bounded embedding merge on concept clusters using chunk embeddings.
 ///
-/// For each pair of clusters, compute the cosine similarity of their
-/// centroid vectors (mean of member-symbol embeddings). If the similarity
-/// exceeds `threshold` AND the combined member count fits under `cap`,
-/// merge the smaller into the larger and re-centroid. Iterate until no
-/// merge fires in a full pass.
+/// Centroids are grouped by a deterministic sign-projection bucket and compared
+/// in chunks of at most [`MAX_EMBEDDING_BUCKET_SIZE`]. This retains the useful
+/// synonym merge while replacing the old unbounded `O(C^2)` all-pairs scan with
+/// `O(C * MAX_EMBEDDING_BUCKET_SIZE)` comparisons.
 ///
 /// Symbols without an embedding vector in `embeddings` are skipped — their
 /// cluster still participates but contributes no centroid information.
@@ -513,63 +819,100 @@ fn merge_clusters_by_embedding(
         return;
     }
 
-    // Precompute centroid for every cluster up front.
-    let mut centroids: Vec<Option<Vec<f32>>> = clusters
+    let centroids: Vec<Option<Vec<f32>>> = clusters
         .iter()
         .map(|c| cluster_centroid(c, embeddings))
         .collect();
 
-    loop {
-        let mut merged_this_pass = false;
-
-        'outer: for i in 0..clusters.len() {
-            let Some(c_i) = centroids[i].as_ref() else {
-                continue;
-            };
-            for j in (i + 1)..clusters.len() {
-                let Some(c_j) = centroids[j].as_ref() else {
-                    continue;
-                };
-                if clusters[i].symbols.len() + clusters[j].symbols.len() > cap {
-                    continue;
-                }
-                let sim = cosine_similarity(c_i, c_j);
-                if sim < threshold {
-                    continue;
-                }
-
-                // Merge j into i. Prefer keeping the larger cluster's name.
-                let (keep, drop_idx) = if clusters[i].symbols.len() >= clusters[j].symbols.len() {
-                    (i, j)
-                } else {
-                    (j, i)
-                };
-
-                // Take (not clone) the dropped cluster's vecs — it's about to be
-                // removed anyway. Dedup once after the append, not per push.
-                let mut drop_cluster = clusters.remove(drop_idx);
-                centroids.remove(drop_idx);
-                let keep = if drop_idx < keep { keep - 1 } else { keep };
-
-                let keep_cluster = &mut clusters[keep];
-                keep_cluster.symbols.append(&mut drop_cluster.symbols);
-                keep_cluster.symbols.sort();
-                keep_cluster.symbols.dedup();
-                keep_cluster.files.append(&mut drop_cluster.files);
-                keep_cluster.files.sort();
-                keep_cluster.files.dedup();
-                keep_cluster.score = keep_cluster.score.max(drop_cluster.score);
-
-                centroids[keep] = cluster_centroid(keep_cluster, embeddings);
-                merged_this_pass = true;
-                break 'outer;
+    let mut buckets: BTreeMap<u16, Vec<usize>> = BTreeMap::new();
+    for (idx, centroid) in centroids.iter().enumerate() {
+        let Some(centroid) = centroid else {
+            continue;
+        };
+        let mut bucket = 0u16;
+        for (dimension, &value) in centroid.iter().take(12).enumerate() {
+            if value >= 0.0 {
+                bucket |= 1 << dimension;
             }
         }
+        buckets.entry(bucket).or_default().push(idx);
+    }
 
-        if !merged_this_pass {
-            break;
+    let mut parent: Vec<usize> = (0..clusters.len()).collect();
+    let mut sizes: Vec<usize> = clusters
+        .iter()
+        .map(|cluster| cluster.symbols.len())
+        .collect();
+    let effective_cap = cap.min(MAX_SYMBOLS_PER_CLUSTER);
+
+    for indices in buckets.values_mut() {
+        indices.sort_by(|&a, &b| clusters[a].name.cmp(&clusters[b].name));
+        for group in indices.chunks(MAX_EMBEDDING_BUCKET_SIZE) {
+            for i in 0..group.len() {
+                for j in (i + 1)..group.len() {
+                    let left = group[i];
+                    let right = group[j];
+                    let left_root = union_find_root(&mut parent, left);
+                    let right_root = union_find_root(&mut parent, right);
+                    if left_root == right_root
+                        || sizes[left_root] + sizes[right_root] > effective_cap
+                    {
+                        continue;
+                    }
+                    let (Some(left_centroid), Some(right_centroid)) =
+                        (centroids[left].as_ref(), centroids[right].as_ref())
+                    else {
+                        continue;
+                    };
+                    if cosine_similarity(left_centroid, right_centroid) < threshold {
+                        continue;
+                    }
+                    let (keep, merge) = if sizes[left_root] > sizes[right_root]
+                        || (sizes[left_root] == sizes[right_root]
+                            && clusters[left_root].name <= clusters[right_root].name)
+                    {
+                        (left_root, right_root)
+                    } else {
+                        (right_root, left_root)
+                    };
+                    parent[merge] = keep;
+                    sizes[keep] += sizes[merge];
+                }
+            }
         }
     }
+
+    let mut merged: BTreeMap<usize, ConceptCluster> = BTreeMap::new();
+    for (idx, mut cluster) in std::mem::take(clusters).into_iter().enumerate() {
+        let root = union_find_root(&mut parent, idx);
+        match merged.get_mut(&root) {
+            Some(target) => {
+                target.symbols.append(&mut cluster.symbols);
+                target.files.append(&mut cluster.files);
+                target.score = target.score.max(cluster.score);
+            }
+            None => {
+                merged.insert(root, cluster);
+            }
+        }
+    }
+    for cluster in merged.values_mut() {
+        cluster.symbols.sort();
+        cluster.symbols.dedup();
+        cluster.symbols.truncate(effective_cap);
+        cluster.files.sort();
+        cluster.files.dedup();
+        cluster.files.truncate(MAX_FILES_PER_CLUSTER);
+    }
+    *clusters = merged.into_values().collect();
+}
+
+fn union_find_root(parent: &mut [usize], mut node: usize) -> usize {
+    while parent[node] != node {
+        parent[node] = parent[parent[node]];
+        node = parent[node];
+    }
+    node
 }
 
 /// Compute the centroid (element-wise mean) of the embedding vectors for
@@ -644,6 +987,30 @@ pub fn extract_concept_words(doc: &str) -> Vec<String> {
         .filter(|w| w.len() >= 3)
         .filter(|w| !STOP_WORDS.contains(&w.as_str()))
         .collect()
+}
+
+/// Extract the strongest unique concept words while retaining at most `limit`
+/// small strings. Builders use this instead of materializing arbitrarily large
+/// generated documentation vocabularies.
+pub(super) fn extract_ranked_concept_words(doc: &str, limit: usize) -> Vec<String> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let mut words = Vec::with_capacity(limit + 1);
+    for raw in doc.split(|c: char| !c.is_alphanumeric()) {
+        if raw.len() < 3 || raw.len() > MAX_CONCEPT_WORD_BYTES {
+            continue;
+        }
+        let word = raw.to_lowercase();
+        if STOP_WORDS.contains(&word.as_str()) || words.contains(&word) {
+            continue;
+        }
+        words.push(word);
+        words.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        words.truncate(limit);
+    }
+    words
 }
 
 /// Split a `camelCase` or `snake_case` identifier into lowercase parts.
@@ -942,6 +1309,24 @@ mod tests {
     }
 
     #[test]
+    fn ranked_concept_words_bound_generated_documentation() {
+        let oversized = "x".repeat(10_000);
+        let doc = format!(
+            "{oversized} authentication authorization validation network session storage cache"
+        );
+        let words = extract_ranked_concept_words(&doc, 4);
+        assert_eq!(
+            words,
+            vec!["authentication", "authorization", "validation", "network"]
+        );
+        assert!(
+            words
+                .iter()
+                .all(|word| word.len() <= MAX_CONCEPT_WORD_BYTES)
+        );
+    }
+
+    #[test]
     fn lookup_query_ranks_by_hit_count() {
         let mut builder = ConceptIndexBuilder::new();
         builder.add_symbol(
@@ -1159,5 +1544,107 @@ mod tests {
         let with_empty = b2.with_symbol_embeddings(HashMap::new()).build();
 
         assert_eq!(without.clusters.len(), with_empty.clusters.len());
+    }
+
+    #[test]
+    fn bounded_clusters_keep_ranked_useful_members() {
+        let mut builder = ConceptIndexBuilder::new();
+        for idx in 0..200 {
+            builder.add_symbol(
+                &format!("auth_token_handler_{idx}"),
+                &format!("src/auth/module_{idx}.rs"),
+                Some("Authenticate and validate credential tokens for users"),
+            );
+            builder.add_cooccurrence(
+                &format!("src/auth/module_{idx}.rs"),
+                &format!("src/routes/route_{idx}.rs"),
+            );
+        }
+        let index = builder.build();
+        let auth = index.lookup("auth");
+        assert!(!auth.is_empty(), "high-evidence auth concept must survive");
+        assert!(index.clusters.len() <= MAX_CONCEPT_CLUSTERS);
+        assert!(index.term_to_clusters.len() <= MAX_CONCEPT_TERMS);
+        assert!(index.clusters.iter().all(|cluster| {
+            cluster.symbols.len() <= MAX_SYMBOLS_PER_CLUSTER
+                && cluster.files.len() <= MAX_FILES_PER_CLUSTER
+        }));
+        assert!(
+            index
+                .term_to_clusters
+                .values()
+                .all(|indices| indices.len() <= MAX_CLUSTERS_PER_TERM)
+        );
+    }
+
+    #[test]
+    fn persisted_concepts_are_deterministic_across_input_order() {
+        fn build(reverse: bool) -> ConceptIndex {
+            let mut symbols = vec![
+                ("auth_login", "src/auth.rs", "Authenticate a credential"),
+                ("auth_token", "src/token.rs", "Validate a credential"),
+                ("cache_read", "src/cache.rs", "Read cached values"),
+                ("cache_write", "src/cache.rs", "Write cached values"),
+            ];
+            if reverse {
+                symbols.reverse();
+            }
+            let mut builder = ConceptIndexBuilder::new();
+            for (name, file, doc) in symbols {
+                builder.add_symbol(name, file, Some(doc));
+            }
+            builder.add_cooccurrence("src/auth.rs", "src/token.rs");
+            builder.build()
+        }
+        let forward = build(false).encode_persisted().unwrap();
+        let reverse = build(true).encode_persisted().unwrap();
+        assert_eq!(forward, reverse);
+    }
+
+    #[test]
+    fn interned_concept_format_is_less_than_half_legacy_size() {
+        let symbols: Vec<String> = (0..32).map(|idx| format!("shared_symbol_{idx}")).collect();
+        let files: Vec<String> = (0..16)
+            .map(|idx| format!("src/shared/module_{idx}.rs"))
+            .collect();
+        let clusters: Vec<ConceptCluster> = (0..256)
+            .map(|idx| ConceptCluster {
+                name: format!("concept_{idx}"),
+                symbols: symbols.clone(),
+                files: files.clone(),
+                score: 0.5,
+            })
+            .collect();
+        let term_to_clusters = clusters
+            .iter()
+            .enumerate()
+            .map(|(idx, cluster)| (cluster.name.clone(), vec![idx]))
+            .collect();
+        let index = ConceptIndex {
+            clusters,
+            term_to_clusters,
+        };
+        let legacy = bitcode::serialize(&index).unwrap();
+        let compact = index.encode_persisted().unwrap();
+        assert!(
+            compact.len().saturating_mul(2) <= legacy.len(),
+            "compact={} legacy={}",
+            compact.len(),
+            legacy.len()
+        );
+        let decoded = ConceptIndex::decode_persisted(&compact).unwrap();
+        assert_eq!(decoded.clusters.len(), index.clusters.len());
+        assert_eq!(decoded.lookup("concept_42").len(), 1);
+    }
+
+    #[test]
+    fn persisted_concept_decoder_accepts_legacy_bytes() {
+        let mut builder = ConceptIndexBuilder::new();
+        builder.add_symbol("auth_login", "src/auth.rs", None);
+        builder.add_symbol("auth_token", "src/auth.rs", None);
+        let index = builder.build();
+        let legacy = bitcode::serialize(&index).unwrap();
+        let decoded = ConceptIndex::decode_persisted(&legacy).unwrap();
+        assert!(!decoded.lookup("auth").is_empty());
     }
 }

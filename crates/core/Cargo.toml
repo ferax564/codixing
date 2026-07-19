@@ -87,6 +87,7 @@ quick-xml.workspace = true
 
 petgraph.workspace = true
 tantivy.workspace = true
+fs4.workspace = true
 fastembed.workspace = true
 usearch = { workspace = true, optional = true }
 tiktoken-rs.workspace = true

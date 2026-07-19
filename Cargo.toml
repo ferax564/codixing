@@ -66,6 +66,7 @@ clap = { version = "4", features = ["derive"] }
 # Concurrency
 dashmap = "6"
 rayon = "1"
+fs4 = "0.13.1"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

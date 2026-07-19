@@ -23,9 +23,12 @@ fn repair_self_heals_partial_index_directory() {
     drop(engine);
 
     // Reproduce the issue: index dir exists, but config.json + meta.json are gone.
-    let codixing_dir = root.join(".codixing");
-    std::fs::remove_file(codixing_dir.join("config.json")).unwrap();
-    std::fs::remove_file(codixing_dir.join("meta.json")).unwrap();
+    let active_index_dir = codixing_core::persistence::IndexStore::open(&root)
+        .unwrap()
+        .codixing_dir()
+        .to_path_buf();
+    std::fs::remove_file(active_index_dir.join("config.json")).unwrap();
+    std::fs::remove_file(active_index_dir.join("meta.json")).unwrap();
 
     // Pre-condition: search should now fail with PartialIndex / actionable error.
     let pre = Command::new(env!("CARGO_BIN_EXE_codixing"))

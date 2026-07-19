@@ -8,6 +8,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Crash-safe generational rebuilds** — `codixing init` now constructs a clean
+  sibling generation, validates its metadata and Tantivy index, then atomically
+  swaps a small active-generation manifest. Repeated init no longer appends
+  duplicate or deleted documents. Failed/interrupted builds preserve the prior
+  searchable generation, legacy flat indexes open and migrate automatically,
+  long-lived read-only engines reopen atomically on generation changes, old
+  generations are safely reclaimed, and `codixing doctor` exposes layout,
+  active generation, and abandoned-generation diagnostics. A rebuild may
+  temporarily require free disk space for both the active and new indexes.
+  Explicit read-only opens never rebuild an incompatible index; they now return
+  a clear error directing the caller to run a writable `codixing init`.
+
+- **Compact v3 chunk-trigram persistence for large repositories** — current
+  `init`, `sync`, and import writes now encode posting lists with dense
+  generation-local u32 ordinals and keep stable hash-derived u64 chunk IDs in
+  a sorted mmap table. This removes the production v1 raw-u64 fallback, uses
+  at most half the bytes on the representative hash-ID regression corpus, and
+  translates ordinals directly into the final query result allocation (no
+  heap copy of the ID table). v1 and v2 files remain readable; the next index
+  write migrates them, or `codixing init .` can reclaim the space immediately.
+  v3 validates flags, fixed sections, canonical entry/blob layout, exact file
+   size, posting totals, stable-ID ordering, and an ID-table checksum before
+   exposing the mmap.
+
+- **Bounded, fresh semantic artifacts for huge repositories** — concept and
+  learned-reformulation construction now ranks and caps source vocabulary,
+  per-file co-occurrences, clusters, postings, and embedding comparisons instead
+  of retaining unbounded all-pairs graphs. Versioned v2 persistence interns
+  repeated paths/symbols with deterministic byte output while reading legacy
+  files. Builders stream the symbol table instead of cloning the full corpus and
+  retain only a small ranked vocabulary from each doc comment. Every mutation
+   invalidates the old artifacts before rebuilding, so a failed update degrades
+   to primary search rather than serving stale concepts.
+
 - **External-context import** — `codixing import <source> <path>` ingests project
   context that lives outside the source tree as first-class, searchable
   documents, across four sources:
@@ -45,6 +79,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Concurrent CLI and federated reads no longer contend for the writer lock** —
+  every non-mutating CLI command now opens the index directly in read-only
+  mode instead of paying the writer retry schedule before falling back.
+  Federation members do the same for both eager and lazy loading, so a
+  long-lived cross-repository search process cannot block `sync`, `update`, or
+  another writer. Lazy federations larger than `max_resident` now retain a
+  stable bounded cache and open overflow projects ephemerally, avoiding the
+  previous every-query eviction/reopen cycle while still searching every
+  project. Mutating commands retain explicit writer ownership, with regression
+  coverage for a CLI search beside an active writer, both federation loading
+  modes, and above-cap fan-out.
 - **`mod foo;` declarations now produce dependency-graph edges** — the Rust
   import extractor only handled `use` declarations, so files wired into a
   crate purely via `mod` declarations (every language plugin, MCP tool module,

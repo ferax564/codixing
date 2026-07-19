@@ -21,6 +21,7 @@ pub mod reformulation;
 mod reload;
 mod search;
 pub mod semantic;
+mod semantic_artifacts;
 mod symbol_graph;
 pub mod sync;
 pub(crate) mod synonyms;
@@ -327,7 +328,6 @@ fn git_diff_since(root: &Path, since_commit: &str) -> Option<(Vec<PathBuf>, Vec<
 /// and retrieval into a single coherent API.
 pub struct Engine {
     pub(super) config: IndexConfig,
-    pub(super) store: IndexStore,
     pub(super) parser: Parser,
     pub(super) tantivy: TantivyIndex,
     pub(super) symbols: SymbolTable,
@@ -389,6 +389,10 @@ pub struct Engine {
     pub(super) concept_reranker: std::sync::OnceLock<Option<Arc<Reranker>>>,
     /// TOML-based output filter pipeline with tee recovery.
     filter_pipeline: FilterPipeline,
+    /// Keep the store last so its generation lease is released only after
+    /// Tantivy readers and memory maps have closed. This is required for safe
+    /// cleanup of superseded generations on Windows.
+    pub(super) store: IndexStore,
 }
 
 impl Engine {
@@ -488,16 +492,10 @@ impl Engine {
             if !self.store.concepts_path().exists() {
                 return None;
             }
-            match std::fs::read(self.store.concepts_path()) {
-                Ok(bytes) => match bitcode::deserialize::<concepts::ConceptIndex>(&bytes) {
-                    Ok(idx) => Some(idx),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to deserialize concept index (lazy)");
-                        None
-                    }
-                },
+            match semantic_artifacts::load_concept_index(&self.store.concepts_path()) {
+                Ok(idx) => Some(idx),
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to read concept index (lazy)");
+                    tracing::warn!(error = %e, "failed to load concept index (lazy)");
                     None
                 }
             }
@@ -515,18 +513,10 @@ impl Engine {
             if !self.store.reformulations_path().exists() {
                 return None;
             }
-            match std::fs::read(self.store.reformulations_path()) {
-                Ok(bytes) => {
-                    match bitcode::deserialize::<reformulation::LearnedReformulations>(&bytes) {
-                        Ok(reform) => Some(reform),
-                        Err(e) => {
-                            tracing::warn!(error = %e, "failed to deserialize reformulations (lazy)");
-                            None
-                        }
-                    }
-                }
+            match semantic_artifacts::load_reformulations(&self.store.reformulations_path()) {
+                Ok(reformulations) => Some(reformulations),
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to read reformulations (lazy)");
+                    tracing::warn!(error = %e, "failed to load reformulations (lazy)");
                     None
                 }
             }
@@ -561,6 +551,29 @@ impl Engine {
     #[cfg(any(test, feature = "internal-testing"))]
     pub fn __test_force_load_reformulations(&self) -> bool {
         self.get_reformulations().is_some()
+    }
+
+    /// Test-only semantic concept lookup used by mutation-freshness regression
+    /// tests without exposing the auxiliary index as public API.
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn __test_concept_symbols(&self, term: &str) -> Vec<String> {
+        self.get_concept_index()
+            .map(|index| {
+                index
+                    .lookup(term)
+                    .into_iter()
+                    .flat_map(|cluster| cluster.symbols.iter().cloned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Test-only learned expansion lookup for mutation-freshness regressions.
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn __test_reformulation_expansions(&self, term: &str) -> Vec<String> {
+        self.get_reformulations()
+            .map(|reformulations| reformulations.expand(term))
+            .unwrap_or_default()
     }
 
     /// Return summary statistics about the current index.

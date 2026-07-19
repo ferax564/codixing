@@ -68,7 +68,9 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 - `crates/core/src/federation/` — cross-repo federated search (`--federation config.json`)
 - `crates/lsp/` — LSP server (`codixing-lsp`), hover/go-to-def/refs/symbols/call hierarchy/complexity diagnostics/rename/semantic tokens
 - `claude-plugin/` — Claude Code plugin with 5 skills + MCP server config
-- `.codixing/` — index data (do not edit manually)
+- `.codixing/` — index control files plus atomically activated data generations
+  under `generations/` (do not edit manually). Rebuilds temporarily need space
+  for both the active and new generation; failed rebuilds preserve the active one.
 
 ## Build & Test
 
@@ -206,7 +208,11 @@ The CI workflow (`.github/workflows/ci.yml`) has the following jobs:
 - **audit** — blocking Ubuntu `cargo-audit` run. Its explicit advisory ignores are justified in `audit.toml`; there is no `continue-on-error` escape hatch.
 - **coverage** — blocking Ubuntu coverage generation and `coverage-report` artifact upload. The final Codecov upload alone is configured not to fail CI on a Codecov service error.
 - **release-build** — blocking three-platform matrix on `main` pushes only (never PRs or tag pushes). It has `needs: [test, npm-installer]`, builds the four binaries for Linux x86_64, macOS arm64, and Windows x86_64 (Windows uses `--no-default-features`), and uploads `binaries-<suffix>` artifacts with 14-day retention.
-- **benchmarks** — blocking Ubuntu `cargo bench` job with no `needs` dependency, so it starts in parallel rather than waiting for `test`; uploads `benchmark-results`.
+- **benchmarks** — blocking Ubuntu job with no `needs` dependency. It runs the
+  registered Criterion benches and the machine-readable large-repository gate,
+  then uploads both results as `benchmark-results`. Pull requests use the short
+  profile, main pushes use 10K files, and the weekly schedule uses 100K files;
+  performance ratios require an explicit same-machine baseline.
 
 The auto-tag workflow waits for the entire CI workflow to conclude successfully, so every blocking job above gates release tagging even though `release-build` itself directly depends only on `test` and `npm-installer`.
 

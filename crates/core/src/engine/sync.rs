@@ -211,6 +211,26 @@ fn merge_signatures(
 }
 
 impl Engine {
+    /// Disable the two auxiliary semantic caches before any searchable mutation.
+    /// The primary indexes remain available; a failed mutation/rebuild can only
+    /// reduce expansion quality, never expose mappings from the previous tree.
+    fn invalidate_semantic_artifacts(&mut self) -> Result<()> {
+        self.concept_index = std::sync::OnceLock::new();
+        self.reformulations = std::sync::OnceLock::new();
+        super::semantic_artifacts::invalidate_semantic_artifacts(&self.store)
+    }
+
+    fn rebuild_semantic_artifacts(&mut self) -> Result<()> {
+        // Reset even if a caller loaded one of the artifacts after invalidation.
+        self.concept_index = std::sync::OnceLock::new();
+        self.reformulations = std::sync::OnceLock::new();
+        super::semantic_artifacts::rebuild_semantic_artifacts(
+            &self.store,
+            &self.symbols,
+            self.graph.as_ref(),
+        )
+    }
+
     fn resolve_mutation_path(
         &self,
         path: &Path,
@@ -989,6 +1009,8 @@ impl Engine {
         let expanded_changes = self.expand_directory_changes(&resolved_changes)?;
         let changes = expanded_changes.as_slice();
 
+        self.invalidate_semantic_artifacts()?;
+
         // Snapshot callers before any direct mutation. Removing a graph node
         // also removes its incoming edges, so discovering cascades afterwards
         // would miss exactly the callers that need their stale resolution
@@ -1135,7 +1157,7 @@ impl Engine {
         // Persist the updated index.
         self.get_file_trigram()
             .save_binary(&self.store.file_trigram_path())?;
-        self.get_trigram().save_mmap_binary_v2(
+        self.get_trigram().save_mmap_binary_v3(
             &self.store.chunk_trigram_path(),
             crate::index::trigram::PostingCodec::DeltaVarint,
         )?;
@@ -1152,6 +1174,8 @@ impl Engine {
             self.store.save_graph(&flat)?;
             self.store.save_symbol_graph(graph)?;
         }
+
+        self.rebuild_semantic_artifacts()?;
 
         Ok(outcome)
     }
@@ -1813,6 +1837,8 @@ impl Engine {
             return Err(CodixingError::ReadOnly);
         }
 
+        self.invalidate_semantic_artifacts()?;
+
         info!(
             files = self.file_chunk_counts.len(),
             "rebuilding dependency graph from disk"
@@ -1930,6 +1956,8 @@ impl Engine {
             self.store.save_graph(&flat)?;
             self.store.save_symbol_graph(g)?;
         }
+
+        self.rebuild_semantic_artifacts()?;
 
         info!("graph rebuild complete");
         Ok(())

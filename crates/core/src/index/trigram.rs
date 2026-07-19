@@ -11,7 +11,8 @@
 //! queries with OR support, and [`build_query_plan`] to decompose a regex
 //! pattern into a query plan using the Russ Cox / trigrep technique.
 
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use memmap2::Mmap;
@@ -31,6 +32,9 @@ const MMAP_VERSION_V1: u32 = 1;
 /// v0.37 v2 mmap format version (delta+varint or roaring postings, u32 IDs).
 const MMAP_VERSION_V2: u32 = 2;
 
+/// v3 mmap format version (dense u32 ordinals plus a stable-u64 ID table).
+const MMAP_VERSION_V3: u32 = 3;
+
 /// Default constant for v1 writes — kept for the original [`TrigramIndex::save_mmap_binary`] path.
 const MMAP_VERSION: u32 = MMAP_VERSION_V1;
 
@@ -39,6 +43,9 @@ const MMAP_HEADER_SIZE: usize = 20;
 
 /// v2 header size: v1 header + encoding_flags(4).
 const MMAP_V2_HEADER_SIZE: usize = 24;
+
+/// v3 header size: v2 header + stable_id_count(4) + stable_id_checksum(4).
+const MMAP_V3_HEADER_SIZE: usize = 32;
 
 /// Size of one v1 trigram index entry: trigram(3) + pad(1) + posting_start(4) + posting_count(4).
 const MMAP_ENTRY_SIZE: usize = 12;
@@ -49,6 +56,9 @@ const MMAP_V2_ENTRY_SIZE: usize = 16;
 
 /// v2 encoding flag bit selecting the posting codec (0 = DeltaVarint, 1 = Roaring).
 const ENCODING_FLAG_CODEC_BIT: u32 = 0x1;
+
+/// FNV-1a offset basis for the v3 stable-ID table checksum.
+const STABLE_ID_CHECKSUM_OFFSET: u32 = 0x811C_9DC5;
 
 /// Posting-list codec used by the v2 mmap format.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
@@ -69,12 +79,17 @@ impl PostingCodec {
         }
     }
 
-    fn from_flag_bits(flags: u32) -> Self {
-        if flags & ENCODING_FLAG_CODEC_BIT != 0 {
+    fn from_flag_bits(flags: u32) -> Result<Self> {
+        if flags & !ENCODING_FLAG_CODEC_BIT != 0 {
+            return Err(CodixingError::Serialization(format!(
+                "unsupported trigram encoding flags: 0x{flags:08X}"
+            )));
+        }
+        Ok(if flags & ENCODING_FLAG_CODEC_BIT != 0 {
             PostingCodec::Roaring
         } else {
             PostingCodec::DeltaVarint
-        }
+        })
     }
 }
 
@@ -84,13 +99,17 @@ struct MmapBacking {
     trigram_count: u32,
     index_offset: usize,
     postings_offset: usize,
-    /// File format version (1 or 2).
+    /// File format version (1, 2, or 3).
     version: u32,
-    /// Posting codec for v2 backings (unused/`DeltaVarint` for v1).
+    /// Posting codec for v2/v3 backings (unused/`DeltaVarint` for v1).
     codec: PostingCodec,
     /// Per-entry stride for the trigram index section. Cached for perf:
     /// `MMAP_ENTRY_SIZE` (12) for v1, `MMAP_V2_ENTRY_SIZE` (16) for v2.
     entry_size: usize,
+    /// Start of the v3 ordinal-to-stable-ID table. Zero for v1/v2.
+    id_table_offset: usize,
+    /// Number of stable u64 IDs in the v3 table. Zero for v1/v2.
+    id_count: u32,
 }
 
 /// Serializable representation of the trigram index data (v2: no content).
@@ -107,6 +126,8 @@ struct TrigramIndexDataLegacy {
     #[allow(dead_code)]
     chunks: Vec<(u64, String)>,
 }
+
+type MaterializedTrigramEntries<'a> = Vec<([u8; 3], Cow<'a, [u64]>)>;
 
 /// An inverted index mapping 3-byte substrings to chunk IDs for fast exact search.
 ///
@@ -149,38 +170,11 @@ impl TrigramIndex {
                 let off = backing.index_offset + i * backing.entry_size;
                 let trigram = [data[off], data[off + 1], data[off + 2]];
 
-                let ids: Vec<u64> = if backing.version == MMAP_VERSION_V1 {
-                    let start =
-                        u32::from_le_bytes(data[off + 4..off + 8].try_into().unwrap()) as usize;
-                    let count =
-                        u32::from_le_bytes(data[off + 8..off + 12].try_into().unwrap()) as usize;
-
-                    let posting_base = backing.postings_offset + start * 8;
-                    (0..count)
-                        .map(|j| {
-                            let o = posting_base + j * 8;
-                            u64::from_le_bytes(data[o..o + 8].try_into().unwrap())
-                        })
-                        .collect()
-                } else {
-                    // v2: posting_byte_off / posting_count / posting_byte_size.
-                    let byte_off =
-                        u32::from_le_bytes(data[off + 4..off + 8].try_into().unwrap()) as usize;
-                    let count =
-                        u32::from_le_bytes(data[off + 8..off + 12].try_into().unwrap()) as usize;
-                    let byte_size =
-                        u32::from_le_bytes(data[off + 12..off + 16].try_into().unwrap()) as usize;
-                    let blob_start = backing.postings_offset + byte_off;
-                    let blob_end = blob_start + byte_size;
-                    if blob_end > data.len() {
-                        Vec::new()
-                    } else {
-                        let blob = &data[blob_start..blob_end];
-                        let u32s =
-                            decode_posting_blob(blob, count, backing.codec).unwrap_or_default();
-                        u32s.into_iter().map(u64::from).collect()
-                    }
-                };
+                // A structurally valid mmap was checked at load time. If a
+                // posting blob is later found to be corrupt, keep the
+                // affected trigram empty rather than panicking while turning
+                // the index mutable; the next complete rebuild heals it.
+                let ids = Self::mmap_read_entry_ids(&backing, off).unwrap_or_default();
 
                 self.index.insert(trigram, ids);
             }
@@ -326,7 +320,7 @@ impl TrigramIndex {
 
         // For each query trigram, binary-search the index to find its posting
         // list location. The two `u32` payload words mean different things in
-        // v1 vs v2 — see `mmap_read_posting_list` / `mmap_read_posting_list_v2`.
+        // v1 vs v2/v3 — see the posting-list readers below.
         struct PostingRef {
             payload_a: u32,
             payload_b: u32,
@@ -347,20 +341,27 @@ impl TrigramIndex {
         // Intersect posting lists, starting from the shortest.
         posting_refs.sort_by_key(|r| r.count);
 
-        let read = |pr: &PostingRef| -> Vec<u64> {
-            if backing.version == MMAP_VERSION_V1 {
-                Self::mmap_read_posting_list(backing, pr.payload_a, pr.count)
-            } else {
-                Self::mmap_read_posting_list_v2(backing, pr.payload_a, pr.count, pr.payload_b)
-                    .into_iter()
-                    .map(u64::from)
-                    .collect()
+        let read = |pr: &PostingRef| -> Option<Vec<u64>> {
+            match backing.version {
+                MMAP_VERSION_V1 => Self::mmap_read_posting_list(backing, pr.payload_a, pr.count),
+                MMAP_VERSION_V2 => {
+                    Self::mmap_read_posting_list_v2(backing, pr.payload_a, pr.count, pr.payload_b)
+                        .map(|ids| ids.into_iter().map(u64::from).collect())
+                }
+                MMAP_VERSION_V3 => {
+                    Self::mmap_read_posting_list_v3(backing, pr.payload_a, pr.count, pr.payload_b)
+                }
+                _ => None,
             }
         };
 
-        let mut candidates = read(&posting_refs[0]);
+        let Some(mut candidates) = read(&posting_refs[0]) else {
+            return Vec::new();
+        };
         for pr in &posting_refs[1..] {
-            let list = read(pr);
+            let Some(list) = read(pr) else {
+                return Vec::new();
+            };
             candidates.retain(|id| list.binary_search(id).is_ok());
             if candidates.is_empty() {
                 break;
@@ -376,7 +377,7 @@ impl TrigramIndex {
     /// `payload_a`/`payload_b` depends on the format version:
     ///
     /// - **v1**: `payload_a = posting_start` (u64-units offset), `payload_b = 0`.
-    /// - **v2**: `payload_a = posting_byte_off`, `payload_b = posting_byte_size`.
+    /// - **v2/v3**: `payload_a = posting_byte_off`, `payload_b = posting_byte_size`.
     ///
     /// `count` is always the logical number of chunk IDs that decode from the
     /// posting list.
@@ -415,39 +416,148 @@ impl TrigramIndex {
 
     /// Read a v1 posting list from the mmap postings section.
     ///
-    /// Returns empty if the requested range exceeds the mmap bounds
+    /// Returns `None` if the requested range exceeds the mmap bounds
     /// (corrupted or partially written index).
-    fn mmap_read_posting_list(backing: &MmapBacking, start: u32, count: u32) -> Vec<u64> {
+    fn mmap_read_posting_list(backing: &MmapBacking, start: u32, count: u32) -> Option<Vec<u64>> {
         let data = &backing.mmap[..];
-        let base = backing.postings_offset + (start as usize) * 8;
-        let end = base + (count as usize) * 8;
+        let byte_start = (start as usize).checked_mul(8)?;
+        let base = backing.postings_offset.checked_add(byte_start)?;
+        let byte_count = (count as usize).checked_mul(8)?;
+        let end = base.checked_add(byte_count)?;
         if end > data.len() {
-            return Vec::new();
+            return None;
         }
-        (0..count as usize)
-            .map(|i| {
-                let off = base + i * 8;
-                u64::from_le_bytes(data[off..off + 8].try_into().unwrap())
-            })
-            .collect()
+        Some(
+            (0..count as usize)
+                .map(|i| {
+                    let off = base + i * 8;
+                    u64::from_le_bytes(data[off..off + 8].try_into().unwrap())
+                })
+                .collect(),
+        )
     }
 
     /// Read a v2 posting list (variable-length codec blob) from the mmap
-    /// postings section. Returns empty on truncation or decode failure.
+    /// postings section. Returns `None` on truncation or decode failure.
     fn mmap_read_posting_list_v2(
         backing: &MmapBacking,
         byte_off: u32,
         count: u32,
         byte_size: u32,
-    ) -> Vec<u32> {
-        let data = &backing.mmap[..];
-        let start = backing.postings_offset + byte_off as usize;
-        let end = start + byte_size as usize;
-        if end > data.len() {
-            return Vec::new();
+    ) -> Option<Vec<u32>> {
+        let blob = Self::mmap_posting_blob(backing, byte_off, byte_size)?;
+        decode_posting_blob(blob, count as usize, backing.codec)
+    }
+
+    /// Read a v3 posting list and translate its generation-local ordinals
+    /// directly to stable external u64 IDs. Delta-varint decoding writes into
+    /// the final `Vec<u64>` so query-time heap use is no higher than v1's raw
+    /// u64 reader; the mmap-backed ID table is never materialized on the heap.
+    fn mmap_read_posting_list_v3(
+        backing: &MmapBacking,
+        byte_off: u32,
+        count: u32,
+        byte_size: u32,
+    ) -> Option<Vec<u64>> {
+        let blob = Self::mmap_posting_blob(backing, byte_off, byte_size)?;
+        match backing.codec {
+            PostingCodec::DeltaVarint => {
+                let mut out = Vec::with_capacity(count as usize);
+                let mut last = 0u32;
+                let mut pos = 0usize;
+                for i in 0..count as usize {
+                    let (delta, consumed) = decode_varint_u32(blob.get(pos..)?)?;
+                    pos = pos.checked_add(consumed)?;
+                    let ordinal = if i == 0 {
+                        delta
+                    } else {
+                        let next = last.checked_add(delta)?;
+                        if next <= last {
+                            return None;
+                        }
+                        next
+                    };
+                    out.push(Self::mmap_stable_id(backing, ordinal)?);
+                    last = ordinal;
+                }
+                (pos == blob.len()).then_some(out)
+            }
+            PostingCodec::Roaring => {
+                let bitmap = RoaringBitmap::deserialize_from(blob).ok()?;
+                if bitmap.len() != u64::from(count) {
+                    return None;
+                }
+                bitmap
+                    .iter()
+                    .map(|ordinal| Self::mmap_stable_id(backing, ordinal))
+                    .collect()
+            }
         }
-        let blob = &data[start..end];
-        decode_posting_blob(blob, count as usize, backing.codec).unwrap_or_default()
+    }
+
+    fn mmap_posting_blob(backing: &MmapBacking, byte_off: u32, byte_size: u32) -> Option<&[u8]> {
+        let data = &backing.mmap[..];
+        let start = backing.postings_offset.checked_add(byte_off as usize)?;
+        let end = start.checked_add(byte_size as usize)?;
+        data.get(start..end)
+    }
+
+    fn mmap_stable_id(backing: &MmapBacking, ordinal: u32) -> Option<u64> {
+        if backing.version != MMAP_VERSION_V3 || ordinal >= backing.id_count {
+            return None;
+        }
+        let rel = (ordinal as usize).checked_mul(8)?;
+        let off = backing.id_table_offset.checked_add(rel)?;
+        let bytes = backing.mmap.get(off..off.checked_add(8)?)?;
+        Some(u64::from_le_bytes(bytes.try_into().ok()?))
+    }
+
+    fn mmap_read_entry_ids(backing: &MmapBacking, off: usize) -> Option<Vec<u64>> {
+        let data = &backing.mmap[..];
+        let payload_a = u32::from_le_bytes(data.get(off + 4..off + 8)?.try_into().ok()?);
+        let count = u32::from_le_bytes(data.get(off + 8..off + 12)?.try_into().ok()?);
+        match backing.version {
+            MMAP_VERSION_V1 => Self::mmap_read_posting_list(backing, payload_a, count),
+            MMAP_VERSION_V2 | MMAP_VERSION_V3 => {
+                let payload_b = u32::from_le_bytes(data.get(off + 12..off + 16)?.try_into().ok()?);
+                if backing.version == MMAP_VERSION_V2 {
+                    Self::mmap_read_posting_list_v2(backing, payload_a, count, payload_b)
+                        .map(|ids| ids.into_iter().map(u64::from).collect())
+                } else {
+                    Self::mmap_read_posting_list_v3(backing, payload_a, count, payload_b)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Return sorted trigram entries without forcing a loaded mmap into the
+    /// live in-memory index. In-memory postings are borrowed; mmap postings
+    /// are owned only while a format migration is being written.
+    fn materialized_entries(&self) -> Result<MaterializedTrigramEntries<'_>> {
+        let mut entries = if let Some(backing) = self.mmap.as_ref() {
+            let data = &backing.mmap[..];
+            let mut entries = Vec::with_capacity(backing.trigram_count as usize);
+            for i in 0..backing.trigram_count as usize {
+                let off = backing.index_offset + i * backing.entry_size;
+                let trigram = [data[off], data[off + 1], data[off + 2]];
+                let ids = Self::mmap_read_entry_ids(backing, off).ok_or_else(|| {
+                    CodixingError::Serialization(format!(
+                        "cannot rewrite corrupt trigram posting for {:?}",
+                        trigram
+                    ))
+                })?;
+                entries.push((trigram, Cow::Owned(ids)));
+            }
+            entries
+        } else {
+            self.index
+                .iter()
+                .map(|(trigram, ids)| (*trigram, Cow::Borrowed(ids.as_slice())))
+                .collect()
+        };
+        entries.sort_by_key(|(trigram, _)| *trigram);
+        Ok(entries)
     }
 
     /// Returns the number of indexed chunks.
@@ -502,17 +612,17 @@ impl TrigramIndex {
     ///   Contiguous u64 chunk IDs (sorted within each list)
     /// ```
     pub fn save_mmap_binary(&self, path: &Path) -> Result<()> {
-        // If still mmap-backed, no mutations happened — file on disk is current.
-        if self.mmap.is_some() {
-            return Ok(());
-        }
-        // Sort trigrams for binary search at load time.
-        let mut entries: Vec<([u8; 3], &Vec<u64>)> =
-            self.index.iter().map(|(k, v)| (*k, v)).collect();
-        entries.sort_by_key(|(k, _)| *k);
-
-        let trigram_count = entries.len() as u32;
-        let total_postings: u32 = entries.iter().map(|(_, v)| v.len() as u32).sum();
+        let entries = self.materialized_entries()?;
+        let trigram_count = u32::try_from(entries.len()).map_err(|_| {
+            CodixingError::Serialization("trigram v1 trigram count exceeds u32::MAX".to_string())
+        })?;
+        let total_postings_u64: u64 = entries.iter().map(|(_, ids)| ids.len() as u64).sum();
+        let total_postings = u32::try_from(total_postings_u64).map_err(|_| {
+            CodixingError::Serialization("trigram v1 posting count exceeds u32::MAX".to_string())
+        })?;
+        let chunk_count = u32::try_from(self.chunk_count).map_err(|_| {
+            CodixingError::Serialization("trigram v1 chunk count exceeds u32::MAX".to_string())
+        })?;
 
         let total_size = MMAP_HEADER_SIZE
             + (trigram_count as usize) * MMAP_ENTRY_SIZE
@@ -523,7 +633,7 @@ impl TrigramIndex {
         buf.extend_from_slice(&MMAP_MAGIC.to_le_bytes());
         buf.extend_from_slice(&MMAP_VERSION.to_le_bytes());
         buf.extend_from_slice(&trigram_count.to_le_bytes());
-        buf.extend_from_slice(&(self.chunk_count as u32).to_le_bytes());
+        buf.extend_from_slice(&chunk_count.to_le_bytes());
         buf.extend_from_slice(&total_postings.to_le_bytes());
 
         // Trigram index entries.
@@ -538,7 +648,7 @@ impl TrigramIndex {
 
         // Postings.
         for (_, ids) in &entries {
-            for &id in *ids {
+            for &id in ids.iter() {
                 buf.extend_from_slice(&id.to_le_bytes());
             }
         }
@@ -551,20 +661,12 @@ impl TrigramIndex {
     /// stores u32 IDs, so the v2 writer falls back to v1 when this is true.
     /// Chunk IDs are not dense ordinals — hash-derived u64 IDs are routine —
     /// so this is a real, common case, not a 4-billion-chunk corner.
-    fn max_id_exceeds_u32(&self) -> bool {
+    fn max_id_exceeds_u32(&self) -> Result<bool> {
         const U32_MAX: u64 = u32::MAX as u64;
-        if let Some(backing) = self.mmap.as_ref() {
-            if backing.version != MMAP_VERSION_V1 {
-                // v2 postings are u32 by construction.
-                return false;
-            }
-            let postings = &backing.mmap[backing.postings_offset..];
-            postings
-                .chunks_exact(8)
-                .any(|c| u64::from_le_bytes(c.try_into().unwrap()) > U32_MAX)
-        } else {
-            self.index.values().flatten().any(|&id| id > U32_MAX)
-        }
+        Ok(self
+            .materialized_entries()?
+            .iter()
+            .any(|(_, ids)| ids.iter().any(|&id| id > U32_MAX)))
     }
 
     /// Save the trigram index in the **v2** mmap-friendly binary format with
@@ -610,67 +712,15 @@ impl TrigramIndex {
         // ordinals — hash-derived u64 IDs are routine. When any ID exceeds
         // u32::MAX, fall back to the v1 format (raw u64 postings) instead of
         // failing: the loader handles both versions transparently.
-        if self.max_id_exceeds_u32() {
+        if self.max_id_exceeds_u32()? {
             return self.save_mmap_binary(path);
         }
 
-        let entries: Vec<([u8; 3], Vec<u32>)> = if let Some(backing) = self.mmap.as_ref() {
-            // Materialize without mutating self by cloning into a local index.
-            let mut tmp = TrigramIndex::new();
-            tmp.chunk_count = self.chunk_count;
-            let data = &backing.mmap[..];
-            for i in 0..backing.trigram_count as usize {
-                let off = backing.index_offset + i * backing.entry_size;
-                let trigram = [data[off], data[off + 1], data[off + 2]];
-                let ids: Vec<u64> = if backing.version == MMAP_VERSION_V1 {
-                    let start =
-                        u32::from_le_bytes(data[off + 4..off + 8].try_into().unwrap()) as usize;
-                    let count =
-                        u32::from_le_bytes(data[off + 8..off + 12].try_into().unwrap()) as usize;
-                    let posting_base = backing.postings_offset + start * 8;
-                    (0..count)
-                        .map(|j| {
-                            let o = posting_base + j * 8;
-                            u64::from_le_bytes(data[o..o + 8].try_into().unwrap())
-                        })
-                        .collect()
-                } else {
-                    let byte_off =
-                        u32::from_le_bytes(data[off + 4..off + 8].try_into().unwrap()) as usize;
-                    let count =
-                        u32::from_le_bytes(data[off + 8..off + 12].try_into().unwrap()) as usize;
-                    let byte_size =
-                        u32::from_le_bytes(data[off + 12..off + 16].try_into().unwrap()) as usize;
-                    let blob_start = backing.postings_offset + byte_off;
-                    let blob_end = blob_start + byte_size;
-                    if blob_end > data.len() {
-                        Vec::new()
-                    } else {
-                        decode_posting_blob(&data[blob_start..blob_end], count, backing.codec)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(u64::from)
-                            .collect()
-                    }
-                };
-                tmp.index.insert(trigram, ids);
-            }
-            let mut entries: Vec<([u8; 3], Vec<u32>)> = tmp
-                .index
-                .iter()
-                .map(|(k, v)| (*k, v.iter().map(|&id| id as u32).collect()))
-                .collect();
-            entries.sort_by_key(|(k, _)| *k);
-            entries
-        } else {
-            let mut entries: Vec<([u8; 3], Vec<u32>)> = self
-                .index
-                .iter()
-                .map(|(k, v)| (*k, v.iter().map(|&id| id as u32).collect()))
-                .collect();
-            entries.sort_by_key(|(k, _)| *k);
-            entries
-        };
+        let entries: Vec<([u8; 3], Vec<u32>)> = self
+            .materialized_entries()?
+            .into_iter()
+            .map(|(trigram, ids)| (trigram, ids.iter().map(|&id| id as u32).collect::<Vec<_>>()))
+            .collect();
 
         // Encode each posting list according to the chosen codec.
         let mut blobs: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
@@ -733,6 +783,165 @@ impl TrigramIndex {
         Ok(())
     }
 
+    /// Save the trigram index in the **v3** compact mmap format.
+    ///
+    /// v3 keeps public chunk IDs stable and lossless while encoding posting
+    /// lists with generation-local dense u32 ordinals. A sorted ordinal-to-u64
+    /// table is memory-mapped alongside the postings, so hash-derived IDs no
+    /// longer force the raw-u64 v1 fallback and the table adds no query-time
+    /// heap residency.
+    ///
+    /// ## Binary format
+    ///
+    /// ```text
+    /// [Header: 32 bytes, little-endian]
+    ///   magic:           u32 = 0x5452474D ("TRGM")
+    ///   version:         u32 = 3
+    ///   trigram_count:   u32
+    ///   chunk_count:     u32
+    ///   total_postings:  u32
+    ///   encoding_flags:  u32   (bit 0 selects the posting codec)
+    ///   stable_id_count:    u32
+    ///   stable_id_checksum: u32   (FNV-1a over little-endian stable IDs)
+    ///
+    /// [Trigram Index: trigram_count x 16 bytes]
+    /// [Stable ID table: stable_id_count x u64, strictly ascending]
+    /// [Posting blobs: sorted dense u32 ordinals]
+    /// ```
+    pub fn save_mmap_binary_v3(&self, path: &Path, codec: PostingCodec) -> Result<()> {
+        let entries = self.materialized_entries()?;
+
+        // Build the generation-local ID space without copying every posting.
+        // Only one entry per distinct chunk is resident in this temporary set.
+        let mut stable_id_set = HashSet::new();
+        for (_, ids) in &entries {
+            stable_id_set.extend(ids.iter().copied());
+        }
+        let mut stable_ids: Vec<u64> = stable_id_set.into_iter().collect();
+        stable_ids.sort_unstable();
+
+        let to_u32 = |what: &str, value: u64| -> Result<u32> {
+            u32::try_from(value).map_err(|_| {
+                CodixingError::Serialization(format!("trigram v3 {what} {value} exceeds u32::MAX"))
+            })
+        };
+
+        let stable_id_count = to_u32("stable_id_count", stable_ids.len() as u64)?;
+        let stable_id_checksum = stable_ids
+            .iter()
+            .fold(STABLE_ID_CHECKSUM_OFFSET, |checksum, &stable_id| {
+                update_stable_id_checksum(checksum, stable_id)
+            });
+        let chunk_count = to_u32("chunk_count", self.chunk_count as u64)?;
+        let id_to_ordinal: HashMap<u64, u32> = stable_ids
+            .iter()
+            .enumerate()
+            .map(|(ordinal, &stable_id)| Ok((stable_id, to_u32("ordinal", ordinal as u64)?)))
+            .collect::<Result<_>>()?;
+
+        struct EncodedEntry {
+            trigram: [u8; 3],
+            posting_count: u32,
+            blob: Vec<u8>,
+        }
+
+        let mut encoded_entries = Vec::with_capacity(entries.len());
+        let mut total_postings_u64 = 0u64;
+        let mut total_blob_bytes = 0usize;
+        for (trigram, ids) in entries {
+            let mut ordinals: Vec<u32> = ids
+                .iter()
+                .map(|stable_id| {
+                    id_to_ordinal.get(stable_id).copied().ok_or_else(|| {
+                        CodixingError::Serialization(format!(
+                            "trigram v3 stable ID {stable_id} is missing from the ordinal table"
+                        ))
+                    })
+                })
+                .collect::<Result<_>>()?;
+            ordinals.sort_unstable();
+            ordinals.dedup();
+            if ordinals.is_empty() {
+                continue;
+            }
+
+            let posting_count = to_u32("posting_count", ordinals.len() as u64)?;
+            let blob = encode_posting_blob(&ordinals, codec);
+            total_postings_u64 = total_postings_u64
+                .checked_add(ordinals.len() as u64)
+                .ok_or_else(|| {
+                    CodixingError::Serialization(
+                        "trigram v3 total posting count overflow".to_string(),
+                    )
+                })?;
+            total_blob_bytes = total_blob_bytes.checked_add(blob.len()).ok_or_else(|| {
+                CodixingError::Serialization("trigram v3 posting bytes overflow".to_string())
+            })?;
+            encoded_entries.push(EncodedEntry {
+                trigram,
+                posting_count,
+                blob,
+            });
+        }
+
+        let trigram_count = to_u32("trigram_count", encoded_entries.len() as u64)?;
+        let total_postings = to_u32("total_postings", total_postings_u64)?;
+        let _ = to_u32("postings section byte size", total_blob_bytes as u64)?;
+        let index_bytes = encoded_entries
+            .len()
+            .checked_mul(MMAP_V2_ENTRY_SIZE)
+            .ok_or_else(|| {
+                CodixingError::Serialization("trigram v3 index size overflow".to_string())
+            })?;
+        let id_table_bytes = stable_ids.len().checked_mul(8).ok_or_else(|| {
+            CodixingError::Serialization("trigram v3 ID table size overflow".to_string())
+        })?;
+        let total_size = MMAP_V3_HEADER_SIZE
+            .checked_add(index_bytes)
+            .and_then(|size| size.checked_add(id_table_bytes))
+            .and_then(|size| size.checked_add(total_blob_bytes))
+            .ok_or_else(|| {
+                CodixingError::Serialization("trigram v3 file size overflow".to_string())
+            })?;
+
+        let mut buf = Vec::with_capacity(total_size);
+        buf.extend_from_slice(&MMAP_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&MMAP_VERSION_V3.to_le_bytes());
+        buf.extend_from_slice(&trigram_count.to_le_bytes());
+        buf.extend_from_slice(&chunk_count.to_le_bytes());
+        buf.extend_from_slice(&total_postings.to_le_bytes());
+        buf.extend_from_slice(&codec.to_flag_bits().to_le_bytes());
+        buf.extend_from_slice(&stable_id_count.to_le_bytes());
+        buf.extend_from_slice(&stable_id_checksum.to_le_bytes());
+
+        let mut byte_off = 0u64;
+        for entry in &encoded_entries {
+            let posting_byte_off = to_u32("posting_byte_off", byte_off)?;
+            let posting_byte_size = to_u32("posting_byte_size", entry.blob.len() as u64)?;
+            buf.extend_from_slice(&entry.trigram);
+            buf.push(0);
+            buf.extend_from_slice(&posting_byte_off.to_le_bytes());
+            buf.extend_from_slice(&entry.posting_count.to_le_bytes());
+            buf.extend_from_slice(&posting_byte_size.to_le_bytes());
+            byte_off = byte_off
+                .checked_add(entry.blob.len() as u64)
+                .ok_or_else(|| {
+                    CodixingError::Serialization("trigram v3 posting offset overflow".to_string())
+                })?;
+        }
+
+        for stable_id in stable_ids {
+            buf.extend_from_slice(&stable_id.to_le_bytes());
+        }
+        for entry in encoded_entries {
+            buf.extend_from_slice(&entry.blob);
+        }
+
+        debug_assert_eq!(buf.len(), total_size);
+        std::fs::write(path, buf)?;
+        Ok(())
+    }
+
     /// Load the trigram index from a binary file.
     ///
     /// Detects the format by peeking at magic bytes:
@@ -784,8 +993,8 @@ impl TrigramIndex {
 
     /// Load the trigram index via memory mapping (zero deserialization).
     ///
-    /// Dispatches on the `version` field in the header. Both v1 (raw u64
-    /// postings) and v2 (codec-tagged variable-length blobs) are supported.
+    /// Dispatches on the `version` field in the header. v1 (raw u64), v2
+    /// (u32), and v3 (dense u32 ordinal + stable u64 table) remain readable.
     fn load_mmap(path: &Path) -> Result<Self> {
         let file = std::fs::File::open(path)?;
         let file_len = file.metadata()?.len() as usize;
@@ -836,6 +1045,8 @@ impl TrigramIndex {
                         version: MMAP_VERSION_V1,
                         codec: PostingCodec::DeltaVarint, // unused in v1 path
                         entry_size: MMAP_ENTRY_SIZE,
+                        id_table_offset: 0,
+                        id_count: 0,
                     }),
                 })
             }
@@ -849,7 +1060,7 @@ impl TrigramIndex {
                 let chunk_count = u32::from_le_bytes(mmap[12..16].try_into().unwrap());
                 let _total_postings = u32::from_le_bytes(mmap[16..20].try_into().unwrap());
                 let encoding_flags = u32::from_le_bytes(mmap[20..24].try_into().unwrap());
-                let codec = PostingCodec::from_flag_bits(encoding_flags);
+                let codec = PostingCodec::from_flag_bits(encoding_flags)?;
 
                 let index_offset = MMAP_V2_HEADER_SIZE;
                 let postings_offset = index_offset + (trigram_count as usize) * MMAP_V2_ENTRY_SIZE;
@@ -887,19 +1098,188 @@ impl TrigramIndex {
                         version: MMAP_VERSION_V2,
                         codec,
                         entry_size: MMAP_V2_ENTRY_SIZE,
+                        id_table_offset: 0,
+                        id_count: 0,
+                    }),
+                })
+            }
+            MMAP_VERSION_V3 => {
+                if file_len < MMAP_V3_HEADER_SIZE {
+                    return Err(CodixingError::Serialization(
+                        "trigram mmap v3 file too small for header".to_string(),
+                    ));
+                }
+                let trigram_count = u32::from_le_bytes(mmap[8..12].try_into().unwrap());
+                let chunk_count = u32::from_le_bytes(mmap[12..16].try_into().unwrap());
+                let total_postings = u32::from_le_bytes(mmap[16..20].try_into().unwrap());
+                let encoding_flags = u32::from_le_bytes(mmap[20..24].try_into().unwrap());
+                let codec = PostingCodec::from_flag_bits(encoding_flags)?;
+                let id_count = u32::from_le_bytes(mmap[24..28].try_into().unwrap());
+                let expected_id_checksum = u32::from_le_bytes(mmap[28..32].try_into().unwrap());
+                if id_count > chunk_count {
+                    return Err(CodixingError::Serialization(format!(
+                        "trigram mmap v3 stable ID count {id_count} exceeds chunk count {chunk_count}"
+                    )));
+                }
+                if total_postings > 0 && id_count == 0 {
+                    return Err(CodixingError::Serialization(
+                        "trigram mmap v3 has postings but no stable ID table".to_string(),
+                    ));
+                }
+
+                let index_offset = MMAP_V3_HEADER_SIZE;
+                let index_bytes = (trigram_count as usize)
+                    .checked_mul(MMAP_V2_ENTRY_SIZE)
+                    .ok_or_else(|| {
+                        CodixingError::Serialization(
+                            "trigram mmap v3 index size overflow".to_string(),
+                        )
+                    })?;
+                let id_table_offset = index_offset.checked_add(index_bytes).ok_or_else(|| {
+                    CodixingError::Serialization(
+                        "trigram mmap v3 ID table offset overflow".to_string(),
+                    )
+                })?;
+                let id_table_bytes = (id_count as usize).checked_mul(8).ok_or_else(|| {
+                    CodixingError::Serialization(
+                        "trigram mmap v3 ID table size overflow".to_string(),
+                    )
+                })?;
+                let postings_offset =
+                    id_table_offset.checked_add(id_table_bytes).ok_or_else(|| {
+                        CodixingError::Serialization(
+                            "trigram mmap v3 postings offset overflow".to_string(),
+                        )
+                    })?;
+                if file_len < postings_offset {
+                    return Err(CodixingError::Serialization(format!(
+                        "trigram mmap v3 file truncated: fixed sections extend to {postings_offset} bytes, got {file_len}"
+                    )));
+                }
+
+                // Structural validation is O(number of trigrams), but does
+                // not decode or allocate posting lists. Enforcing canonical
+                // ordering and contiguous blobs makes the format deterministic
+                // and catches offset overlap/gaps before the mmap is exposed.
+                let mut previous_trigram: Option<[u8; 3]> = None;
+                let mut expected_blob_offset = 0usize;
+                let mut counted_postings = 0u64;
+                for i in 0..trigram_count as usize {
+                    let off = index_offset + i * MMAP_V2_ENTRY_SIZE;
+                    let trigram = [mmap[off], mmap[off + 1], mmap[off + 2]];
+                    if mmap[off + 3] != 0 {
+                        return Err(CodixingError::Serialization(format!(
+                            "trigram mmap v3 entry {i} has non-zero padding"
+                        )));
+                    }
+                    if previous_trigram.is_some_and(|previous| previous >= trigram) {
+                        return Err(CodixingError::Serialization(format!(
+                            "trigram mmap v3 entries are not strictly sorted at entry {i}"
+                        )));
+                    }
+                    previous_trigram = Some(trigram);
+
+                    let byte_off =
+                        u32::from_le_bytes(mmap[off + 4..off + 8].try_into().unwrap()) as usize;
+                    let posting_count =
+                        u32::from_le_bytes(mmap[off + 8..off + 12].try_into().unwrap());
+                    let byte_size =
+                        u32::from_le_bytes(mmap[off + 12..off + 16].try_into().unwrap()) as usize;
+                    if byte_off != expected_blob_offset {
+                        return Err(CodixingError::Serialization(format!(
+                            "trigram mmap v3 entry {i} starts at blob offset {byte_off}, expected {expected_blob_offset}"
+                        )));
+                    }
+                    if posting_count == 0 || byte_size == 0 {
+                        return Err(CodixingError::Serialization(format!(
+                            "trigram mmap v3 entry {i} has an empty posting list"
+                        )));
+                    }
+                    expected_blob_offset =
+                        expected_blob_offset.checked_add(byte_size).ok_or_else(|| {
+                            CodixingError::Serialization(
+                                "trigram mmap v3 posting size overflow".to_string(),
+                            )
+                        })?;
+                    counted_postings = counted_postings
+                        .checked_add(u64::from(posting_count))
+                        .ok_or_else(|| {
+                            CodixingError::Serialization(
+                                "trigram mmap v3 posting count overflow".to_string(),
+                            )
+                        })?;
+                }
+                if counted_postings != u64::from(total_postings) {
+                    return Err(CodixingError::Serialization(format!(
+                        "trigram mmap v3 posting count mismatch: header says {total_postings}, entries say {counted_postings}"
+                    )));
+                }
+                let expected_size = postings_offset
+                    .checked_add(expected_blob_offset)
+                    .ok_or_else(|| {
+                        CodixingError::Serialization(
+                            "trigram mmap v3 file size overflow".to_string(),
+                        )
+                    })?;
+                if file_len != expected_size {
+                    return Err(CodixingError::Serialization(format!(
+                        "trigram mmap v3 size mismatch: expected exactly {expected_size} bytes, got {file_len}"
+                    )));
+                }
+
+                let mut previous_id = None;
+                let mut actual_id_checksum = STABLE_ID_CHECKSUM_OFFSET;
+                for ordinal in 0..id_count as usize {
+                    let off = id_table_offset + ordinal * 8;
+                    let stable_id = u64::from_le_bytes(mmap[off..off + 8].try_into().unwrap());
+                    if previous_id.is_some_and(|previous| previous >= stable_id) {
+                        return Err(CodixingError::Serialization(format!(
+                            "trigram mmap v3 stable ID table is not strictly sorted at ordinal {ordinal}"
+                        )));
+                    }
+                    previous_id = Some(stable_id);
+                    actual_id_checksum = update_stable_id_checksum(actual_id_checksum, stable_id);
+                }
+                if actual_id_checksum != expected_id_checksum {
+                    return Err(CodixingError::Serialization(format!(
+                        "trigram mmap v3 stable ID checksum mismatch: expected 0x{expected_id_checksum:08X}, got 0x{actual_id_checksum:08X}"
+                    )));
+                }
+
+                Ok(Self {
+                    index: HashMap::new(),
+                    chunk_count: chunk_count as usize,
+                    mmap: Some(MmapBacking {
+                        mmap,
+                        trigram_count,
+                        index_offset,
+                        postings_offset,
+                        version: MMAP_VERSION_V3,
+                        codec,
+                        entry_size: MMAP_V2_ENTRY_SIZE,
+                        id_table_offset,
+                        id_count,
                     }),
                 })
             }
             other => Err(CodixingError::Serialization(format!(
-                "unsupported trigram mmap version: expected 1 or 2, got {other}"
+                "unsupported trigram mmap version: expected 1, 2, or 3, got {other}"
             ))),
         }
     }
 }
 
-// ── v2 codec helpers ─────────────────────────────────────────────────────────
+// ── v2/v3 codec helpers ──────────────────────────────────────────────────────
 
-/// Encode a sorted list of u32 chunk IDs into a v2 posting blob using the
+fn update_stable_id_checksum(mut checksum: u32, stable_id: u64) -> u32 {
+    for byte in stable_id.to_le_bytes() {
+        checksum ^= u32::from(byte);
+        checksum = checksum.wrapping_mul(0x0100_0193);
+    }
+    checksum
+}
+
+/// Encode a sorted list of u32 chunk IDs/ordinals into a posting blob using the
 /// chosen codec.
 fn encode_posting_blob(ids: &[u32], codec: PostingCodec) -> Vec<u8> {
     match codec {
@@ -929,7 +1309,7 @@ fn encode_posting_blob(ids: &[u32], codec: PostingCodec) -> Vec<u8> {
     }
 }
 
-/// Decode a v2 posting blob back into a sorted `Vec<u32>` of chunk IDs.
+/// Decode a posting blob back into a sorted `Vec<u32>` of chunk IDs/ordinals.
 /// Returns `None` on malformed input.
 fn decode_posting_blob(
     blob: &[u8],
@@ -943,9 +1323,13 @@ fn decode_posting_blob(
             let mut pos = 0usize;
             while pos < blob.len() {
                 let (delta, consumed) = decode_varint_u32(&blob[pos..])?;
-                pos += consumed;
-                last = last.wrapping_add(delta);
-                out.push(last);
+                pos = pos.checked_add(consumed)?;
+                let next = last.checked_add(delta)?;
+                if !out.is_empty() && next <= last {
+                    return None;
+                }
+                out.push(next);
+                last = next;
             }
             if out.len() != expected_count {
                 return None;

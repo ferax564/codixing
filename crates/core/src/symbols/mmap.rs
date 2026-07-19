@@ -215,6 +215,21 @@ impl MmapSymbolTable {
         all
     }
 
+    /// Visit symbols one name bucket at a time instead of retaining a complete
+    /// decoded copy of the memory-mapped table.
+    pub(crate) fn visit_symbols(&self, mut visitor: impl FnMut(&Symbol)) {
+        for i in 0..self.name_count as usize {
+            let entry_offset = self.name_index_offset + i * NAME_INDEX_ENTRY_SIZE;
+            let name_off = read_u32(&self.mmap, entry_offset + 8) as usize;
+            let syms_off = read_u32(&self.mmap, entry_offset + 12) as usize;
+
+            let name = self.read_string_pool(name_off);
+            for symbol in self.read_symbols_at(syms_off, &name) {
+                visitor(&symbol);
+            }
+        }
+    }
+
     // ── Private helpers ──────────────────────────────────────────────────
 
     /// Lookup by pre-computed hash. Handles hash collisions by checking the

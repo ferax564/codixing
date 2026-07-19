@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
+use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::config::IndexConfig;
@@ -12,6 +13,10 @@ use crate::graph::GraphData;
 
 /// Process-global counter making atomic-write temp filenames unique across threads.
 static ATOMIC_WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Process-global counter making generation names unique when multiple rebuilds
+/// start within the same clock tick.
+static GENERATION_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Atomically write `contents` to `path`: write a sibling temp file, fsync it,
 /// then rename it over the destination. A crash, SIGKILL, OOM, or power loss
@@ -35,7 +40,10 @@ fn atomic_write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::
         f.sync_all()?;
     }
     match fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            sync_directory(dir)?;
+            Ok(())
+        }
         Err(e) => {
             let _ = fs::remove_file(&tmp);
             Err(e)
@@ -44,14 +52,44 @@ fn atomic_write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::
 }
 
 /// Atomic write with parent-directory durability for transaction markers.
-/// File fsync alone does not guarantee the rename survives a power loss on
-/// Unix filesystems; syncing the directory closes that final crash window.
+/// `atomic_write` now provides the same guarantee for every artifact; retain
+/// this named helper so the mutation-journal call sites state their intent.
 fn atomic_write_durable(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
-    let path = path.as_ref();
-    atomic_write(path, contents)?;
-    #[cfg(unix)]
-    if let Some(parent) = path.parent() {
-        fs::File::open(parent)?.sync_all()?;
+    atomic_write(path, contents)
+}
+
+/// Persist a directory entry after an atomic rename. Directory fsync is
+/// supported on Unix; on Windows the file fsync plus atomic rename is the
+/// strongest portable guarantee available through `std`.
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    fs::File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+fn sync_tree(path: &Path) -> std::io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "refusing to publish symlinked index artifact: {}",
+                path.display()
+            ),
+        ));
+    }
+    if metadata.is_file() {
+        return fs::File::open(path)?.sync_all();
+    }
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path)? {
+            sync_tree(&entry?.path())?;
+        }
+        sync_directory(path)?;
     }
     Ok(())
 }
@@ -85,6 +123,12 @@ const CHUNK_TRIGRAM_FILE: &str = "chunk_trigram.bin";
 const SYMBOLS_V2_FILE: &str = "symbols_v2.bin";
 const CONCEPTS_FILE: &str = "concepts.bin";
 const REFORMULATIONS_FILE: &str = "reformulations.bin";
+const GENERATIONS_DIR: &str = "generations";
+const ACTIVE_GENERATION_FILE: &str = "active-generation.json";
+const GENERATION_PREFIX: &str = "gen-";
+const GENERATION_LAYOUT_VERSION: u32 = 1;
+const REBUILD_LOCK_FILE: &str = "rebuild.lock";
+const GENERATION_LEASE_FILE: &str = "generation.lease";
 /// Sidecar file mapping each indexed file to its signature fingerprint (a stable
 /// hash over symbol signatures / imports / exports). Stored separately from
 /// `tree_hashes_v2.bin` so the existing `FileHashEntry` bitcode layout is never
@@ -199,6 +243,265 @@ impl Default for IndexMeta {
     }
 }
 
+/// Atomically-swapped pointer to the complete index generation readers should
+/// open. Keeping this tiny pointer separate from the generated data makes a
+/// rebuild an all-or-nothing operation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct GenerationManifest {
+    layout_version: u32,
+    active: String,
+}
+
+fn new_generation_name() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let seq = GENERATION_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{GENERATION_PREFIX}{nanos}-{}-{seq}", std::process::id())
+}
+
+fn validate_generation_name(name: &str) -> Result<()> {
+    let suffix = name
+        .strip_prefix(GENERATION_PREFIX)
+        .ok_or_else(|| CodixingError::Config(format!("invalid index generation name: {name:?}")))?;
+    if suffix.is_empty()
+        || name.len() > 128
+        || !suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(CodixingError::Config(format!(
+            "invalid index generation name: {name:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn read_generation_manifest(control_dir: &Path) -> Result<Option<GenerationManifest>> {
+    let path = control_dir.join(ACTIVE_GENERATION_FILE);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path)?;
+    let manifest: GenerationManifest = serde_json::from_slice(&bytes).map_err(|e| {
+        CodixingError::Serialization(format!(
+            "failed to deserialize active generation manifest {}: {e}",
+            path.display()
+        ))
+    })?;
+    if manifest.layout_version != GENERATION_LAYOUT_VERSION {
+        return Err(CodixingError::Config(format!(
+            "unsupported index generation layout version {} in {}",
+            manifest.layout_version,
+            path.display()
+        )));
+    }
+    validate_generation_name(&manifest.active)?;
+    Ok(Some(manifest))
+}
+
+fn require_real_directory(path: &Path, label: &str) -> Result<()> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        CodixingError::Config(format!(
+            "{label} {} is unavailable: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(CodixingError::Config(format!(
+            "{label} must be a real directory, not a symlink: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn resolve_index_dir(root: &Path) -> Result<(PathBuf, Option<String>)> {
+    let control_dir = root.join(CODEFORGE_DIR);
+    require_real_directory(&control_dir, "index control directory")?;
+    let Some(manifest) = read_generation_manifest(&control_dir)? else {
+        return Ok((control_dir, None));
+    };
+    let index_dir = control_dir.join(GENERATIONS_DIR).join(&manifest.active);
+    let metadata = fs::symlink_metadata(&index_dir).map_err(|e| {
+        CodixingError::Config(format!(
+            "active index generation {} is unavailable: {e}",
+            index_dir.display()
+        ))
+    })?;
+    if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+        return Err(CodixingError::Config(format!(
+            "active index generation is not a real directory: {}",
+            index_dir.display()
+        )));
+    }
+    Ok((index_dir, Some(manifest.active)))
+}
+
+fn remove_generation_if_safe(control_dir: &Path, generation: &str) {
+    if validate_generation_name(generation).is_err() {
+        return;
+    }
+    let generations_dir = control_dir.join(GENERATIONS_DIR);
+    if require_real_directory(&generations_dir, "index generations directory").is_err() {
+        return;
+    }
+    let path = generations_dir.join(generation);
+    if path.parent() != Some(generations_dir.as_path()) {
+        return;
+    }
+    let Ok(metadata) = fs::symlink_metadata(&path) else {
+        return;
+    };
+    if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() {
+        let lease_path = path.join(GENERATION_LEASE_FILE);
+        let Ok(lease) = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lease_path)
+        else {
+            return;
+        };
+        // Every open engine holds a shared lease. An inactive generation is
+        // deleted only after all of those readers have gone away; otherwise it
+        // remains fully searchable and a later cleanup retries.
+        if !FileExt::try_lock_exclusive(&lease).unwrap_or(false) {
+            return;
+        }
+        drop(lease);
+        if let Err(error) = fs::remove_dir_all(&path) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "could not remove inactive index generation"
+            );
+        }
+    }
+}
+
+fn acquire_generation_lease(index_dir: &Path) -> Result<fs::File> {
+    let lease = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(index_dir.join(GENERATION_LEASE_FILE))?;
+    FileExt::lock_shared(&lease)?;
+    Ok(lease)
+}
+
+fn cleanup_abandoned_generations(control_dir: &Path, grace: std::time::Duration) {
+    let generations_dir = control_dir.join(GENERATIONS_DIR);
+    let active = match read_generation_manifest(control_dir) {
+        Ok(manifest) => manifest.map(|manifest| manifest.active),
+        Err(error) => {
+            // If the pointer is unreadable, no generation can be proven
+            // inactive. Leave every directory in place; a subsequent complete
+            // publication can safely supersede the broken pointer.
+            tracing::warn!(
+                error = %error,
+                "skipping abandoned-generation cleanup because the active manifest is unreadable"
+            );
+            return;
+        }
+    };
+    let Ok(entries) = fs::read_dir(&generations_dir) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if active.as_deref() == Some(name.as_str()) || validate_generation_name(&name).is_err() {
+            continue;
+        }
+        let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        let old_enough = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= grace);
+        if old_enough {
+            remove_generation_if_safe(control_dir, &name);
+        }
+    }
+}
+
+fn cleanup_legacy_artifacts(control_dir: &Path) {
+    const LEGACY_FILES: &[&str] = &[
+        CONFIG_FILE,
+        META_FILE,
+        SYMBOLS_FILE,
+        SYMBOLS_V2_FILE,
+        TREE_HASHES_FILE,
+        TREE_HASHES_V2_FILE,
+        TREE_SIGNATURES_FILE,
+        TREE_SIGNATURES_LOCK_FILE,
+        CHUNK_META_FILE,
+        MMAP_VECTOR_FILE,
+        FILE_TRIGRAM_FILE,
+        CHUNK_TRIGRAM_FILE,
+        CONCEPTS_FILE,
+        REFORMULATIONS_FILE,
+    ];
+    const LEGACY_DIRS: &[&str] = &[TANTIVY_DIR, VECTORS_DIR, GRAPH_DIR];
+
+    // A legacy index opened by this Codixing version is protected exactly like
+    // a generation. Older binaries do not know about leases, so cleanup remains
+    // best-effort for readers from before the migration feature existed.
+    let Ok(exclusive) = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(control_dir.join(GENERATION_LEASE_FILE))
+    else {
+        return;
+    };
+    if !FileExt::try_lock_exclusive(&exclusive).unwrap_or(false) {
+        return;
+    }
+
+    for name in LEGACY_FILES {
+        let path = control_dir.join(name);
+        if path.parent() == Some(control_dir) {
+            let _ = fs::remove_file(path);
+        }
+    }
+    for name in LEGACY_DIRS {
+        let path = control_dir.join(name);
+        if path.parent() != Some(control_dir) {
+            continue;
+        }
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let result = if metadata.file_type().is_symlink() {
+            fs::remove_file(&path)
+        } else if metadata.file_type().is_dir() {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        if let Err(error) = result {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "could not remove migrated legacy index artifact"
+            );
+        }
+    }
+}
+
 /// Manages the `.codixing/` directory layout on disk.
 ///
 /// Provides creation, opening, and persistence of the index configuration,
@@ -206,6 +509,56 @@ impl Default for IndexMeta {
 #[derive(Debug)]
 pub struct IndexStore {
     root: PathBuf,
+    index_dir: PathBuf,
+    generation: Option<String>,
+    rebuild_lock: Option<fs::File>,
+    generation_lease: Option<fs::File>,
+}
+
+/// An extra shared lease retained by work that can outlive its [`Engine`],
+/// such as background embedding. When the work finishes, an inactive
+/// generation is reclaimed immediately instead of waiting for another init.
+#[derive(Debug)]
+pub(crate) struct BackgroundGenerationLease {
+    control_dir: PathBuf,
+    generation: String,
+    lease: Option<fs::File>,
+}
+
+impl Drop for BackgroundGenerationLease {
+    fn drop(&mut self) {
+        self.lease.take();
+        let inactive = match read_generation_manifest(&self.control_dir) {
+            Ok(Some(manifest)) => manifest.active != self.generation,
+            Ok(None) => true,
+            Err(_) => false,
+        };
+        if inactive {
+            remove_generation_if_safe(&self.control_dir, &self.generation);
+        }
+    }
+}
+
+impl Drop for IndexStore {
+    fn drop(&mut self) {
+        let Some(generation) = self.generation.clone() else {
+            return;
+        };
+        let should_remove = match read_generation_manifest(&self.control_dir()) {
+            Ok(Some(manifest)) => manifest.active != generation,
+            Ok(None) => true,
+            // An unreadable pointer means no directory can be proven inactive.
+            Err(_) => false,
+        };
+        if should_remove {
+            // Normal errors unwind through here and reclaim the unpublished
+            // generation while the rebuild lock is still held. A hard process
+            // interruption releases the OS lock; the next builder then safely
+            // performs the same cleanup.
+            self.generation_lease.take();
+            remove_generation_if_safe(&self.control_dir(), &generation);
+        }
+    }
 }
 
 impl IndexStore {
@@ -215,19 +568,176 @@ impl IndexStore {
     /// Returns an error if the directory already exists.
     pub fn init(root: &Path, config: &IndexConfig) -> Result<Self> {
         let codixing_dir = root.join(CODEFORGE_DIR);
-        fs::create_dir_all(&codixing_dir)?;
-        fs::create_dir_all(codixing_dir.join(TANTIVY_DIR))?;
-        fs::create_dir_all(codixing_dir.join(VECTORS_DIR))?;
-        fs::create_dir_all(codixing_dir.join(GRAPH_DIR))?;
+        let mut store = Self {
+            root: root.to_path_buf(),
+            index_dir: codixing_dir,
+            generation: None,
+            rebuild_lock: None,
+            generation_lease: None,
+        };
+        store.initialize_layout(config)?;
+        store.generation_lease = Some(acquire_generation_lease(&store.index_dir)?);
+        Ok(store)
+    }
+
+    /// Start a clean rebuild in a new, unpublished generation.
+    ///
+    /// The currently-active index is not modified. Call
+    /// [`Self::publish_generation`] only after every artifact has been written;
+    /// dropping this store (or crashing) leaves the previous generation active.
+    pub fn begin_generation(root: &Path, config: &IndexConfig) -> Result<Self> {
+        let control_dir = root.join(CODEFORGE_DIR);
+        let generations_dir = control_dir.join(GENERATIONS_DIR);
+        fs::create_dir_all(&control_dir)?;
+        require_real_directory(&control_dir, "index control directory")?;
+        match fs::create_dir(&generations_dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        require_real_directory(&generations_dir, "index generations directory")?;
+
+        let rebuild_lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(control_dir.join(REBUILD_LOCK_FILE))?;
+        FileExt::lock_exclusive(&rebuild_lock)?;
+
+        // The cross-platform OS lock is released automatically on process
+        // death. Once acquired, no live builder can own an unpublished
+        // generation, so interrupted/abandoned directories are safe to remove.
+        cleanup_abandoned_generations(&control_dir, std::time::Duration::ZERO);
+
+        let generation = new_generation_name();
+        let index_dir = generations_dir.join(&generation);
+        fs::create_dir(&index_dir)?;
+        let generation_lease = acquire_generation_lease(&index_dir)?;
 
         let store = Self {
             root: root.to_path_buf(),
+            index_dir,
+            generation: Some(generation),
+            rebuild_lock: Some(rebuild_lock),
+            generation_lease: Some(generation_lease),
         };
-
-        store.save_config(config)?;
-        store.save_meta(&IndexMeta::default())?;
-
+        store.initialize_layout(config)?;
         Ok(store)
+    }
+
+    /// Hold this generation open for background work that may outlive the
+    /// owning engine. The returned guard also performs deferred cleanup if a
+    /// newer generation becomes active before the work finishes.
+    pub(crate) fn background_generation_lease(&self) -> Result<BackgroundGenerationLease> {
+        let generation = self.generation.clone().ok_or_else(|| {
+            CodixingError::Config(
+                "background generation work requires a generational index".to_string(),
+            )
+        })?;
+        Ok(BackgroundGenerationLease {
+            control_dir: self.control_dir(),
+            generation,
+            lease: Some(acquire_generation_lease(&self.index_dir)?),
+        })
+    }
+
+    fn initialize_layout(&self, config: &IndexConfig) -> Result<()> {
+        fs::create_dir_all(self.codixing_dir())?;
+        fs::create_dir_all(self.tantivy_dir())?;
+        fs::create_dir_all(self.vectors_dir())?;
+        fs::create_dir_all(self.graph_dir())?;
+        self.save_config(config)?;
+        self.save_meta(&IndexMeta::default())?;
+        Ok(())
+    }
+
+    /// Validate and atomically activate a fully-built generation.
+    ///
+    /// The manifest replacement is the commit point: before it, all readers
+    /// see the old index; after it, all new readers see this one. Publication
+    /// never renames or mutates the old generation. Once activation succeeds,
+    /// known legacy artifacts and the superseded generation are removed on a
+    /// best-effort basis to keep steady-state disk usage to one generation.
+    pub fn publish_generation(&mut self) -> Result<()> {
+        if self.rebuild_lock.is_none() {
+            return Err(CodixingError::Config(
+                "index generation publication requires the active rebuild lock".to_string(),
+            ));
+        }
+        let generation = self.generation.as_deref().ok_or_else(|| {
+            CodixingError::Config("cannot publish a legacy index store as a generation".to_string())
+        })?;
+        validate_generation_name(generation)?;
+        self.validate_for_publication()?;
+
+        // Flush the generation directory before publishing the pointer. The
+        // artifact writers fsync their files; this persists the containing
+        // directory entry as well on platforms that support directory fsync.
+        sync_tree(&self.index_dir)?;
+
+        let control_dir = self.control_dir();
+        let old_active = read_generation_manifest(&control_dir)
+            .ok()
+            .flatten()
+            .map(|manifest| manifest.active);
+        let manifest = GenerationManifest {
+            layout_version: GENERATION_LAYOUT_VERSION,
+            active: generation.to_string(),
+        };
+        let bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| {
+            CodixingError::Serialization(format!(
+                "failed to serialize active generation manifest: {e}"
+            ))
+        })?;
+        atomic_write(control_dir.join(ACTIVE_GENERATION_FILE), bytes)?;
+
+        // Cleanup is deliberately non-fatal after the commit point. A failed
+        // cleanup costs disk but must not turn a successful atomic activation
+        // into a reported failure.
+        if let Some(old) = old_active {
+            if old != generation {
+                remove_generation_if_safe(&control_dir, &old);
+            }
+        } else {
+            cleanup_legacy_artifacts(&control_dir);
+        }
+        cleanup_abandoned_generations(&control_dir, std::time::Duration::ZERO);
+        // Drop the OS lock only after activation and cleanup are complete.
+        self.rebuild_lock.take();
+        Ok(())
+    }
+
+    /// Ensure every artifact required for a complete lexical index can be
+    /// opened before the generation becomes visible.
+    pub fn validate_for_publication(&self) -> Result<()> {
+        let config = self.load_config()?;
+        self.load_meta()?;
+
+        let required = [
+            self.symbols_path(),
+            self.chunk_meta_path(),
+            self.chunk_trigram_path(),
+            self.file_trigram_path(),
+            self.tree_hashes_v2_path(),
+        ];
+        let missing: Vec<PathBuf> = required
+            .into_iter()
+            .filter(|path| !path.is_file())
+            .collect();
+        if !missing.is_empty() {
+            return Err(CodixingError::PartialIndex {
+                root: self.root.clone(),
+                missing,
+            });
+        }
+
+        let index = crate::index::TantivyIndex::open_read_only_with_config(
+            &self.tantivy_dir(),
+            config.bm25,
+        )?;
+        drop(index);
+        Ok(())
     }
 
     /// Open an existing `.codixing/` directory.
@@ -246,33 +756,73 @@ impl IndexStore {
             });
         }
 
-        let audit = Self::audit_layout(root);
-        if !audit.essentials_missing.is_empty() {
-            return Err(CodixingError::PartialIndex {
-                root: root.to_path_buf(),
-                missing: audit.essentials_missing,
-            });
+        for _ in 0..3 {
+            let (index_dir, generation) = resolve_index_dir(root)?;
+            let generation_lease = match acquire_generation_lease(&index_dir) {
+                Ok(lease) => lease,
+                Err(CodixingError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            // Publication can race the resolve/lease window. Recheck the tiny
+            // manifest while holding the lease: if it changed, release this
+            // snapshot and retry against the new active generation.
+            let (confirmed_dir, confirmed_generation) = resolve_index_dir(root)?;
+            if index_dir == confirmed_dir && generation == confirmed_generation {
+                let missing: Vec<PathBuf> = [CONFIG_FILE, META_FILE]
+                    .into_iter()
+                    .map(|name| index_dir.join(name))
+                    .filter(|path| !path.is_file())
+                    .collect();
+                if !missing.is_empty() {
+                    return Err(CodixingError::PartialIndex {
+                        root: root.to_path_buf(),
+                        missing,
+                    });
+                }
+                return Ok(Self {
+                    root: root.to_path_buf(),
+                    index_dir,
+                    generation,
+                    rebuild_lock: None,
+                    generation_lease: Some(generation_lease),
+                });
+            }
         }
-
-        Ok(Self {
-            root: root.to_path_buf(),
-        })
+        Err(CodixingError::Config(
+            "active index generation changed repeatedly while opening; retry the operation"
+                .to_string(),
+        ))
     }
 
     /// Inspect a `.codixing/` directory layout without instantiating the engine.
     ///
     /// Reports which essential metadata files are present or missing so the
     /// CLI can tell users whether to run `codixing repair` (rebuild the
-    /// missing pieces) or `codixing init` (wipe and reindex from scratch).
+    /// missing pieces) or `codixing init` (build and atomically activate a
+    /// clean generation).
     pub fn audit_layout(root: &Path) -> LayoutAudit {
-        let codixing_dir = root.join(CODEFORGE_DIR);
-        let dir_exists = codixing_dir.is_dir();
+        let control_dir = root.join(CODEFORGE_DIR);
+        let dir_exists = control_dir.is_dir();
+        let mut layout_error = None;
+        let (index_dir, active_generation) = if dir_exists {
+            match resolve_index_dir(root) {
+                Ok(value) => value,
+                Err(error) => {
+                    layout_error = Some(error.to_string());
+                    (control_dir.clone(), None)
+                }
+            }
+        } else {
+            (control_dir.clone(), None)
+        };
 
         let mut essentials_present = Vec::new();
         let mut essentials_missing = Vec::new();
         if dir_exists {
             for file in &[CONFIG_FILE, META_FILE] {
-                let path = codixing_dir.join(file);
+                let path = index_dir.join(file);
                 // Use `is_file` rather than `exists` so a stray directory
                 // named `meta.json` does not fool the audit into thinking
                 // the index is healthy.
@@ -289,7 +839,7 @@ impl IndexStore {
         let mut optional_present = Vec::new();
         if dir_exists {
             for sub in &[TANTIVY_DIR, VECTORS_DIR, GRAPH_DIR] {
-                let path = codixing_dir.join(sub);
+                let path = index_dir.join(sub);
                 if path.exists() {
                     optional_present.push(path);
                 }
@@ -301,7 +851,7 @@ impl IndexStore {
                 CONCEPTS_FILE,
                 REFORMULATIONS_FILE,
             ] {
-                let path = codixing_dir.join(file);
+                let path = index_dir.join(file);
                 if path.exists() {
                     optional_present.push(path);
                 }
@@ -310,13 +860,38 @@ impl IndexStore {
 
         // Best-effort: read the version field from meta.json if it survived
         // so `codixing repair` can mention "indexed by 0.40.x, current 0.41.x".
-        let meta_version = codixing_dir
+        let meta_version = index_dir
             .join(META_FILE)
             .exists()
-            .then(|| fs::read_to_string(codixing_dir.join(META_FILE)).ok())
+            .then(|| fs::read_to_string(index_dir.join(META_FILE)).ok())
             .flatten()
             .and_then(|s| serde_json::from_str::<IndexMeta>(&s).ok())
             .map(|m| m.version);
+
+        let mut generation_count = 0;
+        let mut abandoned_generations = Vec::new();
+        if let Ok(entries) = fs::read_dir(control_dir.join(GENERATIONS_DIR)) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                let Ok(metadata) = fs::symlink_metadata(&path) else {
+                    continue;
+                };
+                if validate_generation_name(&name).is_err()
+                    || !metadata.file_type().is_dir()
+                    || metadata.file_type().is_symlink()
+                {
+                    continue;
+                }
+                generation_count += 1;
+                if active_generation.as_deref() != Some(name.as_str()) {
+                    abandoned_generations.push(path);
+                }
+            }
+        }
+        abandoned_generations.sort();
 
         LayoutAudit {
             dir_exists,
@@ -324,6 +899,19 @@ impl IndexStore {
             essentials_missing,
             optional_present,
             meta_version,
+            layout_kind: if !dir_exists {
+                "missing"
+            } else if layout_error.is_some() {
+                "invalid"
+            } else if active_generation.is_some() {
+                "generational"
+            } else {
+                "legacy"
+            },
+            active_generation,
+            generation_count,
+            abandoned_generations,
+            layout_error,
         }
     }
 
@@ -337,23 +925,37 @@ impl IndexStore {
     /// This does *not* re-index source files — call `codixing sync` (or
     /// `Engine::open` followed by sync) afterwards to repopulate counts.
     pub fn repair(root: &Path) -> Result<RepairReport> {
-        let codixing_dir = root.join(CODEFORGE_DIR);
-        fs::create_dir_all(&codixing_dir)?;
-        fs::create_dir_all(codixing_dir.join(TANTIVY_DIR))?;
-        fs::create_dir_all(codixing_dir.join(VECTORS_DIR))?;
-        fs::create_dir_all(codixing_dir.join(GRAPH_DIR))?;
+        let control_dir = root.join(CODEFORGE_DIR);
+        fs::create_dir_all(&control_dir)?;
+        let rebuild_lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(control_dir.join(REBUILD_LOCK_FILE))?;
+        FileExt::lock_exclusive(&rebuild_lock)?;
+        let (index_dir, generation) = resolve_index_dir(root)?;
 
+        let generation_lease = Some(acquire_generation_lease(&index_dir)?);
         let store = Self {
             root: root.to_path_buf(),
+            index_dir,
+            generation,
+            rebuild_lock: Some(rebuild_lock),
+            generation_lease,
         };
+        fs::create_dir_all(store.codixing_dir())?;
+        fs::create_dir_all(store.tantivy_dir())?;
+        fs::create_dir_all(store.vectors_dir())?;
+        fs::create_dir_all(store.graph_dir())?;
 
         let mut created = Vec::new();
-        let config_path = codixing_dir.join(CONFIG_FILE);
+        let config_path = store.codixing_dir().join(CONFIG_FILE);
         if !config_path.exists() {
             store.save_config(&IndexConfig::new(root))?;
             created.push(config_path);
         }
-        let meta_path = codixing_dir.join(META_FILE);
+        let meta_path = store.codixing_dir().join(META_FILE);
         if !meta_path.exists() {
             store.save_meta(&IndexMeta::default())?;
             created.push(meta_path);
@@ -371,12 +973,19 @@ pub struct LayoutAudit {
     pub essentials_missing: Vec<PathBuf>,
     pub optional_present: Vec<PathBuf>,
     pub meta_version: Option<String>,
+    /// `legacy` for pre-generation indexes, `generational` after the first
+    /// successful atomic rebuild.
+    pub layout_kind: &'static str,
+    pub active_generation: Option<String>,
+    pub generation_count: usize,
+    pub abandoned_generations: Vec<PathBuf>,
+    pub layout_error: Option<String>,
 }
 
 impl LayoutAudit {
     /// True when every file required to open the engine is in place.
     pub fn is_complete(&self) -> bool {
-        self.dir_exists && self.essentials_missing.is_empty()
+        self.dir_exists && self.essentials_missing.is_empty() && self.layout_error.is_none()
     }
 }
 
@@ -394,14 +1003,39 @@ impl IndexStore {
         root.join(CODEFORGE_DIR).is_dir()
     }
 
+    /// Return the generation currently named by the atomic manifest.
+    ///
+    /// `None` denotes a compatible legacy flat index. Long-lived read-only
+    /// engines can compare this value with [`Self::generation`] and reopen the
+    /// complete engine when publication switches generations.
+    pub fn active_generation(root: &Path) -> Result<Option<String>> {
+        let control_dir = root.join(CODEFORGE_DIR);
+        require_real_directory(&control_dir, "index control directory")?;
+        Ok(read_generation_manifest(&control_dir)?.map(|manifest| manifest.active))
+    }
+
     /// Return the project root path.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// Path to the `.codixing/` directory.
+    /// Path to the active index data directory.
+    ///
+    /// Legacy indexes return `<root>/.codixing`; generational indexes return
+    /// `<root>/.codixing/generations/<active>`. Repo-local control files such as
+    /// filters and shared-session logs belong in [`Self::control_dir`].
     pub fn codixing_dir(&self) -> PathBuf {
+        self.index_dir.clone()
+    }
+
+    /// Stable `.codixing/` control directory shared by every generation.
+    pub fn control_dir(&self) -> PathBuf {
         self.root.join(CODEFORGE_DIR)
+    }
+
+    /// Active generation name, or `None` for a compatible legacy flat index.
+    pub fn generation(&self) -> Option<&str> {
+        self.generation.as_deref()
     }
 
     /// Path to the tantivy index directory.

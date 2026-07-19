@@ -131,6 +131,15 @@ impl InMemorySymbolTable {
         all
     }
 
+    /// Visit every symbol without cloning the complete table into a flat Vec.
+    pub(crate) fn visit_symbols(&self, mut visitor: impl FnMut(&Symbol)) {
+        for entry in self.symbols.iter() {
+            for symbol in entry.value() {
+                visitor(symbol);
+            }
+        }
+    }
+
     /// Build from a flat Vec (after deserialization).
     pub fn from_symbols(symbols: Vec<Symbol>) -> Self {
         let table = Self::new();
@@ -238,6 +247,14 @@ impl SymbolTable {
         match self {
             Self::InMemory(t) => t.all_symbols(),
             Self::Mmap(t) => t.all_symbols(),
+        }
+    }
+
+    /// Visit every symbol without materializing an additional full-table copy.
+    pub(crate) fn visit_symbols(&self, visitor: impl FnMut(&Symbol)) {
+        match self {
+            Self::InMemory(table) => table.visit_symbols(visitor),
+            Self::Mmap(table) => table.visit_symbols(visitor),
         }
     }
 
@@ -701,6 +718,46 @@ mod tests {
         assert_eq!(found[1].name, "parse_config");
 
         assert!(table.lookup_prefix("zzz_").is_empty());
+    }
+
+    #[test]
+    fn streaming_visit_matches_in_memory_and_mmap_tables() {
+        let in_mem = InMemorySymbolTable::new();
+        in_mem.insert(make_symbol(
+            "parse_config",
+            "src/config.rs",
+            EntityKind::Function,
+            Language::Rust,
+        ));
+        in_mem.insert(make_symbol(
+            "parse_config",
+            "tests/config.rs",
+            EntityKind::Function,
+            Language::Rust,
+        ));
+        in_mem.insert(make_symbol(
+            "build_index",
+            "src/index.rs",
+            EntityKind::Function,
+            Language::Rust,
+        ));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("symbols_v2.bin");
+        writer::write_mmap_symbols(&in_mem, &path).unwrap();
+
+        let collect = |table: &SymbolTable| {
+            let mut symbols = Vec::new();
+            table.visit_symbols(|symbol| {
+                symbols.push((symbol.name.clone(), symbol.file_path.clone()));
+            });
+            symbols.sort();
+            symbols
+        };
+
+        let expected = collect(&SymbolTable::InMemory(in_mem));
+        let mmap = mmap::MmapSymbolTable::load(&path).unwrap();
+        assert_eq!(collect(&SymbolTable::Mmap(mmap)), expected);
     }
 
     #[test]

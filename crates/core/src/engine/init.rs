@@ -35,13 +35,39 @@ use super::indexing::{
 };
 use super::{Engine, git_head_commit};
 
+fn open_read_only_tantivy_with<F>(root: &Path, open: F) -> Result<TantivyIndex>
+where
+    F: FnOnce() -> Result<TantivyIndex>,
+{
+    match open() {
+        Ok(index) => Ok(index),
+        Err(CodixingError::Tantivy(ref error))
+            if error.to_string().contains("IncompatibleIndex")
+                || error.to_string().contains("index version")
+                || error.to_string().contains("incompatible") =>
+        {
+            Err(CodixingError::Index(format!(
+                "index format at {}/.codixing is incompatible with this Codixing version; \
+                 read-only open never rebuilds or modifies the index. Run `codixing init {}` \
+                 from a writable process to rebuild it, then retry",
+                root.display(),
+                root.display()
+            )))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 impl Engine {
     /// Initialize a new index for the project at `root`.
     ///
     /// Walks the directory tree, parses all supported source files in parallel
     /// using rayon, chunks them with the cAST algorithm, indexes chunks in
     /// Tantivy, optionally embeds them into the HNSW index, and populates the
-    /// symbol table. All state is persisted to the `.codixing/` directory.
+    /// symbol table. The complete result is built in an unpublished generation
+    /// and atomically activated only after validation, so rerunning init cannot
+    /// append stale Tantivy documents or destroy the previous searchable index
+    /// on failure.
     pub fn init(root: impl AsRef<Path>, mut config: IndexConfig) -> Result<Self> {
         let root = root
             .as_ref()
@@ -54,7 +80,7 @@ impl Engine {
         config.root = root.clone();
         let starting_git_commit = git_head_commit(&root);
 
-        let store = IndexStore::init(&root, &config)?;
+        let mut store = IndexStore::begin_generation(&root, &config)?;
         let tantivy =
             TantivyIndex::create_in_dir_with_config(&store.tantivy_dir(), config.bm25.clone())?;
         let parser = Parser::new();
@@ -203,66 +229,22 @@ impl Engine {
             store.save_symbol_graph(g)?;
         }
 
-        // Build concept index from symbols + graph co-occurrences.
-        let concept_index = {
-            let mut builder = super::concepts::ConceptIndexBuilder::new();
-            for sym in symbols.all_symbols() {
-                builder.add_symbol(&sym.name, &sym.file_path, sym.doc_comment.as_deref());
-            }
-            // Add import co-occurrences from graph edges.
-            if let Some(ref g) = graph {
-                let flat = g.to_flat();
-                for (from, to, _edge) in &flat.edges {
-                    builder.add_cooccurrence(from, to);
-                }
-            }
-            let idx = builder.build();
-            if !idx.is_empty() {
-                let bytes = bitcode::serialize(&idx).map_err(|e| {
-                    CodixingError::Serialization(format!("failed to serialize concept index: {e}"))
-                })?;
-                std::fs::write(store.concepts_path(), &bytes)?;
-                Some(idx)
-            } else {
-                // A stale prior artifact would be loaded as current data, so a
-                // cleanup failure is fatal just like a failed write.
-                if let Err(e) = std::fs::remove_file(store.concepts_path())
-                    && e.kind() != std::io::ErrorKind::NotFound
-                {
-                    return Err(e.into());
-                }
-                None
-            }
-        };
+        // BM25-only init has finished every consumer of in-memory source bodies
+        // (Tantivy and both trigram indexes are complete). Release that corpus
+        // copy before semantic construction so their bounded maps do not stack
+        // on top of the largest resident allocation.
+        if embedder.is_none() {
+            clear_chunk_contents(&chunk_meta_map);
+        }
 
-        // Build learned reformulations from symbols (name + file + doc_comment).
-        let reformulations = {
-            let mut builder = super::reformulation::ReformulationBuilder::new();
-            for sym in symbols.all_symbols() {
-                builder.add_identifier(&sym.name, &sym.file_path);
-                if let Some(ref doc) = sym.doc_comment {
-                    builder.add_documented_symbol(&sym.name, doc);
-                }
-            }
-            let reform = builder.build();
-            if !reform.is_empty() {
-                let bytes = bitcode::serialize(&reform).map_err(|e| {
-                    CodixingError::Serialization(format!("failed to serialize reformulations: {e}"))
-                })?;
-                std::fs::write(store.reformulations_path(), &bytes)?;
-                Some(reform)
-            } else {
-                if let Err(e) = std::fs::remove_file(store.reformulations_path())
-                    && e.kind() != std::io::ErrorKind::NotFound
-                {
-                    return Err(e.into());
-                }
-                None
-            }
-        };
+        // Auxiliary semantic data is built sequentially from one symbol
+        // snapshot, bounded at every stage, string-interned on disk, and
+        // invalidated before construction so a failed build cannot leave stale
+        // mappings behind.
+        super::semantic_artifacts::rebuild_semantic_artifacts(&store, &symbols, graph.as_ref())?;
 
         // Persist trigram indexes.
-        trigram_idx.save_mmap_binary_v2(
+        trigram_idx.save_mmap_binary_v3(
             &store.chunk_trigram_path(),
             crate::index::trigram::PostingCodec::DeltaVarint,
         )?;
@@ -358,16 +340,15 @@ impl Engine {
             "index initialized (embeddings starting in background)"
         );
 
+        // This is the sole commit point for the rebuild. Every required
+        // lexical artifact exists and Tantivy can be reopened before the tiny
+        // active-generation manifest is atomically replaced. Any earlier error
+        // leaves the previous generation untouched and searchable.
+        store.publish_generation()?;
+
         // Shared vector slot — starts as None. The background thread will
         // populate it and swap it in when embedding completes.
         let vector_arc: Arc<RwLock<Option<VectorIndex>>> = Arc::new(RwLock::new(None));
-
-        // BM25-only init no longer needs in-memory source bodies after the
-        // trigram indexes and compact metadata have been persisted. Tantivy is
-        // the canonical hydration store, so release this final corpus copy.
-        if embedder.is_none() {
-            clear_chunk_contents(&chunk_meta_map);
-        }
 
         // Wrap chunk_meta in Arc so the background thread can share it.
         let chunk_meta_arc: Arc<DashMap<u64, ChunkMeta>> = Arc::new(chunk_meta_map);
@@ -385,79 +366,118 @@ impl Engine {
                 let root_clone = root.to_path_buf();
                 let file_chunks_path = store.file_chunks_path().to_path_buf();
                 let vector_index_path = store.vector_index_path().to_path_buf();
+                let background_generation_lease = store.background_generation_lease();
 
-                let handle = std::thread::Builder::new()
-                    .name("codixing-embed-bg".into())
-                    .spawn(move || {
-                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            match VectorIndex::new(dims, quantize) {
-                                Ok(bg_vector) => background_embed(
-                                    &emb_clone,
-                                    &pending_embeds,
-                                    &chunk_meta_clone,
-                                    bg_vector,
-                                    contextual,
-                                    &root_clone,
-                                    &state_clone,
-                                ),
-                                Err(e) => {
+                let handle = match background_generation_lease {
+                    Ok(background_generation_lease) => {
+                        let background_task = move || {
+                            // Keep the generation searchable and its files in
+                            // place even if the Engine is dropped or a newer
+                            // generation is published before embedding ends.
+                            let _background_generation_lease = background_generation_lease;
+                            let result =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    match VectorIndex::new(dims, quantize) {
+                                        Ok(bg_vector) => background_embed(
+                                            &emb_clone,
+                                            &pending_embeds,
+                                            &chunk_meta_clone,
+                                            bg_vector,
+                                            contextual,
+                                            &root_clone,
+                                            &state_clone,
+                                        ),
+                                        Err(e) => {
+                                            tracing::error!(
+                                                error = %e,
+                                                "background embedding: failed to create VectorIndex"
+                                            );
+                                            Err(e)
+                                        }
+                                    }
+                                }));
+                            match result {
+                                Ok(Ok(completed_vector)) => {
+                                    // Persist to disk before exposing to readers.
+                                    match completed_vector
+                                        .save(&vector_index_path, &file_chunks_path)
+                                    {
+                                        Ok(()) => {
+                                            *vector_slot
+                                                .write()
+                                                .unwrap_or_else(|e| e.into_inner()) =
+                                                Some(completed_vector);
+                                            state_clone.mark_ready();
+                                            tracing::info!(
+                                                chunks = state_clone.progress().0,
+                                                "background embedding complete"
+                                            );
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                error = %e,
+                                                "background embedding: failed to persist vector index"
+                                            );
+                                            state_clone.mark_failed();
+                                        }
+                                    }
+                                }
+                                Ok(Err(e)) => {
                                     tracing::error!(
                                         error = %e,
-                                        "background embedding: failed to create VectorIndex"
+                                        "background embedding failed"
                                     );
-                                    Err(e)
+                                    state_clone.mark_failed();
+                                }
+                                Err(_panic) => {
+                                    tracing::error!("background embedding panicked");
+                                    state_clone.mark_failed();
                                 }
                             }
-                        }));
-                        match result {
-                            Ok(Ok(completed_vector)) => {
-                                // Persist to disk before exposing to readers.
-                                match completed_vector.save(&vector_index_path, &file_chunks_path) {
-                                    Ok(()) => {
-                                        *vector_slot.write().unwrap_or_else(|e| e.into_inner()) =
-                                            Some(completed_vector);
-                                        state_clone.mark_ready();
-                                        tracing::info!(
-                                            chunks = state_clone.progress().0,
-                                            "background embedding complete"
-                                        );
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            error = %e,
-                                            "background embedding: failed to persist vector index"
-                                        );
-                                        state_clone.mark_failed();
-                                    }
-                                }
-                            }
-                            Ok(Err(e)) => {
-                                tracing::error!(
-                                    error = %e,
-                                    "background embedding failed"
-                                );
-                                state_clone.mark_failed();
-                            }
-                            Err(_panic) => {
-                                tracing::error!("background embedding panicked");
-                                state_clone.mark_failed();
-                            }
-                        }
-                        // Success, model/runtime errors, cancellation, and
-                        // caught panics are all terminal. None of them should
-                        // pin a corpus-sized duplicate of the Tantivy bodies
-                        // for the remaining Engine lifetime.
-                        clear_chunk_contents(&chunk_meta_clone);
-                    })
-                    .map_err(|e| {
-                        CodixingError::Config(format!("failed to spawn embed thread: {e}"))
-                    })?;
+                            // Success, model/runtime errors, cancellation, and
+                            // caught panics are all terminal. None of them should
+                            // pin a corpus-sized duplicate of the Tantivy bodies
+                            // for the remaining Engine lifetime.
+                            clear_chunk_contents(&chunk_meta_clone);
+                        };
+                        Some(
+                            std::thread::Builder::new()
+                                .name("codixing-embed-bg".into())
+                                .spawn(background_task),
+                        )
+                    }
+                    Err(error) => {
+                        warn!(
+                            error = %error,
+                            "failed to acquire generation lease for background embedding"
+                        );
+                        state.mark_failed();
+                        None
+                    }
+                };
 
-                state
-                    .handle
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .replace(handle);
+                if let Some(handle) = handle {
+                    match handle {
+                        Ok(handle) => {
+                            state
+                                .handle
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .replace(handle);
+                        }
+                        Err(error) => {
+                            // The durable BM25 generation is already active.
+                            // Treat thread-creation failure like any other
+                            // embedding failure rather than reporting that
+                            // initialization rolled back when it did not.
+                            warn!(
+                                error = %error,
+                                "failed to spawn background embedding thread"
+                            );
+                            state.mark_failed();
+                        }
+                    }
+                }
 
                 Some(state)
             } else {
@@ -488,15 +508,13 @@ impl Engine {
         // loaders reopen them on demand (the chunk trigram then uses mmap).
         drop(trigram_idx);
         drop(ft_idx);
-        drop(concept_index);
-        drop(reformulations);
         let trigram = std::sync::OnceLock::new();
         let file_trigram = std::sync::OnceLock::new();
 
-        let filter_pipeline = FilterPipeline::load(&store.codixing_dir());
+        let filter_pipeline = FilterPipeline::load(&store.control_dir());
         filter_pipeline.clear();
 
-        let shared_session_path = store.codixing_dir().join("shared_session.jsonl");
+        let shared_session_path = store.control_dir().join("shared_session.jsonl");
 
         Ok(Self {
             config,
@@ -780,8 +798,8 @@ impl Engine {
         // exact-strategy search.
         let trigram = std::sync::OnceLock::new();
         let file_trigram = std::sync::OnceLock::new();
-        let filter_pipeline = FilterPipeline::load(&store.codixing_dir());
-        let shared_session_path = store.codixing_dir().join("shared_session.jsonl");
+        let filter_pipeline = FilterPipeline::load(&store.control_dir());
+        let shared_session_path = store.control_dir().join("shared_session.jsonl");
 
         Ok(Self {
             config,
@@ -828,24 +846,9 @@ impl Engine {
         let mut config = store.load_config()?;
         // Same canonicalization rule as open(): the canonical root is the truth.
         config.root = root.clone();
-        let tantivy = match TantivyIndex::open_read_only_with_config(
-            &store.tantivy_dir(),
-            config.bm25.clone(),
-        ) {
-            Ok(idx) => idx,
-            Err(CodixingError::Tantivy(ref e))
-                if e.to_string().contains("IncompatibleIndex")
-                    || e.to_string().contains("index version")
-                    || e.to_string().contains("incompatible") =>
-            {
-                warn!(
-                    error = %e,
-                    "index format incompatible with current Tantivy version — rebuilding automatically"
-                );
-                return Self::init(root, config);
-            }
-            Err(e) => return Err(e),
-        };
+        let tantivy = open_read_only_tantivy_with(&root, || {
+            TantivyIndex::open_read_only_with_config(&store.tantivy_dir(), config.bm25.clone())
+        })?;
 
         // Restore symbols: prefer bitcode symbols.bin (preserves all fields
         // including doc_comment, visibility, type_relations) over mmap
@@ -1004,8 +1007,8 @@ impl Engine {
             .and_then(|m| m.modified().ok());
 
         // Trigram indexes are lazy-loaded on first use via OnceLock.
-        let filter_pipeline = FilterPipeline::load(&store.codixing_dir());
-        let shared_session_path = store.codixing_dir().join("shared_session.jsonl");
+        let filter_pipeline = FilterPipeline::load(&store.control_dir());
+        let shared_session_path = store.control_dir().join("shared_session.jsonl");
 
         Ok(Self {
             config,
@@ -1098,4 +1101,38 @@ fn background_embed(
     }
 
     Ok(vector)
+}
+
+#[cfg(test)]
+mod read_only_tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn incompatible_read_only_open_requires_explicit_rebuild_without_writing() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let marker = root.join("existing-index-marker");
+        fs::write(&marker, b"must stay unchanged").unwrap();
+
+        let result = open_read_only_tantivy_with(root, || {
+            Err(CodixingError::Tantivy(
+                tantivy::TantivyError::InternalError(
+                    "IncompatibleIndex: unsupported index version".to_owned(),
+                ),
+            ))
+        });
+
+        let error = match result {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("incompatible read-only open unexpectedly succeeded"),
+        };
+        assert!(error.contains("read-only open never rebuilds or modifies"));
+        assert!(error.contains("codixing init"));
+        assert_eq!(fs::read(&marker).unwrap(), b"must stay unchanged");
+        assert!(!root.join(".codixing").exists());
+    }
 }

@@ -381,7 +381,7 @@ fn grep_finds_literal_spanning_two_non_overlapping_chunks() {
 
 // ── v0.37 trigram v2 format tests ────────────────────────────────────────────
 
-mod trigram_v2_tests {
+mod trigram_mmap_tests {
     use codixing_core::index::trigram::{PostingCodec, TrigramIndex};
     use tempfile::tempdir;
 
@@ -421,6 +421,29 @@ mod trigram_v2_tests {
     /// Reference candidate set straight from the in-memory index.
     fn reference_candidates(idx: &TrigramIndex, query: &str) -> std::collections::BTreeSet<u64> {
         idx.search(query).into_iter().collect()
+    }
+
+    /// SplitMix64 is a bijection over u64; setting the high bit mirrors the
+    /// hash-derived production IDs that cannot fit in v2's u32 postings.
+    fn stable_hash_id(value: u64) -> u64 {
+        let mut mixed = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        (mixed ^ (mixed >> 31)) | (1u64 << 63)
+    }
+
+    fn build_hash_id_index(chunk_count: usize) -> TrigramIndex {
+        let mut idx = TrigramIndex::new();
+        for chunk in 0..chunk_count as u64 {
+            let content = format!(
+                "pub fn service_{bucket}() {{ shared_runtime(); parse_request(); validate_input(); }}\n\
+                 fn helper_{bucket}() {{ shared_runtime(); emit_response(); }}\n\
+                 const REQUEST_MARKER: &str = \"dense_ordinal_marker\";",
+                bucket = chunk % 64
+            );
+            idx.add(stable_hash_id(chunk), &content);
+        }
+        idx
     }
 
     #[test]
@@ -529,6 +552,131 @@ mod trigram_v2_tests {
             loaded.search("legacy_marker_abc").into_iter().collect();
 
         assert_eq!(got, expected, "v1 backwards-compat search drifted");
+    }
+
+    #[test]
+    fn v3_hash_ids_round_trip_through_dense_ordinals() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chunk_trigram_v3.bin");
+        let original = build_hash_id_index(500);
+        let expected = reference_candidates(&original, "dense_ordinal_marker");
+
+        original
+            .save_mmap_binary_v3(&path, PostingCodec::DeltaVarint)
+            .unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 3);
+
+        let loaded = TrigramIndex::load_binary(&path).unwrap();
+        let got = reference_candidates(&loaded, "dense_ordinal_marker");
+        assert_eq!(got, expected);
+        assert!(got.iter().all(|id| *id > u64::from(u32::MAX)));
+    }
+
+    #[test]
+    fn v3_roaring_round_trip_preserves_stable_ids() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chunk_trigram_v3_roaring.bin");
+        let original = build_hash_id_index(300);
+        let expected = reference_candidates(&original, "shared_runtime");
+
+        original
+            .save_mmap_binary_v3(&path, PostingCodec::Roaring)
+            .unwrap();
+        let loaded = TrigramIndex::load_binary(&path).unwrap();
+
+        assert_eq!(reference_candidates(&loaded, "shared_runtime"), expected);
+    }
+
+    #[test]
+    fn v1_hash_id_index_migrates_to_v3_without_search_drift() {
+        let dir = tempdir().unwrap();
+        let v1_path = dir.path().join("chunk_trigram_v1.bin");
+        let v3_path = dir.path().join("chunk_trigram_v3.bin");
+        let original = build_hash_id_index(300);
+        let expected = reference_candidates(&original, "validate_input");
+
+        original.save_mmap_binary(&v1_path).unwrap();
+        let legacy = TrigramIndex::load_binary(&v1_path).unwrap();
+        legacy
+            .save_mmap_binary_v3(&v3_path, PostingCodec::DeltaVarint)
+            .unwrap();
+        let migrated = TrigramIndex::load_binary(&v3_path).unwrap();
+
+        assert_eq!(reference_candidates(&migrated, "validate_input"), expected);
+        let bytes = std::fs::read(&v3_path).unwrap();
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 3);
+    }
+
+    #[test]
+    fn v3_output_is_deterministic_across_insertion_order() {
+        let dir = tempdir().unwrap();
+        let first_path = dir.path().join("first.bin");
+        let second_path = dir.path().join("second.bin");
+        let mut first = TrigramIndex::new();
+        let mut second = TrigramIndex::new();
+
+        for chunk in 0..128u64 {
+            let content = format!("fn stable_{chunk}() {{ common_call(); }}");
+            first.add(stable_hash_id(chunk), &content);
+        }
+        for chunk in (0..128u64).rev() {
+            let content = format!("fn stable_{chunk}() {{ common_call(); }}");
+            second.add(stable_hash_id(chunk), &content);
+        }
+
+        first
+            .save_mmap_binary_v3(&first_path, PostingCodec::DeltaVarint)
+            .unwrap();
+        second
+            .save_mmap_binary_v3(&second_path, PostingCodec::DeltaVarint)
+            .unwrap();
+        assert_eq!(
+            std::fs::read(first_path).unwrap(),
+            std::fs::read(second_path).unwrap()
+        );
+    }
+
+    #[test]
+    fn v3_hash_id_corpus_is_at_least_half_the_v1_size() {
+        let dir = tempdir().unwrap();
+        let v1_path = dir.path().join("representative_v1.bin");
+        let v3_path = dir.path().join("representative_v3.bin");
+        let idx = build_hash_id_index(1_000);
+
+        idx.save_mmap_binary(&v1_path).unwrap();
+        idx.save_mmap_binary_v3(&v3_path, PostingCodec::DeltaVarint)
+            .unwrap();
+
+        let v1_size = std::fs::metadata(v1_path).unwrap().len();
+        let v3_size = std::fs::metadata(v3_path).unwrap().len();
+        assert!(
+            v3_size * 2 <= v1_size,
+            "v3 must use at most half the bytes on a representative hash-ID corpus (v1={v1_size}, v3={v3_size})"
+        );
+    }
+
+    #[test]
+    fn v3_rejects_corrupt_stable_id_table() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chunk_trigram_v3_corrupt_ids.bin");
+        let idx = build_hash_id_index(20);
+        idx.save_mmap_binary_v3(&path, PostingCodec::DeltaVarint)
+            .unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let trigram_count = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        let id_table_offset = 32 + trigram_count * 16;
+        bytes[id_table_offset] ^= 1;
+        std::fs::write(&path, bytes).unwrap();
+
+        let error = TrigramIndex::load_binary(&path)
+            .err()
+            .expect("corrupt v3 stable ID table must be rejected");
+        assert!(
+            format!("{error:?}").contains("stable ID checksum"),
+            "unexpected corruption error: {error:?}"
+        );
     }
 
     #[test]

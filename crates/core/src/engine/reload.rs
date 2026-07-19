@@ -2,6 +2,7 @@ use tracing::{debug, info, warn};
 
 use crate::error::Result;
 use crate::graph::CodeGraph;
+use crate::persistence::IndexStore;
 use crate::symbols::SymbolTable;
 use crate::symbols::persistence::deserialize_symbols;
 use crate::vector::VectorIndex;
@@ -36,7 +37,28 @@ impl Engine {
         {
             return Ok(false);
         }
-        self.last_staleness_check = Some(std::time::Instant::now());
+        let check_time = std::time::Instant::now();
+        self.last_staleness_check = Some(check_time);
+
+        // A generation switch replaces every persisted artifact as one
+        // coherent snapshot. Build a complete replacement engine first and
+        // swap only after it opens successfully, leaving this leased snapshot
+        // usable if publication is malformed or incomplete.
+        let root = self.config.root.clone();
+        let active_generation = IndexStore::active_generation(&root)?;
+        let loaded_generation = self.store.generation().map(str::to_owned);
+        if active_generation != loaded_generation {
+            let reload_interval = self.reload_interval;
+            let mut replacement = Self::open_read_only(&root)?;
+            replacement.reload_interval = reload_interval;
+            replacement.last_staleness_check = Some(check_time);
+            *self = replacement;
+            info!(
+                generation = ?active_generation,
+                "read-only index generation changed — reopened active snapshot"
+            );
+            return Ok(true);
+        }
 
         let meta_path = self.store.codixing_dir().join("meta.json");
         let disk_mtime = std::fs::metadata(&meta_path)

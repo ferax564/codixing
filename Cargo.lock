@@ -714,6 +714,7 @@ dependencies = [
  "dashmap 6.1.0",
  "fastembed",
  "filetime",
+ "fs4",
  "glob",
  "half",
  "hf-hub",

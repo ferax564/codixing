@@ -213,7 +213,7 @@ impl Engine {
         {
             warn!(error = %e, "failed to persist file trigram after import");
         }
-        if let Err(e) = self.get_trigram().save_mmap_binary_v2(
+        if let Err(e) = self.get_trigram().save_mmap_binary_v3(
             &self.store.chunk_trigram_path(),
             crate::index::trigram::PostingCodec::DeltaVarint,
         ) {

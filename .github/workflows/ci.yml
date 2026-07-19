@@ -4,6 +4,21 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Weekly 100K-file evidence run. Main pushes use the 10K release profile;
+    # pull requests use the short profile.
+    - cron: "17 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      large_repo_profile:
+        description: End-to-end large-repository benchmark scale
+        required: true
+        default: 10k
+        type: choice
+        options:
+          - pr
+          - 10k
+          - 100k
 
 jobs:
   test:
@@ -274,6 +289,7 @@ jobs:
   benchmarks:
     name: Benchmarks
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -283,10 +299,54 @@ jobs:
           shared-key: ubuntu-latest
       - name: Install system deps
         run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
-      - name: Run benchmarks
-        run: cargo bench --workspace -- --output-format bencher 2>&1 | tee bench-results.txt
+
+      - name: Build benchmark binaries
+        run: cargo build --release -p codixing -p codixing-server
+
+      - name: Test large-repository gate
+        run: python3 benchmarks/test_large_repo_gate.py
+
+      - name: Select large-repository profile
+        id: large-repo-profile
+        env:
+          REQUESTED_PROFILE: ${{ inputs.large_repo_profile }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          profile="$REQUESTED_PROFILE"
+          if [[ -z "$profile" ]]; then
+            case "$EVENT_NAME" in
+              pull_request) profile="pr" ;;
+              schedule) profile="100k" ;;
+              *) profile="10k" ;;
+            esac
+          fi
+          echo "profile=$profile" >> "$GITHUB_OUTPUT"
+
+      - name: Run end-to-end large-repository benchmark
+        run: |
+          python3 benchmarks/large_repo_gate.py \
+            --profile "${{ steps.large-repo-profile.outputs.profile }}" \
+            --codixing target/release/codixing \
+            --server target/release/codixing-server \
+            --output large-repo-gate.json
+
+      - name: Run Criterion benchmarks
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo bench -p codixing-core \
+            --bench search_bench \
+            --bench large_repo_bench \
+            --bench vector_bench \
+            2>&1 | tee criterion-results.txt
+
       - name: Upload benchmark results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
-          path: bench-results.txt
+          path: |
+            criterion-results.txt
+            large-repo-gate.json
+          if-no-files-found: warn
+          retention-days: 14
