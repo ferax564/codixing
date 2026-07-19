@@ -23,12 +23,35 @@ class LargeRepoGateTests(unittest.TestCase):
         self.assertEqual(summary["median_ms"], 2.5)
 
     def test_disk_breakdown_and_rewrite_estimate_are_explicit(self):
-        before = {"tantivy/a": (10, 1), "graph.bin": (5, 1), "gone": (2, 1)}
-        after = {"tantivy/a": (12, 2), "graph.bin": (5, 1), "new": (3, 1)}
+        before = {
+            "tantivy/a": gate.DiskEntry(10, 1, 12, 1, 1),
+            "graph.bin": gate.DiskEntry(5, 1, 8, 1, 2),
+            "gone": gate.DiskEntry(2, 1, 4, 1, 3),
+        }
+        after = {
+            "tantivy/a": gate.DiskEntry(12, 2, 16, 1, 4),
+            "graph.bin": gate.DiskEntry(5, 1, 8, 1, 2),
+            "new": gate.DiskEntry(3, 1, 4, 1, 5),
+        }
         usage = gate.disk_usage(after)
         self.assertEqual(usage["total_bytes"], 20)
+        self.assertEqual(usage["allocated_bytes"], 28)
         self.assertEqual(usage["artifacts_bytes"]["tantivy"], 12)
         self.assertEqual(gate.rewritten_bytes_estimate(before, after), 17)
+
+    def test_disk_usage_deduplicates_hardlinks_and_unwraps_generations(self):
+        snapshot = {
+            "generations/a/tantivy/seg": gate.DiskEntry(10, 1, 12, 7, 11),
+            "generations/b/tantivy/seg": gate.DiskEntry(10, 1, 12, 7, 11),
+            "generations/b/symbols.bin": gate.DiskEntry(5, 1, 8, 7, 12),
+        }
+        usage = gate.disk_usage(snapshot)
+        self.assertEqual(usage["total_bytes"], 25)
+        self.assertEqual(usage["unique_inode_logical_bytes"], 15)
+        self.assertEqual(usage["allocated_bytes"], 20)
+        self.assertEqual(usage["hardlink_duplicate_logical_bytes"], 10)
+        self.assertEqual(usage["artifacts_bytes"]["tantivy"], 20)
+        self.assertEqual(usage["artifacts_allocated_bytes"]["tantivy"], 12)
 
     def test_snapshot_detects_mtime_only_rewrites(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -119,7 +142,7 @@ class LargeRepoGateTests(unittest.TestCase):
     def test_baseline_rejects_a_different_schema_or_synthetic_task_set(self):
         baseline = self._result(init=100.0, rss=1_000.0, disk=2_000.0, quality=1.0)
         current = self._result(init=50.0, rss=500.0, disk=1_000.0, quality=1.0)
-        current["schema_version"] = 2
+        current["schema_version"] = gate.SCHEMA_VERSION + 1
         comparison = gate.compare_to_baseline(
             current, baseline, {"max_init_ratio": 0.5}
         )
@@ -156,6 +179,15 @@ class LargeRepoGateTests(unittest.TestCase):
     def _result(init: float, rss: float, disk: float, quality: float):
         return {
             "schema_version": gate.SCHEMA_VERSION,
+            "fixture": {"schema_hash": gate.fixture_schema_hash()},
+            "host": {
+                "machine": "test-machine",
+                "system": "TestOS",
+                "logical_cpus": 8,
+                "kernel_release": "test-kernel",
+                "cpu_model": "test-cpu",
+                "filesystem": {"device": 1, "block_size": 4096},
+            },
             "profile": {
                 "file_count": 100_000,
                 "query_runs": 25,
@@ -163,7 +195,7 @@ class LargeRepoGateTests(unittest.TestCase):
             },
             "metrics": {
                 "init": {"wall_time_ms": init, "peak_rss_bytes": rss},
-                "disk": {"total_bytes": disk},
+                "disk": {"total_bytes": disk, "allocated_bytes": disk},
                 "queries": {
                     "cold": {"p95_ms": 10.0},
                     "warm": {"client_round_trip": {"p95_ms": 5.0}},

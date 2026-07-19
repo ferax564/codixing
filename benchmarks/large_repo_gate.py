@@ -12,6 +12,7 @@ used as a regression or improvement gate.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -36,7 +37,8 @@ except ImportError:  # Windows: retain all metrics except child peak RSS/PSS.
     resource = None
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+FIXTURE_SCHEMA = "rust-widget-v1"
 FIXTURE_MARKER = ".codixing-large-repo-fixture"
 
 
@@ -73,6 +75,15 @@ class ProcessMetrics:
     io_source: str | None
     stdout: str
     stderr: str
+
+
+@dataclass(frozen=True)
+class DiskEntry:
+    logical_bytes: int
+    mtime_ns: int
+    allocated_bytes: int
+    device: int
+    inode: int
 
 
 def percentile(values: list[float], quantile: float) -> float | None:
@@ -275,33 +286,69 @@ def generate_fixture(root: Path, file_count: int) -> list[Path]:
     return files
 
 
-def disk_snapshot(root: Path) -> dict[str, tuple[int, int]]:
+def disk_snapshot(root: Path) -> dict[str, DiskEntry]:
     if not root.exists():
         return {}
-    snapshot: dict[str, tuple[int, int]] = {}
+    snapshot: dict[str, DiskEntry] = {}
     for path in root.rglob("*"):
         if path.is_file():
             stat = path.stat()
-            snapshot[str(path.relative_to(root))] = (stat.st_size, stat.st_mtime_ns)
+            blocks = getattr(stat, "st_blocks", None)
+            allocated = stat.st_size if blocks is None else blocks * 512
+            snapshot[str(path.relative_to(root))] = DiskEntry(
+                logical_bytes=stat.st_size,
+                mtime_ns=stat.st_mtime_ns,
+                allocated_bytes=allocated,
+                device=stat.st_dev,
+                inode=stat.st_ino,
+            )
     return snapshot
 
 
-def disk_usage(snapshot: dict[str, tuple[int, int]]) -> dict[str, Any]:
+def artifact_category(relative: str) -> str:
+    parts = Path(relative).parts
+    if len(parts) >= 3 and parts[0] == "generations":
+        return parts[2]
+    return parts[0]
+
+
+def disk_usage(snapshot: dict[str, DiskEntry]) -> dict[str, Any]:
     artifacts: dict[str, int] = {}
-    for relative, (size, _) in snapshot.items():
-        top_level = relative.split(os.sep, 1)[0]
-        artifacts[top_level] = artifacts.get(top_level, 0) + size
+    artifacts_allocated: dict[str, int] = {}
+    seen_inodes: set[tuple[int, int]] = set()
+    unique_logical = 0
+    allocated = 0
+    for relative, entry in sorted(snapshot.items()):
+        category = artifact_category(relative)
+        artifacts[category] = artifacts.get(category, 0) + entry.logical_bytes
+        inode = (entry.device, entry.inode)
+        if inode in seen_inodes:
+            continue
+        seen_inodes.add(inode)
+        unique_logical += entry.logical_bytes
+        allocated += entry.allocated_bytes
+        artifacts_allocated[category] = (
+            artifacts_allocated.get(category, 0) + entry.allocated_bytes
+        )
+    logical = sum(entry.logical_bytes for entry in snapshot.values())
     return {
-        "total_bytes": sum(size for size, _ in snapshot.values()),
+        "total_bytes": logical,
+        "unique_inode_logical_bytes": unique_logical,
+        "allocated_bytes": allocated,
+        "hardlink_duplicate_logical_bytes": logical - unique_logical,
         "file_count": len(snapshot),
+        "unique_inode_count": len(seen_inodes),
         "artifacts_bytes": dict(
             sorted(artifacts.items(), key=lambda item: (-item[1], item[0]))
+        ),
+        "artifacts_allocated_bytes": dict(
+            sorted(artifacts_allocated.items(), key=lambda item: (-item[1], item[0]))
         ),
     }
 
 
 def rewritten_bytes_estimate(
-    before: dict[str, tuple[int, int]], after: dict[str, tuple[int, int]]
+    before: dict[str, DiskEntry], after: dict[str, DiskEntry]
 ) -> int:
     """Estimate logical artifact bytes rewritten from size/mtime changes.
 
@@ -310,13 +357,58 @@ def rewritten_bytes_estimate(
     the output rather than pretending to be physical I/O.
     """
     rewritten = 0
+    seen: set[tuple[int, int]] = set()
     for relative, current in after.items():
         if before.get(relative) != current:
-            rewritten += current[0]
+            inode = (current.device, current.inode)
+            if inode not in seen:
+                seen.add(inode)
+                rewritten += current.logical_bytes
     for relative, previous in before.items():
         if relative not in after:
-            rewritten += previous[0]
+            inode = (previous.device, previous.inode)
+            if inode not in seen:
+                seen.add(inode)
+                rewritten += previous.logical_bytes
     return rewritten
+
+
+def fixture_schema_hash() -> str:
+    return hashlib.sha256(FIXTURE_SCHEMA.encode()).hexdigest()
+
+
+def cpu_model() -> str | None:
+    if sys.platform.startswith("linux"):
+        try:
+            for line in Path("/proc/cpuinfo").read_text().splitlines():
+                if line.startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+        except (FileNotFoundError, PermissionError, IndexError):
+            pass
+    if sys.platform == "darwin":
+        try:
+            completed = subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return completed.stdout.strip() or None
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return platform.processor() or None
+
+
+def filesystem_metadata(path: Path) -> dict[str, int]:
+    stat = path.stat()
+    statvfs = os.statvfs(path)
+    return {
+        "device": stat.st_dev,
+        "block_size": statvfs.f_bsize,
+        "fragment_size": statvfs.f_frsize,
+        "name_max": statvfs.f_namemax,
+    }
 
 
 def _parse_search_json(stdout: str) -> list[dict[str, Any]]:
@@ -680,6 +772,31 @@ def compare_to_baseline(
             baseline.get("host", {}).get("logical_cpus"),
         ),
         (
+            "host.kernel_release",
+            current.get("host", {}).get("kernel_release"),
+            baseline.get("host", {}).get("kernel_release"),
+        ),
+        (
+            "host.cpu_model",
+            current.get("host", {}).get("cpu_model"),
+            baseline.get("host", {}).get("cpu_model"),
+        ),
+        (
+            "host.filesystem.device",
+            _metric(current, "host.filesystem.device"),
+            _metric(baseline, "host.filesystem.device"),
+        ),
+        (
+            "host.filesystem.block_size",
+            _metric(current, "host.filesystem.block_size"),
+            _metric(baseline, "host.filesystem.block_size"),
+        ),
+        (
+            "fixture.schema_hash",
+            current.get("fixture", {}).get("schema_hash"),
+            baseline.get("fixture", {}).get("schema_hash"),
+        ),
+        (
             "metrics.quality.comparison_source",
             current.get("metrics", {}).get("quality", {}).get("comparison_source"),
             baseline.get("metrics", {}).get("quality", {}).get("comparison_source"),
@@ -711,7 +828,7 @@ def compare_to_baseline(
     mapping = {
         "max_init_ratio": ("metrics.init.wall_time_ms", "max"),
         "max_rss_ratio": ("metrics.init.peak_rss_bytes", "max"),
-        "max_disk_ratio": ("metrics.disk.total_bytes", "max"),
+        "max_disk_ratio": ("metrics.disk.allocated_bytes", "max"),
         "max_cold_query_p95_ratio": ("metrics.queries.cold.p95_ms", "max"),
         "max_warm_query_p95_ratio": (
             "metrics.queries.warm.client_round_trip.p95_ms",
@@ -845,8 +962,15 @@ def main() -> int:
             "platform": platform.platform(),
             "machine": platform.machine(),
             "processor": platform.processor() or None,
+            "cpu_model": cpu_model(),
+            "kernel_release": platform.release(),
             "python": platform.python_version(),
             "logical_cpus": os.cpu_count(),
+            "filesystem": filesystem_metadata(parent),
+        },
+        "fixture": {
+            "schema": FIXTURE_SCHEMA,
+            "schema_hash": fixture_schema_hash(),
         },
         "source": source_metadata(invocation_root, codixing),
         "configuration": {"threads": args.threads, "embedding_enabled": False},
@@ -878,6 +1002,9 @@ def main() -> int:
         }
         steady_disk = disk_usage(disk_snapshot(root / ".codixing"))
         steady_disk["source_amplification_ratio"] = (
+            steady_disk["allocated_bytes"] / source_bytes if source_bytes else None
+        )
+        steady_disk["logical_source_amplification_ratio"] = (
             steady_disk["total_bytes"] / source_bytes if source_bytes else None
         )
         result["metrics"]["disk"] = steady_disk

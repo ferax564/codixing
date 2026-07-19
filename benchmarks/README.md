@@ -71,7 +71,8 @@ grep:                20 queries, Recall@10 0.191, MRR 0.168
 cannot cover. It generates an owned synthetic Rust repository and records:
 
 - fresh BM25-ready initialization wall time, peak RSS, and Linux PSS/I/O;
-- steady index bytes, source amplification, and a top-level artifact breakdown;
+- steady logical and allocated index bytes with hardlink de-duplication and a
+  generation-aware artifact breakdown;
 - cold-process and warm resident-server query p50/p95;
 - no-op, one-file, and one-percent sync wall time and bytes rewritten;
 - synthetic exact-query Recall@10/MRR, with a normalized external-quality hook.
@@ -115,6 +116,14 @@ evaluation run by another harness, pass normalized
 an optional `source`/`task_count`. That external MRR becomes the baseline
 comparison metric while the generated exact probes continue to gate basic
 correctness.
+
+CI performs this comparison on one runner and records the CPU, kernel,
+filesystem, and fixture-schema identity in both results. It builds the commit pinned in
+`large_repo_baseline_ref.txt`, measures that binary first, then measures the
+candidate with the same profile and enforces every 2x/50% threshold above.
+The baseline and treatment JSON files are uploaded together so the claim is
+auditable. Move the pin only when intentionally starting a new performance
+campaign, and preserve the prior evidence in `benchmarks/results/`.
 
 `claude-context` was not benchmarked locally because it requires Node.js
 20-23 plus OpenAI and Zilliz/Milvus credentials; this machine currently has

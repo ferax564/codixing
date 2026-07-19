@@ -289,9 +289,11 @@ jobs:
   benchmarks:
     name: Benchmarks
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -302,6 +304,16 @@ jobs:
 
       - name: Build benchmark binaries
         run: cargo build --release -p codixing -p codixing-server
+
+      - name: Build pinned large-repository baseline
+        shell: bash
+        run: |
+          baseline_ref="$(tr -d '[:space:]' < benchmarks/large_repo_baseline_ref.txt)"
+          git worktree add --detach "$RUNNER_TEMP/codixing-baseline" "$baseline_ref"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/codixing-baseline-target" \
+            cargo build --release \
+              --manifest-path "$RUNNER_TEMP/codixing-baseline/Cargo.toml" \
+              -p codixing -p codixing-server
 
       - name: Test large-repository gate
         run: python3 benchmarks/test_large_repo_gate.py
@@ -322,12 +334,29 @@ jobs:
           fi
           echo "profile=$profile" >> "$GITHUB_OUTPUT"
 
-      - name: Run end-to-end large-repository benchmark
+      - name: Measure pinned baseline on this runner
+        run: |
+          python3 benchmarks/large_repo_gate.py \
+            --profile "${{ steps.large-repo-profile.outputs.profile }}" \
+            --codixing "$RUNNER_TEMP/codixing-baseline-target/release/codixing" \
+            --server "$RUNNER_TEMP/codixing-baseline-target/release/codixing-server" \
+            --output large-repo-baseline.json
+
+      - name: Run end-to-end large-repository acceptance gate
         run: |
           python3 benchmarks/large_repo_gate.py \
             --profile "${{ steps.large-repo-profile.outputs.profile }}" \
             --codixing target/release/codixing \
             --server target/release/codixing-server \
+            --baseline large-repo-baseline.json \
+            --max-init-ratio 0.50 \
+            --max-rss-ratio 0.50 \
+            --max-disk-ratio 0.50 \
+            --max-cold-query-p95-ratio 0.50 \
+            --max-warm-query-p95-ratio 0.50 \
+            --max-one-file-sync-ratio 0.50 \
+            --max-one-file-rewrite-ratio 0.50 \
+            --min-quality-ratio 0.99 \
             --output large-repo-gate.json
 
       - name: Run Criterion benchmarks
@@ -347,6 +376,7 @@ jobs:
           name: benchmark-results
           path: |
             criterion-results.txt
+            large-repo-baseline.json
             large-repo-gate.json
           if-no-files-found: warn
           retention-days: 14
