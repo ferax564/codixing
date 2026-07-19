@@ -195,7 +195,14 @@ pub struct CodeGraph {
     /// Symbol-level directed graph: nodes are [`SymbolNode`]s, edges are
     /// [`ReferenceKind`]s. Used by context assembly and precise callers/callees.
     pub(crate) inner: DiGraph<types::SymbolNode, types::ReferenceKind>,
+    /// Monotonic in-process generation of the file-level graph topology.
+    file_revision: u64,
+    /// Process-unique identity used by caches that outlive an Engine instance.
+    cache_identity: u64,
 }
+
+static NEXT_GRAPH_CACHE_IDENTITY: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
 
 impl CodeGraph {
     /// Create an empty graph.
@@ -204,7 +211,46 @@ impl CodeGraph {
             graph: DiGraph::new(),
             path_to_node: HashMap::new(),
             inner: DiGraph::new(),
+            file_revision: 0,
+            cache_identity: NEXT_GRAPH_CACHE_IDENTITY
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
+    }
+
+    fn touch_file_graph(&mut self) {
+        self.file_revision = self.file_revision.wrapping_add(1);
+    }
+
+    /// Drop unresolved-import pseudo-nodes once their last incident edge is
+    /// gone. Long-running watchers otherwise retain one `__ext__:*` node for
+    /// every unique import string ever seen, even after the source changed.
+    fn prune_orphan_external_nodes(&mut self, candidates: Vec<String>) {
+        for path in candidates {
+            let is_orphan = self.path_to_node.get(&path).is_some_and(|idx| {
+                self.graph
+                    .edges_directed(*idx, petgraph::Direction::Incoming)
+                    .next()
+                    .is_none()
+                    && self
+                        .graph
+                        .edges_directed(*idx, petgraph::Direction::Outgoing)
+                        .next()
+                        .is_none()
+            });
+            if is_orphan {
+                self.remove_file(&path);
+            }
+        }
+    }
+
+    /// Current in-process file-graph topology generation.
+    pub fn file_revision(&self) -> u64 {
+        self.file_revision
+    }
+
+    /// Process-unique identity for caches shared across Engine lifetimes.
+    pub(crate) fn cache_identity(&self) -> u64 {
+        self.cache_identity
     }
 
     /// Add a symbol node to the symbol-level graph, returning its index.
@@ -263,6 +309,7 @@ impl CodeGraph {
         };
         let idx = self.graph.add_node(node);
         self.path_to_node.insert(file_path.to_string(), idx);
+        self.touch_file_graph();
         idx
     }
 
@@ -288,6 +335,7 @@ impl CodeGraph {
                 confidence,
             },
         );
+        self.touch_file_graph();
         // Update degree counters.
         if let Some(n) = self.graph.node_weight_mut(from_idx) {
             n.out_degree += 1;
@@ -314,6 +362,7 @@ impl CodeGraph {
                 confidence,
             },
         );
+        self.touch_file_graph();
         if let Some(n) = self.graph.node_weight_mut(from_idx) {
             n.out_degree += 1;
         }
@@ -330,6 +379,12 @@ impl CodeGraph {
             let out_neighbours: Vec<NodeIndex> = self
                 .graph
                 .neighbors_directed(idx, petgraph::Direction::Outgoing)
+                .collect();
+            let possible_orphan_externals: Vec<String> = out_neighbours
+                .iter()
+                .filter_map(|neighbor| self.graph.node_weight(*neighbor))
+                .filter(|node| node.file_path.starts_with("__ext__:"))
+                .map(|node| node.file_path.clone())
                 .collect();
 
             for nb in &in_neighbours {
@@ -355,6 +410,8 @@ impl CodeGraph {
                 self.path_to_node.insert(swapped_path, idx);
             }
             self.graph.remove_node(idx);
+            self.touch_file_graph();
+            self.prune_orphan_external_nodes(possible_orphan_externals);
         }
     }
 
@@ -364,6 +421,12 @@ impl CodeGraph {
             let out_neighbours: Vec<NodeIndex> = self
                 .graph
                 .neighbors_directed(idx, petgraph::Direction::Outgoing)
+                .collect();
+            let possible_orphan_externals: Vec<String> = out_neighbours
+                .iter()
+                .filter_map(|neighbor| self.graph.node_weight(*neighbor))
+                .filter(|node| node.file_path.starts_with("__ext__:"))
+                .map(|node| node.file_path.clone())
                 .collect();
             for nb in &out_neighbours {
                 if let Some(n) = self.graph.node_weight_mut(*nb) {
@@ -376,12 +439,17 @@ impl CodeGraph {
                 .edges_directed(idx, petgraph::Direction::Outgoing)
                 .map(|e| e.id())
                 .collect();
+            let removed_any = !out_edges.is_empty();
             for e in out_edges {
                 self.graph.remove_edge(e);
+            }
+            if removed_any {
+                self.touch_file_graph();
             }
             if let Some(n) = self.graph.node_weight_mut(idx) {
                 n.out_degree = 0;
             }
+            self.prune_orphan_external_nodes(possible_orphan_externals);
         }
     }
 
@@ -400,6 +468,25 @@ impl CodeGraph {
             .collect()
     }
 
+    /// Number of distinct files that import or reference `file_path`.
+    /// Parallel edges from the same file count once, matching [`Self::callers`]
+    /// without cloning every caller path.
+    pub fn caller_count(&self, file_path: &str) -> usize {
+        let Some(&idx) = self.path_to_node.get(file_path) else {
+            return 0;
+        };
+        let mut seen = std::collections::HashSet::new();
+        self.graph
+            .neighbors_directed(idx, petgraph::Direction::Incoming)
+            .filter(|neighbor| {
+                self.graph
+                    .node_weight(*neighbor)
+                    .is_some_and(|node| !node.file_path.starts_with("__ext__:"))
+            })
+            .filter(|neighbor| seen.insert(*neighbor))
+            .count()
+    }
+
     /// Files that `file_path` imports (direct callees / dependencies).
     pub fn callees(&self, file_path: &str) -> Vec<String> {
         let Some(&idx) = self.path_to_node.get(file_path) else {
@@ -413,6 +500,60 @@ impl CodeGraph {
             .map(|n| n.file_path.clone())
             .filter(|p| seen.insert(p.clone()))
             .collect()
+    }
+
+    /// Return at most `limit` stable real-file callees plus a transition-degree
+    /// denominator. Both traversal work and scratch memory are O(limit), even
+    /// for a hub with hundreds of thousands of edges.
+    pub(crate) fn bounded_callees(&self, file_path: &str, limit: usize) -> (Vec<String>, usize) {
+        let Some(&idx) = self.path_to_node.get(file_path) else {
+            return (Vec::new(), 0);
+        };
+        if limit == 0 {
+            return (
+                Vec::new(),
+                self.graph
+                    .node_weight(idx)
+                    .map_or(0, |node| node.out_degree),
+            );
+        }
+        let raw_out_degree = self
+            .graph
+            .node_weight(idx)
+            .map_or(0, |node| node.out_degree);
+        let scan_limit = limit.saturating_mul(4).max(64);
+        let mut selected = Vec::<String>::with_capacity(limit.min(raw_out_degree));
+        let mut seen = std::collections::HashSet::<NodeIndex>::with_capacity(limit);
+        let mut exhausted = true;
+        for (scanned, neighbor) in self
+            .graph
+            .neighbors_directed(idx, petgraph::Direction::Outgoing)
+            .enumerate()
+        {
+            if scanned == scan_limit || selected.len() == limit {
+                exhausted = false;
+                break;
+            }
+            let Some(node) = self.graph.node_weight(neighbor) else {
+                continue;
+            };
+            if node.file_path.starts_with("__ext__:") {
+                continue;
+            }
+            if !seen.insert(neighbor) {
+                continue;
+            }
+            selected.push(node.file_path.clone());
+        }
+        selected.sort_unstable();
+        let transition_degree = if exhausted {
+            selected.len()
+        } else {
+            // The raw counter may include parallel/external edges, which makes
+            // omitted mass conservatively reset to the seeds on truncated hubs.
+            raw_out_degree.max(selected.len())
+        };
+        (selected, transition_degree)
     }
 
     /// Find files under `from_prefix` that import any file under `to_prefix`.
@@ -722,6 +863,7 @@ impl CodeGraph {
             let mut edge = edge;
             edge.confidence = edge.kind.default_confidence();
             g.graph.add_edge(from_idx, to_idx, edge);
+            g.touch_file_graph();
         }
         g
     }
@@ -751,6 +893,7 @@ impl CodeGraph {
                 confidence,
             },
         );
+        self.touch_file_graph();
         if let Some(n) = self.graph.node_weight_mut(from_idx) {
             n.out_degree += 1;
         }
@@ -784,6 +927,7 @@ impl CodeGraph {
                 confidence,
             },
         );
+        self.touch_file_graph();
         if let Some(n) = self.graph.node_weight_mut(from_idx) {
             n.out_degree += 1;
         }
@@ -1204,6 +1348,37 @@ mod tests {
     }
 
     #[test]
+    fn removing_edges_prunes_only_orphan_external_nodes() {
+        let mut g = CodeGraph::new();
+        g.add_external_edge("src/a.rs", "old_unique_import", Language::Rust);
+        g.add_external_edge("src/b.rs", "shared_import", Language::Rust);
+        g.add_external_edge("src/c.rs", "shared_import", Language::Rust);
+        assert_eq!(g.file_node_count(), 5);
+
+        g.remove_file_edges("src/a.rs");
+        assert_eq!(g.file_node_count(), 4, "unique external node leaked");
+
+        g.remove_file_edges("src/b.rs");
+        assert_eq!(
+            g.file_node_count(),
+            4,
+            "shared external node was removed while still referenced"
+        );
+        g.remove_file_edges("src/c.rs");
+        assert_eq!(g.file_node_count(), 3, "last shared external node leaked");
+    }
+
+    #[test]
+    fn removing_file_prunes_its_orphan_external_node() {
+        let mut g = CodeGraph::new();
+        g.add_external_edge("src/a.rs", "transient_import", Language::Rust);
+        assert_eq!(g.file_node_count(), 2);
+
+        g.remove_file("src/a.rs");
+        assert_eq!(g.file_node_count(), 0);
+    }
+
+    #[test]
     fn flat_round_trip() {
         let mut g = CodeGraph::new();
         g.add_edge(
@@ -1613,6 +1788,46 @@ mod tests {
             path,
             Some(vec!["src/b.rs".to_string(), "src/a.rs".to_string()])
         );
+    }
+
+    #[test]
+    fn caller_count_deduplicates_parallel_edges() {
+        let mut g = CodeGraph::new();
+        g.add_edge(
+            "src/a.rs",
+            "src/target.rs",
+            "target",
+            Language::Rust,
+            Language::Rust,
+        );
+        g.add_call_edge(
+            "src/a.rs",
+            "src/target.rs",
+            "target",
+            Language::Rust,
+            Language::Rust,
+        );
+        g.add_edge(
+            "src/b.rs",
+            "src/target.rs",
+            "target",
+            Language::Rust,
+            Language::Rust,
+        );
+
+        assert_eq!(g.node("src/target.rs").unwrap().in_degree, 3);
+        assert_eq!(g.caller_count("src/target.rs"), 2);
+    }
+
+    #[test]
+    fn bounded_callees_is_exact_for_parallel_edges_below_cap() {
+        let mut g = CodeGraph::new();
+        g.add_edge("src/a.rs", "src/b.rs", "b", Language::Rust, Language::Rust);
+        g.add_call_edge("src/a.rs", "src/b.rs", "b", Language::Rust, Language::Rust);
+
+        let (callees, degree) = g.bounded_callees("src/a.rs", 8);
+        assert_eq!(callees, vec!["src/b.rs"]);
+        assert_eq!(degree, 1, "parallel edges must share one transition");
     }
 
     // --- Community field on node ---

@@ -138,6 +138,13 @@ pub(crate) async fn run_daemon(
             }
         };
 
+        {
+            let mut eng = engine_for_watch.write().expect("engine lock poisoned");
+            if let Err(error) = eng.apply_changes(&[]) {
+                warn!(%error, "daemon: failed to recover pending index changes");
+            }
+        }
+
         info!(root = %config.root.display(), "daemon: file watcher started");
 
         loop {
@@ -177,9 +184,6 @@ pub(crate) async fn run_daemon(
             let mut eng = engine_for_watch.write().expect("engine lock poisoned");
             if let Err(e) = eng.apply_changes(&all_changes) {
                 warn!(error = %e, "daemon: apply_changes failed");
-            }
-            if let Err(e) = eng.save() {
-                warn!(error = %e, "daemon: save after watcher update failed");
             }
         }
     });

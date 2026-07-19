@@ -215,6 +215,7 @@ pub(crate) fn call_rename_symbol(engine: &mut Engine, args: &Value) -> (String, 
     let mut modified = 0usize;
     let mut replacements = 0usize;
     let mut errors = Vec::new();
+    let mut changed_paths = Vec::new();
 
     for path in &files {
         let content = match std::fs::read_to_string(path) {
@@ -237,9 +238,7 @@ pub(crate) fn call_rename_symbol(engine: &mut Engine, args: &Value) -> (String, 
         }
         replacements += count;
         modified += 1;
-        if let Err(e) = engine.reindex_file(path) {
-            errors.push(format!("Reindex error for {}: {e}", path.display()));
-        }
+        changed_paths.push(path.clone());
     }
 
     if dry_run {
@@ -254,7 +253,18 @@ pub(crate) fn call_rename_symbol(engine: &mut Engine, args: &Value) -> (String, 
         );
     }
 
-    let _ = engine.persist_incremental();
+    if !changed_paths.is_empty() {
+        let changes: Vec<_> = changed_paths
+            .into_iter()
+            .map(|path| codixing_core::watcher::FileChange {
+                path,
+                kind: codixing_core::watcher::ChangeKind::Modified,
+            })
+            .collect();
+        if let Err(error) = engine.apply_changes(&changes) {
+            errors.push(format!("Batch reindex error: {error}"));
+        }
+    }
 
     if !errors.is_empty() {
         return (

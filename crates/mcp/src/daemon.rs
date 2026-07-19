@@ -121,6 +121,16 @@ pub(crate) async fn run_daemon(
             }
         };
 
+        // Register the watcher first so edits made during recovery are queued
+        // and drained by the normal settlement loop instead of falling into a
+        // startup blind spot.
+        {
+            let mut eng = engine_for_watch.write().unwrap_or_else(|e| e.into_inner());
+            if let Err(error) = eng.apply_changes(&[]) {
+                warn!(%error, "daemon: failed to recover pending index changes");
+            }
+        }
+
         info!(root = %config.root.display(), "daemon: file watcher started");
 
         loop {
@@ -164,9 +174,6 @@ pub(crate) async fn run_daemon(
             let mut eng = engine_for_watch.write().unwrap_or_else(|e| e.into_inner());
             if let Err(e) = eng.apply_changes(&all_changes) {
                 warn!(error = %e, "daemon: apply_changes failed");
-            }
-            if let Err(e) = eng.save() {
-                warn!(error = %e, "daemon: save after watcher update failed");
             }
         }
     });

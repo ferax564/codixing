@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::error::Result;
 use crate::retriever::bm25::BM25Retriever;
@@ -162,23 +162,51 @@ impl Engine {
                         return Ok(Vec::new());
                     }
 
-                    let (results_with_meta, embeddings): (Vec<SearchResult>, Vec<Vec<f32>>) =
-                        candidates
-                            .into_iter()
-                            .filter_map(|r| {
-                                let emb_vec = emb_clone.embed_one(&r.content).ok()?;
-                                Some((r, emb_vec))
-                            })
-                            .unzip();
+                    // Embed all MMR candidates in one model invocation. The previous
+                    // per-candidate loop paid the ONNX session overhead up to 30 times
+                    // for a single Thorough query.
+                    let candidate_texts = candidates
+                        .iter()
+                        .map(|result| result.content.clone())
+                        .collect();
+                    let (candidates, embeddings): (Vec<SearchResult>, Vec<Vec<f32>>) =
+                        match emb_clone.embed(candidate_texts) {
+                            Ok(embeddings) if embeddings.len() == candidates.len() => {
+                                (candidates, embeddings)
+                            }
+                            Ok(embeddings) => {
+                                warn!(
+                                    expected = candidates.len(),
+                                    received = embeddings.len(),
+                                    "batched MMR embedding count mismatch; retrying candidates independently"
+                                );
+                                candidates
+                                    .into_iter()
+                                    .filter_map(|result| {
+                                        let embedding =
+                                            emb_clone.embed_one(&result.content).ok()?;
+                                        Some((result, embedding))
+                                    })
+                                    .unzip()
+                            }
+                            Err(error) => {
+                                warn!(%error, "batched MMR embedding failed; retrying candidates independently");
+                                candidates
+                                    .into_iter()
+                                    .filter_map(|result| {
+                                        let embedding =
+                                            emb_clone.embed_one(&result.content).ok()?;
+                                        Some((result, embedding))
+                                    })
+                                    .unzip()
+                            }
+                        };
+                    if candidates.is_empty() {
+                        return Ok(Vec::new());
+                    }
 
                     let query_vec = emb_clone.embed_query(&query_str_owned)?;
-                    mmr_select(
-                        results_with_meta,
-                        &query_vec,
-                        &embeddings,
-                        mmr_lambda,
-                        limit,
-                    )
+                    mmr_select(candidates, &query_vec, &embeddings, mmr_lambda, limit)
                 } else {
                     drop(vec_guard);
                     debug!("no embedder available; falling back to BM25 for Thorough strategy");
@@ -191,8 +219,15 @@ impl Engine {
                 let semantic_results = self.semantic_search(&query.query, query.limit);
                 let mut results: Vec<SearchResult> = Vec::new();
                 for m in semantic_results {
-                    let syms = self.symbols.filter(&m.symbol, Some(&m.file_path));
-                    if let Some(sym) = syms.into_iter().next() {
+                    // Semantic matches already carry an exact symbol name.
+                    // Use the name index, then match its usually tiny bucket,
+                    // instead of scanning the corpus-wide symbol table.
+                    if let Some(sym) = self
+                        .symbols
+                        .lookup(&m.symbol)
+                        .into_iter()
+                        .find(|symbol| symbol.file_path == m.file_path)
+                    {
                         results.push(SearchResult {
                             chunk_id: format!("sem_{}", m.symbol),
                             file_path: m.file_path,
@@ -295,10 +330,9 @@ impl Engine {
         }
 
         let candidate_limit = (base_query.limit * 3).max(30);
-        let mut all_results: Vec<Vec<SearchResult>> = Vec::new();
-
-        for q_text in queries {
-            let sub_query = SearchQuery {
+        let sub_queries: Vec<SearchQuery> = queries
+            .iter()
+            .map(|q_text| SearchQuery {
                 query: expand_query(q_text),
                 limit: candidate_limit,
                 file_filter: base_query.file_filter.clone(),
@@ -307,13 +341,13 @@ impl Engine {
                 queries: None,
                 doc_filter: None,
                 source_filter: None,
-            };
-            if let Ok(results) = self.search_first_pass(&sub_query)
-                && !results.is_empty()
-            {
-                all_results.push(results);
-            }
-        }
+            })
+            .collect();
+        let mut all_results: Vec<Vec<SearchResult>> = self
+            .search_first_pass_multi(&sub_queries)?
+            .into_iter()
+            .filter(|results| !results.is_empty())
+            .collect();
 
         if all_results.is_empty() {
             return Ok(Vec::new());
@@ -778,32 +812,46 @@ impl Engine {
         Ok(results)
     }
 
-    /// First-pass retrieval: BM25+vector hybrid (if available) with graph boost.
-    ///
-    /// This is the shared retrieval core used by `search_deep` (and its
-    /// multi-query variant) to avoid duplicating the BM25/hybrid logic
-    /// and — critically — to avoid recursion through the public `search()`
-    /// method which would trigger query expansion and strategy dispatch again.
-    fn search_first_pass(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
+    /// First-pass retrieval for several reformulations with one batched query
+    /// embedding call. BM25 and graph boosts retain the same per-query
+    /// semantics as independent first-pass retrievals.
+    fn search_first_pass_multi(&self, queries: &[SearchQuery]) -> Result<Vec<Vec<SearchResult>>> {
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let vec_guard = self.vector.read().unwrap_or_else(|e| e.into_inner());
-        let mut candidates =
+        let mut result_lists =
             if let (Some(emb), Some(vec_idx)) = (&self.embedder, vec_guard.as_ref()) {
-                let retriever = HybridRetriever::new(
+                HybridRetriever::new(
                     &self.tantivy,
                     Arc::clone(emb),
                     vec_idx,
                     &self.chunk_meta,
                     self.config.embedding.rrf_k,
-                );
-                retriever.search(query)?
+                )
+                .search_batch(queries)?
             } else {
-                BM25Retriever::new(&self.tantivy).search(query)?
+                queries
+                    .iter()
+                    .map(|query| {
+                        BM25Retriever::new(&self.tantivy)
+                        .search(query)
+                        .unwrap_or_else(|error| {
+                            warn!(query = %query.query, %error, "skipping failed reformulation");
+                            Vec::new()
+                        })
+                    })
+                    .collect()
             };
-        drop(vec_guard); // Release before boost computations
-        self.apply_graph_boost(&mut candidates, self.config.graph.boost_weight);
-        self.apply_definition_boost(&mut candidates, &query.query);
-        self.apply_popularity_boost(&mut candidates);
-        Ok(candidates)
+        drop(vec_guard);
+
+        for (query, candidates) in queries.iter().zip(result_lists.iter_mut()) {
+            self.apply_graph_boost(candidates, self.config.graph.boost_weight);
+            self.apply_definition_boost(candidates, &query.query);
+            self.apply_popularity_boost(candidates);
+        }
+        Ok(result_lists)
     }
 
     /// Two-stage reranked search with multi-query RRF fusion.
@@ -880,10 +928,11 @@ impl Engine {
         );
 
         let mut candidates = {
-            // Run first-pass for each reformulation, then fuse.
-            let mut all_results: Vec<Vec<SearchResult>> = Vec::new();
-            for q_text in &reformulations {
-                let sub_query = SearchQuery {
+            // Batch all query embeddings, then run the per-query retrieval and
+            // fuse the ranked lists exactly as before.
+            let sub_queries: Vec<SearchQuery> = reformulations
+                .iter()
+                .map(|q_text| SearchQuery {
                     query: expand_query(q_text),
                     limit: candidate_limit,
                     file_filter: query.file_filter.clone(),
@@ -892,13 +941,13 @@ impl Engine {
                     queries: None,
                     doc_filter: None,
                     source_filter: None,
-                };
-                if let Ok(results) = self.search_first_pass(&sub_query)
-                    && !results.is_empty()
-                {
-                    all_results.push(results);
-                }
-            }
+                })
+                .collect();
+            let mut all_results: Vec<Vec<SearchResult>> = self
+                .search_first_pass_multi(&sub_queries)?
+                .into_iter()
+                .filter(|results| !results.is_empty())
+                .collect();
 
             if all_results.is_empty() {
                 return Ok(Vec::new());
@@ -952,7 +1001,7 @@ impl Engine {
         if let Some(ref graph) = self.graph {
             let mut boosted = false;
             for r in results.iter_mut() {
-                let caller_count = graph.callers(&r.file_path).len();
+                let caller_count = graph.caller_count(&r.file_path);
                 if caller_count > 3 {
                     // Modest logarithmic boost: ln(4)≈1.4 → 7%, ln(10)≈2.3 → 11.5%
                     r.score *= 1.0 + (caller_count as f32).ln() * 0.05;

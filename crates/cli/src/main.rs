@@ -90,6 +90,12 @@ enum Command {
         /// trade indexing speed for safety.
         #[arg(long, value_name = "N")]
         threads: Option<usize>,
+
+        /// Skip individual source files larger than this many bytes.
+        /// Generated/minified bundles can otherwise dominate big-repo memory.
+        /// Set to 0 for no limit.
+        #[arg(long, value_name = "BYTES", default_value_t = 2_097_152)]
+        max_file_bytes: u64,
     },
 
     /// Search the code index.
@@ -963,6 +969,7 @@ async fn async_main() -> Result<()> {
             defer_embeddings,
             wait,
             threads,
+            max_file_bytes,
         } => cmd_init(
             path,
             also,
@@ -973,6 +980,7 @@ async fn async_main() -> Result<()> {
             defer_embeddings,
             wait,
             threads,
+            max_file_bytes,
         ),
         Command::Search {
             query,
@@ -1260,6 +1268,7 @@ fn cmd_init(
     defer_embeddings: bool,
     wait: bool,
     threads: Option<usize>,
+    max_file_bytes: u64,
 ) -> Result<()> {
     configure_thread_pool(threads);
 
@@ -1268,6 +1277,7 @@ fn cmd_init(
         .with_context(|| format!("path not found: {}", path.display()))?;
 
     let mut config = IndexConfig::new(&root);
+    config.max_file_bytes = max_file_bytes;
 
     // Resolve and register extra roots.
     for extra in also {
@@ -2367,9 +2377,6 @@ fn cmd_update(path: PathBuf, dry_run: bool, file: Option<String>) -> Result<()> 
         engine
             .reindex_file(&abs)
             .map_err(|e| handle_engine_err(e, || format!("failed to reindex {rel}")))?;
-        engine.save().map_err(|e| {
-            handle_engine_err(e, || "failed to save index after --file update".into())
-        })?;
         eprintln!("reindexed {} in {:.2}s", rel, start.elapsed().as_secs_f64());
         return Ok(());
     }
@@ -2464,46 +2471,23 @@ fn cmd_update(path: PathBuf, dry_run: bool, file: Option<String>) -> Result<()> 
     })?;
 
     let start = Instant::now();
-    let mut updated = 0usize;
-    let mut removed = 0usize;
-
-    for rel_path in &to_reindex {
-        let abs = root.join(rel_path);
-        match engine.reindex_file(&abs) {
-            Ok(()) => updated += 1,
-            Err(e) => {
-                let anyhow_err = anyhow::anyhow!("{e}");
-                if check_write_lock_error(&anyhow_err) {
-                    std::process::exit(1);
-                }
-                eprintln!("  warning: skipped {} — {e}", rel_path.display());
-            }
-        }
-    }
-
-    for rel_path in &to_remove {
-        match engine.remove_file(rel_path) {
-            Ok(()) => removed += 1,
-            Err(e) => {
-                let anyhow_err = anyhow::anyhow!("{e}");
-                if check_write_lock_error(&anyhow_err) {
-                    std::process::exit(1);
-                }
-                eprintln!("  warning: remove failed {} — {e}", rel_path.display());
-            }
-        }
-    }
-
-    match engine.save() {
-        Ok(()) => {}
-        Err(e) => {
-            let anyhow_err = anyhow::anyhow!("{e}");
-            if check_write_lock_error(&anyhow_err) {
-                std::process::exit(1);
-            }
-            return Err(anyhow_err).context("failed to save index after update");
-        }
-    }
+    use codixing_core::watcher::{ChangeKind, FileChange};
+    let mut changes = Vec::with_capacity(to_reindex.len() + to_remove.len());
+    changes.extend(to_reindex.iter().map(|path| FileChange {
+        path: root.join(path),
+        kind: ChangeKind::Modified,
+    }));
+    changes.extend(to_remove.iter().map(|path| FileChange {
+        path: root.join(path),
+        kind: ChangeKind::Removed,
+    }));
+    engine.apply_changes(&changes).map_err(|error| {
+        handle_engine_err(error, || {
+            "failed to update changed files as one batch".into()
+        })
+    })?;
+    let updated = to_reindex.len();
+    let removed = to_remove.len();
 
     eprintln!(
         "\nUpdated {updated} file(s), removed {removed} file(s) in {:.2}s",
@@ -3934,6 +3918,16 @@ mod tests {
             Cli::try_parse_from(["codixing", "init", ".", "--threads", "8"]).expect("clap parse");
         match cli.command {
             Command::Init { threads, .. } => assert_eq!(threads, Some(8)),
+            _ => panic!("expected Init variant"),
+        }
+    }
+
+    #[test]
+    fn init_max_file_bytes_flag_parses() {
+        let cli = Cli::try_parse_from(["codixing", "init", ".", "--max-file-bytes", "0"])
+            .expect("clap parse");
+        match cli.command {
+            Command::Init { max_file_bytes, .. } => assert_eq!(max_file_bytes, 0),
             _ => panic!("expected Init variant"),
         }
     }

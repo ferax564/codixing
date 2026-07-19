@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::embedder::Embedder;
 use crate::error::Result;
@@ -112,10 +112,70 @@ impl<'a> HybridRetriever<'a> {
             rrf_k,
         }
     }
-}
 
-impl Retriever for HybridRetriever<'_> {
-    fn search(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
+    /// Search several query variants after embedding their vector forms in a
+    /// single model invocation. Results are returned in input order.
+    pub fn search_batch(&self, queries: &[SearchQuery]) -> Result<Vec<Vec<SearchResult>>> {
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        if self.vector.is_empty() {
+            return Ok(self.search_serial_fallback(queries));
+        }
+
+        let vector_queries: Vec<String> = queries
+            .iter()
+            .map(|query| expand_vector_query(&query.query).unwrap_or_else(|| query.query.clone()))
+            .collect();
+        let embeddings = match self.embedder.embed_queries(&vector_queries) {
+            Ok(embeddings) if embeddings.len() == queries.len() => embeddings,
+            Ok(embeddings) => {
+                warn!(
+                    expected = queries.len(),
+                    received = embeddings.len(),
+                    "batched query embedding count mismatch; retrying variants independently"
+                );
+                return Ok(self.search_serial_fallback(queries));
+            }
+            Err(error) => {
+                warn!(%error, "batched query embedding failed; retrying variants independently");
+                return Ok(self.search_serial_fallback(queries));
+            }
+        };
+
+        Ok(queries
+            .iter()
+            .zip(vector_queries.iter())
+            .zip(embeddings.iter())
+            .map(|((query, vector_query), embedding)| {
+                self.search_preembedded(query, vector_query, Some(embedding))
+                    .unwrap_or_else(|error| {
+                        warn!(query = %query.query, %error, "skipping failed reformulation");
+                        Vec::new()
+                    })
+            })
+            .collect())
+    }
+
+    fn search_serial_fallback(&self, queries: &[SearchQuery]) -> Vec<Vec<SearchResult>> {
+        queries
+            .iter()
+            .map(|query| {
+                self.search(query).unwrap_or_else(|error| {
+                    warn!(query = %query.query, %error, "skipping failed reformulation");
+                    Vec::new()
+                })
+            })
+            .collect()
+    }
+
+    fn search_preembedded(
+        &self,
+        query: &SearchQuery,
+        vector_query_text: &str,
+        query_embedding: Option<&[f32]>,
+    ) -> Result<Vec<SearchResult>> {
         // Fetch extra candidates from both retrievers to feed the fusion.
         let fetch = query.limit * 3;
 
@@ -132,30 +192,27 @@ impl Retriever for HybridRetriever<'_> {
 
         let bm25_results = BM25Retriever::new(self.tantivy).search(&bm25_query)?;
 
-        let vec_results = if self.vector.is_empty() {
-            Vec::new()
-        } else {
-            // Expand the vector query with synonyms (BM25 keeps the original
-            // to avoid matching synonym definition code).
-            let vec_query_text =
-                expand_vector_query(&query.query).unwrap_or_else(|| query.query.clone());
-            let vec_query = SearchQuery {
-                query: vec_query_text,
-                limit: fetch,
-                file_filter: query.file_filter.clone(),
-                strategy: query.strategy,
-                token_budget: query.token_budget,
-                queries: None,
-                doc_filter: None,
-                source_filter: None,
-            };
-            VectorRetriever::with_tantivy(
-                Arc::clone(&self.embedder),
-                self.vector,
-                self.chunk_meta,
-                self.tantivy,
-            )
-            .search(&vec_query)?
+        let vec_results = match query_embedding {
+            Some(embedding) if !self.vector.is_empty() => {
+                let vec_query = SearchQuery {
+                    query: vector_query_text.to_string(),
+                    limit: fetch,
+                    file_filter: query.file_filter.clone(),
+                    strategy: query.strategy,
+                    token_budget: query.token_budget,
+                    queries: None,
+                    doc_filter: None,
+                    source_filter: None,
+                };
+                VectorRetriever::with_tantivy(
+                    Arc::clone(&self.embedder),
+                    self.vector,
+                    self.chunk_meta,
+                    self.tantivy,
+                )
+                .search_with_embedding(&vec_query, embedding)?
+            }
+            _ => Vec::new(),
         };
 
         debug!(
@@ -169,21 +226,33 @@ impl Retriever for HybridRetriever<'_> {
         // queries weight the semantic vector list higher.
         let base = self.rrf_k;
         let (k_bm25, k_vec) = if is_identifier_query(&query.query) {
-            (base / 3.0, base * 1.5) // BM25 dominates for exact-name lookups
+            (base / 3.0, base * 1.5)
         } else {
-            (base * 1.5, base / 3.0) // vector dominates for conceptual queries
+            (base * 1.5, base / 3.0)
         };
         let mut fused = rrf_fuse_asymmetric(&bm25_results, &vec_results, k_bm25, k_vec);
 
-        // Apply file filter (already applied inside sub-retrievers, but
-        // bm25_results post-filter may differ from pre-filter ranking so
-        // re-applying here is safe and cheap).
         if let Some(ref filter) = query.file_filter {
             fused.retain(|r| r.file_path.contains(filter.as_str()));
         }
 
         fused.truncate(query.limit);
         Ok(fused)
+    }
+}
+
+impl Retriever for HybridRetriever<'_> {
+    fn search(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
+        if self.vector.is_empty() {
+            self.search_preembedded(query, &query.query, None)
+        } else {
+            // Expand the vector query with synonyms (BM25 keeps the original
+            // to avoid matching synonym definition code).
+            let vector_query =
+                expand_vector_query(&query.query).unwrap_or_else(|| query.query.clone());
+            let embedding = self.embedder.embed_query(&vector_query)?;
+            self.search_preembedded(query, &vector_query, Some(&embedding))
+        }
     }
 }
 

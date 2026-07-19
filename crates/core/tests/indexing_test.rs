@@ -71,6 +71,138 @@ fn respects_language_filter() {
 }
 
 #[test]
+fn skips_source_files_over_configured_size_limit() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("small.rs"), "pub fn small_file() {}\n").unwrap();
+    fs::write(
+        root.join("generated.rs"),
+        "pub fn generated_bundle() {}\n".repeat(100),
+    )
+    .unwrap();
+
+    let mut config = no_embed_config(root);
+    config.max_file_bytes = 128;
+    let engine = Engine::init(root, config).unwrap();
+
+    assert_eq!(engine.stats().file_count, 1);
+    assert!(engine.symbols("small_file", None).unwrap().len() == 1);
+    assert!(engine.symbols("generated_bundle", None).unwrap().is_empty());
+}
+
+#[test]
+fn incremental_update_removes_file_that_grows_over_size_limit() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let source = root.join("growing.rs");
+    let original = "pub fn initially_small() {}\n";
+    fs::write(&source, original).unwrap();
+
+    let mut config = no_embed_config(root);
+    config.max_file_bytes = 128;
+    let mut engine = Engine::init(root, config).unwrap();
+    assert_eq!(engine.symbols("initially_small", None).unwrap().len(), 1);
+
+    fs::write(
+        &source,
+        "pub fn now_generated_and_oversized() {}\n".repeat(100),
+    )
+    .unwrap();
+    engine
+        .apply_changes(&[codixing_core::watcher::FileChange {
+            path: source.clone(),
+            kind: codixing_core::watcher::ChangeKind::Modified,
+        }])
+        .unwrap();
+
+    assert!(engine.symbols("initially_small", None).unwrap().is_empty());
+    assert!(
+        engine
+            .symbols("now_generated_and_oversized", None)
+            .unwrap()
+            .is_empty()
+    );
+
+    // Restoring the exact original bytes must re-add the file. Keeping the old
+    // hash after the oversized removal would incorrectly classify this as
+    // unchanged even though its index entry no longer exists.
+    fs::write(&source, original).unwrap();
+    let stats = engine.sync().unwrap();
+    assert_eq!(stats.added, 1);
+    assert_eq!(engine.symbols("initially_small", None).unwrap().len(), 1);
+}
+
+#[test]
+fn direct_reindex_removes_stale_file_that_grows_over_size_limit() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let source = root.join("growing.rs");
+    let original = "pub fn initially_small() {}\n";
+    fs::write(&source, original).unwrap();
+
+    let mut config = no_embed_config(root);
+    config.max_file_bytes = 128;
+    let mut engine = Engine::init(root, config).unwrap();
+    assert_eq!(engine.symbols("initially_small", None).unwrap().len(), 1);
+
+    fs::write(
+        &source,
+        "pub fn now_generated_and_oversized() {}\n".repeat(100),
+    )
+    .unwrap();
+    engine.reindex_file(&source).unwrap();
+
+    assert!(engine.symbols("initially_small", None).unwrap().is_empty());
+    assert!(
+        engine
+            .symbols("now_generated_and_oversized", None)
+            .unwrap()
+            .is_empty()
+    );
+
+    fs::write(&source, original).unwrap();
+    let stats = engine.sync().unwrap();
+    assert_eq!(stats.added, 1);
+    assert_eq!(engine.symbols("initially_small", None).unwrap().len(), 1);
+}
+
+#[test]
+fn directory_rename_removes_stale_descendant_paths() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let old_dir = root.join("old_module");
+    let old_file = old_dir.join("nested.rs");
+    fs::create_dir_all(&old_dir).unwrap();
+    fs::write(&old_file, "pub fn directory_rename_marker() {}\n").unwrap();
+
+    let mut engine = Engine::init(root, no_embed_config(root)).unwrap();
+    let new_dir = root.join("new_module");
+    fs::rename(&old_dir, &new_dir).unwrap();
+    engine
+        .apply_changes(&[
+            codixing_core::watcher::FileChange {
+                path: old_dir,
+                kind: codixing_core::watcher::ChangeKind::RemovedDirectory,
+            },
+            codixing_core::watcher::FileChange {
+                path: new_dir.clone(),
+                kind: codixing_core::watcher::ChangeKind::CreatedDirectory,
+            },
+        ])
+        .unwrap();
+
+    let symbols = engine.symbols("directory_rename_marker", None).unwrap();
+    assert_eq!(symbols.len(), 1);
+    assert_eq!(symbols[0].file_path, "new_module/nested.rs");
+    assert!(
+        engine
+            .symbols("directory_rename_marker", Some("old_module/nested.rs"))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn exclude_patterns_work() {
     let dir = tempdir().unwrap();
     let root = dir.path();

@@ -26,6 +26,7 @@ mod temporal;
 #[cfg(test)]
 mod tests;
 
+use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value, json};
 
 use codixing_core::{Engine, FederatedEngine};
@@ -505,30 +506,323 @@ fn validate_text_length(text: &str, field: &str, maximum: usize) -> Result<(), S
 
 fn enforce_tool_output_budget(output: &str, args: &Value) -> String {
     let token_budget = requested_tool_token_budget(args);
-    if codixing_core::formatter::count_tokens(output) <= token_budget {
+    // Every tokenizer token consumes at least one source byte, so this is a
+    // zero-allocation proof that the output fits. For moderately sized output
+    // retain exact behavior, but never ask cl100k to allocate a token Vec for
+    // an arbitrarily large producer response.
+    if output.len() <= token_budget
+        || (output.len() <= bounded_token_count_bytes(token_budget)
+            && codixing_core::formatter::count_tokens(output) <= token_budget)
+    {
         return output.to_string();
     }
 
-    // Byte/token slicing a serialized value produces invalid JSON. Preserve
-    // the protocol contract with a small, valid omission envelope instead.
-    if serde_json::from_str::<Value>(output).is_ok() {
-        let envelope = json!({
-            "truncated": true,
-            "reason": "MCP tool output token budget reached",
-            "token_budget": token_budget,
-        })
-        .to_string();
-        if codixing_core::formatter::count_tokens(&envelope) <= token_budget {
-            return envelope;
-        }
-        return "{}".to_string();
+    // Byte/token slicing a serialized value produces invalid JSON. Preserve a
+    // progressively reduced preview instead of replacing every result with an
+    // empty omission marker. This keeps the first results and scalar metadata
+    // useful to an agent while still enforcing the exact token ceiling.
+    if matches!(
+        output.trim_start().as_bytes().first(),
+        Some(b'{') | Some(b'[')
+    ) && let Some(preview) = bounded_json_preview(output, token_budget)
+    {
+        return preview;
     }
 
+    let bounded_input = bounded_text_prefix(output, token_budget);
     codixing_core::formatter::truncate_to_token_budget(
-        output,
+        bounded_input,
         token_budget,
         TOOL_OUTPUT_TRUNCATION_MARKER,
     )
+}
+
+/// Maximum source bytes handed to the allocating tokenizer for one response.
+/// The cap scales with the requested result size but stays small enough that a
+/// runaway producer cannot turn a 100 MiB response into a larger token vector.
+fn bounded_token_count_bytes(token_budget: usize) -> usize {
+    token_budget.saturating_mul(8).min(1024 * 1024)
+}
+
+/// Keep a generous byte prefix for free-form text before exact token truncation.
+/// JSON uses the structured streaming path above. A 64× allowance preserves
+/// highly-compressible whitespace/repetition while bounding tokenizer memory.
+fn bounded_text_prefix(output: &str, token_budget: usize) -> &str {
+    let cap = token_budget.saturating_mul(64).min(1024 * 1024);
+    if output.len() <= cap {
+        return output;
+    }
+    let mut end = cap;
+    while end > 0 && !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    &output[..end]
+}
+
+/// Wrap structured output in a valid truncation envelope and retain the largest
+/// serialized prefix that fits the exact token budget.
+fn bounded_json_preview(output: &str, token_budget: usize) -> Option<String> {
+    // Four source bytes per token is a useful first estimate for code-shaped
+    // JSON. A single scaled retry handles escape-heavy payloads; unlike the old
+    // DOM + binary-search path, peak memory is O(requested budget), not O(output).
+    let mut byte_budget = output
+        .len()
+        .min(token_budget.saturating_mul(4).saturating_sub(48));
+    for _ in 0..2 {
+        let partial = match stream_json_preview(output, byte_budget) {
+            Ok(Some(partial)) => partial,
+            Ok(None) => break,
+            Err(_) => return None,
+        };
+        let serialized = json!({"truncated": true, "partial": partial}).to_string();
+        let tokens = codixing_core::formatter::count_tokens(&serialized);
+        if tokens <= token_budget {
+            return Some(serialized);
+        }
+        byte_budget = byte_budget
+            .saturating_mul(token_budget)
+            .checked_div(tokens.max(1))
+            .unwrap_or(0)
+            .saturating_mul(9)
+            / 10;
+    }
+
+    let omission = json!({"truncated": true}).to_string();
+    Some(
+        if codixing_core::formatter::count_tokens(&omission) <= token_budget {
+            omission
+        } else {
+            "{}".to_string()
+        },
+    )
+}
+
+/// Deserialize and validate the whole JSON document while retaining only a
+/// byte-bounded prefix tree. Omitted values are consumed as `IgnoredAny`, so a
+/// multi-megabyte result never becomes a multi-megabyte `Value` allocation.
+fn stream_json_preview(
+    output: &str,
+    byte_budget: usize,
+) -> Result<Option<Value>, serde_json::Error> {
+    let mut remaining = byte_budget;
+    let mut deserializer = serde_json::Deserializer::from_str(output);
+    let value = BoundedJsonSeed {
+        remaining: &mut remaining,
+    }
+    .deserialize(&mut deserializer)?;
+    deserializer.end()?;
+    Ok(value)
+}
+
+struct BoundedJsonSeed<'a> {
+    remaining: &'a mut usize,
+}
+
+impl<'de> DeserializeSeed<'de> for BoundedJsonSeed<'_> {
+    type Value = Option<Value>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(BoundedJsonVisitor {
+            remaining: self.remaining,
+        })
+    }
+}
+
+struct BoundedJsonVisitor<'a> {
+    remaining: &'a mut usize,
+}
+
+impl BoundedJsonVisitor<'_> {
+    fn scalar(&mut self, value: Value) -> Option<Value> {
+        let bytes = value.to_string().len();
+        if bytes > *self.remaining {
+            return None;
+        }
+        *self.remaining -= bytes;
+        Some(value)
+    }
+}
+
+impl<'de> Visitor<'de> for BoundedJsonVisitor<'_> {
+    type Value = Option<Value>;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("any JSON value")
+    }
+
+    fn visit_unit<E>(mut self) -> Result<Self::Value, E> {
+        Ok(self.scalar(Value::Null))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.visit_unit()
+    }
+
+    fn visit_bool<E>(mut self, value: bool) -> Result<Self::Value, E> {
+        Ok(self.scalar(Value::Bool(value)))
+    }
+
+    fn visit_i64<E>(mut self, value: i64) -> Result<Self::Value, E> {
+        Ok(self.scalar(Value::Number(value.into())))
+    }
+
+    fn visit_u64<E>(mut self, value: u64) -> Result<Self::Value, E> {
+        Ok(self.scalar(Value::Number(value.into())))
+    }
+
+    fn visit_f64<E>(mut self, value: f64) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        let number = serde_json::Number::from_f64(value)
+            .ok_or_else(|| E::custom("non-finite JSON number"))?;
+        Ok(self.scalar(Value::Number(number)))
+    }
+
+    fn visit_borrowed_str<E>(self, value: &'de str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.visit_str(value)
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(bounded_json_string(value, self.remaining).map(Value::String))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.visit_str(&value)
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        if *self.remaining < 2 {
+            while sequence.next_element::<IgnoredAny>()?.is_some() {}
+            return Ok(None);
+        }
+        *self.remaining -= 2;
+        let mut output = Vec::new();
+        loop {
+            let separator = usize::from(!output.is_empty());
+            if *self.remaining <= separator {
+                while sequence.next_element::<IgnoredAny>()?.is_some() {}
+                break;
+            }
+            let before = *self.remaining;
+            *self.remaining -= separator;
+            match sequence.next_element_seed(BoundedJsonSeed {
+                remaining: self.remaining,
+            })? {
+                Some(Some(value)) => output.push(value),
+                Some(None) => {
+                    *self.remaining = before;
+                    while sequence.next_element::<IgnoredAny>()?.is_some() {}
+                    break;
+                }
+                None => {
+                    *self.remaining = before;
+                    break;
+                }
+            }
+        }
+        Ok(Some(Value::Array(output)))
+    }
+
+    fn visit_map<A>(self, mut object: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        if *self.remaining < 2 {
+            while object.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+            return Ok(None);
+        }
+        *self.remaining -= 2;
+        let mut output = Map::new();
+        while let Some(key) = object.next_key::<String>()? {
+            let overhead = json_string_byte_len(&key)
+                .saturating_add(1)
+                .saturating_add(usize::from(!output.is_empty()));
+            if *self.remaining <= overhead {
+                object.next_value::<IgnoredAny>()?;
+                continue;
+            }
+
+            let before = *self.remaining;
+            *self.remaining -= overhead;
+            // Preserve a little space for scalar metadata that follows a bulky
+            // collection (serde_json maps are commonly key-sorted).
+            let reserve = (*self.remaining / 8).min(64);
+            let mut child_remaining = self.remaining.saturating_sub(reserve);
+            let retained = object.next_value_seed(BoundedJsonSeed {
+                remaining: &mut child_remaining,
+            })?;
+            if let Some(value) = retained {
+                let consumed = self
+                    .remaining
+                    .saturating_sub(reserve)
+                    .saturating_sub(child_remaining);
+                *self.remaining = before.saturating_sub(overhead + consumed);
+                output.insert(key, value);
+            } else {
+                *self.remaining = before;
+            }
+        }
+        Ok(Some(Value::Object(output)))
+    }
+}
+
+fn bounded_json_string(value: &str, remaining: &mut usize) -> Option<String> {
+    if *remaining < 2 {
+        return None;
+    }
+    let content_budget = remaining.saturating_sub(2);
+    let mut output = String::new();
+    let mut encoded = 0usize;
+    let mut truncated = false;
+    for character in value.chars() {
+        let width = json_char_byte_len(character);
+        if encoded.saturating_add(width) > content_budget {
+            truncated = true;
+            break;
+        }
+        output.push(character);
+        encoded += width;
+    }
+    if truncated && content_budget >= '…'.len_utf8() {
+        while encoded.saturating_add('…'.len_utf8()) > content_budget {
+            let Some(character) = output.pop() else {
+                break;
+            };
+            encoded = encoded.saturating_sub(json_char_byte_len(character));
+        }
+        output.push('…');
+        encoded += '…'.len_utf8();
+    }
+    *remaining = remaining.saturating_sub(encoded + 2);
+    Some(output)
+}
+
+fn json_string_byte_len(value: &str) -> usize {
+    2 + value.chars().map(json_char_byte_len).sum::<usize>()
+}
+
+fn json_char_byte_len(character: char) -> usize {
+    match character {
+        '"' | '\\' | '\u{08}' | '\u{0c}' | '\n' | '\r' | '\t' => 2,
+        '\u{00}'..='\u{1f}' => 6,
+        _ => character.len_utf8(),
+    }
 }
 
 // ---------------------------------------------------------------------------

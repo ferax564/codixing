@@ -73,16 +73,19 @@ impl<'a> VectorRetriever<'a> {
                 HashMap::new()
             })
     }
-}
 
-impl Retriever for VectorRetriever<'_> {
-    fn search(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
+    /// Search with an already-computed query embedding.
+    ///
+    /// Multi-query retrieval uses this entry point after embedding all query
+    /// variants in one batch, avoiding one model invocation per reformulation.
+    pub fn search_with_embedding(
+        &self,
+        query: &SearchQuery,
+        query_vec: &[f32],
+    ) -> Result<Vec<SearchResult>> {
         if self.vector.is_empty() {
             return Ok(Vec::new());
         }
-
-        // Embed the query (with model-specific instruction prefix for BGE).
-        let query_vec = self.embedder.embed_query(&query.query)?;
 
         // Find nearest neighbours (fetch more than needed to allow file filtering).
         let fetch_limit = if query.file_filter.is_some() {
@@ -91,7 +94,7 @@ impl Retriever for VectorRetriever<'_> {
             query.limit
         };
 
-        let matches = self.vector.search(&query_vec, fetch_limit)?;
+        let matches = self.vector.search(query_vec, fetch_limit)?;
 
         let missing_content_ids: HashSet<u64> = matches
             .iter()
@@ -145,10 +148,20 @@ impl Retriever for VectorRetriever<'_> {
             results.retain(|r| r.file_path.contains(filter.as_str()));
         }
 
-        // Truncate to requested limit.
         results.truncate(query.limit);
-
         Ok(results)
+    }
+}
+
+impl Retriever for VectorRetriever<'_> {
+    fn search(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
+        if self.vector.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Embed the query (with model-specific instruction prefix for BGE).
+        let query_vec = self.embedder.embed_query(&query.query)?;
+        self.search_with_embedding(query, &query_vec)
     }
 }
 

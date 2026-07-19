@@ -51,6 +51,9 @@ Or for OpenAI Codex CLI: `codex mcp add codixing -- npx -y codixing-mcp --root .
 For large repositories, run `codixing init .` before starting the MCP client. When
 using Codex configuration, set `startup_timeout_sec = 120` so the first `npx`
 download or index load is not cut off by the default startup timeout.
+Codixing skips individual source files over 2 MiB by default so generated or
+minified bundles cannot dominate parsing memory; override this with
+`--max-file-bytes N` (or `0` for no limit).
 
 ---
 

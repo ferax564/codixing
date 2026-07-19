@@ -260,21 +260,24 @@ pub fn compute_weighted_personalized_pagerank(
 
     // Build seed weight map, filtering to nodes that exist in the graph.
     let node_set: std::collections::HashSet<&str> = nodes.iter().copied().collect();
-    let valid_seeds: Vec<(&str, f32)> = seeds
-        .iter()
-        .filter(|(path, _)| node_set.contains(path))
-        .map(|&(p, w)| (p, w.max(0.0)))
-        .collect();
+    let mut seed_weights: HashMap<&str, f32> = HashMap::new();
+    for &(path, weight) in seeds {
+        if node_set.contains(path) {
+            *seed_weights.entry(path).or_insert(0.0) += weight.max(0.0);
+        }
+    }
 
-    if valid_seeds.is_empty() {
+    if seed_weights.is_empty() {
         return compute_pagerank(graph, damping, iterations);
     }
 
-    let total_weight: f32 = valid_seeds.iter().map(|(_, w)| w).sum();
-    let seed_weights: HashMap<&str, f32> = valid_seeds
-        .iter()
-        .map(|&(p, w)| (p, w / total_weight))
-        .collect();
+    let total_weight: f32 = seed_weights.values().sum();
+    if total_weight <= f32::EPSILON {
+        return compute_pagerank(graph, damping, iterations);
+    }
+    for weight in seed_weights.values_mut() {
+        *weight /= total_weight;
+    }
 
     let init = 1.0 / n as f32;
     let mut rank: HashMap<&str, f32> = nodes.iter().map(|&p| (p, init)).collect();

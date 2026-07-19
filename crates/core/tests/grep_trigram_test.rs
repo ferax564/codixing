@@ -348,6 +348,37 @@ fn grep_finds_pattern_near_chunk_boundary() {
     );
 }
 
+#[test]
+fn grep_finds_literal_spanning_two_non_overlapping_chunks() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let src = root.join("src");
+    fs::create_dir_all(&src).unwrap();
+
+    // Force each top-level function into a distinct, non-overlapping chunk.
+    // The literal `}fn omega` exists only across their shared boundary, so a
+    // file trigram index assembled from independent chunk bodies would miss it.
+    fs::write(
+        src.join("boundary.rs"),
+        "fn alpha() { let x = 1; }fn omega() { let y = 2; }\n",
+    )
+    .unwrap();
+
+    let mut config = bm25_config(root);
+    config.chunk.max_chars = 28;
+    config.chunk.min_chars = 1;
+    config.chunk.overlap_ratio = 0.0;
+    let engine = Engine::init(root, config).unwrap();
+
+    let results = engine.grep_code("}fn omega", true, None, 0, 50).unwrap();
+    assert_eq!(
+        results.len(),
+        1,
+        "boundary-spanning literal was filtered out"
+    );
+    assert!(results[0].file_path.ends_with("boundary.rs"));
+}
+
 // ── v0.37 trigram v2 format tests ────────────────────────────────────────────
 
 mod trigram_v2_tests {

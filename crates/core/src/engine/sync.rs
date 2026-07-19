@@ -20,7 +20,8 @@ use crate::vector::VectorIndex;
 
 use super::indexing::{
     PendingSymbolGraph, extract_pending_symbol_graph, make_embed_text, normalize_path,
-    serialize_chunk_meta_compact, symbol_from_entity, unix_timestamp_string,
+    read_source_bounded, serialize_chunk_meta_compact, stable_file_hash_entry, symbol_from_entity,
+    unix_timestamp_string,
 };
 use super::{Engine, GitSyncStats, SyncStats, git_diff_since, git_head_commit};
 
@@ -65,8 +66,21 @@ pub struct SyncOptions {
 struct ApplyChangesOutcome {
     cosmetic_skipped: usize,
     successful_paths: std::collections::HashSet<std::path::PathBuf>,
+    successful_hashes: std::collections::HashMap<std::path::PathBuf, Option<FileHashEntry>>,
+    successful_signatures: std::collections::HashMap<std::path::PathBuf, Option<u64>>,
     failures: Vec<String>,
 }
+
+struct ReindexMutation {
+    cosmetic_reused: bool,
+    hash_entry: Option<FileHashEntry>,
+    signature: Option<u64>,
+}
+
+/// Bound the incremental freshness overlay. Folding at this size amortizes a
+/// repository-wide rewrite over thousands of edits while preventing a long-lived
+/// daemon or large checkout from growing a second full path table.
+const HASH_DELTA_COMPACT_THRESHOLD: usize = 4_096;
 
 impl ApplyChangesOutcome {
     fn failure_error(&self) -> Option<CodixingError> {
@@ -83,33 +97,67 @@ impl ApplyChangesOutcome {
 /// Build the authoritative hash snapshot after a best-effort batch.
 ///
 /// Successful updates adopt the freshly observed hash, successful deletions
-/// remove the old entry, and failures retain the prior baseline so the next
-/// sync retries them. Unchanged files still refresh mtime/size metadata.
+/// remove the old entry, and failures retain the prior baseline while the
+/// separate dirty-path journal forces a retry. Unchanged files still refresh
+/// mtime/size metadata.
 fn merge_hashes_after_apply(
     old: &std::collections::HashMap<std::path::PathBuf, FileHashEntry>,
-    current: &[(std::path::PathBuf, FileHashEntry)],
+    current: Vec<(std::path::PathBuf, FileHashEntry)>,
     changes: &[crate::watcher::FileChange],
-    successful: &std::collections::HashSet<std::path::PathBuf>,
+    successful: &std::collections::HashMap<std::path::PathBuf, Option<FileHashEntry>>,
 ) -> Vec<(std::path::PathBuf, FileHashEntry)> {
-    use crate::watcher::ChangeKind;
-
     let failed: std::collections::HashSet<std::path::PathBuf> = changes
         .iter()
-        .filter(|change| !successful.contains(&change.path))
+        .filter(|change| !successful.contains_key(&change.path))
         .map(|change| change.path.clone())
         .collect();
-    let mut merged = old.clone();
-    for (path, entry) in current {
-        if !failed.contains(path) {
-            merged.insert(path.clone(), entry.clone());
+    let mut seen_success = std::collections::HashSet::with_capacity(successful.len());
+    let mut seen_failed = std::collections::HashSet::with_capacity(failed.len());
+    let mut merged = Vec::with_capacity(current.len().saturating_add(failed.len()));
+
+    for (path, scanned) in current {
+        if let Some(exact) = successful.get(&path) {
+            seen_success.insert(path.clone());
+            if let Some(exact) = exact {
+                // Preserve scan metadata only when it describes the exact bytes
+                // reindexed. A concurrent edit otherwise publishes unknown
+                // metadata and forces a safe verification on the next sync.
+                if scanned.content_hash == exact.content_hash {
+                    merged.push((path, scanned));
+                } else {
+                    merged.push((path, exact.clone()));
+                }
+            }
+        } else if failed.contains(&path) {
+            seen_failed.insert(path.clone());
+            if let Some(previous) = old.get(&path) {
+                merged.push((path, previous.clone()));
+            }
+        } else {
+            merged.push((path, scanned));
         }
     }
-    for change in changes {
-        if successful.contains(&change.path) && matches!(change.kind, ChangeKind::Removed) {
-            merged.remove(&change.path);
+
+    // Cascades or files created after the scan may have exact indexed hashes
+    // without a corresponding scan entry. Publish those with unknown metadata.
+    for (path, exact) in successful {
+        if !seen_success.contains(path)
+            && let Some(exact) = exact
+        {
+            merged.push((path.clone(), exact.clone()));
         }
     }
-    merged.into_iter().collect()
+
+    // A failed removal has no current scan entry; retain its previous baseline
+    // while the dirty journal forces a retry.
+    for path in failed {
+        if !seen_failed.contains(&path)
+            && let Some(previous) = old.get(&path)
+        {
+            merged.push((path, previous.clone()));
+        }
+    }
+    merged
 }
 
 /// Compute a stable identity key for a chunk from its scope chain and entity
@@ -203,54 +251,41 @@ impl Engine {
         self.store.save_tree_hashes_v2(&hashes)
     }
 
-    /// Build conservative hash updates immediately before `apply_changes`.
-    ///
-    /// Metadata is deliberately left unknown so the next filesystem sync
-    /// verifies content once. If a file races with indexing, this pre-index hash
-    /// can only cause an extra reindex; it cannot hide the later edit.
-    fn prepare_hash_delta(
-        &self,
-        changes: &[crate::watcher::FileChange],
-    ) -> Result<Vec<(std::path::PathBuf, Option<FileHashEntry>)>> {
-        use crate::watcher::ChangeKind;
-
-        let mut delta = Vec::with_capacity(changes.len());
-
-        for change in changes {
-            match change.kind {
-                ChangeKind::Modified => {
-                    let source = fs::read(&change.path)?;
-                    let hash = xxhash_rust::xxh3::xxh3_64(&source);
-                    delta.push((change.path.clone(), Some(FileHashEntry::new(hash, None, 0))));
-                }
-                ChangeKind::Removed => delta.push((change.path.clone(), None)),
-            }
+    /// Fold the incremental overlay into a complete hash snapshot without a
+    /// replay race. Existing overlay keys are first rewritten to the exact
+    /// values in `hashes`; replay is then idempotent if the process stops after
+    /// the baseline rename but before the final overlay clear.
+    fn fold_hash_snapshot(&self, hashes: &[(std::path::PathBuf, FileHashEntry)]) -> Result<()> {
+        let overlay = self.store.load_tree_hash_delta()?;
+        if !overlay.is_empty() {
+            // Sort borrowed pointers rather than cloning every repository path
+            // into a second full HashMap merely to resolve the tiny overlay.
+            // Peak scratch space is one pointer per file and is released before
+            // serializing either baseline format.
+            let mut authoritative: Vec<_> = hashes.iter().collect();
+            authoritative.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            let aligned: Vec<_> = overlay
+                .into_iter()
+                .map(|(path, _)| {
+                    let entry = authoritative
+                        .binary_search_by(|candidate| candidate.0.cmp(&path))
+                        .ok()
+                        .map(|index| authoritative[index].1.clone());
+                    (path, entry)
+                })
+                .collect();
+            self.store.replace_tree_hash_delta(&aligned)?;
         }
-
-        Ok(delta)
+        self.persist_hash_snapshot(hashes)?;
+        self.store.clear_tree_hash_delta()
     }
 
-    /// Merge a known-successful change set into the complete stored baseline.
-    fn persist_hash_delta(
-        &self,
-        delta: &[(std::path::PathBuf, Option<FileHashEntry>)],
-    ) -> Result<()> {
-        let mut hashes: std::collections::HashMap<std::path::PathBuf, FileHashEntry> =
-            self.store.load_tree_hashes_v2()?.into_iter().collect();
-
-        for (path, entry) in delta {
-            match entry {
-                Some(entry) => {
-                    hashes.insert(path.clone(), entry.clone());
-                }
-                None => {
-                    hashes.remove(path);
-                }
-            }
+    fn compact_hash_delta_if_needed(&self) -> Result<()> {
+        if self.store.load_tree_hash_delta()?.len() <= HASH_DELTA_COMPACT_THRESHOLD {
+            return Ok(());
         }
-
-        let snapshot: Vec<_> = hashes.into_iter().collect();
-        self.persist_hash_snapshot(&snapshot)
+        let effective = self.store.load_tree_hashes_v2()?;
+        self.fold_hash_snapshot(&effective)
     }
 
     /// Roll back only the git publication marker after a partially successful
@@ -271,70 +306,33 @@ impl Engine {
         if self.read_only {
             return Err(CodixingError::ReadOnly);
         }
-        self.symbols.ensure_mutable();
-        let _ = self.get_trigram();
-        let _ = self.get_file_trigram();
-        self.reindex_file_impl(path, true, false)?;
-        self.tantivy.commit()?;
-        // file_trigram already updated incrementally in reindex_file_impl.
-        if let Err(e) = self
-            .get_file_trigram()
-            .save_binary(&self.store.file_trigram_path())
-        {
-            warn!(error = %e, "failed to persist file trigram index");
-        }
-        // chunk trigram also updated incrementally; persist to disk.
-        if let Err(e) = self.get_trigram().save_mmap_binary_v2(
-            &self.store.chunk_trigram_path(),
-            crate::index::trigram::PostingCodec::DeltaVarint,
-        ) {
-            warn!(error = %e, "failed to persist chunk trigram index");
-        }
-        // This direct path persisted new content but not a new signature
-        // fingerprint, so drop the file's stale sidecar entry — otherwise a later
-        // `sync` could compare a reverted edit against the wrong baseline and
-        // wrongly reuse vectors. Self-healing: the next sync re-stores it.
-        self.invalidate_signature(path);
+        let abs_path = self.resolve_mutation_path(path, false)?;
+        self.apply_changes(&[crate::watcher::FileChange {
+            path: abs_path,
+            kind: crate::watcher::ChangeKind::Modified,
+        }])?;
         Ok(())
-    }
-
-    /// Remove a single file's stored signature fingerprint so the next `sync`
-    /// recomputes it and treats the file as STRUCTURAL. Used by mutation paths
-    /// (direct `reindex_file`, `git_sync`) that persist new content without
-    /// recomputing the fingerprint, to avoid a stale COSMETIC baseline.
-    fn invalidate_signature(&self, path: &Path) {
-        let rel = self.config.normalize_path(path).unwrap_or_else(|| {
-            normalize_path(path.strip_prefix(&self.config.root).unwrap_or(path))
-        });
-        let key = std::path::PathBuf::from(&rel);
-        if let Err(e) = self
-            .store
-            .update_tree_signatures(|sigs| sigs.into_iter().filter(|(p, _)| *p != key).collect())
-        {
-            warn!(error = %e, "failed to invalidate tree signature");
-        }
     }
 
     /// Re-index a single file.
     ///
-    /// `cosmetic` is `true` when the caller has classified this file's change as
-    /// COSMETIC — its content changed but its signature fingerprint did not (see
-    /// [`crate::engine::fingerprint`]). For a COSMETIC file the embedding vectors
+    /// `expected_cosmetic_signature` is present when the classifier observed a
+    /// COSMETIC edit. It is revalidated against the exact indexed bytes before
+    /// vector reuse. For a COSMETIC file the embedding vectors
     /// are reused via a stable per-chunk identity key (scope + entity names) even
     /// when chunk *content* changed, since the structure is unchanged. This is
     /// the broadened reuse that avoids the expensive dense-embedding round-trip
     /// on body/comment/whitespace edits.
     ///
-    /// Returns `true` when the file was COSMETIC **and** every chunk's vector was
-    /// successfully reused (no chunk needed re-embedding). The caller uses this to
-    /// increment `SyncStats::cosmetic_skipped` only when embed work was actually
-    /// avoided.
-    pub(super) fn reindex_file_impl(
+    /// Returns the observed whole-file hash alongside whether a COSMETIC file
+    /// reused every vector. The hash comes from the same bytes that were parsed,
+    /// avoiding a second source-file read on watcher updates.
+    fn reindex_file_impl(
         &mut self,
         path: &Path,
         do_graph_finalize: bool,
-        cosmetic: bool,
-    ) -> Result<bool> {
+        expected_cosmetic_signature: Option<u64>,
+    ) -> Result<ReindexMutation> {
         // Wait for any background embedding to complete before modifying the vector index.
         self.wait_for_embeddings();
 
@@ -345,6 +343,36 @@ impl Engine {
                 abs_path.display()
             ))
         })?;
+
+        // Read and parse before inspecting or mutating live indexes. Besides
+        // keeping failures atomic, this lets us revalidate a COSMETIC decision
+        // against the exact bytes that will be indexed. The file may have
+        // changed after the classifier's earlier read.
+        let Some(read) = read_source_bounded(&abs_path, self.config.max_file_bytes)? else {
+            info!(path = %abs_path.display(), limit = self.config.max_file_bytes, "file exceeds max_file_bytes; removing it from the index");
+            self.remove_file_inner(&abs_path)?;
+            return Ok(ReindexMutation {
+                cosmetic_reused: false,
+                hash_entry: None,
+                signature: None,
+            });
+        };
+        let source = read.bytes;
+        let file_hash = xxhash_rust::xxh3::xxh3_64(&source);
+        let result = self.parser.parse_file(&abs_path, &source)?;
+        let signature =
+            super::fingerprint::signature_fingerprint(&result.entities, &source, result.language);
+        let cosmetic =
+            expected_cosmetic_signature.is_some() && signature == expected_cosmetic_signature;
+
+        // Jupyter notebooks need per-cell dispatch — the incremental sync path
+        // does not implement that yet. Leave old chunks in place so this path
+        // does not partially de-index a notebook it cannot re-add.
+        if result.language.is_notebook() {
+            return Err(CodixingError::Config(format!(
+                "notebook incremental sync is not supported for {rel_str}; run `codixing init` to reindex"
+            )));
+        }
 
         // ── Collect old chunk content hashes before removing data ────────
         // Used for incremental vector updates: chunks whose content hash is
@@ -390,21 +418,6 @@ impl Engine {
         // Drop ambiguous keys so they are never used for reuse.
         for k in &stable_key_dupes {
             old_stable_keys.remove(k);
-        }
-
-        // Read and parse before mutating the live indexes. If the file vanishes
-        // or becomes unreadable mid-sync, the existing in-memory entries remain
-        // intact and a later sync can retry cleanly.
-        let source = fs::read(&abs_path)?;
-        let result = self.parser.parse_file(&abs_path, &source)?;
-
-        // Jupyter notebooks need per-cell dispatch — the incremental sync path
-        // does not implement that yet. Leave old chunks in place so this path
-        // does not partially de-index a notebook it cannot re-add.
-        if result.language.is_notebook() {
-            return Err(CodixingError::Config(format!(
-                "notebook incremental sync is not supported for {rel_str}; run `codixing init` to reindex"
-            )));
         }
 
         // Hydrate old bodies before deleting their stored Tantivy documents.
@@ -706,7 +719,13 @@ impl Engine {
         }
 
         debug!(path = %abs_path.display(), chunks = chunks.len(), "reindexed file");
-        Ok(all_reused)
+        Ok(ReindexMutation {
+            cosmetic_reused: all_reused,
+            // Unknown metadata deliberately makes the next full sync verify
+            // content once. It cannot hide a write racing this indexed read.
+            hash_entry: Some(FileHashEntry::new(file_hash, None, 0)),
+            signature,
+        })
     }
 
     /// Inner removal: all index ops except `tantivy.commit()` and graph PageRank finalization.
@@ -760,40 +779,11 @@ impl Engine {
         if self.read_only {
             return Err(CodixingError::ReadOnly);
         }
-        self.symbols.ensure_mutable();
-        let _ = self.get_trigram();
-        let _ = self.get_file_trigram();
-        self.remove_file_inner(path)?;
-        self.tantivy.commit()?;
-        // file_trigram already updated incrementally in remove_file_inner.
-        if let Err(e) = self
-            .get_file_trigram()
-            .save_binary(&self.store.file_trigram_path())
-        {
-            warn!(error = %e, "failed to persist file trigram index");
-        }
-        if let Err(e) = self.get_trigram().save_mmap_binary_v2(
-            &self.store.chunk_trigram_path(),
-            crate::index::trigram::PostingCodec::DeltaVarint,
-        ) {
-            warn!(error = %e, "failed to persist chunk trigram index");
-        }
-
-        // Recompute PageRank + persist graph for single-file removal.
-        if let Some(ref mut graph) = self.graph {
-            let scores = compute_pagerank(
-                graph,
-                self.config.graph.damping,
-                self.config.graph.iterations,
-            );
-            graph.apply_pagerank(&scores);
-            let flat = graph.to_flat();
-            if let Err(e) = self.store.save_graph(&flat) {
-                warn!(error = %e, "failed to persist graph after remove");
-            }
-        }
-
-        debug!(path = %path.display(), "removed file from index");
+        let abs_path = self.resolve_mutation_path(path, true)?;
+        self.apply_changes(&[crate::watcher::FileChange {
+            path: abs_path,
+            kind: crate::watcher::ChangeKind::Removed,
+        }])?;
         Ok(())
     }
 
@@ -808,12 +798,169 @@ impl Engine {
     /// Tantivy commit for the entire batch, then runs PageRank exactly once.
     /// For N-file batches (e.g. after `git pull`) this reduces N fsyncs to 1.
     pub fn apply_changes(&mut self, changes: &[crate::watcher::FileChange]) -> Result<()> {
+        if self.read_only {
+            return Err(CodixingError::ReadOnly);
+        }
+        use crate::watcher::{ChangeKind, FileChange};
+
+        // Replay any transaction left dirty by a crash or transient failure.
+        // This is O(K) in pending paths and makes the next watcher batch (or an
+        // explicit empty recovery call) self-healing without a full O(N) sync.
+        let mut combined = std::collections::BTreeMap::new();
+        for path in self.store.load_dirty_paths()? {
+            let kind = if path.is_file() && self.config.is_indexable_path(&path) {
+                ChangeKind::Modified
+            } else {
+                ChangeKind::RemovedDirectory
+            };
+            combined.insert(path, kind);
+        }
+        for change in changes {
+            let kind = if matches!(change.kind, ChangeKind::Modified)
+                && !self.config.is_indexable_path(&change.path)
+            {
+                ChangeKind::RemovedDirectory
+            } else {
+                change.kind.clone()
+            };
+            combined.insert(change.path.clone(), kind);
+        }
+        if combined.is_empty() {
+            return Ok(());
+        }
+        let changes: Vec<_> = combined
+            .into_iter()
+            .map(|(path, kind)| FileChange { path, kind })
+            .collect();
         // No cosmetic classification — every modified file re-embeds as usual.
-        let outcome = self.apply_changes_classified(changes, &std::collections::HashSet::new())?;
+        let outcome = self.apply_changes_classified(&changes, &std::collections::HashMap::new())?;
+        // `apply_changes_classified` commits the hot indexes, while `save`
+        // publishes symbols, metadata, vectors, and the remaining sidecars.
+        // Only then may successful paths publish their small freshness overlay
+        // and leave the write-ahead dirty journal.
+        self.save()?;
+        self.persist_exact_signatures(&outcome)?;
+        let successful_delta: Vec<_> = outcome
+            .successful_hashes
+            .iter()
+            .map(|(path, entry)| (path.clone(), entry.clone()))
+            .collect();
+        if !successful_delta.is_empty() {
+            self.store.update_tree_hash_delta(&successful_delta)?;
+            self.compact_hash_delta_if_needed()?;
+        }
+        self.store.clear_dirty_paths(&outcome.successful_paths)?;
         match outcome.failure_error() {
             Some(error) => Err(error),
             None => Ok(()),
         }
+    }
+
+    fn resolve_change_paths(
+        &self,
+        changes: &[crate::watcher::FileChange],
+    ) -> Result<Vec<crate::watcher::FileChange>> {
+        use crate::watcher::ChangeKind;
+
+        changes
+            .iter()
+            .map(|change| {
+                let allow_missing = matches!(
+                    change.kind,
+                    ChangeKind::Removed | ChangeKind::RemovedDirectory
+                );
+                match self.resolve_mutation_path(&change.path, allow_missing) {
+                    Ok(path) => Ok(crate::watcher::FileChange {
+                        path,
+                        kind: change.kind.clone(),
+                    }),
+                    Err(original) if matches!(change.kind, ChangeKind::Modified) => {
+                        // Editor/VCS temp files routinely disappear between the
+                        // event and lock acquisition. If the lexical path is
+                        // still safely contained, reinterpret the ambiguity as
+                        // a prefix-capable removal instead of aborting siblings.
+                        match self.resolve_mutation_path(&change.path, true) {
+                            Ok(path) if !path.exists() => Ok(crate::watcher::FileChange {
+                                path,
+                                kind: ChangeKind::RemovedDirectory,
+                            }),
+                            _ => Err(original),
+                        }
+                    }
+                    Err(error) => Err(error),
+                }
+            })
+            .collect()
+    }
+
+    /// Expand directory intents into concrete per-file changes.
+    ///
+    /// Some native watchers report only the directory for a rename or recursive
+    /// delete. Search artifacts are keyed by file, so removing the literal
+    /// directory would otherwise leave every descendant under its stale path.
+    fn expand_directory_changes(
+        &self,
+        changes: &[crate::watcher::FileChange],
+    ) -> Result<Vec<crate::watcher::FileChange>> {
+        use crate::watcher::{ChangeKind, FileChange};
+
+        let mut expanded = std::collections::HashMap::<std::path::PathBuf, ChangeKind>::new();
+        let mut sorted_indexed_paths: Option<Vec<String>> = None;
+        for change in changes {
+            if change.kind == ChangeKind::CreatedDirectory {
+                for path in super::indexing::walk_source_directory(&change.path, &self.config)? {
+                    expanded.insert(path, ChangeKind::Modified);
+                }
+                continue;
+            }
+            if change.kind == ChangeKind::RemovedDirectory
+                && let Some(rel) = self.config.normalize_path(&change.path)
+            {
+                // Normal file removals are by far the common case. Avoid a
+                // whole-repository prefix scan when the exact key is known.
+                if self.file_chunk_counts.contains_key(&rel) {
+                    expanded.insert(change.path.clone(), ChangeKind::Removed);
+                    continue;
+                }
+
+                let rel = rel.trim_end_matches('/');
+                let prefix = if rel.is_empty() {
+                    String::new()
+                } else {
+                    format!("{rel}/")
+                };
+                // Build and sort the repository key set at most once per batch.
+                // Each possible directory removal then uses O(log N + matches)
+                // prefix lookup instead of rescanning N files.
+                let indexed_paths = sorted_indexed_paths.get_or_insert_with(|| {
+                    let mut paths: Vec<String> = self.file_chunk_counts.keys().cloned().collect();
+                    paths.sort_unstable();
+                    paths
+                });
+                let start = indexed_paths.partition_point(|indexed| indexed < &prefix);
+                let descendants = indexed_paths[start..]
+                    .iter()
+                    .take_while(|indexed| indexed.starts_with(&prefix));
+                let mut found_descendant = false;
+                for indexed in descendants {
+                    if let Some(path) = self.config.resolve_path_for_write(indexed)
+                        && (!rel.is_empty() || path.starts_with(&change.path))
+                    {
+                        found_descendant = true;
+                        expanded.insert(path, ChangeKind::Removed);
+                    }
+                }
+                if found_descendant {
+                    continue;
+                }
+            }
+            expanded.insert(change.path.clone(), change.kind.clone());
+        }
+
+        Ok(expanded
+            .into_iter()
+            .map(|(path, kind)| FileChange { path, kind })
+            .collect())
     }
 
     /// Apply a batch of changes, treating the absolute paths in `cosmetic` as
@@ -826,7 +973,7 @@ impl Engine {
     fn apply_changes_classified(
         &mut self,
         changes: &[crate::watcher::FileChange],
-        cosmetic: &std::collections::HashSet<std::path::PathBuf>,
+        cosmetic: &std::collections::HashMap<std::path::PathBuf, u64>,
     ) -> Result<ApplyChangesOutcome> {
         if self.read_only {
             return Err(CodixingError::ReadOnly);
@@ -838,24 +985,69 @@ impl Engine {
             return Ok(ApplyChangesOutcome::default());
         }
 
+        let resolved_changes = self.resolve_change_paths(changes)?;
+        let expanded_changes = self.expand_directory_changes(&resolved_changes)?;
+        let changes = expanded_changes.as_slice();
+
+        // Snapshot callers before any direct mutation. Removing a graph node
+        // also removes its incoming edges, so discovering cascades afterwards
+        // would miss exactly the callers that need their stale resolution
+        // refreshed. Directory removals have already expanded to descendants.
+        let changed_paths: std::collections::HashSet<String> = changes
+            .iter()
+            .filter_map(|change| self.config.normalize_path(&change.path))
+            .collect();
+        let mut cascade_paths = std::collections::BTreeSet::new();
+        if let Some(ref graph) = self.graph {
+            for changed in &changed_paths {
+                for caller in graph.callers(changed) {
+                    if changed_paths.contains(&caller) {
+                        continue;
+                    }
+                    match self.config.resolve_path(&caller) {
+                        Some(abs) => {
+                            cascade_paths.insert(abs);
+                        }
+                        None => {
+                            warn!(caller = %caller, "rejected unsafe or missing cascade path");
+                        }
+                    }
+                }
+            }
+        }
+        let cascade_paths: Vec<_> = cascade_paths.into_iter().collect();
+
         // Force-init lazy trigram indexes so they're available for mutation.
         let _ = self.get_trigram();
         let _ = self.get_file_trigram();
+
+        // Journal every changed path before mutating search artifacts. The tiny
+        // sidecar avoids rewriting the repository-sized hash snapshot twice per
+        // editor batch while still covering both crash windows.
+        let mut pending_paths: Vec<_> = changes.iter().map(|change| change.path.clone()).collect();
+        pending_paths.extend(cascade_paths.iter().cloned());
+        self.store.mark_dirty_paths(&pending_paths)?;
 
         let mut outcome = ApplyChangesOutcome::default();
 
         for change in changes {
             match change.kind {
                 ChangeKind::Modified => {
-                    // do_graph_finalize=false — accumulate edge updates but
-                    // defer PageRank until after all files are processed.
-                    let is_cosmetic = cosmetic.contains(&change.path);
-                    match self.reindex_file_impl(&change.path, false, is_cosmetic) {
-                        Ok(reused) => {
-                            if reused {
+                    // The bounded exact read decides oversized status from the
+                    // bytes actually observed, avoiding a stat/shrink race.
+                    let expected_signature = cosmetic.get(&change.path).copied();
+                    match self.reindex_file_impl(&change.path, false, expected_signature) {
+                        Ok(update) => {
+                            if update.cosmetic_reused {
                                 outcome.cosmetic_skipped += 1;
                             }
                             outcome.successful_paths.insert(change.path.clone());
+                            outcome
+                                .successful_hashes
+                                .insert(change.path.clone(), update.hash_entry);
+                            outcome
+                                .successful_signatures
+                                .insert(change.path.clone(), update.signature);
                         }
                         Err(e) => {
                             warn!(path = %change.path.display(), error = %e, "failed to reindex");
@@ -865,49 +1057,34 @@ impl Engine {
                         }
                     }
                 }
-                ChangeKind::Removed => match self.remove_file_inner(&change.path) {
-                    Ok(()) => {
-                        outcome.successful_paths.insert(change.path.clone());
-                    }
-                    Err(e) => {
-                        warn!(path = %change.path.display(), error = %e, "failed to remove");
-                        outcome
-                            .failures
-                            .push(format!("{}: {e}", change.path.display()));
-                    }
-                },
-            }
-        }
-
-        // Cascade: re-index direct callers of changed files to refresh stale edges.
-        let changed_paths: std::collections::HashSet<String> = changes
-            .iter()
-            .filter_map(|c| self.config.normalize_path(&c.path))
-            .collect();
-
-        let mut cascade_paths: Vec<std::path::PathBuf> = Vec::new();
-        if let Some(ref graph) = self.graph {
-            for changed in &changed_paths {
-                for caller in graph.callers(changed) {
-                    if !changed_paths.contains(&caller) {
-                        match self.config.resolve_path(&caller) {
-                            Some(abs)
-                                if !cascade_paths
-                                    .iter()
-                                    .any(|path| path.as_path() == abs.as_path()) =>
-                            {
-                                cascade_paths.push(abs);
-                            }
-                            Some(_) => {}
-                            None => {
-                                warn!(caller = %caller, "rejected unsafe or missing cascade path");
-                            }
+                ChangeKind::Removed | ChangeKind::RemovedDirectory => {
+                    match self.remove_file_inner(&change.path) {
+                        Ok(()) => {
+                            outcome.successful_paths.insert(change.path.clone());
+                            outcome.successful_hashes.insert(change.path.clone(), None);
+                            outcome
+                                .successful_signatures
+                                .insert(change.path.clone(), None);
+                        }
+                        Err(e) => {
+                            warn!(path = %change.path.display(), error = %e, "failed to remove");
+                            outcome
+                                .failures
+                                .push(format!("{}: {e}", change.path.display()));
                         }
                     }
+                }
+                ChangeKind::CreatedDirectory => {
+                    outcome.failures.push(format!(
+                        "{}: created directory was not expanded",
+                        change.path.display()
+                    ));
                 }
             }
         }
 
+        // Cascade: re-index the pre-mutation caller snapshot to refresh stale
+        // import/call edges after removals and renames.
         if !cascade_paths.is_empty() {
             info!(
                 count = cascade_paths.len(),
@@ -917,11 +1094,22 @@ impl Engine {
                 // Cascade reindexes (callers of changed files) are never treated
                 // as cosmetic — their resolved import/call edges may shift even
                 // when their own signatures did not.
-                if let Err(e) = self.reindex_file_impl(path, false, false) {
-                    warn!(path = %path.display(), error = %e, "cascade-reindex caller failed");
-                    outcome
-                        .failures
-                        .push(format!("cascade {}: {e}", path.display()));
+                match self.reindex_file_impl(path, false, None) {
+                    Ok(update) => {
+                        outcome.successful_paths.insert(path.clone());
+                        outcome
+                            .successful_hashes
+                            .insert(path.clone(), update.hash_entry);
+                        outcome
+                            .successful_signatures
+                            .insert(path.clone(), update.signature);
+                    }
+                    Err(e) => {
+                        warn!(path = %path.display(), error = %e, "cascade-reindex caller failed");
+                        outcome
+                            .failures
+                            .push(format!("cascade {}: {e}", path.display()));
+                    }
                 }
             }
         }
@@ -935,6 +1123,8 @@ impl Engine {
             .any(|failure| failure.starts_with("cascade"))
         {
             outcome.successful_paths.clear();
+            outcome.successful_hashes.clear();
+            outcome.successful_signatures.clear();
             outcome.cosmetic_skipped = 0;
         }
 
@@ -978,8 +1168,8 @@ impl Engine {
     ///
     /// Returns:
     /// - `cosmetic`: **absolute** paths whose content changed but whose
-    ///   fingerprint did NOT — safe to reuse embeddings. Absolute so they match
-    ///   the `FileChange::path` keys used by [`Engine::apply_changes_classified`].
+    ///   fingerprint did NOT, mapped to the fingerprint observed during
+    ///   classification. Reindex revalidates it against the exact indexed bytes.
     /// - `new_signatures`: freshly-computed fingerprints keyed by **normalized
     ///   relative path** (root-invariant) for every changed file that has one.
     ///   Files with no fingerprint (no AST entities) are omitted.
@@ -992,13 +1182,13 @@ impl Engine {
         changes: &[crate::watcher::FileChange],
         old_signatures: &std::collections::HashMap<std::path::PathBuf, u64>,
     ) -> (
-        std::collections::HashSet<std::path::PathBuf>,
+        std::collections::HashMap<std::path::PathBuf, u64>,
         std::collections::HashMap<std::path::PathBuf, u64>,
     ) {
         use super::fingerprint::signature_fingerprint;
         use crate::watcher::ChangeKind;
 
-        let mut cosmetic = std::collections::HashSet::new();
+        let mut cosmetic = std::collections::HashMap::new();
         let mut new_signatures = std::collections::HashMap::new();
 
         for change in changes {
@@ -1007,9 +1197,10 @@ impl Engine {
             }
             // Parse the file to extract its current entities. A read/parse failure
             // is non-fatal here — we simply leave the file STRUCTURAL.
-            let source = match fs::read(&change.path) {
-                Ok(s) => s,
+            let source = match read_source_bounded(&change.path, self.config.max_file_bytes) {
+                Ok(Some(source)) => source.bytes,
                 Err(_) => continue,
+                Ok(None) => continue,
             };
             let result = match self.parser.parse_file(&change.path, &source) {
                 Ok(r) => r,
@@ -1037,7 +1228,7 @@ impl Engine {
             if let Some(&old_fp) = old_signatures.get(&rel_key)
                 && old_fp == fp
             {
-                cosmetic.insert(change.path.clone());
+                cosmetic.insert(change.path.clone(), fp);
             }
         }
 
@@ -1066,40 +1257,70 @@ impl Engine {
         changes: &[crate::watcher::FileChange],
         outcome: &ApplyChangesOutcome,
         seen: &std::collections::HashSet<std::path::PathBuf>,
-        new_signatures: &std::collections::HashMap<std::path::PathBuf, u64>,
     ) -> Result<()> {
         use crate::watcher::ChangeKind;
 
         let mut signature_seen = seen.clone();
         for change in changes {
-            if matches!(change.kind, ChangeKind::Removed)
-                && !outcome.successful_paths.contains(&change.path)
+            if matches!(
+                change.kind,
+                ChangeKind::Removed | ChangeKind::RemovedDirectory
+            ) && !outcome.successful_paths.contains(&change.path)
             {
                 signature_seen.insert(change.path.clone());
             }
         }
 
-        let successful_modified: std::collections::HashSet<std::path::PathBuf> = changes
-            .iter()
-            .filter(|change| {
-                matches!(change.kind, ChangeKind::Modified)
-                    && outcome.successful_paths.contains(&change.path)
-            })
-            .map(|change| change.path.clone())
-            .collect();
+        let successful_modified: std::collections::HashSet<std::path::PathBuf> =
+            outcome.successful_signatures.keys().cloned().collect();
         let seen_rel = self.normalized_rel_set(&signature_seen);
         let modified_rel = self.normalized_rel_set(&successful_modified);
-        let successful_signatures: std::collections::HashMap<std::path::PathBuf, u64> =
-            new_signatures
-                .iter()
-                .filter(|(path, _)| modified_rel.contains(*path))
-                .map(|(path, hash)| (path.clone(), *hash))
-                .collect();
+        let successful_signatures: std::collections::HashMap<std::path::PathBuf, u64> = outcome
+            .successful_signatures
+            .iter()
+            .filter_map(|(path, signature)| {
+                let rel = self.config.normalize_path(path)?;
+                let rel = std::path::PathBuf::from(rel);
+                if !modified_rel.contains(&rel) {
+                    return None;
+                }
+                signature.map(|signature| (rel, signature))
+            })
+            .collect();
 
         self.store.update_tree_signatures(|latest| {
             let latest: std::collections::HashMap<std::path::PathBuf, u64> =
                 latest.into_iter().collect();
             merge_signatures(&latest, &successful_signatures, &seen_rel, &modified_rel)
+        })
+    }
+
+    /// Apply targeted signature updates from the exact parse used for an
+    /// incremental transaction. `None` removes a stale fingerprint.
+    fn persist_exact_signatures(&self, outcome: &ApplyChangesOutcome) -> Result<()> {
+        let updates: Vec<_> = outcome
+            .successful_signatures
+            .iter()
+            .filter_map(|(path, signature)| {
+                self.config
+                    .normalize_path(path)
+                    .map(std::path::PathBuf::from)
+                    .map(|path| (path, *signature))
+            })
+            .collect();
+        if updates.is_empty() {
+            return Ok(());
+        }
+        self.store.update_tree_signatures(|latest| {
+            let mut latest: std::collections::HashMap<_, _> = latest.into_iter().collect();
+            for (path, signature) in &updates {
+                if let Some(signature) = signature {
+                    latest.insert(path.clone(), *signature);
+                } else {
+                    latest.remove(path);
+                }
+            }
+            latest.into_iter().collect()
         })
     }
 
@@ -1290,6 +1511,7 @@ impl Engine {
         self.symbols.ensure_mutable();
         self.migrate_graph_schema_if_outdated()?;
         let previous_git_commit = self.store.load_meta()?.git_commit;
+        let scanned_git_commit = git_head_commit(&self.config.root);
         use crate::watcher::{ChangeKind, FileChange};
         use std::collections::{HashMap, HashSet};
 
@@ -1300,6 +1522,9 @@ impl Engine {
             .unwrap_or_default()
             .into_iter()
             .collect();
+        let dirty_paths: HashSet<std::path::PathBuf> =
+            self.store.load_dirty_paths()?.into_iter().collect();
+        let had_hash_delta = !self.store.load_tree_hash_delta()?.is_empty();
         // Load stored signature fingerprints (empty for indexes built before this
         // feature → every change classified STRUCTURAL on the first sync).
         let old_signatures: HashMap<std::path::PathBuf, u64> = self
@@ -1320,6 +1545,7 @@ impl Engine {
 
         for abs_path in &current_files {
             seen.insert(abs_path.clone());
+            let force_dirty = dirty_paths.contains(abs_path);
 
             // Phase 1: Fast mtime+size pre-filter (stat only, no file read).
             let metadata = fs::metadata(abs_path);
@@ -1328,7 +1554,8 @@ impl Engine {
                 Err(_) => (None, 0),
             };
 
-            if let Some(cached) = old_hashes.get(abs_path)
+            if !force_dirty
+                && let Some(cached) = old_hashes.get(abs_path)
                 && !cached.file_might_have_changed(current_mtime, current_size)
             {
                 // mtime+size unchanged — skip the expensive content hash.
@@ -1338,13 +1565,22 @@ impl Engine {
                 continue;
             }
 
-            // Phase 2: File potentially changed — read and compute xxh3.
-            let content = fs::read(abs_path)?;
-            let hash = xxhash_rust::xxh3::xxh3_64(&content);
-            let entry = FileHashEntry::new(hash, current_mtime, current_size);
+            // Phase 2: enforce the byte cap again while reading, closing the
+            // walk/stat race if a generated file grows concurrently.
+            let Some(source) = read_source_bounded(abs_path, self.config.max_file_bytes)? else {
+                if old_hashes.contains_key(abs_path) || force_dirty {
+                    changes.push(FileChange {
+                        path: abs_path.clone(),
+                        kind: ChangeKind::Removed,
+                    });
+                }
+                continue;
+            };
+            let hash = xxhash_rust::xxh3::xxh3_64(&source.bytes);
+            let entry = stable_file_hash_entry(hash, source.metadata_before, source.metadata_after);
 
             match old_hashes.get(abs_path) {
-                Some(cached) if cached.content_hash == hash => {
+                Some(cached) if !force_dirty && cached.content_hash == hash => {
                     // mtime/size changed but content is identical (e.g. touch).
                     // Update the cached mtime+size but don't reindex.
                     unchanged += 1;
@@ -1370,6 +1606,16 @@ impl Engine {
                 });
             }
         }
+        let mut scheduled_paths: HashSet<std::path::PathBuf> =
+            changes.iter().map(|change| change.path.clone()).collect();
+        for dirty_path in &dirty_paths {
+            if !seen.contains(dirty_path) && scheduled_paths.insert(dirty_path.clone()) {
+                changes.push(FileChange {
+                    path: dirty_path.clone(),
+                    kind: ChangeKind::Removed,
+                });
+            }
+        }
 
         let added = changes
             .iter()
@@ -1381,7 +1627,7 @@ impl Engine {
             .count();
         let removed = changes
             .iter()
-            .filter(|c| matches!(c.kind, ChangeKind::Removed))
+            .filter(|c| matches!(c.kind, ChangeKind::Removed | ChangeKind::RemovedDirectory))
             .count();
 
         info!(
@@ -1391,7 +1637,7 @@ impl Engine {
 
         // SIGFP: keep this classification + sidecar persistence in sync with the
         // identical block in `sync_with_progress`.
-        let (cosmetic, new_signatures) = self.classify_changes(&changes, &old_signatures);
+        let (cosmetic, _classified_signatures) = self.classify_changes(&changes, &old_signatures);
         let cosmetic_count = cosmetic.len();
 
         let mut cosmetic_skipped = 0usize;
@@ -1403,14 +1649,15 @@ impl Engine {
             // files whose index mutation succeeded.
             let authoritative_hashes = merge_hashes_after_apply(
                 &old_hashes,
-                &current_hashes,
+                std::mem::take(&mut current_hashes),
                 &changes,
-                &outcome.successful_paths,
+                &outcome.successful_hashes,
             );
             let persist_result = (|| -> Result<()> {
                 self.save()?;
-                self.persist_signatures_after_apply(&changes, &outcome, &seen, &new_signatures)?;
-                self.persist_hash_snapshot(&authoritative_hashes)
+                self.persist_signatures_after_apply(&changes, &outcome, &seen)?;
+                self.fold_hash_snapshot(&authoritative_hashes)?;
+                self.store.clear_dirty_paths(&outcome.successful_paths)
             })();
             if let Err(error) = persist_result {
                 self.restore_git_commit(previous_git_commit.as_deref())?;
@@ -1425,7 +1672,9 @@ impl Engine {
         } else {
             // Even if nothing changed content-wise, update the v2 hashes
             // to capture any mtime+size updates (e.g. file was touched).
-            if skipped_by_mtime != unchanged {
+            if had_hash_delta {
+                self.fold_hash_snapshot(&current_hashes)?;
+            } else if skipped_by_mtime != unchanged {
                 self.store.save_tree_hashes_v2(&current_hashes)?;
             }
             info!("index already up-to-date");
@@ -1435,6 +1684,15 @@ impl Engine {
             cosmetic_classified = cosmetic_count,
             cosmetic_skipped, "signature-fingerprint classification"
         );
+
+        // The full filesystem scan covered the whole configured corpus. Publish
+        // its git position only after every searchable artifact and freshness
+        // sidecar is durable.
+        if let Some(scanned_git_commit) = scanned_git_commit.as_deref()
+            && git_head_commit(&self.config.root).as_deref() == Some(scanned_git_commit)
+        {
+            self.restore_git_commit(Some(scanned_git_commit))?;
+        }
 
         self.filter_pipeline.cleanup();
 
@@ -1607,8 +1865,12 @@ impl Engine {
             let rel_str = self.config.normalize_path(file).unwrap_or_else(|| {
                 normalize_path(file.strip_prefix(&self.config.root).unwrap_or(file))
             });
-            let source = match fs::read(file) {
-                Ok(s) => s,
+            let source = match read_source_bounded(file, self.config.max_file_bytes) {
+                Ok(Some(source)) => source.bytes,
+                Ok(None) => {
+                    warn!(path = %file.display(), "skipping oversized file in rebuild_graph");
+                    return;
+                }
                 Err(e) => {
                     warn!(path = %file.display(), error = %e, "skipping file in rebuild_graph");
                     return;
@@ -1686,6 +1948,7 @@ impl Engine {
         }
         self.migrate_graph_schema_if_outdated()?;
         let previous_git_commit = self.store.load_meta()?.git_commit;
+        let scanned_git_commit = git_head_commit(&self.config.root);
         use crate::watcher::{ChangeKind, FileChange};
         use std::collections::{HashMap, HashSet};
 
@@ -1698,6 +1961,9 @@ impl Engine {
             .unwrap_or_default()
             .into_iter()
             .collect();
+        let dirty_paths: HashSet<std::path::PathBuf> =
+            self.store.load_dirty_paths()?.into_iter().collect();
+        let had_hash_delta = !self.store.load_tree_hash_delta()?.is_empty();
         // Load stored signature fingerprints (empty for pre-feature indexes).
         let old_signatures: HashMap<std::path::PathBuf, u64> = self
             .store
@@ -1721,6 +1987,7 @@ impl Engine {
 
         for abs_path in &current_files {
             seen.insert(abs_path.clone());
+            let force_dirty = dirty_paths.contains(abs_path);
 
             let metadata = fs::metadata(abs_path);
             let (current_mtime, current_size) = match &metadata {
@@ -1728,7 +1995,8 @@ impl Engine {
                 Err(_) => (None, 0),
             };
 
-            if let Some(cached) = old_hashes.get(abs_path)
+            if !force_dirty
+                && let Some(cached) = old_hashes.get(abs_path)
                 && !cached.file_might_have_changed(current_mtime, current_size)
             {
                 unchanged += 1;
@@ -1737,12 +2005,20 @@ impl Engine {
                 continue;
             }
 
-            let content = fs::read(abs_path)?;
-            let hash = xxhash_rust::xxh3::xxh3_64(&content);
-            let entry = FileHashEntry::new(hash, current_mtime, current_size);
+            let Some(source) = read_source_bounded(abs_path, self.config.max_file_bytes)? else {
+                if old_hashes.contains_key(abs_path) || force_dirty {
+                    changes.push(FileChange {
+                        path: abs_path.clone(),
+                        kind: ChangeKind::Removed,
+                    });
+                }
+                continue;
+            };
+            let hash = xxhash_rust::xxh3::xxh3_64(&source.bytes);
+            let entry = stable_file_hash_entry(hash, source.metadata_before, source.metadata_after);
 
             match old_hashes.get(abs_path) {
-                Some(cached) if cached.content_hash == hash => {
+                Some(cached) if !force_dirty && cached.content_hash == hash => {
                     unchanged += 1;
                     current_hashes.push((abs_path.clone(), entry));
                 }
@@ -1764,6 +2040,16 @@ impl Engine {
                 });
             }
         }
+        let mut scheduled_paths: HashSet<std::path::PathBuf> =
+            changes.iter().map(|change| change.path.clone()).collect();
+        for dirty_path in &dirty_paths {
+            if !seen.contains(dirty_path) && scheduled_paths.insert(dirty_path.clone()) {
+                changes.push(FileChange {
+                    path: dirty_path.clone(),
+                    kind: ChangeKind::Removed,
+                });
+            }
+        }
 
         let added = changes
             .iter()
@@ -1775,7 +2061,7 @@ impl Engine {
             .count();
         let removed = changes
             .iter()
-            .filter(|c| matches!(c.kind, ChangeKind::Removed))
+            .filter(|c| matches!(c.kind, ChangeKind::Removed | ChangeKind::RemovedDirectory))
             .count();
 
         let total_changes = added + modified + removed;
@@ -1786,7 +2072,7 @@ impl Engine {
 
         // SIGFP: keep this classification + sidecar persistence in sync with the
         // identical block in `sync`.
-        let (cosmetic, new_signatures) = self.classify_changes(&changes, &old_signatures);
+        let (cosmetic, _classified_signatures) = self.classify_changes(&changes, &old_signatures);
 
         let mut cosmetic_skipped = 0usize;
         if !changes.is_empty() {
@@ -1795,14 +2081,15 @@ impl Engine {
             on_progress("persisting index");
             let authoritative_hashes = merge_hashes_after_apply(
                 &old_hashes,
-                &current_hashes,
+                std::mem::take(&mut current_hashes),
                 &changes,
-                &outcome.successful_paths,
+                &outcome.successful_hashes,
             );
             let persist_result = (|| -> Result<()> {
                 self.save()?;
-                self.persist_signatures_after_apply(&changes, &outcome, &seen, &new_signatures)?;
-                self.persist_hash_snapshot(&authoritative_hashes)
+                self.persist_signatures_after_apply(&changes, &outcome, &seen)?;
+                self.fold_hash_snapshot(&authoritative_hashes)?;
+                self.store.clear_dirty_paths(&outcome.successful_paths)
             })();
             if let Err(error) = persist_result {
                 self.restore_git_commit(previous_git_commit.as_deref())?;
@@ -1814,10 +2101,17 @@ impl Engine {
                 self.filter_pipeline.cleanup();
                 return Err(error);
             }
+        } else if had_hash_delta {
+            self.fold_hash_snapshot(&current_hashes)?;
         } else if skipped_by_mtime != unchanged {
             self.store.save_tree_hashes_v2(&current_hashes)?;
         }
 
+        if let Some(scanned_git_commit) = scanned_git_commit.as_deref()
+            && git_head_commit(&self.config.root).as_deref() == Some(scanned_git_commit)
+        {
+            self.restore_git_commit(Some(scanned_git_commit))?;
+        }
         on_progress("sync complete");
 
         self.filter_pipeline.cleanup();
@@ -1860,11 +2154,22 @@ impl Engine {
         self.symbols.ensure_mutable();
         self.migrate_graph_schema_if_outdated()?;
         use crate::watcher::{ChangeKind, FileChange};
+        let pending_dirty = self.store.load_dirty_paths()?;
 
         // Load stored git commit from the persisted meta.
         let stored_commit = match self.store.load_meta()?.git_commit {
             Some(c) => c,
             None => {
+                if !pending_dirty.is_empty() {
+                    let modified = pending_dirty.iter().filter(|path| path.is_file()).count();
+                    let removed = pending_dirty.len().saturating_sub(modified);
+                    self.apply_changes(&[])?;
+                    return Ok(GitSyncStats {
+                        modified,
+                        removed,
+                        unchanged: false,
+                    });
+                }
                 debug!("git_sync: no stored git commit in meta — skipping");
                 return Ok(GitSyncStats {
                     unchanged: true,
@@ -1877,6 +2182,16 @@ impl Engine {
         let head = match git_head_commit(&self.config.root) {
             Some(h) => h,
             None => {
+                if !pending_dirty.is_empty() {
+                    let modified = pending_dirty.iter().filter(|path| path.is_file()).count();
+                    let removed = pending_dirty.len().saturating_sub(modified);
+                    self.apply_changes(&[])?;
+                    return Ok(GitSyncStats {
+                        modified,
+                        removed,
+                        unchanged: false,
+                    });
+                }
                 debug!("git_sync: git unavailable or not a repo — skipping");
                 return Ok(GitSyncStats {
                     unchanged: true,
@@ -1885,11 +2200,26 @@ impl Engine {
             }
         };
 
-        if head == stored_commit {
+        if head == stored_commit && pending_dirty.is_empty() {
             debug!(commit = %head, "git_sync: already up-to-date");
             return Ok(GitSyncStats {
                 unchanged: true,
                 ..Default::default()
+            });
+        }
+
+        if head == stored_commit {
+            let modified = pending_dirty.iter().filter(|path| path.is_file()).count();
+            let removed = pending_dirty.len().saturating_sub(modified);
+            info!(
+                modified,
+                removed, "git_sync: recovering pending index changes"
+            );
+            self.apply_changes(&[])?;
+            return Ok(GitSyncStats {
+                modified,
+                removed,
+                unchanged: false,
             });
         }
 
@@ -1899,6 +2229,16 @@ impl Engine {
             match git_diff_since(&self.config.root, &stored_commit) {
                 Some(delta) => delta,
                 None => {
+                    if !pending_dirty.is_empty() {
+                        let modified = pending_dirty.iter().filter(|path| path.is_file()).count();
+                        let removed = pending_dirty.len().saturating_sub(modified);
+                        self.apply_changes(&[])?;
+                        return Ok(GitSyncStats {
+                            modified,
+                            removed,
+                            unchanged: false,
+                        });
+                    }
                     warn!("git_sync: git diff failed — falling back to no-op");
                     return Ok(GitSyncStats {
                         unchanged: true,
@@ -1921,10 +2261,12 @@ impl Engine {
                             path.display()
                         ))
                     })?;
-                changes.push(FileChange {
-                    path,
-                    kind: ChangeKind::Modified,
-                });
+                let kind = if self.config.is_indexable_path(&path) {
+                    ChangeKind::Modified
+                } else {
+                    ChangeKind::RemovedDirectory
+                };
+                changes.push(FileChange { path, kind });
             }
         }
         for path in &deleted_paths {
@@ -1943,13 +2285,31 @@ impl Engine {
             });
         }
 
+        // A previous interrupted transaction may not be represented by the git
+        // diff (including when its file changed outside git). Fold that bounded
+        // journal into this batch before mutation and de-duplicate by path.
+        let mut scheduled: std::collections::HashSet<_> =
+            changes.iter().map(|change| change.path.clone()).collect();
+        for path in pending_dirty {
+            if scheduled.insert(path.clone()) {
+                changes.push(FileChange {
+                    kind: if path.is_file() && self.config.is_indexable_path(&path) {
+                        ChangeKind::Modified
+                    } else {
+                        ChangeKind::RemovedDirectory
+                    },
+                    path,
+                });
+            }
+        }
+
         let n_modified = changes
             .iter()
             .filter(|c| matches!(c.kind, ChangeKind::Modified))
             .count();
         let n_removed = changes
             .iter()
-            .filter(|c| matches!(c.kind, ChangeKind::Removed))
+            .filter(|c| matches!(c.kind, ChangeKind::Removed | ChangeKind::RemovedDirectory))
             .count();
 
         info!(
@@ -1959,33 +2319,25 @@ impl Engine {
         );
 
         if !changes.is_empty() {
-            let hash_delta = self.prepare_hash_delta(&changes)?;
             let outcome =
-                self.apply_changes_classified(&changes, &std::collections::HashSet::new())?;
-            // `git_sync` mutates the index via `apply_changes` without recomputing
-            // signature fingerprints, leaving `tree_signatures.bin` stale for these
-            // successfully-applied files. Drop only those sidecar entries so the
-            // next `sync` re-embeds them as STRUCTURAL (self-healing: it re-stores
-            // a fresh fingerprint). Failed files keep their prior baseline.
-            // Without this, a later sync that reverts a signature change would
-            // compare against the stale fingerprint and reuse a wrong vector.
-            let touched: std::collections::HashSet<std::path::PathBuf> = changes
-                .iter()
-                .filter(|change| outcome.successful_paths.contains(&change.path))
-                .filter_map(|change| self.config.normalize_path(&change.path))
-                .map(std::path::PathBuf::from)
-                .collect();
-            self.store.update_tree_signatures(|sigs| {
-                sigs.into_iter()
-                    .filter(|(p, _)| !touched.contains(p))
-                    .collect()
-            })?;
-            self.save()?;
-            let successful_delta: Vec<_> = hash_delta
-                .into_iter()
-                .filter(|(path, _)| outcome.successful_paths.contains(path))
-                .collect();
-            if let Err(error) = self.persist_hash_delta(&successful_delta) {
+                self.apply_changes_classified(&changes, &std::collections::HashMap::new())?;
+            let persist_result = (|| -> Result<()> {
+                self.save()?;
+
+                // Publish fingerprints from the exact parse that produced the
+                // searchable artifacts, never from the earlier git/scan view.
+                self.persist_exact_signatures(&outcome)?;
+
+                let successful_delta: Vec<_> = outcome
+                    .successful_hashes
+                    .iter()
+                    .map(|(path, entry)| (path.clone(), entry.clone()))
+                    .collect();
+                self.store.update_tree_hash_delta(&successful_delta)?;
+                self.compact_hash_delta_if_needed()?;
+                self.store.clear_dirty_paths(&outcome.successful_paths)
+            })();
+            if let Err(error) = persist_result {
                 self.restore_git_commit(Some(&stored_commit))?;
                 return Err(error);
             }
@@ -1996,10 +2348,12 @@ impl Engine {
                 self.restore_git_commit(Some(&stored_commit))?;
                 return Err(error);
             }
+            self.restore_git_commit(Some(&head))?;
         } else {
             // Diff produced no indexable changes (e.g. only docs/assets changed).
             // Still update the stored commit so next call is a true no-op.
             self.save()?;
+            self.restore_git_commit(Some(&head))?;
         }
 
         Ok(GitSyncStats {
@@ -2011,9 +2365,9 @@ impl Engine {
 
     /// Persist current searchable state to disk.
     ///
-    /// Records the current git HEAD commit (if available) in the stored
-    /// [`IndexMeta`] so that subsequent [`Engine::git_sync`] calls can compute
-    /// the minimal diff rather than doing a full re-index.
+    /// Preserves the published git commit marker. Only a completed full sync or
+    /// `git_sync` may advance it; watcher/editor transactions intentionally do
+    /// not claim unrelated committed files they never inspected.
     ///
     /// This method deliberately preserves the complete file-hash baseline.
     /// Only `init`, full filesystem sync, and explicit successful hash deltas
@@ -2026,10 +2380,8 @@ impl Engine {
         self.store.save_symbols_bytes(&sym_bytes)?;
 
         // Also write mmap-format v2 for zero-deserialization open().
-        if let Some(in_mem) = self.symbols.as_in_memory()
-            && let Err(e) = write_mmap_symbols(in_mem, &self.store.symbols_v2_path())
-        {
-            warn!(error = %e, "failed to write symbols_v2.bin (non-fatal)");
+        if let Some(in_mem) = self.symbols.as_in_memory() {
+            write_mmap_symbols(in_mem, &self.store.symbols_v2_path())?;
         }
 
         // Persist chunk_meta in compact format (without content).
@@ -2050,14 +2402,11 @@ impl Engine {
         // Persist graph.
         if let Some(ref g) = self.graph {
             let flat = g.to_flat();
-            if let Err(e) = self.store.save_graph(&flat) {
-                warn!(error = %e, "failed to persist graph in save()");
-            }
+            self.store.save_graph(&flat)?;
         }
 
         let stats = self.stats();
-        // Record the current git HEAD so git_sync() can diff from this point.
-        let git_commit = git_head_commit(&self.config.root);
+        let git_commit = self.store.load_meta()?.git_commit;
         let meta = IndexMeta {
             version: "0.3.0".to_string(),
             file_count: stats.file_count,
@@ -2083,51 +2432,7 @@ impl Engine {
     /// table, so a subsequent [`Self::sync`] can detect changes against the
     /// last authoritative baseline.
     pub fn persist_incremental(&self) -> Result<()> {
-        if self.read_only {
-            return Err(CodixingError::ReadOnly);
-        }
-        let sym_bytes = serialize_symbols(&self.symbols)?;
-        self.store.save_symbols_bytes(&sym_bytes)?;
-
-        // Also write mmap-format v2 for zero-deserialization open().
-        if let Some(in_mem) = self.symbols.as_in_memory()
-            && let Err(e) = write_mmap_symbols(in_mem, &self.store.symbols_v2_path())
-        {
-            warn!(error = %e, "failed to write symbols_v2.bin (non-fatal)");
-        }
-
-        let meta_bytes = serialize_chunk_meta_compact(&self.chunk_meta)?;
-        self.store.save_chunk_meta_bytes(&meta_bytes)?;
-
-        {
-            let vec_guard = self.vector.read().unwrap_or_else(|e| e.into_inner());
-            if let Some(ref vec_idx) = *vec_guard {
-                vec_idx.save(
-                    &self.store.vector_index_path(),
-                    &self.store.file_chunks_path(),
-                )?;
-            }
-        }
-
-        if let Some(ref g) = self.graph {
-            let flat = g.to_flat();
-            if let Err(e) = self.store.save_graph(&flat) {
-                warn!(error = %e, "failed to persist graph in persist_incremental()");
-            }
-        }
-
-        let stats = self.stats();
-        let git_commit = git_head_commit(&self.config.root);
-        let meta = IndexMeta {
-            version: "0.3.0".to_string(),
-            file_count: stats.file_count,
-            chunk_count: stats.chunk_count,
-            symbol_count: stats.symbol_count,
-            last_indexed: unix_timestamp_string(),
-            git_commit,
-        };
-        self.store.save_meta(&meta)?;
-        Ok(())
+        self.save()
     }
 }
 
@@ -2439,11 +2744,11 @@ pub struct Config {
     }
 
     #[test]
-    fn direct_reindex_invalidates_signature_sidecar() {
+    fn direct_reindex_persists_exact_signature_sidecar() {
         // BM25-only engine (no ONNX needed): init still records signature
         // fingerprints. A direct `reindex_file` (CLI `update --file`, MCP/LSP/
-        // server writes) that changes a signature must drop the stale sidecar
-        // entry so a later sync can't reuse vectors against the wrong baseline.
+        // server writes) must replace the old fingerprint with the one computed
+        // from the exact bytes that produced the searchable artifacts.
         let dir = tempdir().unwrap();
         let root = dir.path();
         write_main(root, "pub fn f(a: u32) -> u32 { a + 1 }\n");
@@ -2451,19 +2756,48 @@ pub struct Config {
 
         let key = std::path::PathBuf::from("src/main.rs");
         let before = engine.store.load_tree_signatures().unwrap();
-        assert!(
-            before.iter().any(|(p, _)| *p == key),
-            "init should record a signature fingerprint for src/main.rs"
-        );
+        let before_signature = before
+            .iter()
+            .find_map(|(path, signature)| (*path == key).then_some(*signature))
+            .expect("init should record a signature fingerprint for src/main.rs");
 
-        write_main(root, "pub fn f(a: u64) -> u64 { a + 1 }\n");
-        engine.reindex_file(&root.join("src/main.rs")).unwrap();
+        let path = root.join("src/main.rs");
+        let changed = "pub fn f(a: u64) -> u64 { a + 1 }\n";
+        write_main(root, changed);
+        engine.reindex_file(&path).unwrap();
 
         let after = engine.store.load_tree_signatures().unwrap();
-        assert!(
-            !after.iter().any(|(p, _)| *p == key),
-            "direct reindex must invalidate the stale signature fingerprint"
+        let after_signature = after
+            .iter()
+            .find_map(|(path, signature)| (*path == key).then_some(*signature))
+            .expect("direct reindex should publish the newly parsed signature fingerprint");
+        assert_ne!(
+            after_signature, before_signature,
+            "a signature-changing direct reindex must replace the old fingerprint"
         );
+
+        let parsed = engine.parser.parse_file(&path, changed.as_bytes()).unwrap();
+        let expected = super::super::fingerprint::signature_fingerprint(
+            &parsed.entities,
+            changed.as_bytes(),
+            parsed.language,
+        )
+        .expect("the changed Rust function should have a fingerprint");
+        assert_eq!(
+            after_signature, expected,
+            "the sidecar must match the exact bytes used to build the index"
+        );
+
+        // The freshly published value is immediately useful: a later body-only
+        // edit should classify as cosmetic rather than forcing structural work.
+        write_main(root, "pub fn f(a: u64) -> u64 { let n = a + 1; n }\n");
+        let old_signatures = after.into_iter().collect();
+        let changes = [crate::watcher::FileChange {
+            path: path.clone(),
+            kind: crate::watcher::ChangeKind::Modified,
+        }];
+        let (cosmetic, _) = engine.classify_changes(&changes, &old_signatures);
+        assert_eq!(cosmetic.get(&path), Some(&after_signature));
     }
 
     #[test]
@@ -2613,7 +2947,7 @@ pub struct Config {
 
     #[cfg(unix)]
     #[test]
-    fn direct_reindex_through_symlinked_root_invalidates_sidecar() {
+    fn direct_reindex_through_symlinked_root_persists_exact_sidecar() {
         // Engine roots are canonicalized, but callers may address files
         // through a symlinked project path (macOS tempdirs live under
         // /var -> /private/var). normalize_path must canonicalize on miss so
@@ -2629,14 +2963,28 @@ pub struct Config {
         let mut engine = Engine::init(&link_root, IndexConfig::new(&link_root)).unwrap();
 
         let key = std::path::PathBuf::from("src/main.rs");
+        let before = engine.store.load_tree_signatures().unwrap();
+        let before_signature = before
+            .iter()
+            .find_map(|(path, signature)| (*path == key).then_some(*signature))
+            .expect("init should record a signature fingerprint for src/main.rs");
         write_main(&real_root, "pub fn f(a: u64) -> u64 { a + 1 }\n");
         // Address the file through the symlinked (non-canonical) root.
         engine.reindex_file(&link_root.join("src/main.rs")).unwrap();
 
         let after = engine.store.load_tree_signatures().unwrap();
-        assert!(
-            !after.iter().any(|(p, _)| *p == key),
-            "reindex via a symlinked path must still invalidate the sidecar entry"
+        let after_signature = after
+            .iter()
+            .find_map(|(path, signature)| (*path == key).then_some(*signature))
+            .expect("reindex via a symlinked path should publish the new fingerprint");
+        assert_ne!(
+            after_signature, before_signature,
+            "reindex via a symlinked path must replace the old fingerprint"
+        );
+        assert_eq!(
+            after.iter().filter(|(path, _)| *path == key).count(),
+            1,
+            "canonical and symlinked roots must share one normalized sidecar key"
         );
     }
 }

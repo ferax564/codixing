@@ -1072,6 +1072,26 @@ impl FileTrigramIndex {
     /// Safe to call multiple times with the same `path` (e.g. once per chunk):
     /// duplicate `(trigram, file_index)` pairs are deduplicated.
     pub fn add(&mut self, path: &str, content: &[u8]) {
+        let trigrams = Self::prepare_trigrams(content);
+        self.add_prepared(path, &trigrams);
+    }
+
+    /// Scan, sort, and deduplicate one file's trigrams without touching the
+    /// shared index. Init workers use this before taking the short merge lock.
+    pub(crate) fn prepare_trigrams(content: &[u8]) -> Vec<[u8; 3]> {
+        if content.len() < 3 {
+            return Vec::new();
+        }
+        let mut trigrams: Vec<[u8; 3]> = (0..content.len() - 2)
+            .map(|i| [content[i], content[i + 1], content[i + 2]])
+            .collect();
+        trigrams.sort_unstable();
+        trigrams.dedup();
+        trigrams
+    }
+
+    /// Merge an already prepared full-file trigram set into the index.
+    pub(crate) fn add_prepared(&mut self, path: &str, trigrams: &[[u8; 3]]) {
         let file_idx = if let Some(&idx) = self.file_index.get(path) {
             idx
         } else {
@@ -1081,18 +1101,7 @@ impl FileTrigramIndex {
             idx
         };
 
-        if content.len() < 3 {
-            return;
-        }
-
-        // Collect unique trigrams via sort+dedup (avoids per-call HashSet alloc).
-        let mut trigrams: Vec<[u8; 3]> = (0..content.len() - 2)
-            .map(|i| [content[i], content[i + 1], content[i + 2]])
-            .collect();
-        trigrams.sort_unstable();
-        trigrams.dedup();
-
-        for tri in trigrams {
+        for &tri in trigrams {
             let list = self.index.entry(tri).or_default();
             // Maintain sorted order; dedup on insert to avoid duplicates
             // when `add` is called multiple times for the same file.

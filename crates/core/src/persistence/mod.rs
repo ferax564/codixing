@@ -43,6 +43,19 @@ fn atomic_write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::
     }
 }
 
+/// Atomic write with parent-directory durability for transaction markers.
+/// File fsync alone does not guarantee the rename survives a power loss on
+/// Unix filesystems; syncing the directory closes that final crash window.
+fn atomic_write_durable(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let path = path.as_ref();
+    atomic_write(path, contents)?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
 /// Directory name for the Codixing index store.
 const CODEFORGE_DIR: &str = ".codixing";
 const CONFIG_FILE: &str = "config.json";
@@ -51,6 +64,14 @@ const TANTIVY_DIR: &str = "tantivy";
 const SYMBOLS_FILE: &str = "symbols.bin";
 const TREE_HASHES_FILE: &str = "tree_hashes.bin";
 const TREE_HASHES_V2_FILE: &str = "tree_hashes_v2.bin";
+/// Tiny write-ahead journal of paths whose index artifacts are mid-mutation.
+/// It is intentionally separate from the O(repo-files) hash snapshot so an
+/// editor save does not rewrite that snapshot twice just for crash intent.
+const DIRTY_PATHS_FILE: &str = "dirty_paths.bin";
+/// Small overlay of successfully published incremental mutations. Full sync
+/// folds it into `tree_hashes_v2.bin`; watcher edits avoid rewriting the
+/// repository-sized baseline on every save.
+const TREE_HASH_DELTA_FILE: &str = "tree_hash_delta.bin";
 const VECTORS_DIR: &str = "vectors";
 const VECTOR_INDEX_FILE: &str = "index.usearch";
 const FILE_CHUNKS_FILE: &str = "file_chunks.bin";
@@ -408,6 +429,16 @@ impl IndexStore {
         self.codixing_dir().join(TREE_HASHES_V2_FILE)
     }
 
+    /// Path to the incremental-mutation write-ahead journal.
+    pub fn dirty_paths_path(&self) -> PathBuf {
+        self.codixing_dir().join(DIRTY_PATHS_FILE)
+    }
+
+    /// Path to the incremental hash overlay.
+    pub fn tree_hash_delta_path(&self) -> PathBuf {
+        self.codixing_dir().join(TREE_HASH_DELTA_FILE)
+    }
+
     /// Path to the `tree_signatures.bin` sidecar (per-file signature fingerprints).
     pub fn tree_signatures_path(&self) -> PathBuf {
         self.codixing_dir().join(TREE_SIGNATURES_FILE)
@@ -630,7 +661,7 @@ impl IndexStore {
         let bytes = bitcode::serialize(hashes).map_err(|e| {
             CodixingError::Serialization(format!("failed to serialize tree hashes: {e}"))
         })?;
-        atomic_write(self.tree_hashes_path(), bytes)?;
+        atomic_write_durable(self.tree_hashes_path(), bytes)?;
         Ok(())
     }
 
@@ -648,7 +679,7 @@ impl IndexStore {
         let bytes = bitcode::serialize(hashes).map_err(|e| {
             CodixingError::Serialization(format!("failed to serialize tree hashes v2: {e}"))
         })?;
-        atomic_write(self.tree_hashes_v2_path(), bytes)?;
+        atomic_write_durable(self.tree_hashes_v2_path(), bytes)?;
         Ok(())
     }
 
@@ -659,7 +690,7 @@ impl IndexStore {
     /// full content-hash check on the first sync, then v2 is written).
     pub fn load_tree_hashes_v2(&self) -> Result<Vec<(PathBuf, FileHashEntry)>> {
         let v2_path = self.tree_hashes_v2_path();
-        if v2_path.exists() {
+        let hashes = if v2_path.exists() {
             let bytes = fs::read(&v2_path)?;
             let hashes: Vec<(PathBuf, FileHashEntry)> =
                 bitcode::deserialize(&bytes).map_err(|e| {
@@ -667,25 +698,155 @@ impl IndexStore {
                         "failed to deserialize tree hashes v2: {e}"
                     ))
                 })?;
+            hashes
+        } else {
+            // Fall back to v1 and upconvert.
+            self.load_tree_hashes()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(path, hash)| {
+                    (
+                        path,
+                        FileHashEntry {
+                            content_hash: hash,
+                            mtime_secs: 0,
+                            mtime_nanos: 0,
+                            size: 0,
+                        },
+                    )
+                })
+                .collect()
+        };
+
+        // Incremental watcher publications live in a small overlay until the
+        // next full sync. Applying it here keeps every freshness consumer
+        // authoritative without an O(repo-files) rewrite per edit.
+        let delta = self.load_tree_hash_delta()?;
+        if delta.is_empty() {
             return Ok(hashes);
         }
+        let mut merged: std::collections::HashMap<PathBuf, FileHashEntry> =
+            hashes.into_iter().collect();
+        for (path, entry) in delta {
+            match entry {
+                Some(entry) => {
+                    merged.insert(path, entry);
+                }
+                None => {
+                    merged.remove(&path);
+                }
+            }
+        }
+        Ok(merged.into_iter().collect())
+    }
 
-        // Fall back to v1 and upconvert.
-        let v1 = self.load_tree_hashes().unwrap_or_default();
-        Ok(v1
-            .into_iter()
-            .map(|(path, hash)| {
-                (
-                    path,
-                    FileHashEntry {
-                        content_hash: hash,
-                        mtime_secs: 0,
-                        mtime_nanos: 0,
-                        size: 0,
-                    },
-                )
-            })
-            .collect())
+    /// Load the successfully-published incremental hash overlay.
+    pub fn load_tree_hash_delta(&self) -> Result<Vec<(PathBuf, Option<FileHashEntry>)>> {
+        let path = self.tree_hash_delta_path();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let bytes = fs::read(path)?;
+        bitcode::deserialize(&bytes).map_err(|e| {
+            CodixingError::Serialization(format!("failed to deserialize tree hash delta: {e}"))
+        })
+    }
+
+    /// Atomically merge successful watcher publications into the small overlay.
+    pub fn update_tree_hash_delta(
+        &self,
+        updates: &[(PathBuf, Option<FileHashEntry>)],
+    ) -> Result<()> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let mut delta: std::collections::HashMap<PathBuf, Option<FileHashEntry>> =
+            self.load_tree_hash_delta()?.into_iter().collect();
+        delta.extend(updates.iter().cloned());
+        let mut delta: Vec<_> = delta.into_iter().collect();
+        delta.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        self.replace_tree_hash_delta(&delta)
+    }
+
+    /// Atomically replace the overlay. Full sync uses this to align every
+    /// existing overlay key with its authoritative snapshot value before the
+    /// baseline rename, making replay idempotent in either crash window.
+    pub fn replace_tree_hash_delta(
+        &self,
+        delta: &[(PathBuf, Option<FileHashEntry>)],
+    ) -> Result<()> {
+        let mut delta = delta.to_vec();
+        delta.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        let bytes = bitcode::serialize(&delta).map_err(|e| {
+            CodixingError::Serialization(format!("failed to serialize tree hash delta: {e}"))
+        })?;
+        atomic_write_durable(self.tree_hash_delta_path(), bytes)?;
+        Ok(())
+    }
+
+    /// Clear the overlay after it has been folded into a full hash snapshot.
+    pub fn clear_tree_hash_delta(&self) -> Result<()> {
+        let empty: Vec<(PathBuf, Option<FileHashEntry>)> = Vec::new();
+        let bytes = bitcode::serialize(&empty).map_err(|e| {
+            CodixingError::Serialization(format!("failed to serialize tree hash delta: {e}"))
+        })?;
+        atomic_write_durable(self.tree_hash_delta_path(), bytes)?;
+        Ok(())
+    }
+
+    /// Load paths whose index mutation has not yet been fully published.
+    /// Missing journals are equivalent to an empty set for old indexes.
+    pub fn load_dirty_paths(&self) -> Result<Vec<PathBuf>> {
+        let path = self.dirty_paths_path();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let bytes = fs::read(path)?;
+        bitcode::deserialize(&bytes).map_err(|e| {
+            CodixingError::Serialization(format!("failed to deserialize dirty paths: {e}"))
+        })
+    }
+
+    /// Atomically add paths to the incremental-mutation journal.
+    pub fn mark_dirty_paths(&self, paths: &[PathBuf]) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let mut dirty: std::collections::HashSet<PathBuf> =
+            self.load_dirty_paths()?.into_iter().collect();
+        dirty.extend(paths.iter().cloned());
+        let mut dirty: Vec<_> = dirty.into_iter().collect();
+        dirty.sort_unstable();
+        let bytes = bitcode::serialize(&dirty).map_err(|e| {
+            CodixingError::Serialization(format!("failed to serialize dirty paths: {e}"))
+        })?;
+        atomic_write_durable(self.dirty_paths_path(), bytes)?;
+        Ok(())
+    }
+
+    /// Atomically clear paths after every corresponding sidecar is durable.
+    pub fn clear_dirty_paths(&self, published: &std::collections::HashSet<PathBuf>) -> Result<()> {
+        if published.is_empty() || !self.dirty_paths_path().exists() {
+            return Ok(());
+        }
+        let mut dirty = self.load_dirty_paths()?;
+        dirty.retain(|path| !published.contains(path));
+        dirty.sort_unstable();
+        let bytes = bitcode::serialize(&dirty).map_err(|e| {
+            CodixingError::Serialization(format!("failed to serialize dirty paths: {e}"))
+        })?;
+        atomic_write_durable(self.dirty_paths_path(), bytes)?;
+        Ok(())
+    }
+
+    /// Reset the mutation journal after a complete authoritative rebuild.
+    pub fn clear_all_dirty_paths(&self) -> Result<()> {
+        let empty: Vec<PathBuf> = Vec::new();
+        let bytes = bitcode::serialize(&empty).map_err(|e| {
+            CodixingError::Serialization(format!("failed to serialize dirty paths: {e}"))
+        })?;
+        atomic_write_durable(self.dirty_paths_path(), bytes)?;
+        Ok(())
     }
 
     /// Save per-file signature fingerprints to the `tree_signatures.bin` sidecar.

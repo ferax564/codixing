@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Instant, SystemTime};
 
@@ -34,6 +36,69 @@ pub(super) struct PendingDefinition {
     name: String,
     kind: SymbolKind,
     line: usize,
+}
+
+/// One bounded source read plus metadata bracketing the exact bytes.
+pub(super) struct BoundedSourceRead {
+    pub(super) bytes: Vec<u8>,
+    pub(super) metadata_before: Option<(SystemTime, u64)>,
+    pub(super) metadata_after: Option<(SystemTime, u64)>,
+}
+
+/// Read at most `max_file_bytes + 1` bytes from a source file.
+///
+/// `None` means the file exceeded the configured limit, including if it grew
+/// after the directory walk. This closes the stat/read TOCTOU that otherwise
+/// lets a generated multi-gigabyte file blow the process RSS.
+pub(super) fn read_source_bounded(
+    path: &Path,
+    max_file_bytes: u64,
+) -> Result<Option<BoundedSourceRead>> {
+    let mut file = fs::File::open(path)?;
+    let metadata_before = file
+        .metadata()
+        .ok()
+        .and_then(|metadata| Some((metadata.modified().ok()?, metadata.len())));
+    if max_file_bytes > 0 && metadata_before.is_some_and(|(_, bytes)| bytes > max_file_bytes) {
+        // Verify the cap against bytes observed from this open handle. A stat
+        // alone can race a concurrent truncate and incorrectly remove a file
+        // that is already back under the limit. Seeking keeps this O(1) even
+        // for sparse or multi-gigabyte generated files.
+        file.seek(SeekFrom::Start(max_file_bytes))?;
+        let mut probe = [0_u8; 1];
+        if file.read(&mut probe)? == 1 {
+            return Ok(None);
+        }
+        file.seek(SeekFrom::Start(0))?;
+    }
+
+    let capacity = metadata_before
+        .map(|(_, bytes)| {
+            let bounded = if max_file_bytes == 0 {
+                bytes
+            } else {
+                bytes.min(max_file_bytes)
+            };
+            bounded.min(usize::MAX as u64) as usize
+        })
+        .unwrap_or(0);
+    let mut bytes = Vec::with_capacity(capacity);
+    if max_file_bytes == 0 {
+        file.read_to_end(&mut bytes)?;
+    } else {
+        (&mut file)
+            .take(max_file_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > max_file_bytes {
+            return Ok(None);
+        }
+    }
+    let metadata_after = file_metadata_tuple(path);
+    Ok(Some(BoundedSourceRead {
+        bytes,
+        metadata_before,
+        metadata_after,
+    }))
 }
 
 /// Init-only call reference. Non-call reference kinds are discarded before
@@ -84,31 +149,21 @@ pub(super) struct IndexContext<'a> {
     pub(super) pending_signatures: &'a DashMap<String, u64>,
     /// Complete successful-file hash baseline for the initial index.
     pub(super) pending_hashes: &'a DashMap<PathBuf, crate::persistence::FileHashEntry>,
+    /// Full-file trigram index built from the exact bounded source read.
+    ///
+    /// The source scan happens before this short lock, so parallel workers do
+    /// not retain a second corpus-sized copy or serialize parsing/chunking.
+    pub(super) file_trigram: &'a Mutex<FileTrigramIndex>,
 }
 
-/// Build a [`FileTrigramIndex`] from full files in a bounded second pass.
-///
-/// Files are read and released one at a time. The operating-system page cache
-/// normally makes this inexpensive immediately after indexing, while avoiding
-/// a corpus-sized `file_contents` map at peak initialization memory.
-pub(super) fn build_file_trigram_from_files(
-    files: &[PathBuf],
-    root: &Path,
-    config: &IndexConfig,
-) -> FileTrigramIndex {
-    let mut idx = FileTrigramIndex::new();
-    for path in files {
-        let rel_str = config
-            .normalize_path(path)
-            .unwrap_or_else(|| normalize_path(path.strip_prefix(root).unwrap_or(path)));
-        match fs::read(path) {
-            Ok(content) => idx.add(&rel_str, &content),
-            Err(e) => {
-                debug!(path = %path.display(), error = %e, "skipping file in trigram pass");
-            }
-        }
-    }
-    idx
+fn add_file_trigrams(ctx: &IndexContext<'_>, path: &str, source: &[u8]) {
+    // The O(file bytes) scan/sort runs on the Rayon worker. Only the prepared
+    // posting merge is serialized, so one large file cannot stall all parsers.
+    let trigrams = FileTrigramIndex::prepare_trigrams(source);
+    ctx.file_trigram
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .add_prepared(path, &trigrams);
 }
 
 /// Build a chunk [`TrigramIndex`] from Tantivy stored fields.
@@ -150,9 +205,15 @@ pub(super) fn build_file_trigram_from_tantivy(tantivy: &TantivyIndex) -> FileTri
 
 /// Process a single file: parse → chunk → index → extract symbols.
 pub(super) fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
-    let metadata_before = file_metadata_tuple(path);
-    let source = fs::read(path)?;
-    let metadata_after = file_metadata_tuple(path);
+    let Some(read) = read_source_bounded(path, ctx.config.max_file_bytes)? else {
+        debug!(path = %path.display(), limit = ctx.config.max_file_bytes, "source grew beyond max_file_bytes during indexing");
+        return Ok(());
+    };
+    let BoundedSourceRead {
+        bytes: source,
+        metadata_before,
+        metadata_after,
+    } = read;
     let result = ctx.parser.parse_file_transient(path, &source)?;
     let hash_entry = stable_file_hash_entry(result.content_hash, metadata_before, metadata_after);
 
@@ -164,6 +225,7 @@ pub(super) fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
     // Doc language branch — uses DocLanguageSupport instead of tree-sitter/config.
     if result.language.is_doc() {
         process_doc_file(&rel_str, &source, result.language, ctx)?;
+        add_file_trigrams(ctx, &rel_str, &source);
         ctx.pending_hashes.insert(path.to_path_buf(), hash_entry);
         return Ok(());
     }
@@ -171,6 +233,7 @@ pub(super) fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
     // Jupyter branch — parse JSON and dispatch per-cell.
     if result.language.is_notebook() {
         process_jupyter_file(&rel_str, &source, ctx)?;
+        add_file_trigrams(ctx, &rel_str, &source);
         ctx.pending_hashes.insert(path.to_path_buf(), hash_entry);
         return Ok(());
     }
@@ -258,6 +321,7 @@ pub(super) fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
         }
     }
 
+    add_file_trigrams(ctx, &rel_str, &source);
     ctx.pending_hashes.insert(path.to_path_buf(), hash_entry);
 
     debug!(
@@ -279,7 +343,7 @@ fn file_metadata_tuple(path: &Path) -> Option<(SystemTime, u64)> {
 /// Pair a content hash only with metadata observed unchanged around its read.
 /// If either stat fails or the file changes mid-read, zero metadata forces the
 /// next sync to verify the body instead of trusting a mismatched fast-path key.
-fn stable_file_hash_entry(
+pub(super) fn stable_file_hash_entry(
     content_hash: u64,
     before: Option<(SystemTime, u64)>,
     after: Option<(SystemTime, u64)>,
@@ -969,6 +1033,8 @@ pub(super) fn walk_source_files(root: &Path, config: &IndexConfig) -> Result<Vec
 
     let mut files = Vec::new();
     let mut seen_canonical = HashSet::new();
+    let mut oversized_skipped = 0_usize;
+    let mut oversized_bytes = 0_u64;
 
     // Helper closure: collect matching files from a single directory tree.
     let mut collect = |walk_root: &Path| {
@@ -999,8 +1065,36 @@ pub(super) fn walk_source_files(root: &Path, config: &IndexConfig) -> Result<Vec
                 debug!(path = %path.display(), "skipping symlinked source file");
                 continue;
             }
-            if !path.is_file() {
+            if !entry
+                .file_type()
+                .is_some_and(|file_type| file_type.is_file())
+            {
                 continue;
+            }
+            // Apply cheap path/language filters before any metadata or
+            // canonicalization syscalls. Huge repos contain many ignored assets
+            // that should cost only the directory entry already in hand.
+            if !config.is_indexable_path(path) {
+                continue;
+            }
+            if config.max_file_bytes > 0 {
+                match entry.metadata() {
+                    Ok(metadata) if metadata.len() > config.max_file_bytes => {
+                        oversized_skipped += 1;
+                        oversized_bytes = oversized_bytes.saturating_add(metadata.len());
+                        debug!(
+                            path = %path.display(),
+                            bytes = metadata.len(),
+                            limit = config.max_file_bytes,
+                            "oversized source candidate will be verified by bounded read"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        warn!(path = %path.display(), %error, "cannot inspect source file, skipping");
+                        continue;
+                    }
+                }
             }
             let canonical_path = match path.canonicalize() {
                 Ok(path) if path.starts_with(&canonical_walk_root) => path,
@@ -1017,22 +1111,7 @@ pub(super) fn walk_source_files(root: &Path, config: &IndexConfig) -> Result<Vec
                     continue;
                 }
             };
-            // Secondary guard: explicit exclude patterns (exact path component match).
-            let excluded = path.components().any(|c| {
-                let s = c.as_os_str().to_string_lossy();
-                config.exclude_patterns.iter().any(|p| p == s.as_ref())
-            });
-            if excluded {
-                continue;
-            }
-            let supported = if config.languages.is_empty() {
-                detect_language(path).is_some()
-            } else {
-                detect_language(path).is_some_and(|language| {
-                    config.languages.contains(&language.name().to_lowercase())
-                })
-            };
-            if supported && seen_canonical.insert(canonical_path.clone()) {
+            if seen_canonical.insert(canonical_path.clone()) {
                 files.push(canonical_path);
             }
         }
@@ -1050,7 +1129,25 @@ pub(super) fn walk_source_files(root: &Path, config: &IndexConfig) -> Result<Vec
         collect(extra);
     }
 
+    if oversized_skipped > 0 {
+        info!(
+            files = oversized_skipped,
+            bytes = oversized_bytes,
+            limit = config.max_file_bytes,
+            "found oversized source candidates; bounded reads will skip those still above the limit"
+        );
+    }
+
     Ok(files)
+}
+
+/// Walk one newly-created directory without also rescanning configured extra roots.
+/// This keeps native watcher event draining O(events) while reusing the exact same
+/// ignore, language, symlink, and file-size policy as a full build.
+pub(super) fn walk_source_directory(root: &Path, config: &IndexConfig) -> Result<Vec<PathBuf>> {
+    let mut scoped = config.clone();
+    scoped.extra_roots.clear();
+    walk_source_files(root, &scoped)
 }
 
 /// Resolve call-site names against the symbol table and add `EdgeKind::Calls`
@@ -1316,11 +1413,12 @@ pub(super) fn build_graph(
             } else {
                 // Fallback: re-read + re-parse (only reached when cache is empty).
                 let language = detect_language(abs_path)?;
-                let source = fs::read(abs_path)
+                let source = read_source_bounded(abs_path, config.max_file_bytes)
                     .map_err(|e| {
                         warn!(path = %abs_path.display(), error = %e, "skipping in graph build");
                     })
-                    .ok()?;
+                    .ok()??
+                    .bytes;
                 let lang_support = parser.registry().get(language)?;
                 let mut ts_parser = tree_sitter::Parser::new();
                 ts_parser

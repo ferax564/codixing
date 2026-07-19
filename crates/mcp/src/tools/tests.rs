@@ -1621,7 +1621,7 @@ fn final_envelope_uses_default_and_hard_maximum_budgets() {
 }
 
 #[test]
-fn final_envelope_replaces_oversized_json_with_valid_omission_object() {
+fn final_envelope_preserves_a_valid_partial_json_preview() {
     let json_output = serde_json::to_string(&json!({
         "schema_version": 1,
         "items": (0..2_000)
@@ -1633,7 +1633,65 @@ fn final_envelope_replaces_oversized_json_with_valid_omission_object() {
     let bounded = enforce_tool_output_budget(&json_output, &json!({"token_budget": 53}));
     let parsed: serde_json::Value = serde_json::from_str(&bounded).unwrap();
     assert_eq!(parsed["truncated"], true);
+    assert_eq!(parsed["partial"]["schema_version"], 1);
+    assert!(parsed["partial"]["items"].is_array());
+    assert!(
+        parsed["partial"]["items"].as_array().unwrap().len() < 2_000,
+        "preview should retain a bounded prefix instead of dropping all data"
+    );
     assert!(codixing_core::formatter::count_tokens(&bounded) <= 53);
+}
+
+#[test]
+fn final_envelope_keeps_nearly_all_of_a_slightly_oversized_array() {
+    let value = json!({
+        "schema_version": 1,
+        "items": (0..200).map(|index| format!("item-{index:03}")).collect::<Vec<_>>(),
+    });
+    let output = serde_json::to_string(&value).unwrap();
+    let full_tokens = codixing_core::formatter::count_tokens(&output);
+    let budget = full_tokens.saturating_sub(5);
+    let bounded = enforce_tool_output_budget(&output, &json!({"token_budget": budget}));
+    let parsed: Value = serde_json::from_str(&bounded).unwrap();
+    let retained = parsed["partial"]["items"].as_array().unwrap().len();
+
+    assert!(
+        retained >= 180,
+        "slight overflow retained only {retained}/200 items"
+    );
+    assert!(codixing_core::formatter::count_tokens(&bounded) <= budget);
+}
+
+#[test]
+fn final_envelope_handles_wide_scalar_objects_with_a_valid_exact_cap() {
+    let fields: serde_json::Map<String, Value> = (0..2_000)
+        .map(|index| (format!("field_{index:04}"), json!(index)))
+        .collect();
+    let output = Value::Object(fields).to_string();
+    let budget = 211;
+    let bounded = enforce_tool_output_budget(&output, &json!({"token_budget": budget}));
+    let parsed: Value = serde_json::from_str(&bounded).unwrap();
+
+    assert_eq!(parsed["truncated"], true);
+    assert!(
+        parsed["partial"]
+            .as_object()
+            .is_some_and(|fields| !fields.is_empty())
+    );
+    assert!(codixing_core::formatter::count_tokens(&bounded) <= budget);
+}
+
+#[test]
+fn final_envelope_clamps_zero_budget_and_stays_valid_json() {
+    let args = json!({"token_budget": 0});
+    let bounded = enforce_tool_output_budget(
+        &serde_json::to_string(&json!({"items": ["large payload".repeat(100)]})).unwrap(),
+        &args,
+    );
+
+    assert_eq!(requested_tool_token_budget(&args), 1);
+    serde_json::from_str::<serde_json::Value>(&bounded).unwrap();
+    assert!(codixing_core::formatter::count_tokens(&bounded) <= 1);
 }
 
 #[test]

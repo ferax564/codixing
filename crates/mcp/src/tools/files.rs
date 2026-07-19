@@ -360,10 +360,7 @@ pub(crate) fn call_write_file(engine: &mut Engine, args: &Value) -> (String, boo
     let line_count = content.lines().count();
     let byte_count = content.len();
 
-    match engine
-        .reindex_file(&abs_path)
-        .and_then(|()| engine.persist_incremental())
-    {
+    match engine.reindex_file(&abs_path) {
         Ok(()) => {
             engine
                 .session()
@@ -456,10 +453,7 @@ pub(crate) fn call_edit_file(engine: &mut Engine, args: &Value) -> (String, bool
     let old_lines: Vec<&str> = old_string.lines().collect();
     let new_lines: Vec<&str> = new_string.lines().collect();
 
-    match engine
-        .reindex_file(&abs_path)
-        .and_then(|()| engine.persist_incremental())
-    {
+    match engine.reindex_file(&abs_path) {
         Ok(()) => {
             engine
                 .session()
@@ -521,10 +515,7 @@ pub(crate) fn call_delete_file(engine: &mut Engine, args: &Value) -> (String, bo
         return (format!("Failed to delete '{file}': {e}"), true);
     }
 
-    match engine
-        .remove_file(&abs_path)
-        .and_then(|()| engine.persist_incremental())
-    {
+    match engine.remove_file(&abs_path) {
         Ok(()) => (
             format!(
                 "Deleted and de-indexed: {file}.\n\
@@ -722,15 +713,21 @@ pub(crate) fn call_apply_patch(engine: &mut Engine, args: &Value) -> (String, bo
         }
     }
 
-    // Reindex affected files.
-    let mut reindexed = 0usize;
-    for path in &affected {
-        if path.exists() {
-            match engine.reindex_file(path) {
-                Ok(()) => reindexed += 1,
-                Err(e) => errors.push(format!("Reindex failed for {}: {e}", path.display())),
-            }
-        }
+    // Reindex every affected file in one transaction: one Tantivy commit, one
+    // PageRank pass, and one sidecar/vector publication for the whole patch.
+    let changes: Vec<_> = affected
+        .iter()
+        .filter(|path| path.exists())
+        .map(|path| codixing_core::watcher::FileChange {
+            path: path.clone(),
+            kind: codixing_core::watcher::ChangeKind::Modified,
+        })
+        .collect();
+    let reindexed = changes.len();
+    if !changes.is_empty()
+        && let Err(error) = engine.apply_changes(&changes)
+    {
+        errors.push(format!("Batch reindex failed: {error}"));
     }
 
     if !errors.is_empty() {
@@ -751,15 +748,6 @@ pub(crate) fn call_apply_patch(engine: &mut Engine, args: &Value) -> (String, bo
         );
     }
 
-    if let Err(e) = engine.persist_incremental() {
-        return (
-            format!(
-                "Patch applied and re-indexed in memory, but persisting the index failed: {e}\n\
-                 Run `codixing sync .` to recover."
-            ),
-            true,
-        );
-    }
     (
         format!(
             "Patch applied: {reindexed} file(s) modified and reindexed.\n\

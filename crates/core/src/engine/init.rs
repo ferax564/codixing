@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use dashmap::DashMap;
 use rayon::prelude::*;
@@ -30,8 +30,8 @@ use crate::symbols::writer::write_mmap_symbols;
 use crate::vector::VectorIndex;
 
 use super::indexing::{
-    IndexContext, PendingSymbolGraph, add_call_edges, add_doc_edges, build_file_trigram_from_files,
-    build_graph, populate_symbol_graph, process_file, unix_timestamp_string, walk_source_files,
+    IndexContext, PendingSymbolGraph, add_call_edges, add_doc_edges, build_graph,
+    populate_symbol_graph, process_file, unix_timestamp_string, walk_source_files,
 };
 use super::{Engine, git_head_commit};
 
@@ -52,6 +52,7 @@ impl Engine {
         // macOS `/var` vs `/private/var`, or any symlinked project dir)
         // would make every later sync see all paths as added+removed.
         config.root = root.clone();
+        let starting_git_commit = git_head_commit(&root);
 
         let store = IndexStore::init(&root, &config)?;
         let tantivy =
@@ -101,6 +102,7 @@ impl Engine {
             DashMap::new();
         let pending_signatures: DashMap<String, u64> = DashMap::new();
         let pending_hashes: DashMap<std::path::PathBuf, FileHashEntry> = DashMap::new();
+        let file_trigram = Mutex::new(crate::index::trigram::FileTrigramIndex::new());
 
         {
             let ctx = IndexContext {
@@ -120,6 +122,7 @@ impl Engine {
                 pending_doc_refs: &pending_doc_refs,
                 pending_signatures: &pending_signatures,
                 pending_hashes: &pending_hashes,
+                file_trigram: &file_trigram,
             };
 
             // Process files in parallel: parse → chunk → index → extract symbols.
@@ -132,19 +135,34 @@ impl Engine {
 
         tantivy.commit()?;
 
+        // A file can grow beyond max_file_bytes after discovery. The bounded
+        // read path omits it safely; downstream graph/trigram phases and metadata
+        // must use only files whose exact bytes were successfully indexed.
+        let mut indexed_files: Vec<_> = pending_hashes
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+        indexed_files.sort_unstable();
+
         let total_chunks = chunk_count.load(Ordering::Relaxed);
         let total_symbols = symbols.len();
 
         // Convert DashMaps to owned types.
         let file_chunk_counts: HashMap<String, usize> = file_chunk_map.into_iter().collect();
 
-        // Build graph and trigram indexes in parallel — they read from shared
-        // DashMaps but don't write to each other.
-        let (graph, (trigram_idx, ft_idx)) = rayon::join(
+        let ft_idx = file_trigram
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // Build graph and the chunk trigram index in parallel — they read from
+        // shared DashMaps but don't write to each other. The file trigram index
+        // was populated from each exact source read during the primary pass.
+        let (graph, trigram_idx) = rayon::join(
             || {
                 // Graph construction
                 if config.graph.enabled {
-                    let mut g = build_graph(&files, &root, &config, &parser, &pending_imports);
+                    let mut g =
+                        build_graph(&indexed_files, &root, &config, &parser, &pending_imports);
                     // Resolve call-site edges using the now-complete symbol table.
                     add_call_edges(&mut g, &symbols, &pending_calls);
                     // Resolve doc symbol references into DocumentedBy edges.
@@ -167,8 +185,7 @@ impl Engine {
                         .iter()
                         .map(|e| (*e.key(), e.value().content.clone())),
                 );
-                let ft = build_file_trigram_from_files(&files, &root, &config);
-                (tri, ft)
+                tri
             },
         );
 
@@ -264,10 +281,8 @@ impl Engine {
         store.save_symbols_bytes(&sym_bytes)?;
 
         // Also write the mmap-format v2 for zero-deserialization open().
-        if let Some(in_mem) = symbols.as_in_memory()
-            && let Err(e) = write_mmap_symbols(in_mem, &store.symbols_v2_path())
-        {
-            warn!(error = %e, "failed to write symbols_v2.bin (non-fatal)");
+        if let Some(in_mem) = symbols.as_in_memory() {
+            write_mmap_symbols(in_mem, &store.symbols_v2_path())?;
         }
 
         // `process_file` records every successfully indexed file directly.
@@ -293,9 +308,7 @@ impl Engine {
             .iter()
             .map(|e| (std::path::PathBuf::from(e.key()), *e.value()))
             .collect();
-        if let Err(e) = store.save_tree_signatures(&signatures) {
-            warn!(error = %e, "failed to persist tree signatures at init (non-fatal)");
-        }
+        store.save_tree_signatures(&signatures)?;
 
         // Persist chunk_meta in compact format (without content — content lives in Tantivy).
         let meta_pairs: Vec<(u64, ChunkMetaCompact)> = chunk_meta_map
@@ -311,10 +324,18 @@ impl Engine {
         // thread spawned below. We do not persist it here.
 
         // Record the current git HEAD so git_sync() can diff from this point.
-        let git_commit = git_head_commit(&root);
+        let ending_git_commit = git_head_commit(&root);
+        let git_commit = if ending_git_commit == starting_git_commit {
+            ending_git_commit
+        } else {
+            // A checkout raced the build. Publishing the starting marker makes
+            // the next git_sync repair every path changed since that snapshot;
+            // claiming the later HEAD could permanently hide mixed artifacts.
+            starting_git_commit
+        };
         let idx_meta = IndexMeta {
             version: "0.3.0".to_string(),
-            file_count: files.len(),
+            file_count: indexed_files.len(),
             chunk_count: total_chunks,
             symbol_count: total_symbols,
             last_indexed: unix_timestamp_string(),
@@ -322,8 +343,14 @@ impl Engine {
         };
         store.save_meta(&idx_meta)?;
 
+        // A complete rebuild is authoritative. Only after every synchronous
+        // searchable artifact and freshness baseline is durable may stale
+        // transaction state from an older index be cleared.
+        store.clear_tree_hash_delta()?;
+        store.clear_all_dirty_paths()?;
+
         info!(
-            files = files.len(),
+            files = indexed_files.len(),
             chunks = total_chunks,
             symbols = total_symbols,
             graph_nodes,
