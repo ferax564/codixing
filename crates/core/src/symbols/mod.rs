@@ -44,6 +44,10 @@ pub struct Symbol {
 /// Converted to/from the mmap format for persistence.
 pub struct InMemorySymbolTable {
     pub(crate) symbols: DashMap<String, Vec<Symbol>>,
+    sorted_names: std::sync::RwLock<Vec<String>>,
+    sorted_names_dirty: std::sync::atomic::AtomicBool,
+    public_lines_by_file: std::sync::RwLock<std::collections::HashMap<String, Vec<usize>>>,
+    public_lines_dirty: std::sync::atomic::AtomicBool,
 }
 
 impl InMemorySymbolTable {
@@ -51,6 +55,10 @@ impl InMemorySymbolTable {
     pub fn new() -> Self {
         Self {
             symbols: DashMap::new(),
+            sorted_names: std::sync::RwLock::new(Vec::new()),
+            sorted_names_dirty: std::sync::atomic::AtomicBool::new(true),
+            public_lines_by_file: std::sync::RwLock::new(std::collections::HashMap::new()),
+            public_lines_dirty: std::sync::atomic::AtomicBool::new(true),
         }
     }
 
@@ -60,6 +68,14 @@ impl InMemorySymbolTable {
             .entry(symbol.name.clone())
             .or_default()
             .push(symbol);
+        // Publish invalidation after the mutation. If a reader rebuilds while
+        // the write is in flight it may observe the previous snapshot once,
+        // but the post-write flag guarantees the next lookup rebuilds instead
+        // of leaving a permanently stale cache.
+        self.sorted_names_dirty
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.public_lines_dirty
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Remove all symbols originating from a given file path.
@@ -71,6 +87,10 @@ impl InMemorySymbolTable {
             });
         }
         self.symbols.retain(|_, v| !v.is_empty());
+        self.sorted_names_dirty
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.public_lines_dirty
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Exact name lookup.
@@ -83,13 +103,59 @@ impl InMemorySymbolTable {
 
     /// Prefix lookup.
     pub fn lookup_prefix(&self, prefix: &str) -> Vec<Symbol> {
+        self.ensure_sorted_names();
+        let prefix_lower = prefix.to_lowercase();
+        let sorted_names = self
+            .sorted_names
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut low = 0usize;
+        let mut high = sorted_names.len();
+        while low < high {
+            let mid = low + (high - low) / 2;
+            if sorted_names[mid].to_lowercase() < prefix_lower {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+
+        let matching_names: Vec<String> = sorted_names[low..]
+            .iter()
+            .take_while(|name| name.to_lowercase().starts_with(&prefix_lower))
+            .cloned()
+            .collect();
+        drop(sorted_names);
         let mut results = Vec::new();
-        for entry in self.symbols.iter() {
-            if entry.key().starts_with(prefix) {
+        for name in matching_names {
+            if let Some(entry) = self.symbols.get(&name) {
                 results.extend(entry.value().clone());
             }
         }
         results
+    }
+
+    pub fn has_public_symbol_in_range(
+        &self,
+        file_path: &str,
+        line_start: u64,
+        line_end: u64,
+    ) -> bool {
+        if line_start >= line_end {
+            return false;
+        }
+        self.ensure_public_lines();
+        let public_lines_by_file = self
+            .public_lines_by_file
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        let Some(lines) = public_lines_by_file.get(file_path) else {
+            return false;
+        };
+        let index = lines.partition_point(|line| (*line as u64) < line_start);
+        lines
+            .get(index)
+            .is_some_and(|line| (*line as u64) < line_end)
     }
 
     /// Filter by name pattern and optional file path (case-insensitive).
@@ -137,6 +203,69 @@ impl InMemorySymbolTable {
             for symbol in entry.value() {
                 visitor(symbol);
             }
+        }
+    }
+
+    fn ensure_sorted_names(&self) {
+        if !self
+            .sorted_names_dirty
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+
+        let mut sorted_names = self
+            .sorted_names
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        if !self
+            .sorted_names_dirty
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
+
+        *sorted_names = self
+            .symbols
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+        sorted_names.sort_by_cached_key(|name| name.to_lowercase());
+    }
+
+    fn ensure_public_lines(&self) {
+        if !self
+            .public_lines_dirty
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+
+        let mut public_lines_by_file = self
+            .public_lines_by_file
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        if !self
+            .public_lines_dirty
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
+
+        public_lines_by_file.clear();
+        for entry in &self.symbols {
+            for symbol in entry.value() {
+                if symbol.visibility == Visibility::Public {
+                    public_lines_by_file
+                        .entry(symbol.file_path.clone())
+                        .or_default()
+                        .push(symbol.line_start);
+                }
+            }
+        }
+        for lines in public_lines_by_file.values_mut() {
+            lines.sort_unstable();
+            lines.dedup();
         }
     }
 
@@ -215,6 +344,21 @@ impl SymbolTable {
         match self {
             Self::InMemory(t) => t.lookup_prefix(prefix),
             Self::Mmap(t) => t.lookup_prefix(prefix),
+        }
+    }
+
+    /// Return whether a public definition starts inside an exact file/range.
+    pub fn has_public_symbol_in_range(
+        &self,
+        file_path: &str,
+        line_start: u64,
+        line_end: u64,
+    ) -> bool {
+        match self {
+            Self::InMemory(table) => {
+                table.has_public_symbol_in_range(file_path, line_start, line_end)
+            }
+            Self::Mmap(table) => table.has_public_symbol_in_range(file_path, line_start, line_end),
         }
     }
 
@@ -654,9 +798,12 @@ mod tests {
             byte_end: 5678,
             signature: Some("fn complex_func(x: i32, y: &str) -> Result<()>".to_string()),
             scope: vec!["engine".to_string(), "Engine".to_string()],
-            doc_comment: None,
-            visibility: Visibility::default(),
-            type_relations: Vec::new(),
+            doc_comment: Some("Builds a complete search context.".to_string()),
+            visibility: Visibility::Public,
+            type_relations: vec![TypeRelation {
+                kind: crate::language::TypeRelationKind::Returns,
+                target: "SearchContext".to_string(),
+            }],
         });
 
         let dir = tempfile::tempdir().unwrap();
@@ -680,6 +827,17 @@ mod tests {
             Some("fn complex_func(x: i32, y: &str) -> Result<()>")
         );
         assert_eq!(s.scope, vec!["engine", "Engine"]);
+        assert_eq!(
+            s.doc_comment.as_deref(),
+            Some("Builds a complete search context.")
+        );
+        assert_eq!(s.visibility, Visibility::Public);
+        assert_eq!(s.type_relations.len(), 1);
+        assert_eq!(
+            s.type_relations[0].kind,
+            crate::language::TypeRelationKind::Returns
+        );
+        assert_eq!(s.type_relations[0].target, "SearchContext");
     }
 
     #[test]
@@ -888,11 +1046,9 @@ mod tests {
     }
 
     #[test]
-    fn mmap_loses_new_fields_but_bitcode_preserves_them() {
+    fn mmap_and_bitcode_preserve_new_fields() {
         use crate::language::{TypeRelation, TypeRelationKind};
 
-        // Demonstrate that mmap does NOT preserve the new fields,
-        // confirming that bitcode must be preferred over mmap.
         let in_mem = InMemorySymbolTable::new();
         in_mem.insert(Symbol {
             name: "ApiEndpoint".to_string(),
@@ -915,15 +1071,22 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
 
-        // Write and load via mmap — new fields are lost.
+        // Write and load via mmap — all fields remain queryable in place.
         let mmap_path = dir.path().join("symbols_v2.bin");
         writer::write_mmap_symbols(&in_mem, &mmap_path).unwrap();
         let mmap_table = mmap::MmapSymbolTable::load(&mmap_path).unwrap();
         let mmap_syms = mmap_table.lookup("ApiEndpoint");
         assert_eq!(mmap_syms.len(), 1);
-        assert!(mmap_syms[0].doc_comment.is_none()); // lost!
-        assert_eq!(mmap_syms[0].visibility, Visibility::Private); // defaulted!
-        assert!(mmap_syms[0].type_relations.is_empty()); // lost!
+        assert_eq!(
+            mmap_syms[0].doc_comment.as_deref(),
+            Some("Handles /api/v1/users.")
+        );
+        assert_eq!(mmap_syms[0].visibility, Visibility::Public);
+        assert_eq!(mmap_syms[0].type_relations.len(), 1);
+        assert_eq!(
+            mmap_syms[0].type_relations[0].kind,
+            TypeRelationKind::Returns
+        );
 
         // Write and load via bitcode — all fields preserved.
         let bitcode_table =
@@ -939,5 +1102,162 @@ mod tests {
         assert_eq!(bc_syms[0].visibility, Visibility::Public);
         assert_eq!(bc_syms[0].type_relations.len(), 1);
         assert_eq!(bc_syms[0].type_relations[0].kind, TypeRelationKind::Returns);
+    }
+
+    #[test]
+    fn secondary_indexes_match_in_memory_and_mmap() {
+        let in_mem = InMemorySymbolTable::new();
+        for (name, file, line, visibility) in [
+            ("ParseConfig", "src/config.rs", 10, Visibility::Public),
+            ("parse_args", "src/args.rs", 20, Visibility::Private),
+            ("parserState", "src/parser.rs", 30, Visibility::Public),
+            ("build_index", "src/index.rs", 40, Visibility::Public),
+        ] {
+            let mut symbol = make_symbol(name, file, EntityKind::Function, Language::Rust);
+            symbol.line_start = line;
+            symbol.line_end = line + 1;
+            symbol.visibility = visibility;
+            in_mem.insert(symbol);
+        }
+
+        let prefixed_names = |table: &SymbolTable| {
+            let mut names: Vec<_> = table
+                .lookup_prefix("PAR")
+                .into_iter()
+                .map(|symbol| symbol.name)
+                .collect();
+            names.sort();
+            names
+        };
+        let expected = vec![
+            "ParseConfig".to_string(),
+            "parse_args".to_string(),
+            "parserState".to_string(),
+        ];
+        let in_memory_table = SymbolTable::InMemory(in_mem);
+        assert_eq!(prefixed_names(&in_memory_table), expected);
+        assert!(in_memory_table.has_public_symbol_in_range("src/config.rs", 10, 11));
+        assert!(!in_memory_table.has_public_symbol_in_range("src/config.rs", 11, 20));
+        assert!(!in_memory_table.has_public_symbol_in_range("src/args.rs", 20, 21));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("symbols_v2.bin");
+        writer::write_mmap_symbols(in_memory_table.as_in_memory().unwrap(), &path).unwrap();
+        let mmap_table = SymbolTable::Mmap(mmap::MmapSymbolTable::load(&path).unwrap());
+        assert_eq!(prefixed_names(&mmap_table), expected);
+        assert!(mmap_table.has_public_symbol_in_range("src/config.rs", 10, 11));
+        assert!(!mmap_table.has_public_symbol_in_range("src/config.rs", 11, 20));
+        assert!(!mmap_table.has_public_symbol_in_range("src/args.rs", 20, 21));
+        assert!(!mmap_table.has_public_symbol_in_range("src/missing.rs", 0, 100));
+    }
+
+    #[test]
+    fn mmap_v2_supports_more_than_u16_definitions_per_name() {
+        let table = InMemorySymbolTable::new();
+        let mut symbol = make_symbol("main", "generated.rs", EntityKind::Function, Language::Rust);
+        for line in 0..=u16::MAX as usize {
+            symbol.line_start = line;
+            symbol.line_end = line + 1;
+            table.insert(symbol.clone());
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("symbols_v2.bin");
+        writer::write_mmap_symbols(&table, &path).unwrap();
+        let mmap = mmap::MmapSymbolTable::load(&path).unwrap();
+        assert_eq!(mmap.lookup("main").len(), u16::MAX as usize + 1);
+    }
+
+    #[test]
+    fn in_memory_secondary_indexes_invalidate_after_mutation() {
+        let table = InMemorySymbolTable::new();
+        assert!(table.lookup_prefix("new").is_empty());
+        assert!(!table.has_public_symbol_in_range("new.rs", 5, 6));
+
+        let mut symbol = make_symbol(
+            "new_public_api",
+            "new.rs",
+            EntityKind::Function,
+            Language::Rust,
+        );
+        symbol.line_start = 5;
+        symbol.visibility = Visibility::Public;
+        table.insert(symbol);
+
+        assert_eq!(table.lookup_prefix("NEW").len(), 1);
+        assert!(table.has_public_symbol_in_range("new.rs", 5, 6));
+    }
+
+    #[test]
+    fn mmap_reads_legacy_v1_symbols() {
+        let mut pool = vec![0u8, 0u8];
+        let mut intern = |value: &str| {
+            let offset = pool.len() as u32;
+            pool.extend_from_slice(&(value.len() as u16).to_le_bytes());
+            pool.extend_from_slice(value.as_bytes());
+            offset
+        };
+        let name = "LegacyApi";
+        let name_offset = intern(name);
+        let file_offset = intern("legacy.rs");
+        drop(intern);
+
+        let mut symbol_data = Vec::new();
+        symbol_data.extend_from_slice(&1u16.to_le_bytes());
+        symbol_data.push(mmap::entity_kind_to_u8(&EntityKind::Function));
+        symbol_data.push(mmap::language_to_u8(Language::Rust));
+        symbol_data.extend_from_slice(&file_offset.to_le_bytes());
+        symbol_data.extend_from_slice(&3u32.to_le_bytes());
+        symbol_data.extend_from_slice(&4u32.to_le_bytes());
+        symbol_data.extend_from_slice(&10u32.to_le_bytes());
+        symbol_data.extend_from_slice(&20u32.to_le_bytes());
+        symbol_data.extend_from_slice(&0u32.to_le_bytes());
+        symbol_data.push(0);
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&mmap::MAGIC.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(
+            &xxhash_rust::xxh3::xxh3_64(name.to_lowercase().as_bytes()).to_le_bytes(),
+        );
+        bytes.extend_from_slice(&name_offset.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&(pool.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&pool);
+        bytes.extend_from_slice(&symbol_data);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("symbols_v1.bin");
+        std::fs::write(&path, bytes).unwrap();
+        let table = mmap::MmapSymbolTable::load(&path).unwrap();
+        assert!(!table.preserves_full_fidelity());
+        let symbols = table.lookup(name);
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].file_path, "legacy.rs");
+        assert_eq!(symbols[0].line_start, 3);
+        assert_eq!(symbols[0].visibility, Visibility::Private);
+        assert!(!table.has_public_symbol_in_range("legacy.rs", 3, 4));
+    }
+
+    #[test]
+    fn malformed_mmap_offsets_do_not_panic_during_lookup() {
+        let table = InMemorySymbolTable::new();
+        table.insert(make_symbol(
+            "malformed",
+            "bad.rs",
+            EntityKind::Function,
+            Language::Rust,
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("symbols_v2.bin");
+        writer::write_mmap_symbols(&table, &path).unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[28..32].copy_from_slice(&u32::MAX.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        let mmap = mmap::MmapSymbolTable::load(&path).unwrap();
+        assert!(mmap.lookup("malformed").is_empty());
     }
 }

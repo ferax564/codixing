@@ -1,14 +1,14 @@
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
+use crate::embedder::Embedder;
 use crate::error::Result;
 use crate::graph::CodeGraph;
 use crate::persistence::IndexStore;
-use crate::symbols::SymbolTable;
-use crate::symbols::persistence::deserialize_symbols;
 use crate::vector::VectorIndex;
 
 use super::Engine;
 use super::indexing::{build_file_trigram_from_tantivy, deserialize_chunk_meta};
+use super::init::{load_persisted_symbols, persisted_meta_mtime};
 
 impl Engine {
     /// Set the minimum interval between reload-staleness checks.
@@ -58,20 +58,24 @@ impl Engine {
             return Ok(true);
         }
 
-        let meta_path = self.store.codixing_dir().join("meta.json");
-        let disk_mtime = std::fs::metadata(&meta_path)
-            .ok()
-            .and_then(|m| m.modified().ok());
-
-        match (disk_mtime, self.last_load_time) {
-            (Some(disk), Some(loaded)) if disk > loaded => {
-                info!("read-only index stale — reloading from disk");
-                self.reload_from_disk()?;
-                self.last_load_time = Some(disk);
-                Ok(true)
-            }
-            _ => Ok(false),
+        let disk_mtime = persisted_meta_mtime(&self.store);
+        let mut reloaded = false;
+        if matches!(
+            (disk_mtime, self.last_load_time),
+            (Some(disk), Some(loaded)) if disk > loaded
+        ) {
+            info!("read-only index stale — reloading from disk");
+            self.reload_from_disk()?;
+            self.last_load_time = disk_mtime;
+            reloaded = true;
         }
+
+        // Background embedding publishes its two vector artifacts after the
+        // lexical generation is already active. Their joint existence is the
+        // completion signal, so attaching vectors does not require an mtime
+        // marker or a corpus-wide lexical reload.
+        reloaded |= self.reload_vector_from_disk();
+        Ok(reloaded)
     }
 
     /// Re-read all persistent state from the `.codixing/` directory.
@@ -79,25 +83,7 @@ impl Engine {
     /// Reloads symbols, chunk metadata, the dependency graph, the vector
     /// index (if present), and refreshes the Tantivy reader.
     fn reload_from_disk(&mut self) -> Result<()> {
-        // Reload symbols: try mmap v2 first, fall back to bitcode v1.
-        if self.store.symbols_v2_path().exists() {
-            match crate::symbols::mmap::MmapSymbolTable::load(&self.store.symbols_v2_path()) {
-                Ok(mmap_table) => {
-                    debug!("reloaded symbols_v2.bin via mmap");
-                    self.symbols = SymbolTable::Mmap(mmap_table);
-                }
-                Err(e) => {
-                    warn!(error = %e, "failed to reload symbols_v2.bin — trying symbols.bin");
-                    if self.store.symbols_path().exists() {
-                        let bytes = self.store.load_symbols_bytes()?;
-                        self.symbols = deserialize_symbols(&bytes)?;
-                    }
-                }
-            }
-        } else if self.store.symbols_path().exists() {
-            let bytes = self.store.load_symbols_bytes()?;
-            self.symbols = deserialize_symbols(&bytes)?;
-        }
+        self.symbols = load_persisted_symbols(&self.store);
 
         // Reload chunk_meta (compact format first, fall back to legacy).
         if self.store.chunk_meta_path().exists() {
@@ -158,27 +144,7 @@ impl Engine {
             }
         };
 
-        // Reload vector index if it exists and we have an embedder.
-        if let Some(ref emb) = self.embedder
-            && VectorIndex::artifacts_exist(
-                &self.store.vector_index_path(),
-                &self.store.file_chunks_path(),
-            )
-        {
-            match VectorIndex::load(
-                &self.store.vector_index_path(),
-                &self.store.file_chunks_path(),
-                emb.dims,
-                self.config.embedding.quantize,
-            ) {
-                Ok(vec_idx) => {
-                    *self.vector.write().unwrap_or_else(|e| e.into_inner()) = Some(vec_idx);
-                }
-                Err(e) => {
-                    warn!(error = %e, "failed to reload vector index");
-                }
-            }
-        }
+        self.reload_vector_from_disk();
 
         // Reset lazy caches so the next access re-reads fresh data from disk.
         self.concept_index = std::sync::OnceLock::new();
@@ -186,5 +152,83 @@ impl Engine {
 
         info!("read-only engine reloaded from disk");
         Ok(())
+    }
+
+    /// Attach a complete vector checkpoint without touching lexical state.
+    ///
+    /// Each atomically published vector generation has its own identity, so a
+    /// resident reader replaces old/empty checkpoints as post-hoc embedding
+    /// progresses. Failures preserve the previous snapshot and are retried on
+    /// a later staleness check.
+    fn reload_vector_from_disk(&mut self) -> bool {
+        let index_path = self.store.vector_index_path();
+        let file_chunks_path = self.store.file_chunks_path();
+        let Some(publication) = crate::vector::publication_token(&index_path, &file_chunks_path)
+        else {
+            return false;
+        };
+        if self.last_vector_publication.as_ref() == Some(&publication) {
+            return false;
+        }
+
+        // `embed_remaining()` can enable embeddings after this engine opened.
+        // Refresh the persisted embedding settings independently of meta.json
+        // before interpreting the new vector checkpoint.
+        let disk_config = match self.store.load_config() {
+            Ok(config) => config,
+            Err(error) => {
+                warn!(%error, "failed to reload embedding config");
+                return false;
+            }
+        };
+        if !disk_config.embedding.enabled {
+            return false;
+        }
+        let disk_embedding = disk_config.embedding;
+        let candidate_embedder = if self.config.embedding.model == disk_embedding.model {
+            self.embedder.clone()
+        } else {
+            None
+        };
+        let candidate_embedder = match candidate_embedder {
+            Some(embedder) => embedder,
+            None => match Embedder::new(&disk_embedding.model) {
+                Ok(embedder) => std::sync::Arc::new(embedder),
+                Err(error) => {
+                    warn!(%error, "failed to load embedding model during read-only reload");
+                    return false;
+                }
+            },
+        };
+        match VectorIndex::load(
+            &index_path,
+            &file_chunks_path,
+            candidate_embedder.dims,
+            disk_embedding.quantize,
+        ) {
+            Ok(vector) => {
+                // Commit the complete model/config/vector snapshot together.
+                // Failed candidate construction above leaves every previously
+                // attached hybrid-search component untouched.
+                self.config.embedding = disk_embedding;
+                self.embedder = Some(candidate_embedder);
+                *self
+                    .vector
+                    .write()
+                    .unwrap_or_else(|error| error.into_inner()) = Some(vector);
+                // If another checkpoint won the race while this one loaded,
+                // leave the token unset so the next check attaches it too.
+                self.last_vector_publication =
+                    (crate::vector::publication_token(&index_path, &file_chunks_path)
+                        == Some(publication.clone()))
+                    .then_some(publication);
+                info!("read-only engine attached completed vector checkpoint");
+                true
+            }
+            Err(error) => {
+                warn!(%error, "failed to reload vector index");
+                false
+            }
+        }
     }
 }

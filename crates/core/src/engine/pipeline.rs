@@ -412,14 +412,10 @@ impl SearchStage for VisibilityBoostStage {
 
         let mut boosted = false;
         for r in results.iter_mut() {
-            // Check if any symbol in this chunk's file+line range is public
-            let symbols = ctx.symbols.filter("", Some(&r.file_path));
-            let has_public = symbols.iter().any(|s| {
-                s.visibility == crate::language::Visibility::Public
-                    && r.line_start <= s.line_start as u64
-                    && (s.line_start as u64) < r.line_end
-            });
-            if has_public {
+            if ctx
+                .symbols
+                .has_public_symbol_in_range(&r.file_path, r.line_start, r.line_end)
+            {
                 r.score *= 1.5;
                 boosted = true;
             }
@@ -453,7 +449,10 @@ impl SearchStage for DefinitionBoostStage {
                     defining_files.insert(sym.file_path);
                 }
             } else {
-                for sym in ctx.symbols.filter(term, None) {
+                // Bound fuzzy fallback to identifier prefixes. Mmap v2 and the
+                // in-memory table both resolve this through sorted secondary
+                // indexes rather than scanning every symbol name per term.
+                for sym in ctx.symbols.lookup_prefix(term) {
                     defining_files.insert(sym.file_path);
                 }
             }

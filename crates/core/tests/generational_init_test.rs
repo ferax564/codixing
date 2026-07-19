@@ -267,6 +267,63 @@ fn long_lived_read_only_engine_reopens_new_active_generation() {
 }
 
 #[test]
+fn fresh_generation_uses_full_fidelity_mmap_without_bitcode_duplicate() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("api.rs"),
+        "/// Full-fidelity mmap documentation.\npub fn public_mmap_api() {}\n",
+    )
+    .unwrap();
+    drop(Engine::init(root, no_embed_config(root)).unwrap());
+
+    let store = IndexStore::open_read_only(root).unwrap();
+    assert!(store.symbols_v2_path().is_file());
+    assert!(!store.symbols_path().exists());
+    drop(store);
+
+    let engine = Engine::open_read_only(root).unwrap();
+    let symbols = engine.symbols("public_mmap_api", None).unwrap();
+    let symbol = symbols
+        .iter()
+        .find(|symbol| symbol.name == "public_mmap_api")
+        .unwrap();
+    assert_eq!(
+        symbol.visibility,
+        codixing_core::language::Visibility::Public
+    );
+    assert!(
+        symbol
+            .doc_comment
+            .as_deref()
+            .is_some_and(|comment| comment.contains("Full-fidelity mmap documentation"))
+    );
+}
+
+#[test]
+fn explicit_read_only_open_does_not_create_session_artifacts() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("lib.rs"), "pub fn read_only_sessions() {}\n").unwrap();
+    drop(Engine::init(root, no_embed_config(root)).unwrap());
+
+    let control_dir = root.join(".codixing");
+    let session_path = control_dir.join("session.json");
+    let shared_session_path = control_dir.join("shared_session.jsonl");
+    for path in [&session_path, &shared_session_path] {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("failed to remove test artifact: {error}"),
+        }
+    }
+
+    drop(Engine::open_read_only(root).unwrap());
+    assert!(!session_path.exists());
+    assert!(!shared_session_path.exists());
+}
+
+#[test]
 fn malformed_generation_manifest_does_not_destroy_open_reader() {
     let dir = tempdir().unwrap();
     let root = dir.path();

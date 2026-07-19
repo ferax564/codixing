@@ -27,7 +27,10 @@ static GENERATION_SEQ: AtomicU64 = AtomicU64::new(0);
 /// This replaces the bare `fs::write` (truncate-then-write) previously used by
 /// every `save_*` helper, which could corrupt `config.json` / `meta.json` /
 /// `graph.bin` / `symbols.bin` into an unloadable state on an ill-timed crash.
-fn atomic_write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+pub(crate) fn atomic_write(
+    path: impl AsRef<Path>,
+    contents: impl AsRef<[u8]>,
+) -> std::io::Result<()> {
     use std::io::Write;
     let path = path.as_ref();
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
@@ -383,6 +386,17 @@ fn remove_generation_if_safe(control_dir: &Path, generation: &str) {
 }
 
 fn acquire_generation_lease(index_dir: &Path) -> Result<fs::File> {
+    // Readers only need an existing handle for a shared advisory lock. Opening
+    // read-only keeps `Engine::open_read_only` usable on immutable mounts and
+    // ensures merely observing an index never creates a lease artifact.
+    let lease = fs::OpenOptions::new()
+        .read(true)
+        .open(index_dir.join(GENERATION_LEASE_FILE))?;
+    FileExt::lock_shared(&lease)?;
+    Ok(lease)
+}
+
+fn acquire_or_create_generation_lease(index_dir: &Path) -> Result<fs::File> {
     let lease = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -576,7 +590,7 @@ impl IndexStore {
             generation_lease: None,
         };
         store.initialize_layout(config)?;
-        store.generation_lease = Some(acquire_generation_lease(&store.index_dir)?);
+        store.generation_lease = Some(acquire_or_create_generation_lease(&store.index_dir)?);
         Ok(store)
     }
 
@@ -613,7 +627,7 @@ impl IndexStore {
         let generation = new_generation_name();
         let index_dir = generations_dir.join(&generation);
         fs::create_dir(&index_dir)?;
-        let generation_lease = acquire_generation_lease(&index_dir)?;
+        let generation_lease = acquire_or_create_generation_lease(&index_dir)?;
 
         let store = Self {
             root: root.to_path_buf(),
@@ -715,7 +729,7 @@ impl IndexStore {
         self.load_meta()?;
 
         let required = [
-            self.symbols_path(),
+            self.symbols_v2_path(),
             self.chunk_meta_path(),
             self.file_trigram_path(),
             self.tree_hashes_v2_path(),
@@ -748,6 +762,17 @@ impl IndexStore {
     /// partial deletion or when an older index format is missing newer
     /// required files, and is the failure mode addressed by `codixing repair`.
     pub fn open(root: &Path) -> Result<Self> {
+        Self::open_with_lease_access(root, true)
+    }
+
+    /// Open an existing index without creating or opening any artifact for
+    /// write access. Generational indexes hold an existing shared lease;
+    /// legacy layouts without a lease remain readable and are never modified.
+    pub fn open_read_only(root: &Path) -> Result<Self> {
+        Self::open_with_lease_access(root, false)
+    }
+
+    fn open_with_lease_access(root: &Path, writable: bool) -> Result<Self> {
         let codixing_dir = root.join(CODEFORGE_DIR);
         if !codixing_dir.is_dir() {
             return Err(CodixingError::IndexNotFound {
@@ -757,8 +782,22 @@ impl IndexStore {
 
         for _ in 0..3 {
             let (index_dir, generation) = resolve_index_dir(root)?;
-            let generation_lease = match acquire_generation_lease(&index_dir) {
+            let lease_result = if writable {
+                acquire_or_create_generation_lease(&index_dir).map(Some)
+            } else {
+                acquire_generation_lease(&index_dir).map(Some)
+            };
+            let generation_lease = match lease_result {
                 Ok(lease) => lease,
+                Err(CodixingError::Io(error))
+                    if !writable
+                        && generation.is_none()
+                        && error.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    // Pre-generation indexes have no lease. A read-only open
+                    // must not create one merely to observe the legacy layout.
+                    None
+                }
                 Err(CodixingError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                     continue;
                 }
@@ -785,7 +824,7 @@ impl IndexStore {
                     index_dir,
                     generation,
                     rebuild_lock: None,
-                    generation_lease: Some(generation_lease),
+                    generation_lease,
                 });
             }
         }
@@ -793,6 +832,16 @@ impl IndexStore {
             "active index generation changed repeatedly while opening; retry the operation"
                 .to_string(),
         ))
+    }
+
+    /// Upgrade a legacy read-only snapshot to a mutation-capable lease only
+    /// after the caller has acquired its writer. Generational snapshots
+    /// already hold an existing shared lease and need no filesystem mutation.
+    pub(crate) fn ensure_generation_lease_for_mutation(&mut self) -> Result<()> {
+        if self.generation_lease.is_none() {
+            self.generation_lease = Some(acquire_or_create_generation_lease(&self.index_dir)?);
+        }
+        Ok(())
     }
 
     /// Inspect a `.codixing/` directory layout without instantiating the engine.
@@ -935,7 +984,7 @@ impl IndexStore {
         FileExt::lock_exclusive(&rebuild_lock)?;
         let (index_dir, generation) = resolve_index_dir(root)?;
 
-        let generation_lease = Some(acquire_generation_lease(&index_dir)?);
+        let generation_lease = Some(acquire_or_create_generation_lease(&index_dir)?);
         let store = Self {
             root: root.to_path_buf(),
             index_dir,
@@ -1587,6 +1636,21 @@ mod tests {
         let store = IndexStore::open(root).unwrap();
 
         assert!(store.codixing_dir().is_dir());
+    }
+
+    #[test]
+    fn legacy_read_only_open_does_not_create_generation_lease() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let config = IndexConfig::new(root);
+        drop(IndexStore::init(root, &config).unwrap());
+        let lease_path = root.join(CODEFORGE_DIR).join(GENERATION_LEASE_FILE);
+        fs::remove_file(&lease_path).unwrap();
+
+        let mut store = IndexStore::open_read_only(root).unwrap();
+        assert!(!lease_path.exists());
+        store.ensure_generation_lease_for_mutation().unwrap();
+        assert!(lease_path.is_file());
     }
 
     #[test]

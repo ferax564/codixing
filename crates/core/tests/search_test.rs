@@ -348,6 +348,37 @@ fn search_with_progress_reports_bm25_phase() {
 }
 
 #[test]
+fn search_with_progress_returns_actual_exact_results() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    common::setup_multi_language_project(root);
+
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
+    let query = SearchQuery::new("add")
+        .with_limit(10)
+        .with_strategy(Strategy::Exact);
+    let expected = engine.search(query.clone()).unwrap();
+
+    let phases = Mutex::new(Vec::new());
+    let results = engine
+        .search_with_progress(query, |phase, partial| {
+            phases
+                .lock()
+                .unwrap()
+                .push((phase.to_string(), partial.len()));
+        })
+        .unwrap();
+
+    let result_ids: Vec<_> = results.iter().map(|result| &result.chunk_id).collect();
+    let expected_ids: Vec<_> = expected.iter().map(|result| &result.chunk_id).collect();
+    assert_eq!(result_ids, expected_ids);
+    let phases = phases.into_inner().unwrap();
+    assert_eq!(phases[0].0, "bm25");
+    assert_eq!(phases[1].0, "exact");
+    assert_eq!(phases[1].1, expected.len());
+}
+
+#[test]
 fn search_with_progress_reports_fused_phase_for_fast() {
     let dir = tempdir().unwrap();
     let root = dir.path();

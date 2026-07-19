@@ -25,7 +25,7 @@ use crate::retriever::{ChunkMeta, ChunkMetaCompact};
 use crate::session::SessionState;
 use crate::shared_session::SharedSession;
 use crate::symbols::SymbolTable;
-use crate::symbols::persistence::{deserialize_symbols, serialize_symbols};
+use crate::symbols::persistence::deserialize_symbols;
 use crate::symbols::writer::write_mmap_symbols;
 use crate::vector::VectorIndex;
 
@@ -56,6 +56,50 @@ where
         }
         Err(error) => Err(error),
     }
+}
+
+pub(super) fn load_persisted_symbols(store: &IndexStore) -> SymbolTable {
+    if store.symbols_v2_path().exists() {
+        match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path()) {
+            Ok(mmap_table) if mmap_table.preserves_full_fidelity() => {
+                debug!("loaded full-fidelity symbols_v2.bin via mmap (read-only)");
+                return SymbolTable::Mmap(mmap_table);
+            }
+            Ok(mmap_table) => {
+                if !store.symbols_path().exists() {
+                    warn!(
+                        "legacy symbols_v2.bin has no full-fidelity symbols.bin fallback; using compatible reduced metadata"
+                    );
+                    return SymbolTable::Mmap(mmap_table);
+                }
+                debug!("legacy mmap symbols require full-fidelity symbols.bin fallback");
+            }
+            Err(error) => {
+                warn!(%error, "failed to load symbols_v2.bin; trying symbols.bin");
+            }
+        }
+    }
+
+    if store.symbols_path().exists() {
+        match store
+            .load_symbols_bytes()
+            .and_then(|bytes| deserialize_symbols(&bytes))
+        {
+            Ok(table) => return table,
+            Err(error) => warn!(%error, "failed to load symbols.bin"),
+        }
+    }
+
+    SymbolTable::new()
+}
+
+pub(super) fn persisted_meta_mtime(store: &IndexStore) -> Option<std::time::SystemTime> {
+    store
+        .codixing_dir()
+        .join("meta.json")
+        .metadata()
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
 }
 
 impl Engine {
@@ -234,11 +278,9 @@ impl Engine {
             })
             .unwrap_or((0, 0));
 
-        // Persist everything.
-        let sym_bytes = serialize_symbols(&symbols)?;
-        store.save_symbols_bytes(&sym_bytes)?;
-
-        // Also write the mmap-format v2 for zero-deserialization open().
+        // Persist symbols once in the full-fidelity mmap format. Current
+        // readers still accept legacy symbols.bin, but fresh generations do
+        // not pay twice for the same corpus-sized data.
         if let Some(in_mem) = symbols.as_in_memory() {
             write_mmap_symbols(in_mem, &store.symbols_v2_path())?;
         }
@@ -476,8 +518,10 @@ impl Engine {
             None
         };
 
+        let shared_session_path = store.control_dir().join("shared_session.jsonl");
         let session = Arc::new(SessionState::with_root(true, &root));
         session.cleanup_old_sessions();
+        let shared_session = SharedSession::with_persistence_or_default(&shared_session_path);
 
         // The freshly-built auxiliary index has already been persisted.
         // Release its construction-time HashMaps and let the lazy loader
@@ -488,8 +532,6 @@ impl Engine {
         let filter_pipeline = FilterPipeline::load(&store.control_dir());
         filter_pipeline.clear();
 
-        let shared_session_path = store.control_dir().join("shared_session.jsonl");
-
         Ok(Self {
             config,
             store,
@@ -498,6 +540,7 @@ impl Engine {
             symbols,
             file_chunk_counts,
             embedder,
+            last_vector_publication: None,
             vector: vector_arc,
             chunk_meta: chunk_meta_arc,
             graph,
@@ -505,7 +548,7 @@ impl Engine {
             reformulations: std::sync::OnceLock::new(),
             reranker,
             session,
-            shared_session: SharedSession::with_persistence_or_default(&shared_session_path),
+            shared_session,
             read_only: false,
             file_trigram,
             recency_map: std::sync::OnceLock::new(),
@@ -545,7 +588,10 @@ impl Engine {
             .canonicalize()
             .map_err(|e| CodixingError::Config(format!("cannot resolve root path: {e}")))?;
 
-        let store = IndexStore::open(&root)?;
+        // Resolve and lease the active snapshot without creating anything.
+        // Legacy indexes are upgraded to a mutation lease only after Tantivy's
+        // writer lock is actually acquired below.
+        let mut store = IndexStore::open_read_only(&root)?;
         let mut config = store.load_config()?;
         // The persisted root may be stale (index dir moved/cloned) or
         // non-canonical (symlinked path at init time); the canonical open
@@ -604,48 +650,11 @@ impl Engine {
             }
         };
 
-        // Restore symbols: prefer bitcode symbols.bin (preserves all fields
-        // including doc_comment, visibility, type_relations) over mmap
-        // symbols_v2.bin (which doesn't persist those fields).
-        let symbols = if store.symbols_path().exists() {
-            match store
-                .load_symbols_bytes()
-                .and_then(|b| deserialize_symbols(&b))
-            {
-                Ok(table) => {
-                    debug!("loaded symbols.bin via bitcode (full-fidelity)");
-                    table
-                }
-                Err(e) => {
-                    warn!(error = %e, "failed to load symbols.bin — falling back to symbols_v2.bin");
-                    if store.symbols_v2_path().exists() {
-                        match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path())
-                        {
-                            Ok(mmap_table) => SymbolTable::Mmap(mmap_table),
-                            Err(e2) => {
-                                warn!(error = %e2, "failed to load symbols_v2.bin too");
-                                SymbolTable::new()
-                            }
-                        }
-                    } else {
-                        SymbolTable::new()
-                    }
-                }
-            }
-        } else if store.symbols_v2_path().exists() {
-            match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path()) {
-                Ok(mmap_table) => {
-                    debug!("loaded symbols_v2.bin via mmap (no symbols.bin available)");
-                    SymbolTable::Mmap(mmap_table)
-                }
-                Err(e) => {
-                    warn!(error = %e, "failed to load symbols_v2.bin");
-                    SymbolTable::new()
-                }
-            }
-        } else {
-            SymbolTable::new()
-        };
+        if !read_only {
+            store.ensure_generation_lease_for_mutation()?;
+        }
+
+        let symbols = load_persisted_symbols(&store);
 
         let parser = Parser::new();
         let meta = store.load_meta()?;
@@ -750,25 +759,34 @@ impl Engine {
             None
         };
 
-        let session = Arc::new(SessionState::with_root(true, &root));
-        session.cleanup_old_sessions();
+        let shared_session_path = store.control_dir().join("shared_session.jsonl");
+        let (session, shared_session) = if read_only {
+            (
+                Arc::new(SessionState::with_root_read_only(true, &root)),
+                SharedSession::from_persistence_read_only(&shared_session_path),
+            )
+        } else {
+            let session = Arc::new(SessionState::with_root(true, &root));
+            session.cleanup_old_sessions();
+            (
+                session,
+                SharedSession::with_persistence_or_default(&shared_session_path),
+            )
+        };
 
         if read_only {
             info!("engine opened in read-only mode — search works, writes disabled");
         }
 
-        // Record the on-disk mtime of meta.json for read-only staleness detection.
-        let meta_mtime = store
-            .codixing_dir()
-            .join("meta.json")
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok());
+        // Record the lexical publication mtime for read-only staleness detection.
+        let meta_mtime = persisted_meta_mtime(&store);
 
         // The shared file trigram is lazy-loaded on first grep/exact search.
         let file_trigram = std::sync::OnceLock::new();
         let filter_pipeline = FilterPipeline::load(&store.control_dir());
-        let shared_session_path = store.control_dir().join("shared_session.jsonl");
+        let last_vector_publication = vector.as_ref().and_then(|_| {
+            crate::vector::publication_token(&store.vector_index_path(), &store.file_chunks_path())
+        });
 
         Ok(Self {
             config,
@@ -778,6 +796,7 @@ impl Engine {
             symbols,
             file_chunk_counts,
             embedder,
+            last_vector_publication,
             vector: Arc::new(RwLock::new(vector)),
             chunk_meta: Arc::new(chunk_meta),
             graph,
@@ -785,7 +804,7 @@ impl Engine {
             reformulations,
             reranker,
             session,
-            shared_session: SharedSession::with_persistence_or_default(&shared_session_path),
+            shared_session,
             read_only,
             file_trigram,
             recency_map: std::sync::OnceLock::new(),
@@ -810,7 +829,7 @@ impl Engine {
             .canonicalize()
             .map_err(|e| CodixingError::Config(format!("cannot resolve root path: {e}")))?;
 
-        let store = IndexStore::open(&root)?;
+        let store = IndexStore::open_read_only(&root)?;
         let mut config = store.load_config()?;
         // Same canonicalization rule as open(): the canonical root is the truth.
         config.root = root.clone();
@@ -818,48 +837,9 @@ impl Engine {
             TantivyIndex::open_read_only_with_config(&store.tantivy_dir(), config.bm25.clone())
         })?;
 
-        // Restore symbols: prefer bitcode symbols.bin (preserves all fields
-        // including doc_comment, visibility, type_relations) over mmap
-        // symbols_v2.bin (which doesn't persist those fields).
-        let symbols = if store.symbols_path().exists() {
-            match store
-                .load_symbols_bytes()
-                .and_then(|b| deserialize_symbols(&b))
-            {
-                Ok(table) => {
-                    debug!("loaded symbols.bin via bitcode (full-fidelity, read-only)");
-                    table
-                }
-                Err(e) => {
-                    warn!(error = %e, "failed to load symbols.bin — falling back to symbols_v2.bin (read-only)");
-                    if store.symbols_v2_path().exists() {
-                        match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path())
-                        {
-                            Ok(mmap_table) => SymbolTable::Mmap(mmap_table),
-                            Err(e2) => {
-                                warn!(error = %e2, "failed to load symbols_v2.bin too");
-                                SymbolTable::new()
-                            }
-                        }
-                    } else {
-                        SymbolTable::new()
-                    }
-                }
-            }
-        } else if store.symbols_v2_path().exists() {
-            match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path()) {
-                Ok(mmap_table) => {
-                    debug!("loaded symbols_v2.bin via mmap (no symbols.bin available, read-only)");
-                    SymbolTable::Mmap(mmap_table)
-                }
-                Err(e) => {
-                    warn!(error = %e, "failed to load symbols_v2.bin");
-                    SymbolTable::new()
-                }
-            }
-        } else {
-            SymbolTable::new()
-        };
+        // New indexes use the full-fidelity mmap format. Legacy mmap files fall
+        // back to bitcode when available so compatibility never drops fields.
+        let symbols = load_persisted_symbols(&store);
 
         let parser = Parser::new();
         let meta = store.load_meta()?;
@@ -963,20 +943,18 @@ impl Engine {
             None
         };
 
-        let session = Arc::new(SessionState::with_root(true, &root));
-        session.cleanup_old_sessions();
+        // Replay persisted ranking context without attaching any writers.
+        let session = Arc::new(SessionState::with_root_read_only(true, &root));
 
         // Record the on-disk mtime of meta.json for read-only staleness detection.
-        let meta_mtime = store
-            .codixing_dir()
-            .join("meta.json")
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok());
+        let meta_mtime = persisted_meta_mtime(&store);
 
         // The shared file trigram is lazy-loaded on first grep/exact search.
         let filter_pipeline = FilterPipeline::load(&store.control_dir());
         let shared_session_path = store.control_dir().join("shared_session.jsonl");
+        let last_vector_publication = vector.as_ref().and_then(|_| {
+            crate::vector::publication_token(&store.vector_index_path(), &store.file_chunks_path())
+        });
 
         Ok(Self {
             config,
@@ -986,6 +964,7 @@ impl Engine {
             symbols,
             file_chunk_counts,
             embedder,
+            last_vector_publication,
             vector: Arc::new(RwLock::new(vector)),
             chunk_meta: Arc::new(chunk_meta),
             graph,
@@ -993,7 +972,7 @@ impl Engine {
             reformulations,
             reranker,
             session,
-            shared_session: SharedSession::with_persistence_or_default(&shared_session_path),
+            shared_session: SharedSession::from_persistence_read_only(&shared_session_path),
             read_only: true,
             file_trigram: std::sync::OnceLock::new(),
             recency_map: std::sync::OnceLock::new(),

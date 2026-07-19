@@ -335,6 +335,48 @@ fn artifacts_exist(index_path: &Path, file_chunks_path: &Path) -> bool {
     index_path.is_file() && file_chunks_path.is_file()
 }
 
+/// Stable identity for the newest complete vector publication.
+///
+/// Generation manifests have monotonic names and are published only after both
+/// vector artifacts are durable. Legacy in-place artifacts fall back to a
+/// metadata fingerprint so long-lived readers can still notice replacements.
+pub(crate) fn publication_token(index_path: &Path, file_chunks_path: &Path) -> Option<String> {
+    if artifact_parent(index_path, file_chunks_path).is_err() {
+        return None;
+    }
+    if let Ok(paths) = manifest_paths(index_path) {
+        for manifest_path in paths {
+            if let Ok(artifacts) = resolve_manifest(index_path, &manifest_path)
+                && artifacts.index_path.is_file()
+                && artifacts.file_chunks_path.is_file()
+            {
+                return artifacts
+                    .manifest_path
+                    .file_name()
+                    .map(|name| format!("generation:{}", name.to_string_lossy()));
+            }
+        }
+    }
+
+    let index_metadata = fs::metadata(index_path).ok()?;
+    let file_chunks_metadata = fs::metadata(file_chunks_path).ok()?;
+    let modified_nanos = |metadata: &fs::Metadata| {
+        metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default()
+    };
+    Some(format!(
+        "legacy:{}:{}:{}:{}",
+        index_metadata.len(),
+        modified_nanos(&index_metadata),
+        file_chunks_metadata.len(),
+        modified_nanos(&file_chunks_metadata)
+    ))
+}
+
 fn publication_cleanup_snapshot(
     index_path: &Path,
     file_chunks_path: &Path,
@@ -1135,6 +1177,30 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         let results = loaded.search(&unit_vec(4, 0), 1).unwrap();
         assert_eq!(results[0].0, 42);
+    }
+
+    #[test]
+    fn publication_token_changes_for_each_complete_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let idx_path = dir.path().join("checkpoint.usearch");
+        let fc_path = dir.path().join("checkpoint_file_chunks.bin");
+        let mut idx = VectorIndex::new(4, false).unwrap();
+
+        idx.add_mut(1, &unit_vec(4, 0), "a.rs").unwrap();
+        idx.save(&idx_path, &fc_path).unwrap();
+        let first = publication_token(&idx_path, &fc_path).unwrap();
+
+        idx.add_mut(2, &unit_vec(4, 1), "b.rs").unwrap();
+        idx.save(&idx_path, &fc_path).unwrap();
+        let second = publication_token(&idx_path, &fc_path).unwrap();
+
+        assert_ne!(first, second);
+        assert_eq!(
+            VectorIndex::load(&idx_path, &fc_path, 4, false)
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]

@@ -514,11 +514,13 @@ impl Engine {
     ///
     /// Phase names reported:
     /// - `"bm25"` — BM25-only results (always reported first)
+    /// - `"exact"` — trigram-backed exact results (for `Exact` only)
     /// - `"fused"` — hybrid BM25 + vector results (for `Fast`/`Thorough`/`Deep`)
     /// - `"reranked"` — cross-encoder re-ranked results (for `Deep` only)
     ///
-    /// For `Instant` strategy only the `"bm25"` phase fires and the returned
-    /// results are identical to [`search()`](Self::search).
+    /// For `Instant` only the `"bm25"` phase fires. `Exact` reports the BM25
+    /// preview followed by `"exact"`; every returned result set is identical
+    /// to [`search()`](Self::search) for the requested strategy.
     pub fn search_with_progress<F>(
         &self,
         query: SearchQuery,
@@ -538,9 +540,17 @@ impl Engine {
         let bm25_results = self.search(bm25_query)?;
         on_progress("bm25", &bm25_results);
 
-        // For Instant/Exact, BM25 is the only phase — return directly.
-        if strategy == Strategy::Instant || strategy == Strategy::Exact {
+        if strategy == Strategy::Instant {
             return Ok(bm25_results);
+        }
+
+        // Exact has its own trigram-backed semantics. Preserve the quick BM25
+        // preview, then return the actual exact result set instead of silently
+        // substituting the preview.
+        if strategy == Strategy::Exact {
+            let exact_results = self.search(query)?;
+            on_progress("exact", &exact_results);
+            return Ok(exact_results);
         }
 
         // Phase 2+: run the full strategy which internally performs BM25 again
@@ -690,8 +700,8 @@ impl Engine {
                     defining_files.insert(sym.file_path);
                 }
             } else {
-                // Case-insensitive substring fallback (e.g. "indexconfig" → IndexConfig).
-                for sym in self.symbols.filter(term, None) {
+                // Case-insensitive identifier-prefix fallback.
+                for sym in self.symbols.lookup_prefix(term) {
                     defining_files.insert(sym.file_path);
                 }
             }

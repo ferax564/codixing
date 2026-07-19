@@ -14,7 +14,6 @@ use crate::graph::{CallExtractor, ImportExtractor, ImportResolver, compute_pager
 use crate::language::detect_language;
 use crate::persistence::{FileHashEntry, IndexMeta};
 use crate::retriever::ChunkMeta;
-use crate::symbols::persistence::serialize_symbols;
 use crate::symbols::writer::write_mmap_symbols;
 use crate::vector::VectorIndex;
 
@@ -2381,12 +2380,22 @@ impl Engine {
         if self.read_only {
             return Err(CodixingError::ReadOnly);
         }
-        let sym_bytes = serialize_symbols(&self.symbols)?;
-        self.store.save_symbols_bytes(&sym_bytes)?;
-
-        // Also write mmap-format v2 for zero-deserialization open().
+        // Full-fidelity mmap is the sole current symbol artifact. A legacy
+        // symbols.bin remains readable until the first successful mutation,
+        // then is removed only after its v2 replacement is durable.
         if let Some(in_mem) = self.symbols.as_in_memory() {
             write_mmap_symbols(in_mem, &self.store.symbols_v2_path())?;
+            match std::fs::remove_file(self.store.symbols_path()) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    warn!(
+                        %error,
+                        path = %self.store.symbols_path().display(),
+                        "full-fidelity mmap symbols were saved but legacy symbols.bin could not be removed"
+                    );
+                }
+            }
         }
 
         // Persist chunk_meta in compact format (without content).

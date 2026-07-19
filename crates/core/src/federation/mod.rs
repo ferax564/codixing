@@ -218,6 +218,24 @@ impl FederatedEngine {
             if !self.ensure_loaded(slot_index) {
                 return None;
             }
+
+            // Resident readers otherwise pin the generation that was active at
+            // first use forever. The engine performs its own cheap rate limit;
+            // release the write guard before the actual query so concurrent
+            // federation searches still share the resident snapshot.
+            {
+                let mut guard = slot.engine.write().unwrap_or_else(|e| e.into_inner());
+                if let Some(engine) = guard.as_mut()
+                    && let Err(error) = engine.reload_if_stale()
+                {
+                    warn!(
+                        project = %slot.name,
+                        root = %slot.root.display(),
+                        %error,
+                        "federation: failed to refresh resident project; using current snapshot"
+                    );
+                }
+            }
             let guard = slot.engine.read().unwrap_or_else(|e| e.into_inner());
             return guard.as_ref().map(f);
         }
@@ -618,6 +636,53 @@ mod tests {
     #[test]
     fn lazy_federation_member_does_not_hold_writer_lock() {
         assert_federation_member_does_not_hold_writer(true);
+    }
+
+    #[test]
+    fn resident_federation_refreshes_after_generation_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let source = root.join("federated.rs");
+        std::fs::write(&source, "pub fn old_federation_generation() {}\n").unwrap();
+
+        let mut index_config = IndexConfig::new(&root);
+        index_config.embedding.enabled = false;
+        drop(Engine::init(&root, index_config.clone()).unwrap());
+
+        let federation = FederatedEngine::new(FederationConfig {
+            projects: vec![ProjectEntry {
+                root: root.clone(),
+                weight: 1.0,
+            }],
+            rrf_k: 60.0,
+            lazy_load: true,
+            max_resident: 1,
+        })
+        .unwrap();
+        assert!(
+            !federation
+                .search(SearchQuery::new("old_federation_generation"))
+                .unwrap()
+                .is_empty()
+        );
+        {
+            let mut guard = federation.slots[0]
+                .engine
+                .write()
+                .unwrap_or_else(|error| error.into_inner());
+            guard
+                .as_mut()
+                .unwrap()
+                .set_reload_interval(std::time::Duration::ZERO);
+        }
+
+        std::fs::write(&source, "pub fn new_federation_generation() {}\n").unwrap();
+        drop(Engine::init(&root, index_config).unwrap());
+
+        let refreshed = federation
+            .search(SearchQuery::new("new_federation_generation"))
+            .unwrap();
+        assert!(!refreshed.is_empty());
     }
 
     #[test]

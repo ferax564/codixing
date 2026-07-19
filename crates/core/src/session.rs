@@ -118,6 +118,19 @@ impl SessionState {
         state
     }
 
+    /// Restore persisted context without attaching a persistence root.
+    ///
+    /// The returned session can rank and record in memory, but `flush` and
+    /// cleanup remain no-ops and even an expired persisted session is left
+    /// untouched on disk.
+    pub fn with_root_read_only(enabled: bool, root: &Path) -> Self {
+        let mut state = Self::new(enabled);
+        if enabled {
+            state.try_restore_from(root, false);
+        }
+        state
+    }
+
     /// Whether session tracking is enabled.
     pub fn is_enabled(&self) -> bool {
         self.enabled
@@ -599,7 +612,13 @@ impl SessionState {
 
     /// Try to restore session from persisted state.
     fn try_restore(&mut self) {
-        let Some(root) = &self.root else { return };
+        let Some(root) = self.root.clone() else {
+            return;
+        };
+        self.try_restore_from(&root, true);
+    }
+
+    fn try_restore_from(&mut self, root: &Path, delete_expired: bool) {
         let session_file = root.join(".codixing/session.json");
 
         if !session_file.exists() {
@@ -631,7 +650,9 @@ impl SessionState {
                 age_hours = age.as_secs() / 3600,
                 "session too old to restore, starting fresh"
             );
-            std::fs::remove_file(&session_file).ok();
+            if delete_expired {
+                std::fs::remove_file(&session_file).ok();
+            }
             return;
         }
 
@@ -772,6 +793,26 @@ pub const GRAPH_HOP_2_DAMPING: f32 = HOP_2_DAMPING;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_only_restore_does_not_delete_expired_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let control_dir = dir.path().join(".codixing");
+        std::fs::create_dir(&control_dir).unwrap();
+        let session_path = control_dir.join("session.json");
+        let persisted = SessionPersist {
+            session_id: "expired".to_string(),
+            created_at: SystemTime::now() - Duration::from_secs(3 * 60 * 60),
+            events: Vec::new(),
+        };
+        std::fs::write(&session_path, serde_json::to_vec(&persisted).unwrap()).unwrap();
+
+        let session = SessionState::with_root_read_only(true, dir.path());
+        assert_eq!(session.event_count(), 0);
+        session.flush();
+        drop(session);
+        assert!(session_path.is_file());
+    }
 
     #[test]
     fn test_record_and_recent_files() {

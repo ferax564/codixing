@@ -372,6 +372,10 @@ pub struct Engine {
     recency_map: std::sync::OnceLock<std::collections::HashMap<String, i64>>,
     /// When this engine was last loaded/reloaded from disk (mtime of `meta.json`).
     last_load_time: Option<std::time::SystemTime>,
+    /// Identity of the vector generation currently attached to this engine.
+    /// Tracked independently from `meta.json` because background/post-hoc
+    /// embedding publishes multiple vector-only checkpoints.
+    last_vector_publication: Option<String>,
     /// Minimum interval between reload checks (default: 30s).
     reload_interval: std::time::Duration,
     /// Last time we checked for staleness.
