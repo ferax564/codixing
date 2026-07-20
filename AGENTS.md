@@ -30,6 +30,11 @@ codixing types Engine               # type relationships
 codixing examples add_chunk         # usage examples from tests + callers
 codixing context src/engine/mod.rs  # cross-file context assembly
 codixing agent-context-pack "task"  # stable JSON context pack for agents
+codixing ask "task"                 # recommended agent entrypoint (context pack)
+codixing symbols Widget --defs-only # definitions only (no Import rows)
+codixing impact path --full         # full blast radius (default is compact)
+codixing doctor --fix-path          # PATH binary version gate
+codixing bench-tokens               # token-savings harness vs grep+read
 ```
 
 The MCP server is also available when connected to an editor, but the CLI is preferred — it's simpler, works for subagents, and dogfoods the search quality directly.
@@ -51,8 +56,10 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 - **Type relationships for a symbol** → `codixing types <name>`
 - **Usage examples for a symbol** → `codixing examples <name>` (tests + callers + doc blocks)
 - **Cross-file context for understanding** → `codixing context <file> --line N`
-- **Task-local agent context pack** → `codixing agent-context-pack "<task>" --mode edit`
-- **Architecture overview** → `codixing graph --map`
+- **Task-local agent context pack** → `codixing ask "<task>"` or `agent-context-pack "<task>" --mode edit`
+- **Finding a definition** → `codixing search Name --strategy goto` or `symbols Name --defs-only`
+- **Architecture overview** → `codixing graph --map --token-budget 1500`
+- **Token-savings proof** → `codixing bench-tokens`
 - **Test coverage discovery** → `codixing search "test <name>"`
 - **Index freshness / stale files** → `codixing audit`
 - **Incremental re-index after changes** → `codixing sync`

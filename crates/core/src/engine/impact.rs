@@ -28,6 +28,136 @@ pub struct ChangeImpact {
     pub blast_radius: usize,
 }
 
+/// How much of a [`ChangeImpact`] to render as agent-facing text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImpactDetail {
+    /// Top-N lists + counts (token-efficient default for agents).
+    #[default]
+    Compact,
+    /// Full dependent/test lists.
+    Full,
+}
+
+/// Format a [`ChangeImpact`] for CLI/MCP output.
+///
+/// Compact mode keeps the blast-radius signal while avoiding multi-thousand-token
+/// dumps on hub files (e.g. `engine/mod.rs` with 200+ transitive dependents).
+pub fn format_change_impact(impact: &ChangeImpact, detail: ImpactDetail) -> String {
+    const COMPACT_DIRECT: usize = 15;
+    const COMPACT_TRANSITIVE: usize = 10;
+    const COMPACT_TESTS: usize = 12;
+
+    let mut out = format!(
+        "# Change Impact: {}\n\nBlast radius: {} files\n\n",
+        impact.file_path, impact.blast_radius
+    );
+
+    match detail {
+        ImpactDetail::Full => {
+            out.push_str(&format!(
+                "## Direct dependents ({}):\n",
+                impact.direct_dependents.len()
+            ));
+            if impact.direct_dependents.is_empty() {
+                out.push_str("  (none)\n\n");
+            } else {
+                for d in &impact.direct_dependents {
+                    out.push_str(&format!("  {d}\n"));
+                }
+                out.push('\n');
+            }
+
+            out.push_str(&format!(
+                "## Transitive dependents ({}):\n",
+                impact.transitive_dependents.len()
+            ));
+            if impact.transitive_dependents.is_empty() {
+                out.push_str("  (none)\n\n");
+            } else {
+                for t in &impact.transitive_dependents {
+                    out.push_str(&format!("  {t}\n"));
+                }
+                out.push('\n');
+            }
+
+            out.push_str(&format!(
+                "## Affected tests ({}):\n",
+                impact.affected_tests.len()
+            ));
+            if impact.affected_tests.is_empty() {
+                out.push_str("  (none)\n");
+            } else {
+                for t in &impact.affected_tests {
+                    out.push_str(&format!("  {t}\n"));
+                }
+            }
+        }
+        ImpactDetail::Compact => {
+            out.push_str(&format!(
+                "## Direct dependents ({}, showing up to {COMPACT_DIRECT}):\n",
+                impact.direct_dependents.len()
+            ));
+            if impact.direct_dependents.is_empty() {
+                out.push_str("  (none)\n\n");
+            } else {
+                for d in impact.direct_dependents.iter().take(COMPACT_DIRECT) {
+                    out.push_str(&format!("  {d}\n"));
+                }
+                if impact.direct_dependents.len() > COMPACT_DIRECT {
+                    out.push_str(&format!(
+                        "  … +{} more (pass --full for complete list)\n",
+                        impact.direct_dependents.len() - COMPACT_DIRECT
+                    ));
+                }
+                out.push('\n');
+            }
+
+            out.push_str(&format!(
+                "## Transitive dependents: {} total",
+                impact.transitive_dependents.len()
+            ));
+            if impact.transitive_dependents.is_empty() {
+                out.push_str("\n\n");
+            } else {
+                out.push_str(&format!(" (showing up to {COMPACT_TRANSITIVE}):\n"));
+                for t in impact.transitive_dependents.iter().take(COMPACT_TRANSITIVE) {
+                    out.push_str(&format!("  {t}\n"));
+                }
+                if impact.transitive_dependents.len() > COMPACT_TRANSITIVE {
+                    out.push_str(&format!(
+                        "  … +{} more (pass --full for complete list)\n",
+                        impact.transitive_dependents.len() - COMPACT_TRANSITIVE
+                    ));
+                }
+                out.push('\n');
+            }
+
+            out.push_str(&format!(
+                "## Affected tests ({}, showing up to {COMPACT_TESTS}):\n",
+                impact.affected_tests.len()
+            ));
+            if impact.affected_tests.is_empty() {
+                out.push_str("  (none)\n");
+            } else {
+                for t in impact.affected_tests.iter().take(COMPACT_TESTS) {
+                    out.push_str(&format!("  {t}\n"));
+                }
+                if impact.affected_tests.len() > COMPACT_TESTS {
+                    out.push_str(&format!(
+                        "  … +{} more (pass --full for complete list)\n",
+                        impact.affected_tests.len() - COMPACT_TESTS
+                    ));
+                }
+            }
+            out.push_str(
+                "\nTip: use `impact --full` or MCP `change_impact` with `full=true` for the complete list.\n",
+            );
+        }
+    }
+
+    out
+}
+
 /// Compute the change impact for `file_path` using the dependency graph.
 ///
 /// `all_files` is used for test-mapping discovery. When `None`, test discovery
@@ -201,6 +331,25 @@ mod tests {
         // Changing D: C imports D, so C is a direct dependent.
         let impact = compute_change_impact(&g, "src/d.rs", None);
         assert_eq!(impact.direct_dependents, vec!["src/c.rs".to_string()]);
+    }
+
+    #[test]
+    fn format_change_impact_compact_truncates_long_lists() {
+        let impact = ChangeImpact {
+            file_path: "src/hub.rs".into(),
+            direct_dependents: (0..40).map(|i| format!("src/d{i}.rs")).collect(),
+            transitive_dependents: (0..100).map(|i| format!("src/t{i}.rs")).collect(),
+            affected_tests: (0..30).map(|i| format!("tests/t{i}.rs")).collect(),
+            blast_radius: 170,
+        };
+        let compact = format_change_impact(&impact, ImpactDetail::Compact);
+        assert!(compact.contains("Blast radius: 170"));
+        assert!(compact.contains("showing up to"));
+        assert!(compact.contains("… +"));
+        assert!(!compact.contains("src/t99.rs")); // truncated away
+        let full = format_change_impact(&impact, ImpactDetail::Full);
+        assert!(full.contains("src/t99.rs"));
+        assert!(compact.len() < full.len());
     }
 
     #[test]

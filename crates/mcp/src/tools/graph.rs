@@ -80,9 +80,14 @@ fn filter_ranked_files_by_pattern(
 }
 
 pub(crate) fn call_get_references(engine: &Engine, args: &Value) -> (String, bool) {
-    let file = match args.get("file").and_then(|v| v.as_str()) {
-        Some(f) => f.to_string(),
-        None => return ("Missing required argument: file".to_string(), true),
+    let file = match super::arg_file_or_path(args) {
+        Some(f) => f,
+        None => {
+            return (
+                "Missing required argument: file (or path)".to_string(),
+                true,
+            );
+        }
     };
 
     let callers = engine.callers(&file);
@@ -112,9 +117,14 @@ pub(crate) fn call_get_references(engine: &Engine, args: &Value) -> (String, boo
 }
 
 pub(crate) fn call_get_transitive_deps(engine: &Engine, args: &Value) -> (String, bool) {
-    let file = match args.get("file").and_then(|v| v.as_str()) {
-        Some(f) => f.to_string(),
-        None => return ("Missing required argument: file".to_string(), true),
+    let file = match super::arg_file_or_path(args) {
+        Some(f) => f,
+        None => {
+            return (
+                "Missing required argument: file (or path)".to_string(),
+                true,
+            );
+        }
     };
     let depth = requested_traversal_depth(args, "depth", 3);
 
@@ -157,10 +167,34 @@ pub(crate) fn call_get_repo_map(engine: &Engine, args: &Value) -> (String, bool)
 }
 
 pub(crate) fn repo_map_options(args: &Value) -> RepoMapOptions {
-    RepoMapOptions {
+    let mut options = RepoMapOptions {
         token_budget: requested_tool_token_budget(args),
         ..RepoMapOptions::default()
+    };
+
+    // Task-local focus: pin known files near the top of the map.
+    if let Some(arr) = args.get("focus_files").and_then(|v| v.as_array()) {
+        options.focus_files = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+    } else if let Some(file) = args
+        .get("focus_file")
+        .or_else(|| args.get("file"))
+        .or_else(|| args.get("path"))
+        .and_then(|v| v.as_str())
+    {
+        options.focus_files = vec![file.to_string()];
     }
+
+    if let Some(v) = args.get("include_imports").and_then(|v| v.as_bool()) {
+        options.include_imports = v;
+    }
+    if let Some(v) = args.get("prefer_implementation").and_then(|v| v.as_bool()) {
+        options.prefer_implementation = v;
+    }
+
+    options
 }
 
 pub(crate) fn call_symbol_callers(engine: &Engine, args: &Value) -> (String, bool) {
@@ -263,9 +297,14 @@ pub(crate) fn call_symbol_callees(engine: &Engine, args: &Value) -> (String, boo
 /// deliberately contains only file paths (no markdown) so that the CLI can
 /// print the lines directly and match in-process output.
 pub(crate) fn call_file_callers(engine: &Engine, args: &Value) -> (String, bool) {
-    let path = match args.get("path").and_then(|v| v.as_str()) {
-        Some(p) => p.to_string(),
-        None => return ("Missing required argument: path".to_string(), true),
+    let path = match super::arg_file_or_path(args) {
+        Some(p) => p,
+        None => {
+            return (
+                "Missing required argument: path (or file)".to_string(),
+                true,
+            );
+        }
     };
 
     let callers = engine.callers(&path);
@@ -281,9 +320,14 @@ pub(crate) fn call_file_callers(engine: &Engine, args: &Value) -> (String, bool)
 /// deliberately contains only file paths (no markdown) so that the CLI can
 /// print the lines directly and match in-process output.
 pub(crate) fn call_file_callees(engine: &Engine, args: &Value) -> (String, bool) {
-    let path = match args.get("path").and_then(|v| v.as_str()) {
-        Some(p) => p.to_string(),
-        None => return ("Missing required argument: path".to_string(), true),
+    let path = match super::arg_file_or_path(args) {
+        Some(p) => p,
+        None => {
+            return (
+                "Missing required argument: path (or file)".to_string(),
+                true,
+            );
+        }
     };
 
     let callees = engine.callees(&path);

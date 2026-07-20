@@ -2025,6 +2025,16 @@ fn search_tools_finds_search_tools() {
 }
 
 #[test]
+fn search_tools_alias_blast_radius_finds_change_impact() {
+    let (out, err) = call_search_tools(&json!({"query": "blast radius"}));
+    assert!(!err, "search_tools returned error: {out}");
+    assert!(
+        out.contains("change_impact"),
+        "alias 'blast radius' should map to change_impact: {out}"
+    );
+}
+
+#[test]
 fn search_tools_empty_query_returns_all() {
     let (out, err) = call_search_tools(&json!({"query": ""}));
     assert!(!err, "search_tools returned error: {out}");

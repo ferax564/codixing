@@ -60,8 +60,9 @@ pub use engine::freshness::{
 pub use engine::sync::SyncOptions;
 pub use engine::{
     ChangeImpact, ConflictKind, EmbedTimingStats, Engine, FocusMapEntry, FocusMapOptions,
-    GitSyncStats, GrepMatch, GrepOptions, ImportStats, IndexStats, ReferenceOptions,
+    GitSyncStats, GrepMatch, GrepOptions, ImpactDetail, ImportStats, IndexStats, ReferenceOptions,
     RenameConflict, RenameValidation, StaleReport, SymbolReference, SyncStats,
+    format_change_impact,
 };
 pub use error::{CodixingError, Result};
 pub use external::{ExternalDocument, parse_source};

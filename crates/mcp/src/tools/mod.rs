@@ -129,30 +129,145 @@ pub fn tool_summaries() -> Vec<(String, String)> {
         .collect()
 }
 
+/// Natural-language aliases that map agent phrases onto tool names.
+///
+/// Matched as whole-phrase or token-level synonyms against the query so that
+/// e.g. "blast radius" finds `change_impact` even when that string is absent
+/// from the tool description.
+fn tool_search_aliases() -> &'static [(&'static str, &'static [&'static str])] {
+    &[
+        (
+            "change_impact",
+            &[
+                "blast radius",
+                "blast-radius",
+                "dependents",
+                "who depends",
+                "what breaks",
+                "ripple",
+                "cascade",
+                "impact analysis",
+                "change impact",
+            ],
+        ),
+        (
+            "file_callers",
+            &[
+                "who imports",
+                "importers",
+                "dependents of file",
+                "callers of file",
+            ],
+        ),
+        (
+            "file_callees",
+            &["what imports", "dependencies of file", "callees of file"],
+        ),
+        (
+            "agent_context_pack",
+            &[
+                "context pack",
+                "task pack",
+                "orient me",
+                "where should i start",
+                "agent pack",
+            ],
+        ),
+        (
+            "find_symbol",
+            &[
+                "goto",
+                "go to def",
+                "definition",
+                "where is defined",
+                "find def",
+            ],
+        ),
+        (
+            "read_symbol",
+            &["show symbol", "open symbol", "read definition"],
+        ),
+        (
+            "code_search",
+            &["search code", "find code", "semantic search", "search repo"],
+        ),
+        (
+            "search_usages",
+            &["find usages", "find references", "call sites", "who calls"],
+        ),
+        (
+            "get_repo_map",
+            &["repo map", "architecture map", "overview", "codebase map"],
+        ),
+        (
+            "grep_code",
+            &["grep", "literal search", "exact text", "rg", "ripgrep"],
+        ),
+        ("api_surface", &["public api", "exports", "api surface"]),
+        (
+            "predict_impact",
+            &["diff impact", "pr impact", "patch impact"],
+        ),
+        ("review_context", &["review", "code review", "pr review"]),
+        (
+            "assemble_location_context",
+            &["cross file context", "location context", "stitch context"],
+        ),
+    ]
+}
+
 /// Handle the `search_tools` meta-tool: substring-match `query` against tool
-/// names and descriptions, returning a compact list.
+/// names and descriptions (plus synonym aliases), returning a compact list.
 pub(crate) fn call_search_tools(args: &Value) -> (String, bool) {
-    let query = args
-        .get("query")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_lowercase();
+    let raw_query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+    let query = raw_query.to_lowercase();
 
     let summaries = tool_summaries();
     let matches: Vec<&(String, String)> = if query.is_empty() {
         summaries.iter().collect()
     } else {
-        summaries
+        // Alias hits first (stable order of alias table), then substring matches.
+        let mut alias_hits: Vec<&(String, String)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for (tool_name, phrases) in tool_search_aliases() {
+            let phrase_hit = phrases.iter().any(|p| query.contains(p))
+                || query.split_whitespace().any(|tok| {
+                    phrases
+                        .iter()
+                        .any(|p| p.split_whitespace().any(|pt| pt == tok && tok.len() > 3))
+                });
+            if phrase_hit
+                && let Some(entry) = summaries.iter().find(|(n, _)| n == tool_name)
+                && seen.insert(tool_name.to_string())
+            {
+                alias_hits.push(entry);
+            }
+        }
+
+        let substring_hits: Vec<&(String, String)> = summaries
             .iter()
             .filter(|(name, desc)| {
-                name.to_lowercase().contains(&query) || desc.to_lowercase().contains(&query)
+                let n = name.to_lowercase();
+                let d = desc.to_lowercase();
+                // Token OR: any query token (len>2) matches name or description.
+                query
+                    .split_whitespace()
+                    .any(|tok| tok.len() > 2 && (n.contains(tok) || d.contains(tok)))
+                    || n.contains(&query)
+                    || d.contains(&query)
             })
-            .collect()
+            .filter(|(name, _)| seen.insert(name.clone()))
+            .collect();
+
+        alias_hits.extend(substring_hits);
+        alias_hits
     };
 
     if matches.is_empty() {
         return (
-            format!("No tools match query '{query}'. Try a broader keyword."),
+            format!(
+                "No tools match query '{raw_query}'. Try keywords like: impact, search, symbol, map, usages, review."
+            ),
             false,
         );
     }
@@ -166,6 +281,14 @@ pub(crate) fn call_search_tools(args: &Value) -> (String, bool) {
     out.push_str("\nUse `get_tool_schema` with the tool name(s) to get full parameter details.");
 
     (out, false)
+}
+
+/// Accept either `file` or `path` tool arguments (agents mix the two).
+pub(crate) fn arg_file_or_path(args: &Value) -> Option<String> {
+    args.get("path")
+        .or_else(|| args.get("file"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 /// Handle the `get_tool_schema` meta-tool: return full JSON schemas for the

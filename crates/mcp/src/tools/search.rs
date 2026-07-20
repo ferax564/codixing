@@ -58,6 +58,7 @@ fn parse_search_args(engine: &Engine, args: &Value) -> Result<SearchArgs, String
         Some("explore") => Strategy::Explore,
         Some("deep") => Strategy::Deep,
         Some("exact") => Strategy::Exact,
+        Some("goto") => Strategy::Goto,
         Some("semantic") => Strategy::Semantic,
         _ => engine.detect_strategy(&query_str),
     };

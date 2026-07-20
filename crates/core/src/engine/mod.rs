@@ -31,7 +31,7 @@ mod validation;
 
 pub use embed_stats::EmbedTimingStats;
 pub use focus_map::{FocusMapEntry, FocusMapOptions};
-pub use impact::{ChangeImpact, compute_change_impact};
+pub use impact::{ChangeImpact, ImpactDetail, compute_change_impact, format_change_impact};
 pub use import::ImportStats;
 pub use symbol_graph::{ReferenceOptions, SymbolReference};
 
@@ -1229,7 +1229,7 @@ pub trait Processor {
         assert!(
             error
                 .to_string()
-                .contains("supports only Exact and Instant")
+                .contains("supports only Exact, Instant, and Goto")
         );
 
         let mut progress_callbacks = 0;
@@ -1244,7 +1244,7 @@ pub trait Processor {
         assert!(
             error
                 .to_string()
-                .contains("supports only Exact and Instant")
+                .contains("supports only Exact, Instant, and Goto")
         );
         assert_eq!(
             progress_callbacks, 0,

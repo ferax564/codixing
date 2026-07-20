@@ -213,12 +213,17 @@ codixing graph --surprises 10    # Top N surprising edges
 codixing graph --html graph.html # Interactive HTML dashboard
 codixing graph --html g.html --diff-base main  # Dashboard + diff-impact overlay
 codixing path src/a.rs src/b.rs  # Shortest import chain
-codixing impact src/engine.rs    # Blast radius analysis
+codixing impact src/engine.rs    # Blast radius (compact by default; --full for all)
 codixing api src/engine.rs       # Public API surface
 codixing types Engine            # Type relationships
 codixing examples add_chunk      # Usage examples from tests + callers
 codixing context src/engine.rs   # Cross-file context assembly
+codixing ask "task"              # Recommended agent entrypoint (context pack)
 codixing agent-context-pack "task" # Stable JSON context pack for agents
+codixing symbols Widget --defs-only  # Definitions only (no Import rows)
+codixing search IndexStore --strategy goto  # Definition-first symbol jump
+codixing doctor --fix-path       # PATH binary version gate + install hints
+codixing bench-tokens            # Prove token savings vs grep+read
 codixing init .                  # Index a project
 codixing sync                    # Incremental re-index
 codixing import github issues.json  # Import GitHub issues/PRs as searchable context
@@ -362,7 +367,10 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Type-aware search** — `codixing types` shows type relationships: implements, extends, returns, contains
 - **Usage example mining** — `codixing examples` finds real usage from tests, callers, and doc blocks
 - **Cross-file context assembly** — `codixing context` follows import chains and callees to assemble understanding context
-- **Agent context pack** — `codixing agent-context-pack` and MCP `agent_context_pack` compile a versioned JSON pack with repo orientation, must-read evidence handles, related symbols, likely tests, docs, risks, and recommended next tools
+- **Agent context pack** — `codixing ask` / `agent-context-pack` and MCP `agent_context_pack` compile a versioned JSON pack with repo orientation, must-read evidence handles, related symbols, likely tests, docs, risks, and recommended next tools
+- **Definition-first search** — identifier queries auto-select `goto` when a primary definition is indexed; chunk-level definition boost ranks `struct Foo` above tests/usages of `Foo`
+- **Compact impact + hard-budget maps** — `impact` defaults to top-N blast radius; repo maps never overshoot `--token-budget` and accept focus seeds
+- **Token-savings harness** — `codixing bench-tokens` measures Codixing vs naive grep+read token cost for release claims
 - **External-context import** — `codixing import <github|adr|jira|linear> <path>` and the MCP `import_external` tool ingest GitHub issues/PRs (from `gh issue list --json …` or the REST API), architecture decision records, and Jira/Linear issue exports (CSV or JSON, auto-detected) as first-class searchable documents. Imported context is chunked like docs, linked to the code symbols it mentions (doc→code graph edges, so `callers`/`impact` surface the tickets discussing a file), and tagged so `codixing search --source github` (or `--source jira` / `linear` / `adr` / `external`) scopes results. Fully local — no SaaS connector or API key. Re-importing a source replaces it; imports survive `sync` (a full `init` rebuilds from disk, so re-run imports after)
 - **Query-personalized PageRank** — Query-time graph boost seeds PageRank from query-relevant nodes for context-aware ranking
 - **Learned query reformulation** — Project-specific vocabulary expansion learns from codebase patterns with deterministic evidence-ranked caps (32 terms/file, 12 expansions/term), compact string-interned persistence, and sync-safe freshness
@@ -374,7 +382,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Model2Vec with code-aware preprocessing** — Static embeddings via `potion-base-8M` (no ONNX needed, instant init). CamelCase/snake_case splitting before tokenization reduces subword fragments by 50-70%, achieving MRR 1.000 on concept queries
 - **Jina Code Int8** — `jina-embeddings-v2-base-code` int8-quantized for ARM64 (768 dims, 8ms/query, nDCG@10 0.949). Set `JINA_CODE_INT8_ONNX` env var to the model path
 - **Embedding speed measurement** — New `bench-embed` CLI subcommand for profiling embedding performance across custom models
-- **Health diagnostics** — `codixing doctor` reports binary/version, index metadata health, git staleness, daemon endpoint status, ONNX runtime configuration, and index disk usage in human or JSON form
+- **Health diagnostics** — `codixing doctor` reports binary/version, PATH binary drift (`--fix-path`), index metadata health, git staleness, daemon endpoint status, ONNX runtime configuration, and index disk usage in human or JSON form
 - **Daemon mode** — Engine stays in memory, auto-starts on first connection, Unix socket (macOS/Linux) or named pipe (Windows) IPC, file watcher for live index updates, 30-min idle timeout
 - **Field-weighted BM25** — Configurable per-field boosting (entity_names 3×, signature 2×, scope_chain 1.5×, content 1×)
 - **Search pipeline** — Composable search stages (definition boost, test demotion, path match, graph boost, recency boost, graph semantic propagation via GraphPropagationStage, file-level dedup via FileDedupStage, truncation) with seven strategies, including file-trigram exact-match and embedding-free semantic matching

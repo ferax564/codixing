@@ -1,14 +1,19 @@
 [[tools]]
 name = "change_impact"
-description = "Analyze the blast radius of changing a file. Returns direct dependents, transitive dependents, affected tests, and total blast radius count. Use before refactoring to understand what might break."
+description = "Analyze the blast radius of changing a file. Returns direct dependents, transitive dependents, affected tests, and total blast radius count. Default output is compact (top-N lists); set full=true for the complete dump. Use before refactoring to understand what might break. Accepts `file` or `path`."
 handler = "analysis::call_change_impact"
 calling_convention = "engine_args"
 read_only = true
 
 [tools.params.file]
 type = "string"
-description = "Relative file path to analyze (e.g. 'src/auth.rs')"
+description = "Relative file path to analyze (e.g. 'src/auth.rs'). Alias: path."
 required = true
+
+[tools.params.full]
+type = "boolean"
+description = "When true, emit the complete dependent/test lists. Default false (compact top-N)."
+
 
 [[tools]]
 name = "api_surface"

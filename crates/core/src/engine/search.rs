@@ -74,9 +74,12 @@ impl Engine {
             return Ok(());
         }
 
-        if !matches!(query.strategy, Strategy::Exact | Strategy::Instant) {
+        if !matches!(
+            query.strategy,
+            Strategy::Exact | Strategy::Instant | Strategy::Goto
+        ) {
             return Err(CodixingError::Config(format!(
-                "lexical read profile supports only Exact and Instant searches, not {:?}",
+                "lexical read profile supports only Exact, Instant, and Goto searches, not {:?}",
                 query.strategy
             )));
         }
@@ -103,8 +106,11 @@ impl Engine {
         self.ensure_read_profile_supports(&query)?;
 
         // Expand CamelCase/snake_case identifiers in the query for better BM25 matching.
-        // Skip expansion for Instant/Exact strategies (exact symbol lookups).
-        let query = if query.strategy != Strategy::Instant && query.strategy != Strategy::Exact {
+        // Skip expansion for Instant/Exact/Goto strategies (exact symbol lookups).
+        let query = if !matches!(
+            query.strategy,
+            Strategy::Instant | Strategy::Exact | Strategy::Goto
+        ) {
             let expanded = expand_query(&query.query);
             if expanded != query.query {
                 SearchQuery {
@@ -298,6 +304,7 @@ impl Engine {
             }
             Strategy::Deep => self.search_deep(query)?,
             Strategy::Exact => self.search_exact(&query)?,
+            Strategy::Goto => self.search_goto(&query)?,
             Strategy::Semantic => {
                 let semantic_results = self.semantic_search(&query.query, query.limit);
                 let mut results: Vec<SearchResult> = Vec::new();
@@ -345,7 +352,7 @@ impl Engine {
             Strategy::Instant => instant_pipeline(),
             Strategy::Fast => fast_pipeline(),
             Strategy::Thorough => thorough_pipeline(),
-            Strategy::Exact => exact_pipeline(),
+            Strategy::Exact | Strategy::Goto => exact_pipeline(),
             // Semantic returns early from search() — pipeline is not applied,
             // but we still need a valid pipeline for the match arm.
             Strategy::Semantic => SearchPipeline::new(),
@@ -371,7 +378,7 @@ impl Engine {
             Strategy::Fast | Strategy::Thorough | Strategy::Explore | Strategy::Deep => {
                 self.get_concept_index()
             }
-            Strategy::Instant | Strategy::Exact | Strategy::Semantic => None,
+            Strategy::Instant | Strategy::Exact | Strategy::Goto | Strategy::Semantic => None,
         };
         SearchContext {
             query,
@@ -382,6 +389,7 @@ impl Engine {
                 Strategy::Fast | Strategy::Thorough => Some(self.get_recency_map()),
                 Strategy::Instant
                 | Strategy::Exact
+                | Strategy::Goto
                 | Strategy::Semantic
                 | Strategy::Explore
                 | Strategy::Deep => None,
@@ -595,6 +603,135 @@ impl Engine {
         Ok(results)
     }
 
+    /// True when the symbol table has a primary definition for `name`
+    /// (struct/class/fn/…, not import-only).
+    fn has_primary_definition(&self, name: &str) -> bool {
+        use super::pipeline::is_primary_definition_kind;
+        self.symbols
+            .lookup(name)
+            .into_iter()
+            .any(|symbol| is_primary_definition_kind(&symbol.kind))
+    }
+
+    /// Symbol-table-first definition lookup.
+    ///
+    /// Returns chunks covering primary definitions of the query identifier,
+    /// ranked so structs/classes/functions beat imports and impl blocks.
+    /// Falls back to [`Self::search_exact`] when no defining symbol is indexed.
+    fn search_goto(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
+        use super::pipeline::is_primary_definition_kind;
+        use crate::language::EntityKind;
+
+        let name = query.query.trim();
+        if name.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut symbols = self.symbols.lookup(name);
+        if let Some(ref filter) = query.file_filter {
+            symbols.retain(|s| s.file_path.contains(filter.as_str()));
+        }
+        symbols.retain(|s| !matches!(s.kind, EntityKind::Import));
+
+        if symbols.is_empty() {
+            return self.search_exact(query);
+        }
+
+        // Prefer primary definitions over impl/module noise.
+        symbols.sort_by(|a, b| {
+            let a_primary = is_primary_definition_kind(&a.kind);
+            let b_primary = is_primary_definition_kind(&b.kind);
+            b_primary
+                .cmp(&a_primary)
+                .then_with(|| a.file_path.cmp(&b.file_path))
+                .then_with(|| a.line_start.cmp(&b.line_start))
+        });
+
+        // Hydrate one chunk per defining symbol via the file-path visitor.
+        let mut results: Vec<SearchResult> = Vec::new();
+        let mut seen_keys = std::collections::HashSet::new();
+        for (rank, symbol) in symbols.into_iter().enumerate() {
+            if results.len() >= query.limit {
+                break;
+            }
+            let key = (symbol.file_path.clone(), symbol.line_start, symbol.line_end);
+            if !seen_keys.insert(key) {
+                continue;
+            }
+
+            let score = if is_primary_definition_kind(&symbol.kind) {
+                1000.0 - rank as f32
+            } else {
+                100.0 - rank as f32
+            };
+            let mut best: Option<SearchResult> = None;
+            let paths = [symbol.file_path.clone()];
+            let _ = self
+                .tantivy
+                .visit_chunks_by_file_paths(&paths, |chunk_id, content| {
+                    let Some(meta) = self.chunk_meta.get(&chunk_id) else {
+                        return Ok(());
+                    };
+                    let overlaps = meta.line_start <= symbol.line_end as u64
+                        && meta.line_end >= symbol.line_start as u64;
+                    if !overlaps {
+                        return Ok(());
+                    }
+                    // Prefer the tightest chunk covering the definition.
+                    let span = meta.line_end.saturating_sub(meta.line_start);
+                    let candidate = SearchResult {
+                        chunk_id: format!("{chunk_id}"),
+                        file_path: meta.file_path.clone(),
+                        language: meta.language.clone(),
+                        score: score + 1.0 / (1.0 + span as f32),
+                        line_start: meta.line_start,
+                        line_end: meta.line_end,
+                        signature: symbol
+                            .signature
+                            .clone()
+                            .unwrap_or_else(|| meta.signature.clone()),
+                        scope_chain: meta.scope_chain.clone(),
+                        content,
+                    };
+                    match &best {
+                        Some(prev)
+                            if prev.line_end.saturating_sub(prev.line_start)
+                                <= candidate.line_end.saturating_sub(candidate.line_start) => {}
+                        _ => best = Some(candidate),
+                    }
+                    Ok(())
+                });
+
+            if let Some(result) = best {
+                results.push(result);
+            } else {
+                results.push(SearchResult {
+                    chunk_id: format!("goto_{}_{}", symbol.file_path, symbol.line_start),
+                    file_path: symbol.file_path,
+                    language: symbol.language.name().to_string(),
+                    score,
+                    line_start: symbol.line_start as u64,
+                    line_end: symbol.line_end as u64,
+                    signature: symbol.signature.unwrap_or_default(),
+                    scope_chain: symbol.scope,
+                    content: String::new(),
+                });
+            }
+        }
+
+        if results.is_empty() {
+            return self.search_exact(query);
+        }
+
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results.truncate(query.limit);
+        Ok(results)
+    }
+
     /// Like [`search()`](Self::search), but calls `on_progress` after each
     /// retrieval phase so callers can stream partial results to the client.
     ///
@@ -631,12 +768,19 @@ impl Engine {
             return Ok(bm25_results);
         }
 
-        // Exact has its own trigram-backed semantics. Preserve the quick BM25
-        // preview, then return the actual exact result set instead of silently
+        // Exact/Goto have their own semantics. Preserve the quick BM25
+        // preview, then return the actual result set instead of silently
         // substituting the preview.
-        if strategy == Strategy::Exact {
+        if matches!(strategy, Strategy::Exact | Strategy::Goto) {
             let exact_results = self.search(query)?;
-            on_progress("exact", &exact_results);
+            on_progress(
+                if strategy == Strategy::Goto {
+                    "goto"
+                } else {
+                    "exact"
+                },
+                &exact_results,
+            );
             return Ok(exact_results);
         }
 
@@ -833,8 +977,9 @@ impl Engine {
     /// Auto-detect the best search strategy based on query characteristics
     /// and available engine capabilities (embedder, reranker).
     ///
-    /// - Single exact identifier → `Exact` (trigram fast-path for `_`, `::`, `.`, or camelCase)
-    /// - Single identifier → `Instant` (BM25 is fastest for exact matches)
+    /// - Single exact identifier → `Goto` when a defining symbol is indexed,
+    ///   otherwise `Exact` (trigram fast-path for `_`, `::`, `.`, or camelCase)
+    /// - Single identifier → `Goto` / `Instant` depending on symbol table hits
     /// - Two identifiers → `Fast` (if embedder available) or `Instant`
     /// - Natural language (3+ words) → `Thorough`/`Deep`/`Instant` depending on availability
     pub fn detect_strategy(&self, query: &str) -> Strategy {
@@ -842,14 +987,15 @@ impl Engine {
         let words: Vec<&str> = trimmed.split_whitespace().collect();
         let word_count = words.len();
 
-        // Single identifier that looks like code → Exact (trigram fast-path).
-        // Criteria: contains `_`, `::`, `.`, or is camelCase (mixed case).
-        if word_count == 1 && is_identifier_like(trimmed) && looks_like_exact_identifier(trimmed) {
-            return Strategy::Exact;
-        }
-
-        // Single identifier → Instant (BM25)
+        // Single identifier that looks like code → prefer Goto (definition-first)
+        // when the symbol table has a primary definition; else Exact/Instant.
         if word_count == 1 && is_identifier_like(trimmed) {
+            if self.has_primary_definition(trimmed) {
+                return Strategy::Goto;
+            }
+            if looks_like_exact_identifier(trimmed) {
+                return Strategy::Exact;
+            }
             return Strategy::Instant;
         }
 
