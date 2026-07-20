@@ -879,56 +879,32 @@ pub(crate) fn call_generate_onboarding(engine: &mut Engine) -> (String, bool) {
 }
 
 pub(crate) fn call_change_impact(engine: &Engine, args: &Value) -> (String, bool) {
-    let file = match args.get("file").and_then(|v| v.as_str()) {
+    let file = match args
+        .get("file")
+        .or_else(|| args.get("path"))
+        .and_then(|v| v.as_str())
+    {
         Some(f) => f,
-        None => return ("Error: 'file' parameter is required".to_string(), true),
+        None => {
+            return (
+                "Error: 'file' (or 'path') parameter is required".to_string(),
+                true,
+            );
+        }
+    };
+
+    let full = args.get("full").and_then(|v| v.as_bool()).unwrap_or(false);
+    let detail = if full {
+        codixing_core::engine::ImpactDetail::Full
+    } else {
+        codixing_core::engine::ImpactDetail::Compact
     };
 
     let impact = engine.change_impact(file);
-
-    let out = format!(
-        "# Change Impact: {}\n\n\
-         Blast radius: {} files\n\n\
-         ## Direct dependents ({})\n{}\n\n\
-         ## Transitive dependents ({})\n{}\n\n\
-         ## Affected tests ({})\n{}",
-        impact.file_path,
-        impact.blast_radius,
-        impact.direct_dependents.len(),
-        if impact.direct_dependents.is_empty() {
-            "None".to_string()
-        } else {
-            impact
-                .direct_dependents
-                .iter()
-                .map(|d| format!("- {d}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        },
-        impact.transitive_dependents.len(),
-        if impact.transitive_dependents.is_empty() {
-            "None".to_string()
-        } else {
-            impact
-                .transitive_dependents
-                .iter()
-                .map(|t| format!("- {t}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        },
-        impact.affected_tests.len(),
-        if impact.affected_tests.is_empty() {
-            "None".to_string()
-        } else {
-            impact
-                .affected_tests
-                .iter()
-                .map(|t| format!("- {t}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        },
-    );
-    (out, false)
+    (
+        codixing_core::engine::format_change_impact(&impact, detail),
+        false,
+    )
 }
 
 pub(crate) fn call_api_surface(engine: &Engine, args: &Value) -> (String, bool) {

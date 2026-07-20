@@ -37,14 +37,22 @@ required = true
 
 [[tools]]
 name = "get_repo_map"
-description = "Generate a token-budgeted repository map showing the file structure and key symbols, sorted by PageRank (most important files first). Useful for understanding a codebase at a glance."
+description = "Generate a hard token-budgeted repository map of key files and symbols. Focused seed files (focus_file / focus_files) rank first; pure test paths are skipped by default. Output never overshoots the budget. Useful for understanding a codebase at a glance before deeper search."
 handler = "graph::call_get_repo_map"
 calling_convention = "engine_args"
 read_only = true
 
 [tools.params.token_budget]
 type = "integer"
-description = "Maximum number of tokens for the repo map (default: 4000)"
+description = "Hard maximum number of tokens for the repo map (default: 4000)"
+
+[tools.params.focus_file]
+type = "string"
+description = "Optional task-local file to pin near the top of the map"
+
+[tools.params.focus_files]
+type = "array"
+description = "Optional list of task-local files to pin near the top of the map"
 
 [[tools]]
 name = "get_transitive_deps"

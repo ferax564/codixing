@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.47.0] - 2026-07-20
+
+### Added
+
+- **Definition-first search + `goto` strategy** — identifier queries prefer
+  symbol-table definitions (struct/class/fn) over test/usage chunks. Auto-detect
+  selects `Strategy::Goto` when a primary definition is indexed; explicit
+  `--strategy goto` / MCP `strategy=goto` available.
+- **Hard token budgets for repo maps** — `graph --map` / `get_repo_map` never
+  overshoot the budget; hub files cap symbols/imports; test paths are skipped by
+  default; optional `focus_file` / `focus_files` pin task-local seeds first.
+- **Compact change impact by default** — `codixing impact` and MCP
+  `change_impact` return top-N dependents/tests with counts; pass `--full` or
+  `full=true` for the complete blast-radius dump.
+- **`codixing ask`** — recommended agent entrypoint alias for
+  `agent-context-pack` with smart default modes and a tighter token budget.
+- **`codixing bench-tokens`** — first-class token-savings harness comparing
+  Codixing workflows to naive grep+read baselines (JSON report).
+- **`codixing doctor --fix-path`** — PATH binary version gate with install
+  instructions when the on-PATH binary is missing, unversioned, or stale.
+- **`symbols --defs-only`** — hide Import rows when listing symbols.
+- **Smarter `search_tools` aliases** — natural phrases like "blast radius",
+  "who imports", "context pack" map to the right MCP tools.
+- **`file`/`path` argument aliases** — MCP tools that previously required only
+  `path` or only `file` accept either.
+
+### Changed
+
+- Chunk-level definition boost replaces file-level boost so tests in the same
+  file as a definition no longer outrank the defining span.
+- Minimal-profile agent guidance: start with `agent_context_pack` / `ask`,
+  escalate to reviewer tools only when needed.
+
 ## [0.46.0] - 2026-07-20
 
 ### Added

@@ -33,6 +33,9 @@ pub enum Strategy {
     /// Uses the trigram inverted index for sub-millisecond exact substring
     /// matching, with BM25 fallback when trigram yields < 3 results.
     Exact,
+    /// Symbol-table first: jump to definitions (struct/class/fn/etc.) by name,
+    /// falling back to [`Exact`] when no defining symbol is indexed.
+    Goto,
     /// Embedding-free semantic matching using behavioral signatures.
     /// Decomposes queries into intent (verbs, nouns, types) and matches
     /// against AST-derived function signatures, call patterns, and concepts.

@@ -428,7 +428,22 @@ fn git_sync_metadata_only_commit_retains_search_artifacts() {
     );
 
     drop(engine);
-    let mut reopened = Engine::open(root).unwrap();
+    // After a generation-publishing git_sync, macOS CI can briefly retain the
+    // prior writer lock; Engine::open then falls back to read-only and
+    // git_sync returns ReadOnly. Retry briefly for a writable reopen.
+    let mut reopened = None;
+    for attempt in 0..10u32 {
+        match Engine::open(root) {
+            Ok(engine) if !engine.is_read_only() => {
+                reopened = Some(engine);
+                break;
+            }
+            Ok(_) | Err(_) => {
+                std::thread::sleep(std::time::Duration::from_millis(1u64 << attempt.min(6)));
+            }
+        }
+    }
+    let mut reopened = reopened.expect("expected writable Engine::open after drop");
     assert!(reopened.git_sync().unwrap().unchanged);
 }
 

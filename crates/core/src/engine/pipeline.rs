@@ -434,22 +434,79 @@ impl SearchStage for VisibilityBoostStage {
 /// above the file that *defines* it. Uses a 3.5x score multiplier.
 pub struct DefinitionBoostStage;
 
-/// Resolve definition files only among the files already returned by the
-/// retriever. Exact names use the global O(log N) index. Fresh indexes resolve
-/// fuzzy substrings through candidate-file postings; legacy mmap indexes keep
-/// their efficient global prefix lookup until they are rebuilt.
-pub(super) fn defining_candidate_files(
+/// Whether a symbol kind is a primary definition (not import/module noise).
+pub(super) fn is_primary_definition_kind(kind: &crate::language::EntityKind) -> bool {
+    use crate::language::EntityKind;
+    matches!(
+        kind,
+        EntityKind::Function
+            | EntityKind::Method
+            | EntityKind::Class
+            | EntityKind::Struct
+            | EntityKind::Enum
+            | EntityKind::Interface
+            | EntityKind::Trait
+            | EntityKind::TypeAlias
+            | EntityKind::Constant
+            | EntityKind::Static
+            | EntityKind::Impl
+            | EntityKind::Type
+            | EntityKind::Variable
+    )
+}
+
+/// A defining symbol span used for chunk-level definition ranking.
+#[derive(Debug, Clone)]
+pub(super) struct DefiningSpan {
+    pub file_path: String,
+    pub line_start: u64,
+    pub line_end: u64,
+    pub primary: bool,
+}
+
+/// Resolve definition spans among files already returned by the retriever.
+/// Exact names use the global O(log N) index. Fresh indexes resolve fuzzy
+/// substrings through candidate-file postings; legacy mmap indexes keep their
+/// efficient global prefix lookup until they are rebuilt.
+///
+/// Import-only symbols are excluded so that `use Foo` rows do not steal the
+/// definition boost from `struct Foo` / `fn foo`.
+pub(super) fn defining_candidate_spans(
     symbols: &crate::symbols::SymbolTable,
     results: &[SearchResult],
     query: &str,
-) -> std::collections::HashSet<String> {
+) -> Vec<DefiningSpan> {
     use std::collections::HashSet;
 
     let candidate_files: HashSet<&str> = results
         .iter()
         .map(|result| result.file_path.as_str())
         .collect();
-    let mut defining_files = HashSet::new();
+    let mut spans = Vec::new();
+    let mut seen = HashSet::new();
+
+    let push_symbol = |spans: &mut Vec<DefiningSpan>,
+                       seen: &mut HashSet<(String, u64, u64)>,
+                       symbol: crate::symbols::Symbol| {
+        if matches!(symbol.kind, crate::language::EntityKind::Import) {
+            return;
+        }
+        let key = (
+            symbol.file_path.clone(),
+            symbol.line_start as u64,
+            symbol.line_end as u64,
+        );
+        if !seen.insert(key) {
+            return;
+        }
+        spans.push(DefiningSpan {
+            file_path: symbol.file_path,
+            line_start: symbol.line_start as u64,
+            line_end: symbol.line_end as u64,
+            primary: is_primary_definition_kind(&symbol.kind),
+        });
+    };
+
     for term in query.split_whitespace() {
         if term.len() < 3 || !term.chars().all(|c| c.is_alphanumeric() || c == '_') {
             continue;
@@ -459,8 +516,10 @@ pub(super) fn defining_candidate_files(
         if exact.is_empty() {
             if symbols.supports_exact_file_postings() {
                 for file_path in &candidate_files {
-                    if !symbols.symbols_in_file(file_path, Some(term)).is_empty() {
-                        defining_files.insert((*file_path).to_string());
+                    for symbol in symbols.symbols_in_file(file_path, Some(term)) {
+                        if candidate_files.contains(symbol.file_path.as_str()) {
+                            push_symbol(&mut spans, &mut seen, symbol);
+                        }
                     }
                 }
             } else {
@@ -469,38 +528,88 @@ pub(super) fn defining_candidate_files(
                 // per candidate; v2 resolves it through its prefix index.
                 for symbol in symbols.lookup_prefix(term) {
                     if candidate_files.contains(symbol.file_path.as_str()) {
-                        defining_files.insert(symbol.file_path);
+                        push_symbol(&mut spans, &mut seen, symbol);
                     }
                 }
             }
         } else {
             for symbol in exact {
                 if candidate_files.contains(symbol.file_path.as_str()) {
-                    defining_files.insert(symbol.file_path);
+                    push_symbol(&mut spans, &mut seen, symbol);
                 }
             }
         }
     }
-    defining_files
+    spans
+}
+
+/// Resolve definition files only among the files already returned by the
+/// retriever. Convenience wrapper around [`defining_candidate_spans`].
+pub(super) fn defining_candidate_files(
+    symbols: &crate::symbols::SymbolTable,
+    results: &[SearchResult],
+    query: &str,
+) -> std::collections::HashSet<String> {
+    defining_candidate_spans(symbols, results, query)
+        .into_iter()
+        .map(|span| span.file_path)
+        .collect()
+}
+
+fn chunk_overlaps_span(result: &SearchResult, span: &DefiningSpan) -> bool {
+    result.file_path == span.file_path
+        && result.line_start <= span.line_end
+        && result.line_end >= span.line_start
 }
 
 impl SearchStage for DefinitionBoostStage {
     fn apply(&self, results: &mut Vec<SearchResult>, ctx: &SearchContext<'_>) -> Result<()> {
-        let defining_files = defining_candidate_files(ctx.symbols, results, ctx.query);
+        let spans = defining_candidate_spans(ctx.symbols, results, ctx.query);
 
-        if defining_files.is_empty() {
+        if spans.is_empty() {
             return Ok(());
         }
 
-        const DEFINITION_BOOST: f32 = 3.5;
-        let mut boosted = false;
+        // Chunk-level boost: only the defining span ranks as "the definition".
+        // File-level boost previously promoted test modules in the same file
+        // (e.g. `persistence/mod.rs` tests for `IndexStore`) above `struct IndexStore`.
+        const PRIMARY_DEF_BOOST: f32 = 12.0;
+        const SECONDARY_DEF_BOOST: f32 = 6.0;
+        // When a true definition is present, demote pure usages/tests in those files.
+        const NON_DEF_USAGE_DEMOTION: f32 = 0.35;
+
+        let has_primary = spans.iter().any(|s| s.primary);
+        let mut changed = false;
         for r in results.iter_mut() {
-            if defining_files.contains(&r.file_path) {
-                r.score *= DEFINITION_BOOST;
-                boosted = true;
+            let mut best_boost = 1.0_f32;
+            let mut is_def_chunk = false;
+            for span in &spans {
+                if chunk_overlaps_span(r, span) {
+                    is_def_chunk = true;
+                    let boost = if span.primary {
+                        PRIMARY_DEF_BOOST
+                    } else {
+                        SECONDARY_DEF_BOOST
+                    };
+                    if boost > best_boost {
+                        best_boost = boost;
+                    }
+                }
+            }
+            if is_def_chunk {
+                r.score *= best_boost;
+                changed = true;
+            } else if has_primary
+                && spans
+                    .iter()
+                    .any(|s| s.file_path == r.file_path && s.primary)
+            {
+                // Same file as a primary definition, but not the defining chunk.
+                r.score *= NON_DEF_USAGE_DEMOTION;
+                changed = true;
             }
         }
-        if boosted {
+        if changed {
             sort_descending(results);
         }
         Ok(())
@@ -1044,7 +1153,8 @@ mod tests {
         DefinitionBoostStage.apply(&mut results, &ctx).unwrap();
 
         assert_eq!(results[0].chunk_id, "config");
-        assert!((results[0].score - 3.5).abs() < f32::EPSILON);
+        // Primary definition chunk-level boost (see PRIMARY_DEF_BOOST).
+        assert!((results[0].score - 12.0).abs() < f32::EPSILON);
     }
 
     #[test]

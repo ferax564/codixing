@@ -58,6 +58,7 @@ fn parse_search_args(engine: &Engine, args: &Value) -> Result<SearchArgs, String
         Some("explore") => Strategy::Explore,
         Some("deep") => Strategy::Deep,
         Some("exact") => Strategy::Exact,
+        Some("goto") => Strategy::Goto,
         Some("semantic") => Strategy::Semantic,
         _ => engine.detect_strategy(&query_str),
     };
@@ -431,7 +432,21 @@ pub(crate) fn call_find_symbol(engine: &Engine, args: &Value) -> (String, bool) 
         Ok(symbols) if symbols.is_empty() => {
             (format!("No symbols found matching '{name}'."), false)
         }
-        Ok(symbols) => {
+        Ok(mut symbols) => {
+            // Prefer primary definitions (struct/fn/…) over Import rows so the
+            // first hit is something an agent should open.
+            symbols.sort_by_key(|s| match s.kind {
+                codixing_core::EntityKind::Import => 9u8,
+                codixing_core::EntityKind::Module | codixing_core::EntityKind::Namespace => 3,
+                codixing_core::EntityKind::Constant
+                | codixing_core::EntityKind::Static
+                | codixing_core::EntityKind::Variable => 2,
+                codixing_core::EntityKind::Function
+                | codixing_core::EntityKind::Method
+                | codixing_core::EntityKind::Impl => 1,
+                _ => 0,
+            });
+
             // Record session event.
             let first_file = symbols.first().map(|s| s.file_path.clone());
             engine.session().record(SessionEventKind::SymbolLookup {
@@ -563,7 +578,7 @@ pub(crate) fn call_read_symbol(engine: &Engine, args: &Value) -> (String, bool) 
     };
     let file = args.get("file").and_then(|v| v.as_str());
 
-    let symbols = match engine.symbols(name, file) {
+    let mut symbols = match engine.symbols(name, file) {
         Ok(s) => s,
         Err(e) => return (format!("Symbol lookup error: {e}"), true),
     };
@@ -578,7 +593,22 @@ pub(crate) fn call_read_symbol(engine: &Engine, args: &Value) -> (String, bool) 
         );
     }
 
-    match engine.read_symbol_source(name, file) {
+    // Align listing order with definition-first ranking used by read_symbol_source.
+    symbols.sort_by_key(|s| match s.kind {
+        codixing_core::EntityKind::Import => 9u8,
+        codixing_core::EntityKind::Module | codixing_core::EntityKind::Namespace => 3,
+        codixing_core::EntityKind::Constant
+        | codixing_core::EntityKind::Static
+        | codixing_core::EntityKind::Variable => 2,
+        codixing_core::EntityKind::Function
+        | codixing_core::EntityKind::Method
+        | codixing_core::EntityKind::Impl => 1,
+        _ => 0,
+    });
+
+    // Prefer reading the ranked primary definition (not symbols[0] pre-sort).
+    let preferred_file = symbols.first().map(|s| s.file_path.as_str());
+    match engine.read_symbol_source(name, preferred_file.or(file)) {
         Ok(None) => (
             format!(
                 "Symbol '{name}' is in the index ({} match(es)) but the source file is not on disk.",

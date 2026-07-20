@@ -241,6 +241,7 @@ pub async fn repo_map_handler(
         include_imports: req.include_imports,
         include_signatures: req.include_signatures,
         min_pagerank: req.min_pagerank,
+        ..RepoMapOptions::default()
     };
     let map = engine.repo_map(opts);
     let available = map.is_some();

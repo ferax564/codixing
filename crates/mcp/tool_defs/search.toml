@@ -12,8 +12,8 @@ required = true
 
 [tools.params.strategy]
 type = "string"
-description = "Retrieval strategy. Omit to auto-detect from query: single identifiers use 'instant' (BM25), multi-word uses 'fast'/'thorough'. Explicit options: 'instant'=BM25 only (fastest), 'fast'=hybrid BM25+vector, 'thorough'=hybrid+MMR deduplication, 'explore'=BM25 + graph expansion, 'deep'=hybrid + reranker, 'exact'=trigram substring lookup, 'semantic'=embedding-free behavioral signatures."
-enum = ["instant", "fast", "thorough", "explore", "deep", "exact", "semantic"]
+description = "Retrieval strategy. Omit to auto-detect from query: single identifiers with a known definition use 'goto', other identifiers use 'exact'/'instant', multi-word uses 'fast'/'thorough'. Explicit options: 'instant'=BM25 only (fastest), 'fast'=hybrid BM25+vector, 'thorough'=hybrid+MMR deduplication, 'explore'=BM25 + graph expansion, 'deep'=hybrid + reranker, 'exact'=trigram substring lookup, 'goto'=symbol-table definition-first lookup, 'semantic'=embedding-free behavioral signatures."
+enum = ["instant", "fast", "thorough", "explore", "deep", "exact", "goto", "semantic"]
 
 [tools.params.limit]
 type = "integer"

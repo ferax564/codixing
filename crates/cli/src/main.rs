@@ -160,6 +160,10 @@ enum Command {
         #[arg(short, long)]
         file: Option<String>,
 
+        /// Only show primary definitions (exclude Import rows).
+        #[arg(long)]
+        defs_only: bool,
+
         /// Print only the result count, not the full results.
         #[arg(long)]
         count: bool,
@@ -247,6 +251,11 @@ enum Command {
         /// Output the health report as JSON.
         #[arg(long)]
         json: bool,
+
+        /// Check that the `codixing` binary on PATH matches this binary's
+        /// version, and print install instructions when it is stale/missing.
+        #[arg(long)]
+        fix_path: bool,
     },
 
     /// Find the shortest path between two files in the dependency graph.
@@ -628,6 +637,10 @@ enum Command {
         /// File to analyze (relative path).
         file: String,
 
+        /// Emit the complete dependent/test lists (default is compact top-N).
+        #[arg(long)]
+        full: bool,
+
         /// Output results as JSON.
         #[arg(long)]
         json: bool,
@@ -717,6 +730,50 @@ enum Command {
         /// Optional caller risk label (for example: low, medium, high).
         #[arg(long)]
         risk_level: Option<String>,
+    },
+
+    /// Shortcut for `agent-context-pack` — the recommended agent entrypoint.
+    ///
+    /// Defaults to mode=`locate` for short tasks and mode=`understand` otherwise;
+    /// pass `--mode` to override.
+    Ask {
+        /// Natural language task description.
+        task: String,
+
+        /// Workflow mode for ranking and next-tool recommendations.
+        #[arg(long, value_enum)]
+        mode: Option<AgentContextModeArg>,
+
+        /// Token budget for the JSON context pack.
+        #[arg(long, default_value = "4000")]
+        token_budget: usize,
+
+        /// File already changed or known to be task-local. Repeatable.
+        #[arg(long = "changed-file", value_name = "PATH")]
+        changed_files: Vec<String>,
+
+        /// Optional branch/worktree label to include in the schema.
+        #[arg(long)]
+        branch: Option<String>,
+
+        /// Optional caller risk label (for example: low, medium, high).
+        #[arg(long)]
+        risk_level: Option<String>,
+    },
+
+    /// Measure token savings of Codixing workflows vs naive grep+read baselines.
+    ///
+    /// Prints a JSON report with per-task token estimates (chars/4) and the
+    /// percentage saved by Codixing paths. Intended for release claims and CI.
+    #[command(name = "bench-tokens")]
+    BenchTokens {
+        /// Project root (defaults to current directory).
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Write JSON report to this file (also prints a human summary).
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
 }
 
@@ -905,13 +962,15 @@ enum StrategyArg {
     Deep,
     /// Trigram index fast-path for exact identifier lookups.
     Exact,
+    /// Symbol-table first: jump to definitions by name (falls back to Exact).
+    Goto,
     /// Embedding-free semantic matching using behavioral signatures.
     Semantic,
 }
 
 impl StrategyArg {
     fn uses_lexical_read_profile(&self) -> bool {
-        matches!(self, Self::Exact | Self::Instant)
+        matches!(self, Self::Exact | Self::Instant | Self::Goto)
     }
 
     /// Resolve this argument to a concrete [`Strategy`], using auto-detection when `Auto`.
@@ -924,6 +983,7 @@ impl StrategyArg {
             StrategyArg::Explore => Strategy::Explore,
             StrategyArg::Deep => Strategy::Deep,
             StrategyArg::Exact => Strategy::Exact,
+            StrategyArg::Goto => Strategy::Goto,
             StrategyArg::Semantic => Strategy::Semantic,
         }
     }
@@ -1036,8 +1096,9 @@ async fn async_main() -> Result<()> {
         Command::Symbols {
             filter,
             file,
+            defs_only,
             count,
-        } => cmd_symbols(filter, file, count),
+        } => cmd_symbols(filter, file, defs_only, count),
         Command::Graph {
             path,
             token_budget,
@@ -1063,7 +1124,11 @@ async fn async_main() -> Result<()> {
         ),
         Command::Hook { action } => cmd_hook(action),
         Command::Repair { path, no_sync } => cmd_repair(path, no_sync),
-        Command::Doctor { path, json } => cmd_doctor(path, json),
+        Command::Doctor {
+            path,
+            json,
+            fix_path,
+        } => cmd_doctor(path, json, fix_path),
         Command::Path { from, to } => cmd_path(from, to),
         Command::Callers { file, depth } => cmd_callers(file, depth),
         Command::Callees { file, depth } => cmd_callees(file, depth),
@@ -1141,7 +1206,7 @@ async fn async_main() -> Result<()> {
             profile,
             path,
         } => cmd_audit(path, threshold_days, include, exclude, profile.into()),
-        Command::Impact { file, json } => cmd_impact(file, json),
+        Command::Impact { file, full, json } => cmd_impact(file, full, json),
         Command::Api { file, json } => cmd_api(file, json),
         Command::Types { symbol, json } => cmd_types(symbol, json),
         Command::Examples {
@@ -1171,6 +1236,32 @@ async fn async_main() -> Result<()> {
             branch,
             risk_level,
         ),
+        Command::Ask {
+            task,
+            mode,
+            token_budget,
+            changed_files,
+            branch,
+            risk_level,
+        } => {
+            let mode = mode.unwrap_or_else(|| {
+                // Short tasks → locate; longer phrasing → understand.
+                if task.split_whitespace().count() <= 6 {
+                    AgentContextModeArg::Locate
+                } else {
+                    AgentContextModeArg::Understand
+                }
+            });
+            cmd_agent_context_pack(
+                task,
+                mode.into(),
+                token_budget,
+                changed_files,
+                branch,
+                risk_level,
+            )
+        }
+        Command::BenchTokens { path, output } => cmd_bench_tokens(path, output),
     }
 }
 
@@ -1749,13 +1840,16 @@ fn cmd_grep(args: GrepArgs) -> Result<()> {
     Ok(())
 }
 
-fn cmd_symbols(filter: String, file: Option<String>, count: bool) -> Result<()> {
+fn cmd_symbols(filter: String, file: Option<String>, defs_only: bool, count: bool) -> Result<()> {
+    use codixing_core::EntityKind;
+
     let root = std::env::current_dir().context("cannot determine current directory")?;
 
     // Fast path: proxy through the daemon if one is running.
-    // Skip daemon proxy for --count: we need the raw symbol list to count accurately.
+    // Skip daemon proxy for --count / --defs-only: we need the raw symbol list.
     if !filter.is_empty()
         && !count
+        && !defs_only
         && let Some(text) = daemon_proxy::try_symbols(&root, &filter, file.as_deref())
     {
         print!("{text}");
@@ -1764,9 +1858,13 @@ fn cmd_symbols(filter: String, file: Option<String>, count: bool) -> Result<()> 
 
     let engine = open_read_engine(&root)?;
 
-    let symbols = engine
+    let mut symbols = engine
         .symbols(&filter, file.as_deref())
         .context("symbol lookup failed")?;
+
+    if defs_only {
+        symbols.retain(|s| !matches!(s.kind, EntityKind::Import));
+    }
 
     if count {
         println!("{} symbol(s) found", symbols.len());
@@ -3174,13 +3272,18 @@ fn cmd_audit(
     Ok(())
 }
 
-fn cmd_impact(file: String, json: bool) -> Result<()> {
+fn cmd_impact(file: String, full: bool, json: bool) -> Result<()> {
+    use codixing_core::{ImpactDetail, format_change_impact};
+
     let root = std::env::current_dir().context("cannot determine current directory")?;
 
-    // Fast path: proxy through the daemon (plain output only — JSON mode
-    // needs the structured ChangeImpact type, which the MCP text body
-    // loses).
-    if !json && let Some(text) = daemon_proxy::try_impact(&root, &file) {
+    // Fast path: proxy through the daemon only for full text dumps so we do
+    // not silently serve a pre-compact daemon response when the CLI now
+    // defaults to compact output.
+    if full
+        && !json
+        && let Some(text) = daemon_proxy::try_impact(&root, &file)
+    {
         print!("{text}");
         return Ok(());
     }
@@ -3194,37 +3297,12 @@ fn cmd_impact(file: String, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("# Change Impact: {}", impact.file_path);
-    println!();
-    println!("Blast radius: {} files", impact.blast_radius);
-    println!();
-
-    if !impact.direct_dependents.is_empty() {
-        println!("## Direct dependents ({}):", impact.direct_dependents.len());
-        for d in &impact.direct_dependents {
-            println!("  {d}");
-        }
-        println!();
-    }
-
-    if !impact.transitive_dependents.is_empty() {
-        println!(
-            "## Transitive dependents ({}):",
-            impact.transitive_dependents.len()
-        );
-        for t in &impact.transitive_dependents {
-            println!("  {t}");
-        }
-        println!();
-    }
-
-    if !impact.affected_tests.is_empty() {
-        println!("## Affected tests ({}):", impact.affected_tests.len());
-        for t in &impact.affected_tests {
-            println!("  {t}");
-        }
-    }
-
+    let detail = if full {
+        ImpactDetail::Full
+    } else {
+        ImpactDetail::Compact
+    };
+    print!("{}", format_change_impact(&impact, detail));
     Ok(())
 }
 
@@ -3474,7 +3552,7 @@ fn cmd_agent_context_pack(
     Ok(())
 }
 
-fn cmd_doctor(path: PathBuf, json: bool) -> Result<()> {
+fn cmd_doctor(path: PathBuf, json: bool, fix_path: bool) -> Result<()> {
     use codixing_core::persistence::IndexStore;
 
     let root = path
@@ -3486,6 +3564,7 @@ fn cmd_doctor(path: PathBuf, json: bool) -> Result<()> {
     let daemon = daemon_health(&root);
     let onnx = onnx_health();
     let git_head = current_git_head(&root);
+    let path_check = path_binary_health();
 
     let mut meta_json = serde_json::Value::Null;
     let mut config_json = serde_json::Value::Null;
@@ -3547,7 +3626,9 @@ fn cmd_doctor(path: PathBuf, json: bool) -> Result<()> {
         "binary": {
             "name": "codixing",
             "version": env!("CARGO_PKG_VERSION"),
+            "path": std::env::current_exe().ok().map(|p| p.display().to_string()),
         },
+        "path_binary": path_check,
         "root": root,
         "index": {
             "status": status,
@@ -3641,7 +3722,373 @@ fn cmd_doctor(path: PathBuf, json: bool) -> Result<()> {
         }
     }
 
+    // PATH binary version gate (always shown; --fix-path adds repair steps).
+    let path_status = report["path_binary"]["status"]
+        .as_str()
+        .unwrap_or("unknown");
+    let this_version = env!("CARGO_PKG_VERSION");
+    match path_status {
+        "match" => {
+            println!(
+                "PATH binary: ok ({} @ {})",
+                report["path_binary"]["path"].as_str().unwrap_or("?"),
+                report["path_binary"]["version"].as_str().unwrap_or("?")
+            );
+        }
+        "mismatch" => {
+            println!(
+                "PATH binary: STALE — {} reports {} but this binary is {this_version}",
+                report["path_binary"]["path"].as_str().unwrap_or("?"),
+                report["path_binary"]["version"].as_str().unwrap_or("?")
+            );
+            if fix_path {
+                print_path_fix_instructions();
+            } else {
+                println!("  Hint: re-run with `codixing doctor --fix-path` for install steps.");
+            }
+        }
+        "missing" => {
+            println!("PATH binary: not found (`codixing` not on PATH)");
+            if fix_path {
+                print_path_fix_instructions();
+            } else {
+                println!("  Hint: re-run with `codixing doctor --fix-path` for install steps.");
+            }
+        }
+        "unversioned" => {
+            println!(
+                "PATH binary: unversioned/old — {} does not support --version (likely <0.45)",
+                report["path_binary"]["path"].as_str().unwrap_or("?")
+            );
+            if fix_path {
+                print_path_fix_instructions();
+            } else {
+                println!("  Hint: re-run with `codixing doctor --fix-path` for install steps.");
+            }
+        }
+        other => {
+            println!(
+                "PATH binary: {other} ({})",
+                report["path_binary"]["detail"].as_str().unwrap_or("")
+            );
+            if fix_path {
+                print_path_fix_instructions();
+            }
+        }
+    }
+
     Ok(())
+}
+
+/// Inspect the `codixing` binary resolved via PATH and compare versions.
+fn path_binary_health() -> serde_json::Value {
+    let this_version = env!("CARGO_PKG_VERSION");
+    let this_exe = std::env::current_exe()
+        .ok()
+        .map(|p| p.display().to_string());
+
+    // Prefer `which`/`where` semantics via looking up PATH ourselves.
+    let path_var = std::env::var_os("PATH").unwrap_or_default();
+    let mut found: Option<PathBuf> = None;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join("codixing");
+        if candidate.is_file() {
+            found = Some(candidate);
+            break;
+        }
+        #[cfg(windows)]
+        {
+            let candidate_exe = dir.join("codixing.exe");
+            if candidate_exe.is_file() {
+                found = Some(candidate_exe);
+                break;
+            }
+        }
+    }
+
+    let Some(path) = found else {
+        return serde_json::json!({
+            "status": "missing",
+            "path": null,
+            "version": null,
+            "expected_version": this_version,
+            "this_exe": this_exe,
+        });
+    };
+
+    // If PATH points at this same binary, it's a match.
+    if let Some(ref exe) = this_exe
+        && let (Ok(a), Ok(b)) = (std::fs::canonicalize(&path), std::fs::canonicalize(exe))
+        && a == b
+    {
+        return serde_json::json!({
+            "status": "match",
+            "path": path.display().to_string(),
+            "version": this_version,
+            "expected_version": this_version,
+            "this_exe": this_exe,
+        });
+    }
+
+    let output = std::process::Command::new(&path).arg("--version").output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let version = text
+                .split_whitespace()
+                .last()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let status = if version == this_version {
+                "match"
+            } else if version.is_empty() {
+                "unversioned"
+            } else {
+                "mismatch"
+            };
+            serde_json::json!({
+                "status": status,
+                "path": path.display().to_string(),
+                "version": version,
+                "expected_version": this_version,
+                "this_exe": this_exe,
+            })
+        }
+        Ok(_) => serde_json::json!({
+            "status": "unversioned",
+            "path": path.display().to_string(),
+            "version": null,
+            "expected_version": this_version,
+            "this_exe": this_exe,
+            "detail": "binary rejected --version",
+        }),
+        Err(err) => serde_json::json!({
+            "status": "error",
+            "path": path.display().to_string(),
+            "version": null,
+            "expected_version": this_version,
+            "this_exe": this_exe,
+            "detail": err.to_string(),
+        }),
+    }
+}
+
+fn print_path_fix_instructions() {
+    let this_version = env!("CARGO_PKG_VERSION");
+    let this_exe = std::env::current_exe()
+        .ok()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| format!("target/release/codixing (built {this_version})"));
+    let dest = std::env::var("CODIXING_INSTALL_DIR").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "$HOME".into());
+        format!("{home}/.local/bin")
+    });
+    println!("PATH fix:");
+    println!("  1. Build or download codixing {this_version}");
+    println!("  2. Install over PATH:");
+    println!("       mkdir -p {dest}");
+    println!("       cp -f \"{this_exe}\" \"{dest}/codixing\"");
+    println!("       chmod +x \"{dest}/codixing\"");
+    println!("  3. Verify: codixing --version  # expect {this_version}");
+    println!("  Or: curl -fsSL https://codixing.com/install.sh | bash");
+}
+
+/// Token-savings harness: Codixing workflows vs naive grep+read baselines.
+fn cmd_bench_tokens(path: PathBuf, output: Option<PathBuf>) -> Result<()> {
+    use std::time::Instant;
+
+    let root = path
+        .canonicalize()
+        .with_context(|| format!("path not found: {}", path.display()))?;
+
+    // Pick a representative symbol/file from the index when possible.
+    let engine = open_read_engine(&root)?;
+    let (symbol, file) = pick_bench_targets(&engine);
+
+    let codixing_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("codixing"));
+
+    // Task 1: locate definition + usages + impact via Codixing
+    let cx_cmds = [
+        format!("{} symbols {symbol} --defs-only", codixing_bin.display()),
+        format!("{} usages {symbol}", codixing_bin.display()),
+        format!("{} impact {file}", codixing_bin.display()),
+        format!(
+            "{} context {file} --line 0 --token-budget 1000",
+            codixing_bin.display()
+        ),
+        format!(
+            "{} ask \"where is {symbol} defined and what depends on it\" --token-budget 2500",
+            codixing_bin.display()
+        ),
+    ];
+    let naive_cmds = [
+        format!(
+            "grep -rn \"{symbol}\" --include='*.rs' --include='*.py' --include='*.ts' --include='*.go' . | head -120"
+        ),
+        format!("sed -n '1,250p' {file}"),
+        format!("sed -n '250,500p' {file}"),
+    ];
+
+    let mut cx_total_toks = 0usize;
+    let mut cx_total_ms = 0u128;
+    let mut cx_results = Vec::new();
+    for cmd in &cx_cmds {
+        let (ms, bytes, toks, rc) = run_shell_measure(cmd, &root);
+        cx_total_toks += toks;
+        cx_total_ms += ms;
+        cx_results.push(serde_json::json!({
+            "cmd": cmd,
+            "ms": ms,
+            "bytes": bytes,
+            "toks": toks,
+            "rc": rc,
+        }));
+    }
+
+    let mut naive_total_toks = 0usize;
+    let mut naive_total_ms = 0u128;
+    let mut naive_results = Vec::new();
+    for cmd in &naive_cmds {
+        let (ms, bytes, toks, rc) = run_shell_measure(cmd, &root);
+        naive_total_toks += toks;
+        naive_total_ms += ms;
+        naive_results.push(serde_json::json!({
+            "cmd": cmd,
+            "ms": ms,
+            "bytes": bytes,
+            "toks": toks,
+            "rc": rc,
+        }));
+    }
+
+    // Map / impact size gates
+    let (map_ms, map_bytes, map_toks, _) = run_shell_measure(
+        &format!("{} graph --map --token-budget 1500", codixing_bin.display()),
+        &root,
+    );
+    let (imp_ms, imp_bytes, imp_toks, _) =
+        run_shell_measure(&format!("{} impact {file}", codixing_bin.display()), &root);
+    let (imp_full_ms, imp_full_bytes, imp_full_toks, _) = run_shell_measure(
+        &format!("{} impact {file} --full", codixing_bin.display()),
+        &root,
+    );
+    let (search_ms, search_bytes, search_toks, _) = run_shell_measure(
+        &format!("{} search \"{symbol}\" --limit 5", codixing_bin.display()),
+        &root,
+    );
+
+    let saved = naive_total_toks.saturating_sub(cx_total_toks);
+    let pct = if naive_total_toks == 0 {
+        0.0
+    } else {
+        100.0 * saved as f64 / naive_total_toks as f64
+    };
+
+    let report = serde_json::json!({
+        "schema_version": 1,
+        "binary_version": env!("CARGO_PKG_VERSION"),
+        "root": root.display().to_string(),
+        "targets": { "symbol": symbol, "file": file },
+        "workflow": {
+            "name": "locate_definition_and_blast_radius",
+            "codixing": {
+                "total_toks": cx_total_toks,
+                "total_ms": cx_total_ms,
+                "steps": cx_results,
+            },
+            "naive": {
+                "total_toks": naive_total_toks,
+                "total_ms": naive_total_ms,
+                "steps": naive_results,
+            },
+            "tokens_saved": saved,
+            "percent_saved": pct,
+        },
+        "gates": {
+            "graph_map_1500": { "ms": map_ms, "bytes": map_bytes, "toks": map_toks, "budget": 1500 },
+            "impact_compact": { "ms": imp_ms, "bytes": imp_bytes, "toks": imp_toks },
+            "impact_full": { "ms": imp_full_ms, "bytes": imp_full_bytes, "toks": imp_full_toks },
+            "search_symbol": { "ms": search_ms, "bytes": search_bytes, "toks": search_toks },
+        },
+        "timestamp_unix": Instant::now().elapsed().as_secs(), // placeholder; overwritten below
+    });
+
+    // Prefer wall-clock timestamp when available.
+    let mut report = report;
+    report["timestamp_unix"] = serde_json::json!(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    );
+
+    let pretty = serde_json::to_string_pretty(&report)?;
+    if let Some(path) = output {
+        std::fs::write(&path, &pretty)
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        eprintln!("Wrote {}", path.display());
+    }
+
+    println!("# Codixing bench-tokens");
+    println!("Version: {}", env!("CARGO_PKG_VERSION"));
+    println!("Root: {}", root.display());
+    println!("Targets: symbol={symbol} file={file}");
+    println!();
+    println!("## Workflow: locate definition + blast radius");
+    println!("  Codixing: ~{cx_total_toks} toks in {cx_total_ms} ms");
+    println!("  Naive:    ~{naive_total_toks} toks in {naive_total_ms} ms");
+    println!("  Saved:    ~{saved} toks ({pct:.1}%)");
+    println!();
+    println!("## Gates");
+    println!("  graph --map --token-budget 1500 → ~{map_toks} toks (budget 1500)");
+    println!("  impact compact → ~{imp_toks} toks");
+    println!("  impact --full  → ~{imp_full_toks} toks");
+    println!("  search {symbol} → ~{search_toks} toks");
+    println!();
+    println!("{pretty}");
+
+    Ok(())
+}
+
+fn pick_bench_targets(engine: &Engine) -> (String, String) {
+    // Prefer a well-known struct if present, else first public struct/fn.
+    for candidate in ["IndexStore", "Engine", "SearchQuery", "CodeGraph"] {
+        let syms = engine.symbols(candidate, None).unwrap_or_default();
+        if let Some(s) = syms
+            .iter()
+            .find(|s| !matches!(s.kind, codixing_core::EntityKind::Import))
+        {
+            return (s.name.clone(), s.file_path.clone());
+        }
+    }
+    let all = engine.symbols("", None).unwrap_or_default();
+    if let Some(s) = all
+        .iter()
+        .find(|s| !matches!(s.kind, codixing_core::EntityKind::Import))
+    {
+        return (s.name.clone(), s.file_path.clone());
+    }
+    ("main".into(), "src/main.rs".into())
+}
+
+fn run_shell_measure(cmd: &str, root: &Path) -> (u128, usize, usize, i32) {
+    let start = std::time::Instant::now();
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(root)
+        .output();
+    let ms = start.elapsed().as_millis();
+    match output {
+        Ok(out) => {
+            let bytes = out.stdout.len() + out.stderr.len();
+            let toks = bytes.div_ceil(4).max(1);
+            let rc = out.status.code().unwrap_or(1);
+            (ms, bytes, toks, rc)
+        }
+        Err(_) => (ms, 0, 1, 1),
+    }
 }
 
 fn paths_to_strings(paths: &[PathBuf]) -> Vec<String> {
