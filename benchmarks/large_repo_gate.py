@@ -515,6 +515,15 @@ def run_measured(
             rss = _darwin_process_rss_bytes(proc.pid)
             if rss is not None:
                 peak_rss = max(peak_rss or 0, rss)
+        elif is_linux:
+            # Cumulative /proc/<pid>/io can disappear for zombies on some
+            # runners; keep the latest live sample as a fallback for the final
+            # read that happens under waitid(WNOWAIT).
+            live_read, live_write = _linux_process_io(proc.pid)
+            if live_read is not None:
+                max_read = live_read
+            if live_write is not None:
+                max_write = live_write
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             _terminate_process_group(proc, force=True)
@@ -537,7 +546,19 @@ def run_measured(
     memory_complete = False
     io_complete = False
     if is_linux and linux_exit_held_for_sampling == [True]:
-        direct_read, direct_write = _linux_process_io(proc.pid)
+        # Prefer the post-exit counters while the child is still held as a
+        # zombie. Retry briefly: some kernels expose /proc/<pid>/io only after
+        # a short delay, and CI hidepid policies can race with the first read.
+        direct_read = direct_write = None
+        for _ in range(10):
+            direct_read, direct_write = _linux_process_io(proc.pid)
+            if direct_read is not None and direct_write is not None:
+                break
+            time.sleep(0.01)
+        if direct_read is None:
+            direct_read = max_read
+        if direct_write is None:
+            direct_write = max_write
 
         # The claim metric is deliberately scoped to the measured direct child.
         # Descendants are excluded because aggregating short-lived helpers from
