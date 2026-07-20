@@ -10,6 +10,7 @@ use std::fs;
 
 use tempfile::TempDir;
 
+use codixing_core::persistence::IndexStore;
 use codixing_core::{Engine, IndexConfig, SearchQuery, Strategy};
 
 fn bm25_config(root: &std::path::Path) -> IndexConfig {
@@ -173,6 +174,43 @@ fn exact_search_indexes_decoded_notebook_cell_text_after_reopen() {
 }
 
 #[test]
+fn notebook_cells_with_equal_local_ranges_keep_distinct_chunk_ids() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let notebook = r#"{
+      "nbformat": 4,
+      "nbformat_minor": 5,
+      "metadata": {"kernelspec": {"language": "python", "name": "python3"}},
+      "cells": [
+        {"cell_type": "code", "id": "code-a", "source": "collision_alpha = 1\n", "outputs": []},
+        {"cell_type": "code", "id": "code-b", "source": "collision_bravo = 2\n", "outputs": []},
+        {"cell_type": "markdown", "id": "notes", "source": "collision_gamma text\n"}
+      ]
+    }"#;
+    fs::write(root.join("collisions.ipynb"), notebook).unwrap();
+
+    drop(Engine::init(root, bm25_config(root)).unwrap());
+    let engine = Engine::open(root).unwrap();
+    let mut chunk_ids = std::collections::HashSet::new();
+    for marker in ["collision_alpha", "collision_bravo", "collision_gamma"] {
+        let hits = engine
+            .search(
+                SearchQuery::new(marker)
+                    .with_limit(10)
+                    .with_strategy(Strategy::Exact),
+            )
+            .unwrap();
+        let hit = hits
+            .iter()
+            .find(|hit| hit.file_path == "collisions.ipynb" && hit.content.contains(marker))
+            .unwrap_or_else(|| panic!("missing notebook cell for {marker}: {hits:?}"));
+        chunk_ids.insert(hit.chunk_id.clone());
+    }
+
+    assert_eq!(chunk_ids.len(), 3, "each cell must own a unique chunk ID");
+}
+
+#[test]
 fn malformed_notebook_does_not_abort_init() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
@@ -188,8 +226,24 @@ fn malformed_notebook_does_not_abort_init() {
     );
 
     // The sibling code file must still be searchable.
-    let hits = engine
+    let engine = engine.unwrap();
+    assert_eq!(
+        engine.stats().file_count,
+        1,
+        "the malformed notebook must not inflate indexed-file metadata"
+    );
+    let hashes = IndexStore::open(root)
         .unwrap()
+        .load_tree_hashes_v2()
+        .unwrap();
+    assert_eq!(hashes.len(), 1);
+    assert!(
+        hashes
+            .iter()
+            .all(|(path, _)| !path.ends_with("broken.ipynb"))
+    );
+
+    let hits = engine
         .search(
             SearchQuery::new("hello")
                 .with_limit(10)

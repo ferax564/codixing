@@ -10,6 +10,7 @@ import * as os from 'os';
 import * as path from 'path';
 import {
     findBinary,
+    getIndexState,
     getWorkspaceRoot,
     runCommandSpawn,
     runCommandCollect,
@@ -72,6 +73,58 @@ export function buildInitArgs(root: string, embeddings: boolean): string[] {
  */
 export function buildReviewerMcpArgs(root: string): string[] {
     return ['--root', root, '--profile', 'reviewer', '--no-daemon-fork'];
+}
+
+async function runIndexRecovery(
+    root: string,
+    command: 'doctor' | 'repair',
+): Promise<void> {
+    const bin = await findBinary('codixing');
+    if (!bin) {
+        return;
+    }
+
+    const terminal = vscode.window.createTerminal({
+        name: `Codixing: ${command === 'doctor' ? 'Doctor' : 'Repair'}`,
+        cwd: root,
+    });
+    terminal.sendText(
+        `${shellQuote(bin)} ${command} ${shellQuote(root)}`,
+    );
+    terminal.show();
+}
+
+async function ensureIndexReady(root: string): Promise<boolean> {
+    const state = getIndexState(root);
+    if (state === 'ready') {
+        return true;
+    }
+
+    if (state === 'missing') {
+        const action = await vscode.window.showWarningMessage(
+            'Codixing: No index found. Index the workspace first.',
+            'Index Now',
+        );
+        if (action === 'Index Now') {
+            await cmdIndexWorkspace();
+        }
+        return false;
+    }
+
+    const action = await vscode.window.showWarningMessage(
+        'Codixing: The index is incomplete. Inspect it, repair preserved metadata, or rebuild a clean index.',
+        'Run Doctor',
+        'Repair',
+        'Rebuild',
+    );
+    if (action === 'Run Doctor') {
+        await runIndexRecovery(root, 'doctor');
+    } else if (action === 'Repair') {
+        await runIndexRecovery(root, 'repair');
+    } else if (action === 'Rebuild') {
+        await cmdIndexWorkspace();
+    }
+    return false;
 }
 
 export async function cmdIndexWorkspace(): Promise<void> {
@@ -141,14 +194,7 @@ export async function cmdSearch(): Promise<void> {
         return;
     }
 
-    if (!fs.existsSync(path.join(root, '.codixing'))) {
-        const action = await vscode.window.showWarningMessage(
-            'Codixing: No index found. Index the workspace first.',
-            'Index Now',
-        );
-        if (action === 'Index Now') {
-            await cmdIndexWorkspace();
-        }
+    if (!(await ensureIndexReady(root))) {
         return;
     }
 
@@ -201,10 +247,7 @@ export async function cmdShowRepoMap(): Promise<void> {
         return;
     }
 
-    if (!fs.existsSync(path.join(root, '.codixing'))) {
-        vscode.window.showWarningMessage(
-            'Codixing: No index found. Run "Codixing: Index Workspace" first.',
-        );
+    if (!(await ensureIndexReady(root))) {
         return;
     }
 
@@ -301,10 +344,7 @@ export async function cmdShowHotspots(): Promise<void> {
         return;
     }
 
-    if (!fs.existsSync(path.join(root, '.codixing'))) {
-        vscode.window.showWarningMessage(
-            'Codixing: No index found. Run "Codixing: Index Workspace" first.',
-        );
+    if (!(await ensureIndexReady(root))) {
         return;
     }
 
@@ -380,10 +420,7 @@ export async function cmdShowComplexity(): Promise<void> {
         return;
     }
 
-    if (!fs.existsSync(path.join(root, '.codixing'))) {
-        vscode.window.showWarningMessage(
-            'Codixing: No index found. Run "Codixing: Index Workspace" first.',
-        );
+    if (!(await ensureIndexReady(root))) {
         return;
     }
 

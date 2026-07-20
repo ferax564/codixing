@@ -84,6 +84,75 @@ fn repeated_identical_init_replaces_instead_of_appending() {
     assert!(audit.abandoned_generations.is_empty());
 }
 
+#[cfg(feature = "internal-testing")]
+#[test]
+fn failed_fresh_init_never_exposes_partially_staged_tantivy_documents() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("lib.rs"),
+        "pub fn retained_active_value() -> usize { 41 }\n",
+    )
+    .unwrap();
+    drop(Engine::init(root, no_embed_config(root)).unwrap());
+    let before_generation = IndexStore::active_generation(root).unwrap();
+    let before_documents = tantivy_documents(root);
+
+    fs::write(
+        root.join("good.rs"),
+        "pub fn unpublished_good_sibling() -> usize { 42 }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("bad.rs"),
+        "pub fn unpublished_bad_marker() { let _ = \"codixing-test-fail-after-first-tantivy-add\"; }\n",
+    )
+    .unwrap();
+
+    let error = match Engine::init(root, no_embed_config(root)) {
+        Ok(_) => panic!("injected late Tantivy failure must abort fresh init"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("injected failure after first Tantivy add")
+    );
+    assert_eq!(
+        IndexStore::active_generation(root).unwrap(),
+        before_generation
+    );
+    assert_eq!(tantivy_documents(root), before_documents);
+
+    let retained = Engine::open(root).unwrap();
+    assert!(instant_has(&retained, "retained_active_value"));
+    assert!(!instant_has(&retained, "unpublished_good_sibling"));
+    assert!(!instant_has(&retained, "unpublished_bad_marker"));
+}
+
+#[cfg(feature = "internal-testing")]
+#[test]
+fn file_local_parse_failure_skips_only_that_source() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("good.rs"),
+        "pub fn healthy_init_sibling() -> usize { 42 }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("bad.rs"),
+        "pub fn skipped_init_source() { let _ = \"codixing-test-skip-before-index-publication\"; }\n",
+    )
+    .unwrap();
+
+    let engine = Engine::init(root, no_embed_config(root)).unwrap();
+
+    assert!(instant_has(&engine, "healthy_init_sibling"));
+    assert!(!instant_has(&engine, "skipped_init_source"));
+    assert_eq!(engine.stats().file_count, 1);
+}
+
 #[test]
 fn fresh_generation_uses_one_shared_trigram_artifact() {
     let dir = tempdir().unwrap();
@@ -236,6 +305,53 @@ fn active_reader_keeps_superseded_generation_searchable_until_drop() {
 }
 
 #[test]
+fn lexical_reader_keeps_lean_profile_across_generation_reload() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let source = root.join("lib.rs");
+    fs::write(
+        &source,
+        "pub fn lexical_generation_old_marker() -> usize { 1 }\n",
+    )
+    .unwrap();
+    drop(Engine::init(root, no_embed_config(root)).unwrap());
+
+    let mut lexical = Engine::open_read_only_lexical(root).unwrap();
+    assert!(lexical.graph_stats().is_none());
+
+    fs::write(
+        &source,
+        "pub fn lexical_generation_new_marker() -> usize { 2 }\n",
+    )
+    .unwrap();
+    drop(Engine::init(root, no_embed_config(root)).unwrap());
+
+    lexical.set_reload_interval(std::time::Duration::ZERO);
+    assert!(lexical.reload_if_stale().unwrap());
+    assert!(
+        lexical.graph_stats().is_none(),
+        "generation replacement must preserve the lexical load profile"
+    );
+
+    let full = Engine::open_read_only(root).unwrap();
+    assert!(full.graph_stats().is_some());
+    for strategy in [Strategy::Exact, Strategy::Instant] {
+        let query = || {
+            SearchQuery::new("lexical_generation_new_marker")
+                .with_strategy(strategy)
+                .with_limit(20)
+        };
+        let full_results = full.search(query()).unwrap();
+        let lexical_results = lexical.search(query()).unwrap();
+        assert!(!lexical_results.is_empty());
+        assert_eq!(
+            serde_json::to_vec(&lexical_results).unwrap(),
+            serde_json::to_vec(&full_results).unwrap()
+        );
+    }
+}
+
+#[test]
 fn long_lived_read_only_engine_reopens_new_active_generation() {
     let dir = tempdir().unwrap();
     let root = dir.path();
@@ -292,6 +408,109 @@ fn long_lived_read_only_engine_reopens_new_active_generation() {
         IndexStore::active_generation(root).unwrap().as_deref(),
         Some(generation_b.as_str())
     );
+}
+
+#[test]
+fn incremental_symbol_delta_preserves_generation_isolation_and_reloads() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let changed = root.join("changed.rs");
+    fs::write(
+        &changed,
+        "/// Old symbol docs.\npub fn overlay_old() {}\npub fn overlay_removed() {}\n",
+    )
+    .unwrap();
+    fs::write(root.join("untouched.rs"), "pub fn overlay_untouched() {}\n").unwrap();
+    drop(Engine::init(root, no_embed_config(root)).unwrap());
+
+    let old_store = IndexStore::open_read_only(root).unwrap();
+    #[cfg(unix)]
+    let old_base_identity = {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = fs::metadata(old_store.symbols_v2_path()).unwrap();
+        (metadata.dev(), metadata.ino())
+    };
+    let retained_old_reader = Engine::open_read_only(root).unwrap();
+    let mut refreshing_reader = Engine::open_read_only(root).unwrap();
+    let mut writer = Engine::open(root).unwrap();
+
+    fs::write(
+        &changed,
+        "/// New full-fidelity docs.\npub fn overlay_new() -> usize { 7 }\n",
+    )
+    .unwrap();
+    writer
+        .apply_changes(&[FileChange {
+            path: changed.canonicalize().unwrap(),
+            kind: ChangeKind::Modified,
+        }])
+        .unwrap();
+
+    let has_symbol = |engine: &Engine, name: &str| {
+        engine
+            .symbols(name, None)
+            .unwrap()
+            .iter()
+            .any(|symbol| symbol.name == name)
+    };
+    assert!(has_symbol(&writer, "overlay_new"));
+    assert!(!has_symbol(&writer, "overlay_old"));
+    assert!(!has_symbol(&writer, "overlay_removed"));
+    assert!(has_symbol(&writer, "overlay_untouched"));
+
+    let active_store = IndexStore::open_read_only(root).unwrap();
+    assert!(active_store.symbols_delta_path().is_file());
+    assert!(
+        fs::metadata(active_store.symbols_delta_path())
+            .unwrap()
+            .len()
+            <= 8 * 1024 * 1024
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = fs::metadata(active_store.symbols_v2_path()).unwrap();
+        assert_eq!(
+            (metadata.dev(), metadata.ino()),
+            old_base_identity,
+            "a small checkpoint must retain the hard-linked mmap symbol base"
+        );
+    }
+
+    let fresh_reader = Engine::open_read_only(root).unwrap();
+    assert!(has_symbol(&fresh_reader, "overlay_new"));
+    assert!(!has_symbol(&fresh_reader, "overlay_old"));
+    assert!(!has_symbol(&fresh_reader, "overlay_removed"));
+    assert!(has_symbol(&fresh_reader, "overlay_untouched"));
+    let replacement = fresh_reader.symbols("overlay_new", None).unwrap();
+    let replacement = replacement
+        .iter()
+        .find(|symbol| symbol.name == "overlay_new")
+        .unwrap();
+    assert!(
+        replacement
+            .doc_comment
+            .as_deref()
+            .is_some_and(|comment| comment.contains("New full-fidelity docs"))
+    );
+
+    refreshing_reader.set_reload_interval(std::time::Duration::ZERO);
+    assert!(refreshing_reader.reload_if_stale().unwrap());
+    assert!(has_symbol(&refreshing_reader, "overlay_new"));
+    assert!(!has_symbol(&refreshing_reader, "overlay_old"));
+
+    assert!(has_symbol(&retained_old_reader, "overlay_old"));
+    assert!(has_symbol(&retained_old_reader, "overlay_removed"));
+    assert!(!has_symbol(&retained_old_reader, "overlay_new"));
+    assert_eq!(IndexStore::audit_layout(root).generation_count, 2);
+
+    drop(active_store);
+    drop(fresh_reader);
+    drop(retained_old_reader);
+    drop(old_store);
+    assert_eq!(IndexStore::audit_layout(root).generation_count, 1);
 }
 
 #[test]
@@ -612,7 +831,7 @@ fn pending_journal_replays_after_an_unpublished_writer_is_dropped() {
 }
 
 #[test]
-fn partial_checkpoint_publishes_successes_and_retries_only_failures() {
+fn failed_checkpoint_aborts_whole_batch_and_retries_dirty_paths() {
     let dir = tempdir().unwrap();
     let root = dir.path();
     let source = root.join("lib.rs");
@@ -624,11 +843,12 @@ fn partial_checkpoint_publishes_successes_and_retries_only_failures() {
 
     fs::write(&source, "pub fn partial_new_value() -> usize { 2 }\n").unwrap();
     fs::write(&notebook, notebook_with_code("value = 2\n")).unwrap();
+    let source = source.canonicalize().unwrap();
     let notebook = notebook.canonicalize().unwrap();
     let error = writer
         .apply_changes(&[
             FileChange {
-                path: source,
+                path: source.clone(),
                 kind: ChangeKind::Modified,
             },
             FileChange {
@@ -639,22 +859,34 @@ fn partial_checkpoint_publishes_successes_and_retries_only_failures() {
         .unwrap_err();
     assert!(error.to_string().contains("analysis.ipynb"));
 
+    assert_eq!(IndexStore::active_generation(root).unwrap(), before);
+    assert!(instant_has(&writer, "partial_old_value"));
+    assert!(!instant_has(&writer, "partial_new_value"));
+    let retained = Engine::open_read_only(root).unwrap();
+    assert!(instant_has(&retained, "partial_old_value"));
+    assert!(!instant_has(&retained, "partial_new_value"));
+
+    let dirty = IndexStore::open_read_only(root)
+        .unwrap()
+        .load_dirty_paths()
+        .unwrap();
+    assert_eq!(dirty.len(), 2);
+    assert!(dirty.contains(&source));
+    assert!(dirty.contains(&notebook));
+
+    // Removing the unsupported notebook lets the journal replay the entire
+    // batch, including the source file that had succeeded before the abort.
+    fs::remove_file(&notebook).unwrap();
+    writer.apply_changes(&[]).unwrap();
     assert_ne!(IndexStore::active_generation(root).unwrap(), before);
-    let published = Engine::open_read_only(root).unwrap();
-    assert!(instant_has(&published, "partial_new_value"));
-    assert_eq!(
+    assert!(instant_has(&writer, "partial_new_value"));
+    assert!(!instant_has(&writer, "partial_old_value"));
+    assert!(
         IndexStore::open_read_only(root)
             .unwrap()
             .load_dirty_paths()
-            .unwrap(),
-        vec![notebook]
-    );
-    assert!(
-        writer
-            .apply_changes(&[])
-            .unwrap_err()
-            .to_string()
-            .contains("analysis.ipynb")
+            .unwrap()
+            .is_empty()
     );
 }
 
@@ -689,7 +921,10 @@ fn latest_deferred_failure_revokes_an_earlier_success_for_the_same_path() {
             }])
             .is_err()
     );
-    assert!(writer.checkpoint_pending_changes().is_err());
+    assert!(
+        writer.checkpoint_pending_changes().is_ok(),
+        "the failed deferred batch already aborted and cleared pending state"
+    );
     assert_eq!(IndexStore::active_generation(root).unwrap(), before);
     assert_eq!(
         IndexStore::open_read_only(root)
@@ -761,6 +996,13 @@ fn first_checkpoint_migrates_a_legacy_v1_only_hash_index() {
     drop(Engine::init(root, no_embed_config(root)).unwrap());
 
     let store = IndexStore::open(root).unwrap();
+    let legacy_hashes: Vec<_> = store
+        .load_tree_hashes_v2()
+        .unwrap()
+        .into_iter()
+        .map(|(path, entry)| (path, entry.content_hash))
+        .collect();
+    store.save_tree_hashes(&legacy_hashes).unwrap();
     fs::remove_file(store.tree_hashes_v2_path()).unwrap();
     drop(store);
 

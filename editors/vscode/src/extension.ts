@@ -12,9 +12,7 @@
 //   - MCP server registration for Claude Code / Cursor
 
 import * as vscode from 'vscode';
-import * as fs from 'fs';
-import * as path from 'path';
-import { getWorkspaceRoot } from './utils';
+import { getIndexState, getWorkspaceRoot } from './utils';
 import { startLspClient, stopLspClient } from './lsp';
 import { SearchResultsProvider } from './views/searchView';
 import { RepoMapProvider } from './views/graphView';
@@ -146,14 +144,23 @@ export function activate(context: vscode.ExtensionContext): void {
 
         // Watch for .codixing directory creation so that LSP starts
         // automatically after the user runs "Index Workspace" on a fresh repo.
-        if (root && !fs.existsSync(path.join(root, '.codixing'))) {
+        if (root && getIndexState(root) !== 'ready') {
             const watcher = vscode.workspace.createFileSystemWatcher(
                 new vscode.RelativePattern(root, '.codixing/**'),
             );
-            const onIndexCreated = () => {
-                startLspClient(context, outputChannel);
+            let starting = false;
+            const onIndexCreated = async () => {
                 updateStatusBar();
-                watcher.dispose();
+                if (starting || getIndexState(root) !== 'ready') {
+                    return;
+                }
+                starting = true;
+                try {
+                    await startLspClient(context, outputChannel);
+                    watcher.dispose();
+                } finally {
+                    starting = false;
+                }
             };
             watcher.onDidCreate(onIndexCreated);
             context.subscriptions.push(watcher);
@@ -177,12 +184,18 @@ function updateStatusBar(): void {
         return;
     }
 
-    const indexed = fs.existsSync(path.join(root, '.codixing'));
-    statusBarItem.text = indexed
-        ? 'Codixing: $(check) indexed'
-        : 'Codixing: $(circle-slash) not indexed';
-    statusBarItem.tooltip = indexed
-        ? 'Codixing index is present. Click to search.'
-        : 'No Codixing index found. Click to search (or run "Codixing: Index Workspace").';
+    const state = getIndexState(root);
+    if (state === 'ready') {
+        statusBarItem.text = 'Codixing: $(check) indexed';
+        statusBarItem.tooltip = 'Codixing index is ready. Click to search.';
+    } else if (state === 'incomplete') {
+        statusBarItem.text = 'Codixing: $(warning) repair needed';
+        statusBarItem.tooltip =
+            'The Codixing index is incomplete. Click for doctor, repair, or rebuild guidance.';
+    } else {
+        statusBarItem.text = 'Codixing: $(circle-slash) not indexed';
+        statusBarItem.tooltip =
+            'No Codixing index found. Click to index the workspace.';
+    }
     statusBarItem.show();
 }

@@ -120,7 +120,7 @@ pub(super) struct IndexContext<'a> {
     pub(super) tantivy: &'a TantivyIndex,
     pub(super) symbols: &'a SymbolTable,
     pub(super) chunk_count: &'a AtomicUsize,
-    pub(super) file_chunk_map: &'a DashMap<String, usize>,
+    pub(super) file_chunk_map: &'a DashMap<String, Box<[u64]>>,
     pub(super) chunk_meta_map: &'a DashMap<u64, ChunkMeta>,
     /// Pending chunks to embed. The value is intentionally empty: embedding
     /// reads content from `chunk_meta_map`, avoiding a second corpus-sized copy.
@@ -156,40 +156,98 @@ pub(super) struct IndexContext<'a> {
     pub(super) file_trigram: &'a Mutex<FileTrigramIndex>,
 }
 
-fn add_file_trigrams(ctx: &IndexContext<'_>, path: &str, source: &[u8]) {
-    // The O(file bytes) scan/sort runs on the Rayon worker. Only the prepared
-    // posting merge is serialized, so one large file cannot stall all parsers.
-    let trigrams = FileTrigramIndex::prepare_trigrams(source);
-    ctx.file_trigram
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .add_prepared(path, &trigrams);
-}
-
-/// Add every stored chunk representation for one file to the shared trigram
-/// index. Parser-produced text can differ from the raw container bytes (for
-/// example decoded notebook cells, extracted PDF text, or normalized HTML),
-/// so exact search needs their union while grep still relies on the raw scan.
-/// Byte-identical source-range chunks are skipped because their trigrams are
-/// already present in the raw representation.
-fn add_chunk_trigrams(
+/// Add both the raw file and every non-verbatim stored chunk representation to
+/// the shared trigram index. Parser-produced text can differ from raw container
+/// bytes (decoded notebooks, PDFs, normalized HTML), so exact search needs the
+/// union while grep still needs the raw bytes. Preparing the union before the
+/// lock keeps the serialized publication path short.
+fn add_search_trigrams(
     ctx: &IndexContext<'_>,
     path: &str,
     source: &[u8],
     chunks: &[crate::chunker::Chunk],
 ) {
     let trigrams = FileTrigramIndex::prepare_contents(
-        chunks
-            .iter()
-            .filter(|chunk| {
-                source.get(chunk.byte_start..chunk.byte_end) != Some(chunk.content.as_bytes())
-            })
-            .map(|chunk| chunk.content.as_bytes()),
+        std::iter::once(source).chain(
+            chunks
+                .iter()
+                .filter(|chunk| {
+                    source.get(chunk.byte_start..chunk.byte_end) != Some(chunk.content.as_bytes())
+                })
+                .map(|chunk| chunk.content.as_bytes()),
+        ),
     );
     ctx.file_trigram
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .add_prepared(path, &trigrams);
+}
+
+/// Stage every Tantivy document for one file before publishing any of its
+/// exact postings or in-memory metadata. A late writer failure therefore
+/// cannot leave postings that point at missing documents.
+fn publish_chunks(
+    rel_str: &str,
+    chunks: &[crate::chunker::Chunk],
+    ctx: &IndexContext<'_>,
+) -> Result<()> {
+    for chunk in chunks {
+        if let Err(error) = ctx.tantivy.add_chunk(chunk) {
+            if let Err(rollback_error) = ctx.tantivy.remove_file(rel_str) {
+                warn!(
+                    path = %rel_str,
+                    error = %rollback_error,
+                    "failed to roll back partially staged file"
+                );
+            }
+            return Err(error);
+        }
+        #[cfg(feature = "internal-testing")]
+        if chunk
+            .content
+            .contains("codixing-test-fail-after-first-tantivy-add")
+        {
+            ctx.tantivy.remove_file(rel_str)?;
+            return Err(CodixingError::Index(
+                "injected failure after first Tantivy add".to_string(),
+            ));
+        }
+    }
+
+    ctx.chunk_count.fetch_add(chunks.len(), Ordering::Relaxed);
+    ctx.file_chunk_map.insert(
+        rel_str.to_string(),
+        chunks
+            .iter()
+            .map(|chunk| chunk.id)
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    );
+    for chunk in chunks {
+        ctx.chunk_meta_map.insert(
+            chunk.id,
+            ChunkMeta {
+                chunk_id: chunk.id,
+                file_path: rel_str.to_string(),
+                language: chunk.language.name().to_string(),
+                line_start: chunk.line_start as u64,
+                line_end: chunk.line_end as u64,
+                signature: chunk.signatures.join("\n"),
+                scope_chain: chunk.scope_chain.clone(),
+                entity_names: chunk.entity_names.clone(),
+                content_hash: xxhash_rust::xxh3::xxh3_64(chunk.content.as_bytes()),
+                content: if ctx.queue_embeddings {
+                    chunk.content.clone()
+                } else {
+                    String::new()
+                },
+            },
+        );
+        if ctx.queue_embeddings {
+            ctx.pending_embeds.insert(chunk.id, String::new());
+        }
+    }
+    Ok(())
 }
 
 /// Build a [`FileTrigramIndex`] from Tantivy stored fields.
@@ -209,8 +267,37 @@ pub(super) fn build_file_trigram_from_tantivy(tantivy: &TantivyIndex) -> FileTri
 }
 
 /// Process a single file: parse → chunk → index → extract symbols.
+fn parse_source_for_init(
+    path: &Path,
+    source: &[u8],
+    ctx: &IndexContext<'_>,
+) -> Result<crate::parser::ParseResult> {
+    #[cfg(feature = "internal-testing")]
+    if source
+        .windows(b"codixing-test-skip-before-index-publication".len())
+        .any(|window| window == b"codixing-test-skip-before-index-publication")
+    {
+        return Err(CodixingError::Parse {
+            path: path.to_path_buf(),
+            message: "injected file-local parse failure".to_string(),
+        });
+    }
+
+    ctx.parser.parse_file_transient(path, source)
+}
+
 pub(super) fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
-    let Some(read) = read_source_bounded(path, ctx.config.max_file_bytes)? else {
+    let read = match read_source_bounded(path, ctx.config.max_file_bytes) {
+        Ok(read) => read,
+        Err(error) => {
+            // Source trees can change while a large parallel walk is running.
+            // Nothing has been staged for this file yet, so a vanished or
+            // temporarily unreadable source is safe to omit from this snapshot.
+            warn!(path = %path.display(), %error, "cannot read source during initialization, skipping");
+            return Ok(());
+        }
+    };
+    let Some(read) = read else {
         debug!(path = %path.display(), limit = ctx.config.max_file_bytes, "source grew beyond max_file_bytes during indexing");
         return Ok(());
     };
@@ -219,7 +306,15 @@ pub(super) fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
         metadata_before,
         metadata_after,
     } = read;
-    let result = ctx.parser.parse_file_transient(path, &source)?;
+    let result = match parse_source_for_init(path, &source, ctx) {
+        Ok(result) => result,
+        Err(error) => {
+            // Parsing has no index side effects. Keep healthy siblings usable
+            // when one malformed or unsupported source cannot be interpreted.
+            warn!(path = %path.display(), %error, "cannot parse source during initialization, skipping");
+            return Ok(());
+        }
+    };
     let hash_entry = stable_file_hash_entry(result.content_hash, metadata_before, metadata_after);
 
     let rel_str = ctx
@@ -230,15 +325,15 @@ pub(super) fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
     // Doc language branch — uses DocLanguageSupport instead of tree-sitter/config.
     if result.language.is_doc() {
         process_doc_file(&rel_str, &source, result.language, ctx)?;
-        add_file_trigrams(ctx, &rel_str, &source);
         ctx.pending_hashes.insert(path.to_path_buf(), hash_entry);
         return Ok(());
     }
 
     // Jupyter branch — parse JSON and dispatch per-cell.
     if result.language.is_notebook() {
-        process_jupyter_file(&rel_str, &source, ctx)?;
-        add_file_trigrams(ctx, &rel_str, &source);
+        if process_jupyter_file(&rel_str, &source, ctx)? == NotebookProcessOutcome::Skipped {
+            return Ok(());
+        }
         ctx.pending_hashes.insert(path.to_path_buf(), hash_entry);
         return Ok(());
     }
@@ -252,34 +347,7 @@ pub(super) fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
         &ctx.config.chunk,
     );
 
-    ctx.chunk_count.fetch_add(chunks.len(), Ordering::Relaxed);
-    ctx.file_chunk_map.insert(rel_str.clone(), chunks.len());
-
-    for chunk in &chunks {
-        ctx.tantivy.add_chunk(chunk)?;
-
-        ctx.chunk_meta_map.insert(
-            chunk.id,
-            ChunkMeta {
-                chunk_id: chunk.id,
-                file_path: rel_str.clone(),
-                language: chunk.language.name().to_string(),
-                line_start: chunk.line_start as u64,
-                line_end: chunk.line_end as u64,
-                signature: chunk.signatures.join("\n"),
-                scope_chain: chunk.scope_chain.clone(),
-                entity_names: chunk.entity_names.clone(),
-                content_hash: xxhash_rust::xxh3::xxh3_64(chunk.content.as_bytes()),
-                content: chunk.content.clone(),
-            },
-        );
-
-        // Queue only IDs when embedding is active. Content already lives in
-        // chunk_meta_map and the String value is deliberately empty.
-        if ctx.queue_embeddings {
-            ctx.pending_embeds.insert(chunk.id, String::new());
-        }
-    }
+    publish_chunks(&rel_str, &chunks, ctx)?;
 
     for entity in &result.entities {
         ctx.symbols
@@ -326,8 +394,7 @@ pub(super) fn process_file(path: &Path, ctx: &IndexContext<'_>) -> Result<()> {
         }
     }
 
-    add_chunk_trigrams(ctx, &rel_str, &source, &chunks);
-    add_file_trigrams(ctx, &rel_str, &source);
+    add_search_trigrams(ctx, &rel_str, &source, &chunks);
     ctx.pending_hashes.insert(path.to_path_buf(), hash_entry);
 
     debug!(
@@ -415,11 +482,6 @@ fn process_doc_file(
     let sections = doc_support.parse_sections(source, file_name);
     let symbol_refs = doc_support.extract_symbol_refs(source);
 
-    if !symbol_refs.is_empty() {
-        ctx.pending_doc_refs
-            .insert(rel_str.to_string(), symbol_refs.clone());
-    }
-
     let mut chunks =
         crate::chunker::doc::chunk_doc(rel_str, source, &sections, language, &ctx.config.chunk);
 
@@ -434,34 +496,13 @@ fn process_doc_file(
             .collect();
     }
 
-    ctx.chunk_count.fetch_add(chunks.len(), Ordering::Relaxed);
-    ctx.file_chunk_map.insert(rel_str.to_string(), chunks.len());
-
-    for chunk in &chunks {
-        ctx.tantivy.add_chunk(chunk)?;
-
-        ctx.chunk_meta_map.insert(
-            chunk.id,
-            ChunkMeta {
-                chunk_id: chunk.id,
-                file_path: rel_str.to_string(),
-                language: chunk.language.name().to_string(),
-                line_start: chunk.line_start as u64,
-                line_end: chunk.line_end as u64,
-                signature: String::new(),
-                scope_chain: chunk.scope_chain.clone(),
-                entity_names: chunk.entity_names.clone(),
-                content_hash: xxhash_rust::xxh3::xxh3_64(chunk.content.as_bytes()),
-                content: chunk.content.clone(),
-            },
-        );
-
-        if ctx.queue_embeddings {
-            ctx.pending_embeds.insert(chunk.id, String::new());
-        }
+    publish_chunks(rel_str, &chunks, ctx)?;
+    if !symbol_refs.is_empty() {
+        ctx.pending_doc_refs
+            .insert(rel_str.to_string(), symbol_refs);
     }
 
-    add_chunk_trigrams(ctx, rel_str, source, &chunks);
+    add_search_trigrams(ctx, rel_str, source, &chunks);
 
     debug!(
         path = %rel_str,
@@ -489,184 +530,178 @@ fn process_doc_file(
 /// - Cell imports do not participate in the cross-file import graph yet —
 ///   pending_imports / pending_calls are not populated for notebook cells.
 ///
-/// **Parallelism (v0.42)**: cells are processed via `par_iter().try_for_each`.
-/// Each rayon worker owns a fresh `tree_sitter::Parser` (the one place
-/// per-cell that can't be shared) and writes chunks into the lock-free
-/// DashMap-backed sinks on `IndexContext`. `tantivy.add_chunk` and
-/// `symbols.insert` are internally synchronized, so concurrent writes are
-/// safe but serialize at the lock — the win is in tree-sitter parse +
-/// chunk-builder time, not Tantivy ingest. Expected ~4-5× on notebooks
-/// with ≥10 code cells.
-fn process_jupyter_file(rel_str: &str, source: &[u8], ctx: &IndexContext<'_>) -> Result<()> {
+/// Cells are parsed and chunked in parallel, then their prepared artifacts are
+/// published as one file transaction. This preserves parallel tree-sitter work
+/// without exposing partial notebook state if Tantivy rejects a later chunk.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NotebookProcessOutcome {
+    Indexed,
+    Skipped,
+}
+
+fn process_jupyter_file(
+    rel_str: &str,
+    source: &[u8],
+    ctx: &IndexContext<'_>,
+) -> Result<NotebookProcessOutcome> {
     let cells = match ipynb::parse_notebook(source) {
         Ok(cells) => cells,
         Err(e) => {
             warn!(path = %rel_str, error = %e, "malformed notebook, skipping");
-            return Ok(());
+            return Ok(NotebookProcessOutcome::Skipped);
         }
     };
 
-    let total_chunks = AtomicUsize::new(0);
-    let total_entities = AtomicUsize::new(0);
+    #[derive(Default)]
+    struct CellArtifacts {
+        chunks: Vec<crate::chunker::Chunk>,
+        symbols: Vec<Symbol>,
+        doc_refs: Vec<crate::language::doc::SymbolRef>,
+    }
 
-    cells.par_iter().try_for_each(|cell| -> Result<()> {
-        if matches!(cell.kind, CellKind::Raw) {
-            return Ok(());
-        }
-        let cell_scope = format!("cell-{}", cell.id);
-        let cell_bytes = cell.source.as_bytes();
+    let mut id_counts = HashMap::<&str, usize>::new();
+    for cell in &cells {
+        *id_counts.entry(cell.id.as_str()).or_default() += 1;
+    }
 
-        match cell.kind {
-            CellKind::Code => {
-                let ext = ipynb::kernel_language_extension(cell.kernel_language.as_deref())
-                    .unwrap_or("py");
-                // Detect target language off a synthetic extension — the
-                // real notebook path has `.ipynb` and would resolve back
-                // to Jupyter, so use a throwaway path for dispatch only.
-                let synthetic = PathBuf::from(format!("cell.{ext}"));
-                let Some(cell_lang) = detect_language(&synthetic) else {
-                    return Ok(());
-                };
-                let Some(lang_support) = ctx.parser.registry().get(cell_lang) else {
-                    return Ok(());
-                };
-
-                // Direct tree-sitter parse, bypassing the path-keyed cache
-                // so we don't thrash it with per-cell synthetic paths. Each
-                // rayon worker owns its own parser (tree_sitter::Parser is
-                // !Send-by-value, but constructed inside the closure each
-                // call so this is fine).
-                let mut ts_parser = tree_sitter::Parser::new();
-                if ts_parser
-                    .set_language(&lang_support.tree_sitter_language())
-                    .is_err()
-                {
-                    return Ok(());
-                }
-                let Some(tree) = ts_parser.parse(cell_bytes, None) else {
-                    return Ok(());
-                };
-                let entities = lang_support.extract_entities(&tree, cell_bytes);
-
-                let chunker = CastChunker;
-                let mut chunks = chunker.chunk(
-                    rel_str,
-                    cell_bytes,
-                    Some(&tree),
-                    cell_lang,
-                    &ctx.config.chunk,
-                );
-                for chunk in &mut chunks {
-                    let mut scope = vec![cell_scope.clone()];
-                    scope.append(&mut chunk.scope_chain);
-                    chunk.scope_chain = scope;
-                }
-
-                total_chunks.fetch_add(chunks.len(), Ordering::Relaxed);
-                for chunk in &chunks {
-                    ctx.tantivy.add_chunk(chunk)?;
-                    ctx.chunk_meta_map.insert(
-                        chunk.id,
-                        ChunkMeta {
-                            chunk_id: chunk.id,
-                            file_path: rel_str.to_string(),
-                            language: chunk.language.name().to_string(),
-                            line_start: chunk.line_start as u64,
-                            line_end: chunk.line_end as u64,
-                            signature: chunk.signatures.join("\n"),
-                            scope_chain: chunk.scope_chain.clone(),
-                            entity_names: chunk.entity_names.clone(),
-                            content_hash: xxhash_rust::xxh3::xxh3_64(chunk.content.as_bytes()),
-                            content: chunk.content.clone(),
-                        },
-                    );
-                    if ctx.queue_embeddings {
-                        ctx.pending_embeds.insert(chunk.id, String::new());
-                    }
-                }
-
-                add_chunk_trigrams(ctx, rel_str, source, &chunks);
-
-                for entity in &entities {
-                    let mut sym = symbol_from_entity(entity, rel_str, cell_lang);
-                    let mut scope = vec![cell_scope.clone()];
-                    scope.append(&mut sym.scope);
-                    sym.scope = scope;
-                    ctx.symbols.insert(sym);
-                }
-                total_entities.fetch_add(entities.len(), Ordering::Relaxed);
+    let prepared = cells
+        .par_iter()
+        .map(|cell| -> Result<CellArtifacts> {
+            if matches!(cell.kind, CellKind::Raw) {
+                return Ok(CellArtifacts::default());
             }
-            CellKind::Markdown => {
-                let Some(doc_support) = ctx.parser.registry().get_doc(Language::Markdown) else {
-                    return Ok(());
-                };
-                let file_name_hint = format!("{cell_scope}.md");
-                let sections =
-                    doc_support.parse_sections(cell_bytes, Some(file_name_hint.as_str()));
-                let symbol_refs = doc_support.extract_symbol_refs(cell_bytes);
+            let cell_scope = format!("cell-{}", cell.id);
+            let identity = if id_counts.get(cell.id.as_str()).copied().unwrap_or(0) == 1 {
+                format!("{rel_str}#cell:{}", cell.id)
+            } else {
+                format!("{rel_str}#cell:{}:{}", cell.id, cell.index)
+            };
+            let cell_bytes = cell.source.as_bytes();
 
-                let mut chunks = crate::chunker::doc::chunk_doc(
-                    rel_str,
-                    cell_bytes,
-                    &sections,
-                    Language::Markdown,
-                    &ctx.config.chunk,
-                );
-                for chunk in &mut chunks {
-                    let mut scope = vec![cell_scope.clone()];
-                    scope.append(&mut chunk.scope_chain);
-                    chunk.scope_chain = scope;
-                    chunk.entity_names = symbol_refs
+            match cell.kind {
+                CellKind::Code => {
+                    let ext = ipynb::kernel_language_extension(cell.kernel_language.as_deref())
+                        .unwrap_or("py");
+                    // Detect target language off a synthetic extension — the
+                    // real notebook path has `.ipynb` and would resolve back
+                    // to Jupyter, so use a throwaway path for dispatch only.
+                    let synthetic = PathBuf::from(format!("cell.{ext}"));
+                    let Some(cell_lang) = detect_language(&synthetic) else {
+                        return Ok(CellArtifacts::default());
+                    };
+                    let Some(lang_support) = ctx.parser.registry().get(cell_lang) else {
+                        return Ok(CellArtifacts::default());
+                    };
+
+                    // Direct tree-sitter parse, bypassing the path-keyed cache
+                    // so we don't thrash it with per-cell synthetic paths. Each
+                    // rayon worker owns its own parser (tree_sitter::Parser is
+                    // !Send-by-value, but constructed inside the closure each
+                    // call so this is fine).
+                    let mut ts_parser = tree_sitter::Parser::new();
+                    if ts_parser
+                        .set_language(&lang_support.tree_sitter_language())
+                        .is_err()
+                    {
+                        return Ok(CellArtifacts::default());
+                    }
+                    let Some(tree) = ts_parser.parse(cell_bytes, None) else {
+                        return Ok(CellArtifacts::default());
+                    };
+                    let entities = lang_support.extract_entities(&tree, cell_bytes);
+
+                    let chunker = CastChunker;
+                    let mut chunks = chunker.chunk(
+                        &identity,
+                        cell_bytes,
+                        Some(&tree),
+                        cell_lang,
+                        &ctx.config.chunk,
+                    );
+                    for chunk in &mut chunks {
+                        chunk.file_path = rel_str.to_string();
+                        let mut scope = vec![cell_scope.clone()];
+                        scope.append(&mut chunk.scope_chain);
+                        chunk.scope_chain = scope;
+                    }
+
+                    let symbols = entities
                         .iter()
-                        .filter(|r| {
-                            r.byte_range.start >= chunk.byte_start
-                                && r.byte_range.end <= chunk.byte_end
+                        .map(|entity| {
+                            let mut sym = symbol_from_entity(entity, rel_str, cell_lang);
+                            let mut scope = vec![cell_scope.clone()];
+                            scope.append(&mut sym.scope);
+                            sym.scope = scope;
+                            sym
                         })
-                        .map(|r| r.name.clone())
                         .collect();
+                    Ok(CellArtifacts {
+                        chunks,
+                        symbols,
+                        doc_refs: Vec::new(),
+                    })
                 }
+                CellKind::Markdown => {
+                    let Some(doc_support) = ctx.parser.registry().get_doc(Language::Markdown)
+                    else {
+                        return Ok(CellArtifacts::default());
+                    };
+                    let file_name_hint = format!("{cell_scope}.md");
+                    let sections =
+                        doc_support.parse_sections(cell_bytes, Some(file_name_hint.as_str()));
+                    let symbol_refs = doc_support.extract_symbol_refs(cell_bytes);
 
-                total_chunks.fetch_add(chunks.len(), Ordering::Relaxed);
-                for chunk in &chunks {
-                    ctx.tantivy.add_chunk(chunk)?;
-                    ctx.chunk_meta_map.insert(
-                        chunk.id,
-                        ChunkMeta {
-                            chunk_id: chunk.id,
-                            file_path: rel_str.to_string(),
-                            language: chunk.language.name().to_string(),
-                            line_start: chunk.line_start as u64,
-                            line_end: chunk.line_end as u64,
-                            signature: String::new(),
-                            scope_chain: chunk.scope_chain.clone(),
-                            entity_names: chunk.entity_names.clone(),
-                            content_hash: xxhash_rust::xxh3::xxh3_64(chunk.content.as_bytes()),
-                            content: chunk.content.clone(),
-                        },
+                    let mut chunks = crate::chunker::doc::chunk_doc(
+                        &identity,
+                        cell_bytes,
+                        &sections,
+                        Language::Markdown,
+                        &ctx.config.chunk,
                     );
-                    if ctx.queue_embeddings {
-                        ctx.pending_embeds.insert(chunk.id, String::new());
+                    for chunk in &mut chunks {
+                        chunk.file_path = rel_str.to_string();
+                        let mut scope = vec![cell_scope.clone()];
+                        scope.append(&mut chunk.scope_chain);
+                        chunk.scope_chain = scope;
+                        chunk.entity_names = symbol_refs
+                            .iter()
+                            .filter(|r| {
+                                r.byte_range.start >= chunk.byte_start
+                                    && r.byte_range.end <= chunk.byte_end
+                            })
+                            .map(|r| r.name.clone())
+                            .collect();
                     }
+                    Ok(CellArtifacts {
+                        chunks,
+                        symbols: Vec::new(),
+                        doc_refs: symbol_refs,
+                    })
                 }
-
-                add_chunk_trigrams(ctx, rel_str, source, &chunks);
-
-                if !symbol_refs.is_empty() {
-                    ctx.pending_doc_refs
-                        .entry(rel_str.to_string())
-                        .or_default()
-                        .extend(symbol_refs);
-                }
+                CellKind::Raw => unreachable!("raw cells filtered above"),
             }
-            CellKind::Raw => unreachable!("raw cells filtered above"),
-        }
-        Ok(())
-    })?;
+        })
+        .collect::<Result<Vec<_>>>()?;
 
-    let total_chunks = total_chunks.load(Ordering::Relaxed);
-    let total_entities = total_entities.load(Ordering::Relaxed);
-    ctx.chunk_count.fetch_add(total_chunks, Ordering::Relaxed);
-    ctx.file_chunk_map.insert(rel_str.to_string(), total_chunks);
+    let total_chunks = prepared.iter().map(|cell| cell.chunks.len()).sum();
+    let total_entities = prepared.iter().map(|cell| cell.symbols.len()).sum();
+    let mut chunks = Vec::with_capacity(total_chunks);
+    let mut symbols = Vec::with_capacity(total_entities);
+    let mut doc_refs = Vec::new();
+    for cell in prepared {
+        chunks.extend(cell.chunks);
+        symbols.extend(cell.symbols);
+        doc_refs.extend(cell.doc_refs);
+    }
+
+    publish_chunks(rel_str, &chunks, ctx)?;
+    add_search_trigrams(ctx, rel_str, source, &chunks);
+    for symbol in symbols {
+        ctx.symbols.insert(symbol);
+    }
+    if !doc_refs.is_empty() {
+        ctx.pending_doc_refs.insert(rel_str.to_string(), doc_refs);
+    }
 
     debug!(
         path = %rel_str,
@@ -675,7 +710,7 @@ fn process_jupyter_file(rel_str: &str, source: &[u8], ctx: &IndexContext<'_>) ->
         "indexed jupyter notebook"
     );
 
-    Ok(())
+    Ok(NotebookProcessOutcome::Indexed)
 }
 
 /// Build the text string to embed for a chunk.
@@ -690,6 +725,25 @@ pub(super) fn make_embed_text(meta: &ChunkMeta, contextual: bool) -> String {
     }
     let prefix = build_context_prefix(meta);
     format!("{prefix}{}", meta.content)
+}
+
+/// Reconstructible identity for the exact text used to produce an embedding.
+///
+/// Compact chunk metadata deliberately omits the body after publication, so a
+/// contextual reuse key cannot hash `make_embed_text` directly after reopen.
+/// Hash the context prefix together with the already-persisted body hash
+/// instead. The domain/version tag keeps this cache identity independent from
+/// other xxh3 hashes and makes future context-format changes explicit.
+pub(super) fn embedding_reuse_key(meta: &ChunkMeta, contextual: bool) -> u64 {
+    if !contextual {
+        return meta.content_hash;
+    }
+
+    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+    hasher.update(b"codixing:contextual-embedding-reuse:v1\0");
+    hasher.update(build_context_prefix(meta).as_bytes());
+    hasher.update(&meta.content_hash.to_le_bytes());
+    hasher.digest()
 }
 
 /// Deserialize `chunk_meta.bin` with backward compatibility.
@@ -1030,6 +1084,122 @@ where
     })
 }
 
+const SOURCE_CANONICALIZE_BATCH_SIZE: usize = 4096;
+
+#[cfg(test)]
+std::thread_local! {
+    static PARALLEL_CANONICALIZE_BATCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static SERIAL_CANONICALIZE_BATCHES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LAST_CANONICALIZE_POOL_SIZE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn canonicalize_source_candidate(path: PathBuf, canonical_walk_root: &Path) -> Option<PathBuf> {
+    match path.canonicalize() {
+        Ok(path) if path.starts_with(canonical_walk_root) => Some(path),
+        Ok(path) => {
+            warn!(
+                path = %path.display(),
+                root = %canonical_walk_root.display(),
+                "skipping source file outside its configured root"
+            );
+            None
+        }
+        Err(error) => {
+            warn!(path = %path.display(), %error, "cannot resolve source file, skipping");
+            None
+        }
+    }
+}
+
+fn canonicalize_source_candidates_with_mode(
+    candidates: Vec<PathBuf>,
+    canonical_walk_root: &Path,
+    parallel: bool,
+) -> Vec<Option<PathBuf>> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    if parallel {
+        #[cfg(test)]
+        {
+            PARALLEL_CANONICALIZE_BATCHES.with(|count| count.set(count.get() + 1));
+            LAST_CANONICALIZE_POOL_SIZE.with(|size| size.set(rayon::current_num_threads()));
+        }
+        // Vec's indexed parallel iterator preserves input order on collect.
+        // Use the caller-configured Rayon pool rather than creating another
+        // pool or spawning one thread per path.
+        candidates
+            .into_par_iter()
+            .map(|path| canonicalize_source_candidate(path, canonical_walk_root))
+            .collect()
+    } else {
+        #[cfg(test)]
+        SERIAL_CANONICALIZE_BATCHES.with(|count| count.set(count.get() + 1));
+        candidates
+            .into_iter()
+            .map(|path| canonicalize_source_candidate(path, canonical_walk_root))
+            .collect()
+    }
+}
+
+fn append_canonicalized_source_candidates(
+    candidates: Vec<PathBuf>,
+    canonical_walk_root: &Path,
+    parallel: bool,
+    files: &mut Vec<PathBuf>,
+    seen_canonical: &mut HashSet<PathBuf>,
+) {
+    for canonical_path in
+        canonicalize_source_candidates_with_mode(candidates, canonical_walk_root, parallel)
+            .into_iter()
+            .flatten()
+    {
+        if seen_canonical.insert(canonical_path.clone()) {
+            files.push(canonical_path);
+        }
+    }
+}
+
+fn push_source_candidate(
+    candidates: &mut Vec<PathBuf>,
+    path: PathBuf,
+    canonical_walk_root: &Path,
+    files: &mut Vec<PathBuf>,
+    seen_canonical: &mut HashSet<PathBuf>,
+) {
+    candidates.push(path);
+    if candidates.len() == SOURCE_CANONICALIZE_BATCH_SIZE {
+        let full_batch = std::mem::replace(
+            candidates,
+            Vec::with_capacity(SOURCE_CANONICALIZE_BATCH_SIZE),
+        );
+        append_canonicalized_source_candidates(
+            full_batch,
+            canonical_walk_root,
+            true,
+            files,
+            seen_canonical,
+        );
+    }
+}
+
+fn finish_source_candidates(
+    candidates: Vec<PathBuf>,
+    canonical_walk_root: &Path,
+    files: &mut Vec<PathBuf>,
+    seen_canonical: &mut HashSet<PathBuf>,
+) {
+    // A partial tail is cheaper to resolve serially and never exceeds the
+    // bounded batch retained during the directory walk.
+    append_canonicalized_source_candidates(
+        candidates,
+        canonical_walk_root,
+        false,
+        files,
+        seen_canonical,
+    );
+}
+
 /// Walk the directory tree and collect all source files with supported extensions.
 ///
 /// Uses the `ignore` crate so that `.gitignore`, `.ignore`, and
@@ -1045,8 +1215,6 @@ pub(super) fn walk_source_files(root: &Path, config: &IndexConfig) -> Result<Vec
 
     let mut files = Vec::new();
     let mut seen_canonical = HashSet::new();
-    let mut oversized_skipped = 0_usize;
-    let mut oversized_bytes = 0_u64;
 
     // Helper closure: collect matching files from a single directory tree.
     let mut collect = |walk_root: &Path| {
@@ -1057,6 +1225,7 @@ pub(super) fn walk_source_files(root: &Path, config: &IndexConfig) -> Result<Vec
                 return;
             }
         };
+        let mut candidates = Vec::with_capacity(SOURCE_CANONICALIZE_BATCH_SIZE);
         for entry in WalkBuilder::new(walk_root)
             .standard_filters(true) // honour .gitignore / .ignore / global gitignore
             .hidden(true) // skip dot-files not covered by .gitignore
@@ -1083,50 +1252,31 @@ pub(super) fn walk_source_files(root: &Path, config: &IndexConfig) -> Result<Vec
             {
                 continue;
             }
-            // Apply cheap path/language filters before any metadata or
-            // canonicalization syscalls. Huge repos contain many ignored assets
-            // that should cost only the directory entry already in hand.
+            // Apply cheap path/language filters before canonicalization. File
+            // size is enforced from the opened handle by `read_source_bounded`;
+            // avoid a duplicate serial metadata syscall for every candidate.
             if !config.is_indexable_path(path) {
                 continue;
             }
-            if config.max_file_bytes > 0 {
-                match entry.metadata() {
-                    Ok(metadata) if metadata.len() > config.max_file_bytes => {
-                        oversized_skipped += 1;
-                        oversized_bytes = oversized_bytes.saturating_add(metadata.len());
-                        debug!(
-                            path = %path.display(),
-                            bytes = metadata.len(),
-                            limit = config.max_file_bytes,
-                            "oversized source candidate will be verified by bounded read"
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        warn!(path = %path.display(), %error, "cannot inspect source file, skipping");
-                        continue;
-                    }
-                }
-            }
-            let canonical_path = match path.canonicalize() {
-                Ok(path) if path.starts_with(&canonical_walk_root) => path,
-                Ok(path) => {
-                    warn!(
-                        path = %path.display(),
-                        root = %canonical_walk_root.display(),
-                        "skipping source file outside its configured root"
-                    );
-                    continue;
-                }
-                Err(error) => {
-                    warn!(path = %path.display(), %error, "cannot resolve source file, skipping");
-                    continue;
-                }
-            };
-            if seen_canonical.insert(canonical_path.clone()) {
-                files.push(canonical_path);
-            }
+            push_source_candidate(
+                &mut candidates,
+                path.to_path_buf(),
+                &canonical_walk_root,
+                &mut files,
+                &mut seen_canonical,
+            );
         }
+
+        // Canonicalization is independent per candidate and dominates a
+        // metadata-only scan on very large repositories. Full bounded batches
+        // were resolved and consumed above; keep the final partial batch serial.
+        // Sequential consumption preserves global walk and root precedence.
+        finish_source_candidates(
+            candidates,
+            &canonical_walk_root,
+            &mut files,
+            &mut seen_canonical,
+        );
     };
 
     // Walk the primary root.
@@ -1139,15 +1289,6 @@ pub(super) fn walk_source_files(root: &Path, config: &IndexConfig) -> Result<Vec
             continue;
         }
         collect(extra);
-    }
-
-    if oversized_skipped > 0 {
-        info!(
-            files = oversized_skipped,
-            bytes = oversized_bytes,
-            limit = config.max_file_bytes,
-            "found oversized source candidates; bounded reads will skip those still above the limit"
-        );
     }
 
     Ok(files)
@@ -1516,11 +1657,45 @@ pub(super) fn unix_timestamp_string() -> String {
 
 #[cfg(test)]
 mod init_hash_tests {
-    use super::{stable_file_hash_entry, walk_source_files};
+    use super::{
+        LAST_CANONICALIZE_POOL_SIZE, PARALLEL_CANONICALIZE_BATCHES, SERIAL_CANONICALIZE_BATCHES,
+        SOURCE_CANONICALIZE_BATCH_SIZE, canonicalize_source_candidates_with_mode,
+        finish_source_candidates, push_source_candidate, read_source_bounded,
+        stable_file_hash_entry, walk_source_files,
+    };
     use crate::config::IndexConfig;
+    use std::collections::HashSet;
     use std::fs;
     use std::time::{Duration, SystemTime};
     use tempfile::tempdir;
+
+    fn reset_canonicalize_observations() {
+        PARALLEL_CANONICALIZE_BATCHES.with(|count| count.set(0));
+        SERIAL_CANONICALIZE_BATCHES.with(|count| count.set(0));
+        LAST_CANONICALIZE_POOL_SIZE.with(|size| size.set(0));
+    }
+
+    fn canonicalize_observations() -> (usize, usize, usize) {
+        (
+            PARALLEL_CANONICALIZE_BATCHES.with(std::cell::Cell::get),
+            SERIAL_CANONICALIZE_BATCHES.with(std::cell::Cell::get),
+            LAST_CANONICALIZE_POOL_SIZE.with(std::cell::Cell::get),
+        )
+    }
+
+    fn canonicalize_in_bounded_batches(
+        candidates: impl IntoIterator<Item = std::path::PathBuf>,
+        canonical_root: &std::path::Path,
+    ) -> Vec<std::path::PathBuf> {
+        let mut batch = Vec::with_capacity(SOURCE_CANONICALIZE_BATCH_SIZE);
+        let mut files = Vec::new();
+        let mut seen = HashSet::new();
+        for path in candidates {
+            push_source_candidate(&mut batch, path, canonical_root, &mut files, &mut seen);
+        }
+        finish_source_candidates(batch, canonical_root, &mut files, &mut seen);
+        files
+    }
 
     #[test]
     fn changing_metadata_forces_next_sync_to_verify_content() {
@@ -1542,6 +1717,199 @@ mod init_hash_tests {
         assert_eq!(entry.mtime(), Some(time));
         assert_eq!(entry.size, 100);
         assert!(!entry.file_might_have_changed(Some(time), 100));
+    }
+
+    #[test]
+    fn source_walk_defers_size_limit_to_bounded_reader() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        let oversized = root.join("oversized.rs");
+        fs::write(&oversized, vec![b'x'; 256]).unwrap();
+
+        let mut config = IndexConfig::new(&root);
+        config.max_file_bytes = 128;
+        let files = walk_source_files(&root, &config).unwrap();
+
+        assert_eq!(files, vec![oversized.canonicalize().unwrap()]);
+        assert!(
+            read_source_bounded(&files[0], config.max_file_bytes)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn parallel_canonicalization_matches_serial_order_and_rejections() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let outside = dir.path().join("outside.rs");
+        fs::create_dir_all(&root).unwrap();
+        let first = root.join("first.rs");
+        let second = root.join("second.rs");
+        fs::write(&first, "fn first() {}\n").unwrap();
+        fs::write(&second, "fn second() {}\n").unwrap();
+        fs::write(&outside, "fn outside() {}\n").unwrap();
+        let missing = root.join("missing.rs");
+        let canonical_root = root.canonicalize().unwrap();
+        let candidates = vec![
+            second.clone(),
+            first.clone(),
+            second.clone(),
+            missing,
+            outside,
+        ];
+
+        let serial =
+            canonicalize_source_candidates_with_mode(candidates.clone(), &canonical_root, false);
+        let parallel = canonicalize_source_candidates_with_mode(candidates, &canonical_root, true);
+
+        assert_eq!(parallel, serial);
+        assert_eq!(
+            serial,
+            vec![
+                Some(second.canonicalize().unwrap()),
+                Some(first.canonicalize().unwrap()),
+                Some(second.canonicalize().unwrap()),
+                None,
+                None,
+            ],
+            "parallel resolution must preserve candidate and duplicate order while rejecting missing and outside-root paths"
+        );
+    }
+
+    #[test]
+    fn canonicalization_batch_boundaries_select_expected_modes() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.rs");
+        fs::write(&source, "fn source() {}\n").unwrap();
+        let canonical_root = root.canonicalize().unwrap();
+        let canonical_source = source.canonicalize().unwrap();
+
+        for (count, expected_parallel, expected_serial) in
+            [(4095, 0, 1), (4096, 1, 0), (4097, 1, 1)]
+        {
+            reset_canonicalize_observations();
+            let files = canonicalize_in_bounded_batches(
+                std::iter::repeat_n(source.clone(), count),
+                &canonical_root,
+            );
+            assert_eq!(files, vec![canonical_source.clone()]);
+            let (parallel, serial, _) = canonicalize_observations();
+            assert_eq!(
+                (parallel, serial),
+                (expected_parallel, expected_serial),
+                "unexpected batch modes for {count} candidates"
+            );
+        }
+    }
+
+    #[test]
+    fn multiple_batches_preserve_order_and_reject_invalid_candidates() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let outside = dir.path().join("outside.rs");
+        fs::create_dir_all(&root).unwrap();
+        let first = root.join("first.rs");
+        let second = root.join("second.rs");
+        let third = root.join("third.rs");
+        for (path, body) in [
+            (&first, "fn first() {}\n"),
+            (&second, "fn second() {}\n"),
+            (&third, "fn third() {}\n"),
+            (&outside, "fn outside() {}\n"),
+        ] {
+            fs::write(path, body).unwrap();
+        }
+        let canonical_root = root.canonicalize().unwrap();
+        let mut candidates = Vec::with_capacity(SOURCE_CANONICALIZE_BATCH_SIZE + 4);
+        candidates.push(first.clone());
+        candidates.extend(std::iter::repeat_n(
+            first.clone(),
+            SOURCE_CANONICALIZE_BATCH_SIZE - 2,
+        ));
+        candidates.push(second.clone());
+        candidates.extend([
+            root.join("missing.rs"),
+            outside,
+            first.clone(),
+            third.clone(),
+        ]);
+
+        reset_canonicalize_observations();
+        let files = canonicalize_in_bounded_batches(candidates, &canonical_root);
+
+        assert_eq!(
+            files,
+            vec![
+                first.canonicalize().unwrap(),
+                second.canonicalize().unwrap(),
+                third.canonicalize().unwrap(),
+            ]
+        );
+        assert_eq!(canonicalize_observations().0, 1);
+        assert_eq!(canonicalize_observations().1, 1);
+    }
+
+    #[test]
+    fn parallel_batch_uses_installed_two_worker_pool() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source.rs");
+        fs::write(&source, "fn source() {}\n").unwrap();
+        let canonical_root = root.canonicalize().unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+
+        pool.install(|| {
+            reset_canonicalize_observations();
+            let files = canonicalize_in_bounded_batches(
+                std::iter::repeat_n(source.clone(), SOURCE_CANONICALIZE_BATCH_SIZE),
+                &canonical_root,
+            );
+            assert_eq!(files, vec![source.canonicalize().unwrap()]);
+            assert_eq!(canonicalize_observations(), (1, 0, 2));
+        });
+    }
+
+    #[test]
+    fn source_walk_honors_filters_and_distinct_extra_root() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("repo");
+        let extra = dir.path().join("shared");
+        fs::create_dir_all(root.join("blocked")).unwrap();
+        fs::create_dir_all(&extra).unwrap();
+        let included = root.join("included.rs");
+        let ignored = root.join("ignored.rs");
+        let hidden = root.join(".hidden.rs");
+        let excluded = root.join("blocked/excluded.rs");
+        let unsupported = root.join("notes.unsupported");
+        let extra_file = extra.join("extra.rs");
+        fs::write(root.join(".ignore"), "ignored.rs\n").unwrap();
+        fs::write(&included, "fn included() {}\n").unwrap();
+        fs::write(&ignored, "fn ignored() {}\n").unwrap();
+        fs::write(&hidden, "fn hidden() {}\n").unwrap();
+        fs::write(&excluded, "fn excluded() {}\n").unwrap();
+        fs::write(&unsupported, "not source\n").unwrap();
+        fs::write(&extra_file, "fn extra() {}\n").unwrap();
+
+        let mut config = IndexConfig::new(&root);
+        config.exclude_patterns.push("blocked".to_string());
+        config.extra_roots.push(extra);
+        let files = walk_source_files(&root, &config).unwrap();
+
+        assert_eq!(
+            files,
+            vec![
+                included.canonicalize().unwrap(),
+                extra_file.canonicalize().unwrap(),
+            ]
+        );
     }
 
     #[cfg(unix)]

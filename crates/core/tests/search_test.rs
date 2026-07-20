@@ -159,7 +159,7 @@ fn search_no_results() {
 }
 
 #[test]
-fn exact_search_hydrates_content_after_reopen() {
+fn exact_search_hydrates_content_after_init_and_reopen() {
     let dir = tempdir().unwrap();
     let root = dir.path();
     let src = root.join("src");
@@ -171,7 +171,22 @@ fn exact_search_hydrates_content_after_reopen() {
     )
     .unwrap();
 
-    drop(Engine::init(root, bm25_config(root)).unwrap());
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
+    let initialized_results = engine
+        .search(
+            SearchQuery::new(marker)
+                .with_limit(10)
+                .with_strategy(Strategy::Exact),
+        )
+        .unwrap();
+    assert!(
+        initialized_results
+            .iter()
+            .any(|result| result.content.contains(marker)),
+        "exact search should hydrate compact metadata content from Tantivy immediately after init"
+    );
+    drop(engine);
+
     let store = IndexStore::open(root).unwrap();
     assert!(!store.chunk_trigram_path().exists());
     fs::write(store.chunk_trigram_path(), b"ignored legacy corruption").unwrap();

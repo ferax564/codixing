@@ -92,6 +92,47 @@ fn import_links_to_code_via_doc_edges() {
 }
 
 #[test]
+fn incremental_symbol_uniqueness_refreshes_virtual_doc_edges() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::create_dir_all(root.join("src")).unwrap();
+    let mut engine = Engine::init(root, bm25_config(root)).unwrap();
+    let doc_path = "_external/github/issue-7.md";
+
+    let docs = codixing_core::external::github::parse_bytes(
+        br#"[{"number":7,"title":"Late target","body":"See `virtual_edge_target`.","state":"open"}]"#,
+    )
+    .unwrap();
+    assert_eq!(engine.import_external(docs).unwrap().doc_edges, 0);
+    assert!(engine.callees(doc_path).is_empty());
+
+    let target_a = root.join("src/target_a.rs");
+    fs::write(&target_a, "pub fn virtual_edge_target() -> usize { 1 }\n").unwrap();
+    engine.reindex_file(&target_a).unwrap();
+    assert_eq!(engine.callees(doc_path), vec!["src/target_a.rs"]);
+
+    let target_b = root.join("src/target_b.rs");
+    fs::write(&target_b, "pub fn virtual_edge_target() -> usize { 2 }\n").unwrap();
+    engine.reindex_file(&target_b).unwrap();
+    assert!(
+        engine.callees(doc_path).is_empty(),
+        "adding a duplicate definition must invalidate the formerly unique doc edge"
+    );
+
+    fs::remove_file(&target_b).unwrap();
+    engine.remove_file(&target_b).unwrap();
+    assert_eq!(engine.callees(doc_path), vec!["src/target_a.rs"]);
+
+    fs::remove_file(&target_a).unwrap();
+    engine.remove_file(&target_a).unwrap();
+    assert!(engine.callees(doc_path).is_empty());
+
+    drop(engine);
+    let reopened = Engine::open_read_only(root).unwrap();
+    assert!(reopened.callees(doc_path).is_empty());
+}
+
+#[test]
 fn source_filter_scopes_results() {
     let (_dir, mut engine) = init_repo();
 
@@ -294,4 +335,76 @@ fn imports_jira_and_linear_and_scopes_by_source() {
         );
         assert!(res.iter().all(|r| r.external_source() == Some(src)));
     }
+}
+
+#[test]
+fn failed_import_restores_active_generation_before_later_replacement() {
+    let (dir, mut engine) = init_repo();
+    let root = dir.path().to_path_buf();
+
+    let original =
+        r#"[{"number":1,"title":"Original","body":"stableexternalmarker","state":"open"}]"#;
+    engine
+        .import_external(codixing_core::external::github::parse_bytes(original.as_bytes()).unwrap())
+        .unwrap();
+
+    let injected = r#"[{"number":1,"title":"Broken replacement","body":"partialexternalmarker codixing-test-fail-external-import","state":"closed"}]"#;
+    let error = engine
+        .import_external(codixing_core::external::github::parse_bytes(injected.as_bytes()).unwrap())
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("injected external import failure")
+    );
+    assert!(
+        !engine
+            .search(SearchQuery::new("stableexternalmarker").with_strategy(Strategy::Exact))
+            .unwrap()
+            .is_empty(),
+        "the published import must remain live after an aborted replacement"
+    );
+    assert!(
+        engine
+            .search(SearchQuery::new("partialexternalmarker").with_strategy(Strategy::Exact))
+            .unwrap()
+            .is_empty(),
+        "resident search state must not retain the aborted import"
+    );
+
+    let final_doc =
+        r#"[{"number":1,"title":"Final","body":"finalexternalmarker","state":"closed"}]"#;
+    engine
+        .import_external(
+            codixing_core::external::github::parse_bytes(final_doc.as_bytes()).unwrap(),
+        )
+        .unwrap();
+    assert!(
+        engine
+            .search(SearchQuery::new("stableexternalmarker").with_strategy(Strategy::Exact))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !engine
+            .search(SearchQuery::new("finalexternalmarker").with_strategy(Strategy::Exact))
+            .unwrap()
+            .is_empty()
+    );
+
+    drop(engine);
+    let reopened = Engine::open(root).unwrap();
+    assert!(
+        !reopened
+            .search(SearchQuery::new("finalexternalmarker").with_strategy(Strategy::Exact))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        reopened
+            .search(SearchQuery::new("partialexternalmarker").with_strategy(Strategy::Exact))
+            .unwrap()
+            .is_empty(),
+        "a later checkpoint must not publish artifacts from the failed import"
+    );
 }

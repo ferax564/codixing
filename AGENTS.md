@@ -213,9 +213,15 @@ The CI workflow (`.github/workflows/ci.yml`) has the following jobs:
 - **release-build** — blocking three-platform matrix on `main` pushes only (never PRs or tag pushes). It has `needs: [test, npm-installer]`, builds the four binaries for Linux x86_64, macOS arm64, and Windows x86_64 (Windows uses `--no-default-features`), and uploads `binaries-<suffix>` artifacts with 14-day retention.
 - **benchmarks** — blocking Ubuntu job with no `needs` dependency. It runs the
   registered Criterion benches and the machine-readable large-repository gate,
-  then uploads both results as `benchmark-results`. Pull requests use the short
-  profile, main pushes use 10K files, and the weekly schedule uses 100K files;
-  performance ratios require an explicit same-machine baseline.
+  then uploads both results as `benchmark-results`. Pull requests and main
+  pushes use the regression-only 10K profile. Weekly and manually selected
+  100K runs use strict-claim mode: they require a trusted `origin/main`
+  baseline revision plus separate commit-bound external-quality JSON for the
+  baseline and candidate (positive task count, dataset digest, MRR, and
+  Recall@10). Baseline and candidate init/sync commands use an explicit fixed
+  eight-worker cap; missing or mismatched worker telemetry, missing quality
+  evidence, or stale evidence fails closed. The published speed scope is the
+  five-operation geometric mean, not a claim that every operation is 2x faster.
 
 The auto-tag workflow waits for the entire CI workflow to conclude successfully, so every blocking job above gates release tagging even though `release-build` itself directly depends only on `test` and `npm-installer`.
 

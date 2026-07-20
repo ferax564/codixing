@@ -7,8 +7,8 @@ use super::Engine;
 impl Engine {
     /// Find orphan files — files with zero in-degree in the dependency graph.
     pub fn find_orphans(&self, options: OrphanOptions) -> Vec<OrphanFile> {
-        // Gather all indexed files from the file_chunk_counts map.
-        let all_files: Vec<String> = self.file_chunk_counts.keys().cloned().collect();
+        // Gather all indexed files from the exact per-file chunk map.
+        let all_files: Vec<String> = self.file_chunk_ids.keys().cloned().collect();
         let mut orphans = Vec::new();
 
         for file in &all_files {

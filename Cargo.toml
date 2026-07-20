@@ -33,6 +33,10 @@ tree-sitter-bash = "0.23"
 
 # Search
 tantivy = "0.25"
+zstd = { version = "0.13", default-features = false }
+
+# Platform I/O
+libc = "0.2"
 
 # Embeddings + vector index
 fastembed = { version = "5.12", default-features = false, features = ["ort-load-dynamic", "hf-hub-native-tls"] }

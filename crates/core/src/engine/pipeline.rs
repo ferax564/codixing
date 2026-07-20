@@ -434,29 +434,59 @@ impl SearchStage for VisibilityBoostStage {
 /// above the file that *defines* it. Uses a 3.5x score multiplier.
 pub struct DefinitionBoostStage;
 
-impl SearchStage for DefinitionBoostStage {
-    fn apply(&self, results: &mut Vec<SearchResult>, ctx: &SearchContext<'_>) -> Result<()> {
-        use std::collections::HashSet;
+/// Resolve definition files only among the files already returned by the
+/// retriever. Exact names use the global O(log N) index. Fresh indexes resolve
+/// fuzzy substrings through candidate-file postings; legacy mmap indexes keep
+/// their efficient global prefix lookup until they are rebuilt.
+pub(super) fn defining_candidate_files(
+    symbols: &crate::symbols::SymbolTable,
+    results: &[SearchResult],
+    query: &str,
+) -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
 
-        let mut defining_files: HashSet<String> = HashSet::new();
-        for term in ctx.query.split_whitespace() {
-            if term.len() < 3 || !term.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                continue;
-            }
-            let exact = ctx.symbols.lookup(term);
-            if !exact.is_empty() {
-                for sym in exact {
-                    defining_files.insert(sym.file_path);
+    let candidate_files: HashSet<&str> = results
+        .iter()
+        .map(|result| result.file_path.as_str())
+        .collect();
+    let mut defining_files = HashSet::new();
+    for term in query.split_whitespace() {
+        if term.len() < 3 || !term.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+
+        let exact = symbols.lookup(term);
+        if exact.is_empty() {
+            if symbols.supports_exact_file_postings() {
+                for file_path in &candidate_files {
+                    if !symbols.symbols_in_file(file_path, Some(term)).is_empty() {
+                        defining_files.insert((*file_path).to_string());
+                    }
                 }
             } else {
-                // Bound fuzzy fallback to identifier prefixes. Mmap v2 and the
-                // in-memory table both resolve this through sorted secondary
-                // indexes rather than scanning every symbol name per term.
-                for sym in ctx.symbols.lookup_prefix(term) {
-                    defining_files.insert(sym.file_path);
+                // Existing v1/v2 mmap indexes have no exact-file postings.
+                // The global fallback avoids repeating a compatibility scan
+                // per candidate; v2 resolves it through its prefix index.
+                for symbol in symbols.lookup_prefix(term) {
+                    if candidate_files.contains(symbol.file_path.as_str()) {
+                        defining_files.insert(symbol.file_path);
+                    }
+                }
+            }
+        } else {
+            for symbol in exact {
+                if candidate_files.contains(symbol.file_path.as_str()) {
+                    defining_files.insert(symbol.file_path);
                 }
             }
         }
+    }
+    defining_files
+}
+
+impl SearchStage for DefinitionBoostStage {
+    fn apply(&self, results: &mut Vec<SearchResult>, ctx: &SearchContext<'_>) -> Result<()> {
+        let defining_files = defining_candidate_files(ctx.symbols, results, ctx.query);
 
         if defining_files.is_empty() {
             return Ok(());
@@ -547,6 +577,10 @@ pub struct GraphPropagationStage;
 impl GraphPropagationStage {
     const TOP_N: usize = 5;
     const MAX_INJECTED: usize = 3;
+    /// Per source/direction overscan before filtering existing and shared
+    /// neighbours. This keeps graph work hard-bounded while avoiding the
+    /// common case where the first three neighbours are already results.
+    const MAX_NEIGHBOR_CANDIDATES: usize = 32;
     const CALLEE_DAMPING: f32 = 0.25;
     const CALLER_DAMPING: f32 = 0.15;
 }
@@ -565,86 +599,109 @@ impl SearchStage for GraphPropagationStage {
         let existing_files: std::collections::HashSet<&str> =
             results.iter().map(|r| r.file_path.as_str()).collect();
 
-        let mut candidates: Vec<(String, f32)> = Vec::new();
+        let mut candidate_scores: std::collections::HashMap<String, f32> =
+            std::collections::HashMap::new();
         let source_count = results.len().min(Self::TOP_N);
 
         for r in &results[..source_count] {
-            for callee in graph.callees(&r.file_path) {
+            for callee in graph
+                .bounded_callees(&r.file_path, Self::MAX_NEIGHBOR_CANDIDATES)
+                .0
+            {
                 if !existing_files.contains(callee.as_str()) {
-                    candidates.push((callee, r.score * Self::CALLEE_DAMPING));
+                    let score = r.score * Self::CALLEE_DAMPING;
+                    candidate_scores
+                        .entry(callee)
+                        .and_modify(|existing| *existing = existing.max(score))
+                        .or_insert(score);
                 }
             }
-            for caller in graph.callers(&r.file_path) {
+            for caller in graph.bounded_callers(&r.file_path, Self::MAX_NEIGHBOR_CANDIDATES) {
                 if !existing_files.contains(caller.as_str()) {
-                    candidates.push((caller, r.score * Self::CALLER_DAMPING));
+                    let score = r.score * Self::CALLER_DAMPING;
+                    candidate_scores
+                        .entry(caller)
+                        .and_modify(|existing| *existing = existing.max(score))
+                        .or_insert(score);
                 }
             }
         }
 
-        if candidates.is_empty() {
+        if candidate_scores.is_empty() {
             return Ok(());
         }
 
-        // Deduplicate candidates by file path, keeping highest score.
-        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let mut seen_candidates = std::collections::HashSet::new();
-        candidates.retain(|(path, _)| seen_candidates.insert(path.clone()));
+        let mut candidates: Vec<(String, f32)> = candidate_scores.into_iter().collect();
+        candidates.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
         candidates.truncate(Self::MAX_INJECTED);
 
-        // Resolve all candidate metadata in one pass. The previous loop scanned
-        // the full chunk map once per injected file (up to three whole-repo
-        // scans per query on a large index).
-        let candidate_scores: std::collections::HashMap<&str, f32> = candidates
-            .iter()
-            .map(|(path, score)| (path.as_str(), *score))
-            .collect();
-        let mut best_chunks: std::collections::HashMap<&str, crate::retriever::ChunkMeta> =
-            std::collections::HashMap::with_capacity(candidates.len());
-        for entry in chunk_meta.iter() {
-            let meta = entry.value();
-            let Some(candidate_path) = candidate_scores.get_key_value(meta.file_path.as_str())
-            else {
-                continue;
-            };
-            let best = best_chunks
-                .entry(*candidate_path.0)
-                .or_insert_with(|| meta.clone());
-            if meta.line_start < best.line_start {
-                *best = meta.clone();
+        let candidate_scores: std::collections::HashMap<String, f32> =
+            candidates.iter().cloned().collect();
+        let candidate_paths: Vec<String> =
+            candidates.iter().map(|(path, _)| path.clone()).collect();
+        let mut best_chunks: std::collections::HashMap<
+            String,
+            (crate::retriever::ChunkMeta, String),
+        > = std::collections::HashMap::with_capacity(candidates.len());
+
+        if let Some(tantivy) = ctx.tantivy {
+            if let Err(error) =
+                tantivy.visit_chunks_by_file_paths(&candidate_paths, |chunk_id, stored_content| {
+                    let Some(meta) = chunk_meta.get(&chunk_id) else {
+                        return Ok(());
+                    };
+                    if !candidate_scores.contains_key(&meta.file_path) {
+                        return Ok(());
+                    }
+                    let replace = best_chunks.get(&meta.file_path).is_none_or(|(best, _)| {
+                        (meta.line_start, meta.chunk_id) < (best.line_start, best.chunk_id)
+                    });
+                    if replace {
+                        let content = if stored_content.is_empty() {
+                            meta.content.clone()
+                        } else {
+                            stored_content
+                        };
+                        best_chunks.insert(meta.file_path.clone(), (meta.clone(), content));
+                    }
+                    Ok(())
+                })
+            {
+                tracing::warn!(%error, "failed to hydrate graph-neighbor candidates");
+            }
+        } else {
+            // Unit tests may construct a pipeline context without a Tantivy
+            // index. Production searches always take the exact-path posting
+            // route above and never scan the repository-wide metadata map.
+            for entry in chunk_meta.iter() {
+                let meta = entry.value();
+                if !candidate_scores.contains_key(&meta.file_path) {
+                    continue;
+                }
+                let replace = best_chunks.get(&meta.file_path).is_none_or(|(best, _)| {
+                    (meta.line_start, meta.chunk_id) < (best.line_start, best.chunk_id)
+                });
+                if replace {
+                    best_chunks
+                        .insert(meta.file_path.clone(), (meta.clone(), meta.content.clone()));
+                }
             }
         }
+
         let candidate_chunks: Vec<_> = candidates
             .iter()
             .filter_map(|(path, score)| {
-                best_chunks.remove(path.as_str()).map(|meta| (meta, *score))
+                best_chunks
+                    .remove(path.as_str())
+                    .map(|(meta, content)| (meta, *score, content))
             })
             .collect();
 
-        let missing_content_ids: std::collections::HashSet<u64> = candidate_chunks
-            .iter()
-            .filter_map(|(meta, _)| meta.content.is_empty().then_some(meta.chunk_id))
-            .collect();
-        let hydrated_contents = if let Some(tantivy) = ctx.tantivy {
-            match tantivy.lookup_chunk_contents(&missing_content_ids) {
-                Ok(contents) => contents,
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to batch-hydrate graph neighbors");
-                    std::collections::HashMap::new()
-                }
-            }
-        } else {
-            std::collections::HashMap::new()
-        };
-
-        for (meta, score) in candidate_chunks {
-            let content = if meta.content.is_empty() {
-                hydrated_contents
-                    .get(&meta.chunk_id)
-                    .cloned()
-                    .unwrap_or_default()
-            } else {
-                meta.content.clone()
-            };
+        for (meta, score, content) in candidate_chunks {
             results.push(SearchResult {
                 chunk_id: meta.chunk_id.to_string(),
                 file_path: meta.file_path,
@@ -952,6 +1009,45 @@ mod tests {
     }
 
     #[test]
+    fn definition_boost_preserves_substring_recall_with_file_local_lookup() {
+        let symbols = crate::symbols::SymbolTable::new();
+        symbols.insert(crate::symbols::Symbol {
+            name: "IndexConfig".to_string(),
+            kind: crate::language::EntityKind::Struct,
+            language: crate::language::Language::Rust,
+            file_path: "src/config.rs".to_string(),
+            line_start: 0,
+            line_end: 8,
+            byte_start: 0,
+            byte_end: 80,
+            signature: Some("pub struct IndexConfig".to_string()),
+            scope: Vec::new(),
+            doc_comment: None,
+            visibility: crate::language::Visibility::Public,
+            type_relations: Vec::new(),
+        });
+        let ctx = SearchContext {
+            query: "config",
+            symbols: &symbols,
+            graph: None,
+            graph_boost_weight: 0.0,
+            recency_map: None,
+            chunk_meta: None,
+            tantivy: None,
+            concepts: None,
+        };
+        let mut results = vec![
+            make_result("other", 2.0, "src/other.rs"),
+            make_result("config", 1.0, "src/config.rs"),
+        ];
+
+        DefinitionBoostStage.apply(&mut results, &ctx).unwrap();
+
+        assert_eq!(results[0].chunk_id, "config");
+        assert!((results[0].score - 3.5).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn test_demotion_stage_demotes_test_files() {
         let stage = TestDemotionStage;
         let symbols = crate::symbols::SymbolTable::new();
@@ -1226,6 +1322,74 @@ mod tests {
             (b.score - 2.5).abs() < 0.01,
             "expected callee score ~2.5, got {}",
             b.score
+        );
+    }
+
+    #[test]
+    fn graph_propagation_overscans_past_existing_neighbours() {
+        use crate::graph::CodeGraph;
+        use crate::language::Language;
+
+        let mut graph = CodeGraph::new();
+        for neighbour in [
+            // petgraph visits the most recently inserted outgoing edges first,
+            // so put the unseen fourth candidate behind the three covered ones.
+            "src/unseen.rs",
+            "src/existing_0.rs",
+            "src/existing_1.rs",
+            "src/existing_2.rs",
+        ] {
+            graph.add_edge(
+                "src/a.rs",
+                neighbour,
+                neighbour,
+                Language::Rust,
+                Language::Rust,
+            );
+        }
+
+        let chunk_meta = dashmap::DashMap::new();
+        chunk_meta.insert(
+            100,
+            crate::retriever::ChunkMeta {
+                chunk_id: 100,
+                file_path: "src/unseen.rs".into(),
+                language: "Rust".into(),
+                line_start: 0,
+                line_end: 1,
+                signature: "fn unseen()".into(),
+                scope_chain: vec![],
+                entity_names: vec!["unseen".into()],
+                content: "fn unseen() {}".into(),
+                content_hash: 0,
+            },
+        );
+
+        let symbols = crate::symbols::SymbolTable::new();
+        let ctx = SearchContext {
+            query: "test",
+            symbols: &symbols,
+            graph: Some(&graph),
+            graph_boost_weight: 0.5,
+            recency_map: None,
+            chunk_meta: Some(&chunk_meta),
+            tantivy: None,
+            concepts: None,
+        };
+        let mut results = vec![
+            make_result("a", 10.0, "src/a.rs"),
+            make_result("existing-0", 9.0, "src/existing_0.rs"),
+            make_result("existing-1", 8.0, "src/existing_1.rs"),
+            make_result("existing-2", 7.0, "src/existing_2.rs"),
+        ];
+
+        GraphPropagationStage.apply(&mut results, &ctx).unwrap();
+
+        assert!(
+            results
+                .iter()
+                .any(|result| result.file_path == "src/unseen.rs"),
+            "existing neighbours must not consume the three injection slots"
         );
     }
 
@@ -1813,5 +1977,35 @@ mod tests {
                 exact[path]
             );
         }
+    }
+
+    #[test]
+    fn bounded_personalized_scores_preserves_mass_beyond_edge_limit() {
+        use crate::graph::CodeGraph;
+        use crate::language::Language;
+
+        let seed = "src/seed.rs";
+        let fanout = PPR_LOCAL_MAX_EDGES * 2;
+        let mut graph = CodeGraph::new();
+        let mut candidates = Vec::with_capacity(fanout + 1);
+        candidates.push(seed.to_string());
+        for index in 0..fanout {
+            let target = format!("src/fanout_{index:05}.rs");
+            graph.add_edge(seed, &target, "dep", Language::Rust, Language::Rust);
+            candidates.push(target);
+        }
+
+        let scores = bounded_personalized_scores(&graph, &[(seed, 1.0)], &candidates);
+        assert_eq!(scores.len(), PPR_LOCAL_MAX_VISITS);
+
+        let retained_score = scores
+            .iter()
+            .find_map(|(path, score)| (path != seed).then_some(*score))
+            .expect("the bounded walk should retain at least one fanout edge");
+        let expected = PPR_LOCAL_DAMPING / fanout as f32;
+        assert!(
+            (retained_score - expected).abs() < expected * 0.05,
+            "retained fanout score {retained_score} should use the full degree {fanout} (expected {expected})"
+        );
     }
 }

@@ -2,14 +2,14 @@ use std::sync::Arc;
 
 use tracing::{debug, warn};
 
-use crate::error::Result;
+use crate::error::{CodixingError, Result};
 use crate::retriever::bm25::BM25Retriever;
 use crate::retriever::hybrid::{HybridRetriever, rrf_fuse};
 use crate::retriever::mmr::mmr_select;
 use crate::retriever::{DocFilter, Retriever, SearchQuery, SearchResult, SourceFilter, Strategy};
 
-use super::Engine;
-use super::pipeline::{SearchContext, SearchPipeline};
+use super::pipeline::{SearchContext, SearchPipeline, defining_candidate_files};
+use super::{Engine, ReadOnlyLoadMode};
 
 /// Quote user text before passing an exact-search fallback through Tantivy's
 /// query parser. Exact queries are literals, so characters such as `:` must
@@ -27,7 +27,72 @@ fn quote_query_literal(query: &str) -> String {
     quoted
 }
 
+/// Collect a small, stable Explore expansion in ranked-anchor order.
+///
+/// Each direction is overscanned by a fixed amount so covered or shared graph
+/// neighbours do not consume the result slots, while hub traversal remains
+/// independent of repository size.
+fn collect_explore_neighbour_files(
+    graph: &crate::graph::CodeGraph,
+    anchor_files: &[String],
+    anchor_set: &std::collections::HashSet<String>,
+    covered_files: &std::collections::HashSet<String>,
+    limit: usize,
+) -> Vec<String> {
+    const MAX_NEIGHBOR_CANDIDATES: usize = 32;
+
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let mut neighbour_files = Vec::with_capacity(limit);
+    let mut seen_neighbours = std::collections::HashSet::with_capacity(limit);
+    'anchors: for file in anchor_files {
+        let neighbours = graph
+            .bounded_callers(file, MAX_NEIGHBOR_CANDIDATES)
+            .into_iter()
+            .chain(graph.bounded_callees(file, MAX_NEIGHBOR_CANDIDATES).0);
+        for neighbour in neighbours {
+            if anchor_set.contains(&neighbour)
+                || covered_files.contains(&neighbour)
+                || !seen_neighbours.insert(neighbour.clone())
+            {
+                continue;
+            }
+            neighbour_files.push(neighbour);
+            if neighbour_files.len() == limit {
+                break 'anchors;
+            }
+        }
+    }
+    neighbour_files
+}
+
 impl Engine {
+    fn ensure_read_profile_supports(&self, query: &SearchQuery) -> Result<()> {
+        if self.read_only_load_mode != ReadOnlyLoadMode::Lexical {
+            return Ok(());
+        }
+
+        if !matches!(query.strategy, Strategy::Exact | Strategy::Instant) {
+            return Err(CodixingError::Config(format!(
+                "lexical read profile supports only Exact and Instant searches, not {:?}",
+                query.strategy
+            )));
+        }
+        if query
+            .queries
+            .as_ref()
+            .is_some_and(|queries| queries.len() >= 2)
+        {
+            return Err(CodixingError::Config(
+                "lexical read profile does not support multi-query fusion".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Search the index using the strategy specified in `query`.
     ///
     /// - `Instant` → BM25 only
@@ -35,6 +100,8 @@ impl Engine {
     /// - `Thorough` → hybrid + MMR deduplication
     /// - `Exact`   → Trigram index fast-path with BM25 fallback
     pub fn search(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
+        self.ensure_read_profile_supports(&query)?;
+
         // Expand CamelCase/snake_case identifiers in the query for better BM25 matching.
         // Skip expansion for Instant/Exact strategies (exact symbol lookups).
         let query = if query.strategy != Strategy::Instant && query.strategy != Strategy::Exact {
@@ -341,6 +408,12 @@ impl Engine {
         queries: &[String],
         base_query: &SearchQuery,
     ) -> Result<Vec<SearchResult>> {
+        if self.read_only_load_mode == ReadOnlyLoadMode::Lexical {
+            return Err(CodixingError::Config(
+                "lexical read profile does not support multi-query fusion".to_string(),
+            ));
+        }
+
         if queries.is_empty() {
             return Ok(Vec::new());
         }
@@ -444,7 +517,7 @@ impl Engine {
         // chunk text without appearing in the raw-byte trigram index. Preserve
         // exact-search semantics by scanning known files for this rare case.
         if query.query.contains('\u{FFFD}') {
-            for file_path in self.file_chunk_counts.keys() {
+            for file_path in self.file_chunk_ids.keys() {
                 if let Some(ref filter) = query.file_filter
                     && !file_path.contains(filter.as_str())
                 {
@@ -456,7 +529,7 @@ impl Engine {
                 }
             }
         } else {
-            self.get_file_trigram().visit_literal_candidates(
+            let prefiltered = self.get_file_trigram().visit_literal_candidates(
                 query.query.as_bytes(),
                 |file_path| {
                     if let Some(ref filter) = query.file_filter
@@ -471,6 +544,19 @@ impl Engine {
                     Ok(())
                 },
             )?;
+            if prefiltered.is_none() {
+                for file_path in self.file_chunk_ids.keys() {
+                    if let Some(ref filter) = query.file_filter
+                        && !file_path.contains(filter.as_str())
+                    {
+                        continue;
+                    }
+                    candidate_files.push(file_path.clone());
+                    if candidate_files.len() == FILE_BATCH_SIZE {
+                        flush_candidates(&mut candidate_files, &mut results)?;
+                    }
+                }
+            }
         }
         if !candidate_files.is_empty() {
             flush_candidates(&mut candidate_files, &mut results)?;
@@ -529,6 +615,7 @@ impl Engine {
     where
         F: FnMut(&str, &[SearchResult]),
     {
+        self.ensure_read_profile_supports(&query)?;
         let strategy = query.strategy;
 
         // Phase 1: quick BM25-only pass — always runs, gives near-instant
@@ -593,38 +680,34 @@ impl Engine {
         // Phase 2 — expand via import graph.
         if let Some(ref graph) = self.graph {
             // Anchor = files in the top-limit initial results.
-            let anchor_files: HashSet<String> = results
-                .iter()
-                .take(query.limit)
-                .map(|r| r.file_path.clone())
-                .collect();
+            let mut anchor_files = Vec::new();
+            let mut anchor_set = HashSet::new();
+            for result in results.iter().take(query.limit) {
+                if anchor_set.insert(result.file_path.clone()) {
+                    anchor_files.push(result.file_path.clone());
+                }
+            }
 
             // Already-covered = all files in the full result set.
             let covered_files: HashSet<String> =
                 results.iter().map(|r| r.file_path.clone()).collect();
 
-            // Collect graph neighbours not already in the anchor set.
-            let mut neighbour_files: HashSet<String> = HashSet::new();
-            for file in &anchor_files {
-                for n in graph.callers(file) {
-                    if !anchor_files.contains(&n) {
-                        neighbour_files.insert(n);
-                    }
-                }
-                for n in graph.callees(file) {
-                    if !anchor_files.contains(&n) {
-                        neighbour_files.insert(n);
-                    }
-                }
-            }
+            // Collect only the small expansion set that can actually be
+            // consumed below. This prevents a dependency hub from allocating
+            // and traversing every neighbour just to discard all but eight.
+            const MAX_EXPANSION: usize = 8;
+            let neighbour_files = collect_explore_neighbour_files(
+                graph,
+                &anchor_files,
+                &anchor_set,
+                &covered_files,
+                MAX_EXPANSION,
+            );
 
             // Phase 3 — for each uncovered neighbour, fetch its best BM25 chunk.
-            // Cap at 8 neighbours to keep latency predictable.
+            // The collection phase above already caps this at eight.
             let mut expansion: Vec<SearchResult> = Vec::new();
-            for neighbour in neighbour_files.iter().take(8) {
-                if covered_files.contains(neighbour) {
-                    continue;
-                }
+            for neighbour in &neighbour_files {
                 let nq = SearchQuery {
                     query: query.query.clone(),
                     limit: 1,
@@ -684,28 +767,7 @@ impl Engine {
     /// Works for all strategies — even `Instant` — since it is pure in-memory
     /// DashMap lookups with no I/O.
     pub(super) fn apply_definition_boost(&self, results: &mut [SearchResult], query: &str) {
-        use std::collections::HashSet;
-
-        // Collect files that define any identifier-like token in the query.
-        let mut defining_files: HashSet<String> = HashSet::new();
-        for term in query.split_whitespace() {
-            // Skip short or punctuation-heavy tokens.
-            if term.len() < 3 || !term.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                continue;
-            }
-            // Exact-name lookup (covers CamelCase identifiers like `IndexConfig`).
-            let exact = self.symbols.lookup(term);
-            if !exact.is_empty() {
-                for sym in exact {
-                    defining_files.insert(sym.file_path);
-                }
-            } else {
-                // Case-insensitive identifier-prefix fallback.
-                for sym in self.symbols.lookup_prefix(term) {
-                    defining_files.insert(sym.file_path);
-                }
-            }
-        }
+        let defining_files = defining_candidate_files(&self.symbols, results, query);
 
         if defining_files.is_empty() {
             return;
@@ -830,6 +892,12 @@ impl Engine {
     /// ranked chunks where that identifier appears — including call sites,
     /// imports, and variable usages, not just the definition.
     pub fn search_usages(&self, symbol: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        if self.read_only_load_mode == ReadOnlyLoadMode::Lexical {
+            return Err(CodixingError::Config(
+                "lexical read profile does not support usage search; reopen the full read profile"
+                    .to_string(),
+            ));
+        }
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -1993,6 +2061,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn explore_neighbours_preserve_anchor_rank_and_skip_covered_slots() {
+        use crate::graph::CodeGraph;
+        use crate::language::Language;
+
+        let mut graph = CodeGraph::new();
+        // Incoming edges are visited newest first. Insert the useful neighbour
+        // before eight covered ones so a pre-filter limit of eight would miss it.
+        graph.add_edge(
+            "src/top_unseen.rs",
+            "src/top.rs",
+            "top",
+            Language::Rust,
+            Language::Rust,
+        );
+        let mut covered_files = std::collections::HashSet::new();
+        for index in 0..8 {
+            let covered = format!("src/covered_{index}.rs");
+            graph.add_edge(
+                &covered,
+                "src/top.rs",
+                "top",
+                Language::Rust,
+                Language::Rust,
+            );
+            covered_files.insert(covered);
+        }
+        graph.add_edge(
+            "src/lower_unseen.rs",
+            "src/lower.rs",
+            "lower",
+            Language::Rust,
+            Language::Rust,
+        );
+
+        let anchor_files = vec!["src/top.rs".to_string(), "src/lower.rs".to_string()];
+        let anchor_set: std::collections::HashSet<String> = anchor_files.iter().cloned().collect();
+        covered_files.extend(anchor_set.iter().cloned());
+
+        let first =
+            collect_explore_neighbour_files(&graph, &anchor_files, &anchor_set, &covered_files, 1);
+        let second =
+            collect_explore_neighbour_files(&graph, &anchor_files, &anchor_set, &covered_files, 1);
+
+        assert_eq!(first, vec!["src/top_unseen.rs"]);
+        assert_eq!(second, first, "collection must be deterministic");
+    }
+
+    #[test]
     fn recency_map_is_only_initialized_for_consuming_pipelines() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -2023,6 +2139,56 @@ mod tests {
 
         let thorough_context = engine.search_context("recency_fixture", Strategy::Thorough);
         assert!(thorough_context.recency_map.is_some());
+    }
+
+    #[test]
+    fn popularity_boost_distinguishes_hubs_above_the_old_sampling_cap() {
+        use crate::graph::CodeGraph;
+        use crate::language::Language;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn fixture() {}\n").unwrap();
+        let mut config = crate::IndexConfig::new(dir.path());
+        config.embedding.enabled = false;
+        let mut engine = Engine::init(dir.path(), config).unwrap();
+        let mut graph = CodeGraph::new();
+        for index in 0..65 {
+            graph.add_edge(
+                &format!("src/moderate_caller_{index}.rs"),
+                "src/moderate_hub.rs",
+                "moderate",
+                Language::Rust,
+                Language::Rust,
+            );
+        }
+        for index in 0..96 {
+            graph.add_edge(
+                &format!("src/popular_caller_{index}.rs"),
+                "src/popular_hub.rs",
+                "popular",
+                Language::Rust,
+                Language::Rust,
+            );
+        }
+        engine.graph = Some(graph);
+
+        let result = |file_path: &str| SearchResult {
+            chunk_id: file_path.to_string(),
+            file_path: file_path.to_string(),
+            language: "Rust".to_string(),
+            score: 1.0,
+            line_start: 1,
+            line_end: 1,
+            signature: String::new(),
+            scope_chain: Vec::new(),
+            content: String::new(),
+        };
+        let mut results = vec![result("src/moderate_hub.rs"), result("src/popular_hub.rs")];
+
+        engine.apply_popularity_boost(&mut results);
+
+        assert_eq!(results[0].file_path, "src/popular_hub.rs");
+        assert!(results[0].score > results[1].score);
     }
 
     #[test]

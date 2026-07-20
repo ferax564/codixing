@@ -10,6 +10,7 @@
 //! share a Tantivy writer are annotated with `#[serial]` to prevent
 //! concurrent lock contention.
 
+use codixing_core::persistence::IndexStore;
 use codixing_core::{Engine, IndexConfig, SearchQuery, Strategy};
 use serial_test::serial;
 use tempfile::tempdir;
@@ -42,6 +43,26 @@ fn git_available() -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn active_search_artifact_inodes(
+    root: &std::path::Path,
+) -> std::collections::BTreeMap<&'static str, (u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+
+    let store = IndexStore::open(root).unwrap();
+    [
+        ("symbols", store.symbols_v2_path()),
+        ("chunks", store.chunk_meta_path()),
+        ("graph", store.graph_path()),
+    ]
+    .into_iter()
+    .map(|(name, path)| {
+        let metadata = std::fs::metadata(path).unwrap();
+        (name, (metadata.dev(), metadata.ino()))
+    })
+    .collect()
 }
 
 /// BM25-only config (no model download in tests).
@@ -147,9 +168,9 @@ fn git_sync_preserves_complete_hash_baseline() {
 
 #[test]
 #[serial]
-fn git_sync_partial_failure_keeps_commit_retriable() {
+fn git_sync_partial_failure_rolls_back_and_retries_atomically() {
     if !git_available() {
-        eprintln!("git_sync_partial_failure_keeps_commit_retriable: skipped");
+        eprintln!("git_sync_partial_failure_rolls_back_and_retries_atomically: skipped");
         return;
     }
 
@@ -158,7 +179,11 @@ fn git_sync_partial_failure_keeps_commit_retriable() {
     git(root, &["init"]);
     git(root, &["config", "user.email", "test@test.com"]);
     git(root, &["config", "user.name", "Test User"]);
-    std::fs::write(root.join("lib.rs"), "pub fn version() -> u32 { 1 }\n").unwrap();
+    std::fs::write(
+        root.join("lib.rs"),
+        "pub fn atomic_old_version_marker() -> u32 { 1 }\n",
+    )
+    .unwrap();
     std::fs::write(
         root.join("analysis.ipynb"),
         r#"{"nbformat":4,"metadata":{"kernelspec":{"language":"python"}},"cells":[{"cell_type":"code","id":"one","source":"def value():\n    return 1\n"}]}"#,
@@ -168,7 +193,11 @@ fn git_sync_partial_failure_keeps_commit_retriable() {
     git(root, &["commit", "-m", "initial"]);
     drop(Engine::init(root, bm25_config(root)).unwrap());
 
-    std::fs::write(root.join("lib.rs"), "pub fn version_two() -> u32 { 2 }\n").unwrap();
+    std::fs::write(
+        root.join("lib.rs"),
+        "pub fn atomic_new_version_marker() -> u32 { 2 }\n",
+    )
+    .unwrap();
     std::fs::write(
         root.join("analysis.ipynb"),
         r#"{"nbformat":4,"metadata":{"kernelspec":{"language":"python"}},"cells":[{"cell_type":"code","id":"one","source":"def value_with_longer_name():\n    return 222\n"}]}"#,
@@ -183,20 +212,41 @@ fn git_sync_partial_failure_keeps_commit_retriable() {
         .expect_err("unsupported notebook update must fail the batch");
     assert!(first.to_string().contains("notebook incremental sync"));
     assert!(
-        !engine
+        engine
             .search(
-                SearchQuery::new("version_two")
+                SearchQuery::new("atomic_new_version_marker")
                     .with_limit(5)
                     .with_strategy(Strategy::Instant)
             )
             .unwrap()
             .is_empty(),
-        "successful siblings should still be committed to the searchable index"
+        "a failed batch must not leak successful sibling mutations"
     );
     let retry = engine
         .git_sync()
         .expect_err("failed git path must remain pending at the old commit");
     assert!(retry.to_string().contains("notebook incremental sync"));
+
+    // Make the unsupported modification representable as a supported removal.
+    // The stored commit remains at the initial snapshot, so the next diff must
+    // replay the sibling edit and notebook removal as one successful batch.
+    std::fs::remove_file(root.join("analysis.ipynb")).unwrap();
+    git(root, &["add", "-u", "analysis.ipynb"]);
+    git(root, &["commit", "-m", "remove notebook"]);
+    let stats = engine.git_sync().unwrap();
+    assert_eq!(stats.modified, 1);
+    assert_eq!(stats.removed, 1);
+    assert!(
+        !engine
+            .search(
+                SearchQuery::new("atomic_new_version_marker")
+                    .with_limit(5)
+                    .with_strategy(Strategy::Instant)
+            )
+            .unwrap()
+            .is_empty(),
+        "the retried batch must publish every successful sibling together"
+    );
 }
 
 #[test]
@@ -335,6 +385,51 @@ fn git_sync_rejects_source_symlink_escape_without_advancing_commit() {
         std::fs::read_to_string(&outside).unwrap(),
         "pub fn outside_secret() {}\n"
     );
+}
+
+#[test]
+#[serial]
+#[cfg(unix)]
+fn git_sync_metadata_only_commit_retains_search_artifacts() {
+    if !git_available() {
+        eprintln!("git_sync_metadata_only_commit_retains_search_artifacts: skipped");
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init"]);
+    git(root, &["config", "user.email", "test@test.com"]);
+    git(root, &["config", "user.name", "Test User"]);
+    std::fs::write(root.join("lib.rs"), "pub fn retained_search_state() {}\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "initial source"]);
+
+    let mut engine = Engine::init(root, bm25_config(root)).unwrap();
+    let before_generation = IndexStore::active_generation(root).unwrap();
+    let before = active_search_artifact_inodes(root);
+
+    std::fs::write(root.join("asset.png"), b"not an indexable source artifact").unwrap();
+    git(root, &["add", "asset.png"]);
+    git(root, &["commit", "-m", "asset only"]);
+    let stats = engine.git_sync().unwrap();
+
+    assert!(!stats.unchanged, "the stored commit marker must advance");
+    assert_eq!(stats.modified, 0);
+    assert_eq!(stats.removed, 0);
+    assert_ne!(
+        IndexStore::active_generation(root).unwrap(),
+        before_generation
+    );
+    assert_eq!(
+        active_search_artifact_inodes(root),
+        before,
+        "a metadata-only git checkpoint must retain hard-linked search artifacts"
+    );
+
+    drop(engine);
+    let mut reopened = Engine::open(root).unwrap();
+    assert!(reopened.git_sync().unwrap().unchanged);
 }
 
 #[test]

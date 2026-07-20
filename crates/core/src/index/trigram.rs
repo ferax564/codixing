@@ -12,8 +12,10 @@
 //! pattern into a query plan using the Russ Cox / trigrep technique.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use memmap2::Mmap;
 use roaring::RoaringBitmap;
@@ -1399,6 +1401,88 @@ struct FileTrigramIndexData {
     index: Vec<([u8; 3], Vec<u32>)>,
 }
 
+/// Magic bytes for the mmap file-level trigram format: `FTRI`.
+const FILE_TRIGRAM_MMAP_MAGIC: u32 = u32::from_le_bytes(*b"FTRI");
+const FILE_TRIGRAM_MMAP_VERSION: u32 = 1;
+const FILE_TRIGRAM_MMAP_HEADER_SIZE: usize = 32;
+const FILE_TRIGRAM_MMAP_FILE_ENTRY_SIZE: usize = 8;
+const FILE_TRIGRAM_MMAP_INDEX_ENTRY_SIZE: usize = 16;
+const FILE_TRIGRAM_POSTING_VALIDATION_CACHE_CAPACITY: usize = 256;
+
+/// Maximum number of complete changed-path replacements retained beside an
+/// immutable file-trigram base before the next checkpoint compacts it.
+pub(crate) const FILE_TRIGRAM_DELTA_MAX_PATHS: usize = 4096;
+/// Maximum encoded size of the durable changed-path overlay.
+pub(crate) const FILE_TRIGRAM_DELTA_MAX_BYTES: usize = 8 * 1024 * 1024;
+const FILE_TRIGRAM_DELTA_MAGIC: u32 = u32::from_le_bytes(*b"FTDL");
+const FILE_TRIGRAM_DELTA_VERSION: u32 = 1;
+
+#[cfg(test)]
+thread_local! {
+    static FILE_TRIGRAM_CHECKPOINT_SCRATCH_PEAK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static FILE_TRIGRAM_POSTING_VALUES_VALIDATED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static FILE_TRIGRAM_OVERLAY_MEMBERSHIPS_VISITED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[derive(Default)]
+struct FilePostingValidationCache {
+    validated: HashSet<u32>,
+    order: VecDeque<u32>,
+}
+
+/// Zero-copy backing for a persisted [`FileTrigramIndex`].
+///
+/// File paths and posting lists stay in the mapped generation until an actual
+/// mutation requires the ordinary in-memory representation. Exact search only
+/// touches the few posting pages required by its query.
+struct FileTrigramMmap {
+    mmap: Mmap,
+    /// Canonical path of the immutable file backing this mapping.
+    source_path: PathBuf,
+    file_count: u32,
+    trigram_count: u32,
+    file_table_offset: usize,
+    trigram_index_offset: usize,
+    string_pool_offset: usize,
+    postings_offset: usize,
+    posting_validation: Mutex<FilePostingValidationCache>,
+}
+
+#[derive(Clone, Copy)]
+struct FilePostingRef {
+    byte_offset: u32,
+    count: u32,
+}
+
+/// Changed-file state layered over an immutable mapped generation.
+///
+/// `exclude_base` distinguishes replacement (`true`) from the historical
+/// additive `add` contract (`false`). `trigrams == None` is a removal.
+struct FileTrigramDelta {
+    exclude_base: bool,
+    trigrams: Option<Vec<[u8; 3]>>,
+}
+
+/// Deterministic on-disk representation of the bounded mapped-base overlay.
+/// Entries are required to be strictly sorted by normalized relative path.
+#[derive(Serialize, Deserialize)]
+struct FileTrigramDeltaCheckpoint {
+    entries: Vec<FileTrigramDeltaEntry>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FileTrigramDeltaEntry {
+    path: String,
+    exclude_base: bool,
+    trigrams: Option<Vec<[u8; 3]>>,
+}
+
+struct FileTrigramMergePlan<'a> {
+    removed_base_paths: Vec<&'a str>,
+    added_paths: Vec<&'a str>,
+    overlay_files: Vec<(&'a str, &'a [[u8; 3]])>,
+}
+
 /// A boolean query plan over trigrams, produced by [`build_query_plan`].
 ///
 /// Execution semantics (see [`FileTrigramIndex::execute_plan`]):
@@ -1433,6 +1517,13 @@ pub struct FileTrigramIndex {
     file_index: HashMap<String, u32>,
     /// trigram → sorted list of file indices containing that trigram
     index: HashMap<[u8; 3], Vec<u32>>,
+    /// Immutable mapped base. Changed files remain in `delta` until checkpoint.
+    mmap: Option<FileTrigramMmap>,
+    /// Sorted cumulative changed-path overlay since the last base compaction.
+    delta: BTreeMap<String, FileTrigramDelta>,
+    /// Corrupt persisted overlays disable prefiltering so callers perform
+    /// correctness-preserving full scans instead of trusting a partial base.
+    disabled: bool,
 }
 
 impl Default for FileTrigramIndex {
@@ -1442,13 +1533,562 @@ impl Default for FileTrigramIndex {
 }
 
 impl FileTrigramIndex {
+    #[cfg(test)]
+    fn record_checkpoint_scratch(items: usize) {
+        FILE_TRIGRAM_CHECKPOINT_SCRATCH_PEAK.with(|peak| peak.set(peak.get().max(items)));
+    }
+
+    #[cfg(not(test))]
+    fn record_checkpoint_scratch(_items: usize) {}
+
     /// Creates an empty index.
     pub fn new() -> Self {
         Self {
             files: Vec::new(),
             file_index: HashMap::new(),
             index: HashMap::new(),
+            mmap: None,
+            delta: BTreeMap::new(),
+            disabled: false,
         }
+    }
+
+    pub(crate) fn disabled() -> Self {
+        Self {
+            disabled: true,
+            ..Self::new()
+        }
+    }
+
+    fn delta_checkpoint(entries: Vec<FileTrigramDeltaEntry>) -> FileTrigramDeltaCheckpoint {
+        FileTrigramDeltaCheckpoint { entries }
+    }
+
+    fn serialize_delta_checkpoint(entries: Vec<FileTrigramDeltaEntry>) -> Result<Vec<u8>> {
+        let payload = bitcode::serialize(&Self::delta_checkpoint(entries)).map_err(|error| {
+            CodixingError::Serialization(format!("failed to serialize file trigram delta: {error}"))
+        })?;
+        let mut bytes = Vec::with_capacity(8 + payload.len());
+        bytes.extend_from_slice(&FILE_TRIGRAM_DELTA_MAGIC.to_le_bytes());
+        bytes.extend_from_slice(&FILE_TRIGRAM_DELTA_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        Ok(bytes)
+    }
+
+    /// Canonical empty overlay paired with every freshly built or compacted
+    /// `file_trigram.bin` generation.
+    pub(crate) fn empty_delta_checkpoint() -> Result<Vec<u8>> {
+        Self::serialize_delta_checkpoint(Vec::new())
+    }
+
+    /// Encode the cumulative mapped-base overlay when it remains within both
+    /// checkpoint limits. `None` asks the caller to compact a new base.
+    pub(crate) fn delta_checkpoint_bytes(&self) -> Result<Option<Vec<u8>>> {
+        if self.disabled {
+            return Err(CodixingError::Serialization(
+                "cannot checkpoint a disabled file trigram index".to_string(),
+            ));
+        }
+        if self.mmap.is_none() || self.delta.len() > FILE_TRIGRAM_DELTA_MAX_PATHS {
+            return Ok(None);
+        }
+        let raw_overlay_bytes = self.delta.iter().fold(8usize, |bytes, (path, change)| {
+            bytes.saturating_add(path.len()).saturating_add(
+                change
+                    .trigrams
+                    .as_ref()
+                    .map_or(0, |trigrams| trigrams.len().saturating_mul(3)),
+            )
+        });
+        if raw_overlay_bytes > FILE_TRIGRAM_DELTA_MAX_BYTES {
+            return Ok(None);
+        }
+        let entries = self
+            .delta
+            .iter()
+            .map(|(path, change)| FileTrigramDeltaEntry {
+                path: path.clone(),
+                exclude_base: change.exclude_base,
+                trigrams: change.trigrams.clone(),
+            })
+            .collect::<Vec<_>>();
+        let backing = self.mmap.as_ref().expect("mapped delta checkpoint base");
+        for entry in &entries {
+            Self::validate_delta_entry(backing, entry)?;
+        }
+        let bytes = Self::serialize_delta_checkpoint(entries)?;
+        Ok((bytes.len() <= FILE_TRIGRAM_DELTA_MAX_BYTES).then_some(bytes))
+    }
+
+    fn is_safe_normalized_relative_path(path: &str) -> bool {
+        if path.is_empty()
+            || path.starts_with('/')
+            || path.ends_with('/')
+            || path.contains('\\')
+            || path.contains('\0')
+        {
+            return false;
+        }
+        let bytes = path.as_bytes();
+        if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            return false;
+        }
+        let mut components = path.split('/');
+        let Some(first) = components.next() else {
+            return false;
+        };
+        if first.is_empty() || matches!(first, "." | "..") {
+            return false;
+        }
+        components.all(|component| !component.is_empty() && !matches!(component, "." | ".."))
+    }
+
+    fn validate_delta_entry(
+        backing: &FileTrigramMmap,
+        entry: &FileTrigramDeltaEntry,
+    ) -> Result<()> {
+        if !Self::is_safe_normalized_relative_path(&entry.path) {
+            return Err(CodixingError::Serialization(format!(
+                "file trigram delta path is not a safe normalized relative path: {:?}",
+                entry.path
+            )));
+        }
+        if !entry.exclude_base && entry.trigrams.is_none() {
+            return Err(CodixingError::Serialization(
+                "file trigram delta removal does not exclude the base".to_string(),
+            ));
+        }
+        if entry.exclude_base && Self::mmap_file_id(backing, &entry.path).is_none() {
+            return Err(CodixingError::Serialization(format!(
+                "file trigram delta replacement has no base path: {:?}",
+                entry.path
+            )));
+        }
+        if let Some(trigrams) = &entry.trigrams
+            && trigrams.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(CodixingError::Serialization(format!(
+                "file trigram delta trigrams are not strictly sorted for {:?}",
+                entry.path
+            )));
+        }
+        Ok(())
+    }
+
+    fn apply_delta_checkpoint(&mut self, bytes: &[u8]) -> Result<()> {
+        if bytes.len() > FILE_TRIGRAM_DELTA_MAX_BYTES {
+            return Err(CodixingError::Serialization(format!(
+                "file trigram delta is {} bytes; maximum is {}",
+                bytes.len(),
+                FILE_TRIGRAM_DELTA_MAX_BYTES
+            )));
+        }
+        if bytes.len() < 8 {
+            return Err(CodixingError::Serialization(
+                "file trigram delta is smaller than its header".to_string(),
+            ));
+        }
+        let magic = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        if magic != FILE_TRIGRAM_DELTA_MAGIC || version != FILE_TRIGRAM_DELTA_VERSION {
+            return Err(CodixingError::Serialization(
+                "unsupported file trigram delta format".to_string(),
+            ));
+        }
+        let checkpoint: FileTrigramDeltaCheckpoint =
+            bitcode::deserialize(&bytes[8..]).map_err(|error| {
+                CodixingError::Serialization(format!(
+                    "failed to deserialize file trigram delta: {error}"
+                ))
+            })?;
+        if checkpoint.entries.len() > FILE_TRIGRAM_DELTA_MAX_PATHS {
+            return Err(CodixingError::Serialization(format!(
+                "file trigram delta contains {} paths; maximum is {}",
+                checkpoint.entries.len(),
+                FILE_TRIGRAM_DELTA_MAX_PATHS
+            )));
+        }
+        if self.mmap.is_none() {
+            return Err(CodixingError::Serialization(
+                "file trigram delta requires an mmap file_trigram.bin base".to_string(),
+            ));
+        }
+
+        let mut delta = BTreeMap::<String, FileTrigramDelta>::new();
+        for entry in checkpoint.entries {
+            if delta
+                .last_key_value()
+                .is_some_and(|(previous, _)| previous.as_str() >= entry.path.as_str())
+            {
+                return Err(CodixingError::Serialization(
+                    "file trigram delta paths are not strictly sorted".to_string(),
+                ));
+            }
+            Self::validate_delta_entry(self.mmap.as_ref().unwrap(), &entry)?;
+            delta.insert(
+                entry.path,
+                FileTrigramDelta {
+                    exclude_base: entry.exclude_base,
+                    trigrams: entry.trigrams,
+                },
+            );
+        }
+        self.delta = delta;
+        Ok(())
+    }
+
+    fn mmap_file_path(backing: &FileTrigramMmap, file_id: u32) -> Option<&str> {
+        if file_id >= backing.file_count {
+            return None;
+        }
+        let file_entry_offset =
+            (file_id as usize).checked_mul(FILE_TRIGRAM_MMAP_FILE_ENTRY_SIZE)?;
+        let entry = backing.file_table_offset.checked_add(file_entry_offset)?;
+        let offset_end = entry.checked_add(4)?;
+        let entry_end = entry.checked_add(FILE_TRIGRAM_MMAP_FILE_ENTRY_SIZE)?;
+        let relative_offset =
+            u32::from_le_bytes(backing.mmap.get(entry..offset_end)?.try_into().ok()?) as usize;
+        let len =
+            u32::from_le_bytes(backing.mmap.get(offset_end..entry_end)?.try_into().ok()?) as usize;
+        let start = backing.string_pool_offset.checked_add(relative_offset)?;
+        let bytes = backing.mmap.get(start..start.checked_add(len)?)?;
+        std::str::from_utf8(bytes).ok()
+    }
+
+    fn mmap_file_id(backing: &FileTrigramMmap, path: &str) -> Option<u32> {
+        let mut low = 0u32;
+        let mut high = backing.file_count;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let candidate = Self::mmap_file_path(backing, middle)?;
+            match candidate.cmp(path) {
+                std::cmp::Ordering::Less => low = middle + 1,
+                std::cmp::Ordering::Greater => high = middle,
+                std::cmp::Ordering::Equal => return Some(middle),
+            }
+        }
+        None
+    }
+
+    fn mmap_lookup_trigram(backing: &FileTrigramMmap, trigram: &[u8; 3]) -> Option<FilePostingRef> {
+        let mut low = 0usize;
+        let mut high = backing.trigram_count as usize;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let relative = middle.checked_mul(FILE_TRIGRAM_MMAP_INDEX_ENTRY_SIZE)?;
+            let entry = backing.trigram_index_offset.checked_add(relative)?;
+            let key = [
+                *backing.mmap.get(entry)?,
+                *backing.mmap.get(entry.checked_add(1)?)?,
+                *backing.mmap.get(entry.checked_add(2)?)?,
+            ];
+            match key.cmp(trigram) {
+                std::cmp::Ordering::Less => low = middle + 1,
+                std::cmp::Ordering::Greater => high = middle,
+                std::cmp::Ordering::Equal => {
+                    return Some(FilePostingRef {
+                        byte_offset: u32::from_le_bytes(
+                            backing
+                                .mmap
+                                .get(entry.checked_add(4)?..entry.checked_add(8)?)?
+                                .try_into()
+                                .ok()?,
+                        ),
+                        count: u32::from_le_bytes(
+                            backing
+                                .mmap
+                                .get(entry.checked_add(8)?..entry.checked_add(12)?)?
+                                .try_into()
+                                .ok()?,
+                        ),
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    fn mmap_posting_value(
+        backing: &FileTrigramMmap,
+        posting: FilePostingRef,
+        index: usize,
+    ) -> Option<u32> {
+        if index >= posting.count as usize {
+            return None;
+        }
+        let relative = (posting.byte_offset as usize).checked_add(index.checked_mul(4)?)?;
+        let offset = backing.postings_offset.checked_add(relative)?;
+        let end = offset.checked_add(4)?;
+        Some(u32::from_le_bytes(
+            backing.mmap.get(offset..end)?.try_into().ok()?,
+        ))
+    }
+
+    fn mmap_posting_contains(
+        backing: &FileTrigramMmap,
+        posting: FilePostingRef,
+        needle: u32,
+    ) -> bool {
+        let mut low = 0usize;
+        let mut high = posting.count as usize;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let Some(value) = Self::mmap_posting_value(backing, posting, middle) else {
+                return false;
+            };
+            match value.cmp(&needle) {
+                std::cmp::Ordering::Less => low = middle + 1,
+                std::cmp::Ordering::Greater => high = middle,
+                std::cmp::Ordering::Equal => return true,
+            }
+        }
+        false
+    }
+
+    fn validate_mmap_posting(backing: &FileTrigramMmap, posting: FilePostingRef) -> Result<()> {
+        let mut previous = None;
+        for posting_index in 0..posting.count as usize {
+            #[cfg(test)]
+            FILE_TRIGRAM_POSTING_VALUES_VALIDATED.with(|count| count.set(count.get() + 1));
+            let file_id =
+                Self::mmap_posting_value(backing, posting, posting_index).ok_or_else(|| {
+                    CodixingError::Serialization(
+                        "file trigram posting value is truncated".to_string(),
+                    )
+                })?;
+            if file_id >= backing.file_count {
+                return Err(CodixingError::Serialization(format!(
+                    "file trigram posting file ID {file_id} exceeds file count {}",
+                    backing.file_count
+                )));
+            }
+            if previous.is_some_and(|prior| prior >= file_id) {
+                return Err(CodixingError::Serialization(
+                    "file trigram posting IDs are not strictly increasing".to_string(),
+                ));
+            }
+            previous = Some(file_id);
+        }
+        Ok(())
+    }
+
+    fn validate_all_mmap_postings(backing: &FileTrigramMmap) -> Result<()> {
+        for index in 0..backing.trigram_count as usize {
+            let relative = index
+                .checked_mul(FILE_TRIGRAM_MMAP_INDEX_ENTRY_SIZE)
+                .ok_or_else(|| {
+                    CodixingError::Serialization(
+                        "file trigram validation index offset overflow".to_string(),
+                    )
+                })?;
+            let entry = backing
+                .trigram_index_offset
+                .checked_add(relative)
+                .ok_or_else(|| {
+                    CodixingError::Serialization(
+                        "file trigram validation index entry overflow".to_string(),
+                    )
+                })?;
+            let posting = FilePostingRef {
+                byte_offset: u32::from_le_bytes(
+                    backing
+                        .mmap
+                        .get(entry + 4..entry + 8)
+                        .ok_or_else(|| {
+                            CodixingError::Serialization(
+                                "file trigram validation index is truncated".to_string(),
+                            )
+                        })?
+                        .try_into()
+                        .unwrap(),
+                ),
+                count: u32::from_le_bytes(
+                    backing
+                        .mmap
+                        .get(entry + 8..entry + 12)
+                        .ok_or_else(|| {
+                            CodixingError::Serialization(
+                                "file trigram validation index is truncated".to_string(),
+                            )
+                        })?
+                        .try_into()
+                        .unwrap(),
+                ),
+            };
+            Self::validate_mmap_posting(backing, posting)?;
+        }
+        Ok(())
+    }
+
+    fn validate_mmap_posting_cached(
+        backing: &FileTrigramMmap,
+        posting: FilePostingRef,
+    ) -> Result<()> {
+        let key = posting.byte_offset;
+        {
+            let cache = backing.posting_validation.lock().map_err(|_| {
+                CodixingError::Serialization(
+                    "file trigram posting validation cache is poisoned".to_string(),
+                )
+            })?;
+            if cache.validated.contains(&key) {
+                return Ok(());
+            }
+        }
+
+        Self::validate_mmap_posting(backing, posting)?;
+        let mut cache = backing.posting_validation.lock().map_err(|_| {
+            CodixingError::Serialization(
+                "file trigram posting validation cache is poisoned".to_string(),
+            )
+        })?;
+        if cache.validated.insert(key) {
+            cache.order.push_back(key);
+            if cache.order.len() > FILE_TRIGRAM_POSTING_VALIDATION_CACHE_CAPACITY
+                && let Some(evicted) = cache.order.pop_front()
+            {
+                cache.validated.remove(&evicted);
+            }
+        }
+        Ok(())
+    }
+
+    fn validated_mmap_lookup_trigram(
+        backing: &FileTrigramMmap,
+        trigram: &[u8; 3],
+    ) -> Result<Option<FilePostingRef>> {
+        let Some(posting) = Self::mmap_lookup_trigram(backing, trigram) else {
+            return Ok(None);
+        };
+        Self::validate_mmap_posting_cached(backing, posting)?;
+        Ok(Some(posting))
+    }
+
+    /// Visit mapped candidates directly from the shortest posting list.
+    ///
+    /// This never allocates a candidate vector proportional to the number of
+    /// files sharing a common trigram.
+    fn visit_mmap_candidate_ids(
+        backing: &FileTrigramMmap,
+        trigrams: &[[u8; 3]],
+        mut visit: impl FnMut(u32) -> Result<()>,
+    ) -> Result<()> {
+        let mut postings = Vec::with_capacity(trigrams.len());
+        for trigram in trigrams {
+            let Some(posting) = Self::validated_mmap_lookup_trigram(backing, trigram)? else {
+                return Ok(());
+            };
+            postings.push(posting);
+        }
+        postings.sort_unstable_by_key(|posting| posting.count);
+
+        let Some((shortest, remaining)) = postings.split_first() else {
+            return Ok(());
+        };
+        for index in 0..shortest.count as usize {
+            let candidate =
+                Self::mmap_posting_value(backing, *shortest, index).ok_or_else(|| {
+                    CodixingError::Serialization(
+                        "validated file trigram posting became truncated".to_string(),
+                    )
+                })?;
+            if remaining
+                .iter()
+                .all(|posting| Self::mmap_posting_contains(backing, *posting, candidate))
+            {
+                visit(candidate)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn delta_matches(change: &FileTrigramDelta, trigrams: &[[u8; 3]]) -> bool {
+        change.trigrams.as_ref().is_some_and(|available| {
+            trigrams
+                .iter()
+                .all(|trigram| available.binary_search(trigram).is_ok())
+        })
+    }
+
+    fn mapped_change_matches(
+        backing: &FileTrigramMmap,
+        path: &str,
+        change: &FileTrigramDelta,
+        trigrams: &[[u8; 3]],
+    ) -> Result<bool> {
+        if change.exclude_base {
+            return Ok(Self::delta_matches(change, trigrams));
+        }
+        let base_file_id = Self::mmap_file_id(backing, path);
+        for trigram in trigrams {
+            let in_delta = change
+                .trigrams
+                .as_ref()
+                .is_some_and(|available| available.binary_search(trigram).is_ok());
+            if in_delta {
+                continue;
+            }
+            let in_base = if let Some(file_id) = base_file_id {
+                Self::validated_mmap_lookup_trigram(backing, trigram)?
+                    .is_some_and(|posting| Self::mmap_posting_contains(backing, posting, file_id))
+            } else {
+                false
+            };
+            if !in_base {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Merge mapped candidates with the bounded changed-path overlay.
+    ///
+    /// Base matches for touched paths are delayed until the overlay is checked,
+    /// which makes replacement/removal exact and preserves additive `add`
+    /// semantics without ever copying the mapped corpus.
+    fn visit_mapped_candidates<'a>(
+        &'a self,
+        trigrams: &[[u8; 3]],
+        mut visit: impl FnMut(&'a str) -> Result<()>,
+    ) -> Result<()> {
+        let backing = self.mmap.as_ref().expect("mapped candidate base");
+        let mut changed_matches = Vec::with_capacity(self.delta.len());
+        for (path, change) in &self.delta {
+            if Self::mapped_change_matches(backing, path, change, trigrams)? {
+                changed_matches.push(path.as_str());
+            }
+        }
+        let mut changed_index = 0usize;
+        Self::visit_mmap_candidate_ids(backing, trigrams, |file_id| {
+            let path = Self::mmap_file_path(backing, file_id).ok_or_else(|| {
+                CodixingError::Serialization(
+                    "validated file trigram candidate path is missing".to_string(),
+                )
+            })?;
+            while changed_matches
+                .get(changed_index)
+                .is_some_and(|changed| *changed < path)
+            {
+                visit(changed_matches[changed_index])?;
+                changed_index += 1;
+            }
+            if self.delta.contains_key(path) {
+                if changed_matches
+                    .get(changed_index)
+                    .is_some_and(|changed| *changed == path)
+                {
+                    visit(changed_matches[changed_index])?;
+                    changed_index += 1;
+                }
+                return Ok(());
+            }
+            visit(path)
+        })?;
+
+        for path in &changed_matches[changed_index..] {
+            visit(path)?;
+        }
+        Ok(())
     }
 
     /// Index all trigrams from `content` under `path`.
@@ -1487,6 +2127,20 @@ impl FileTrigramIndex {
 
     /// Merge an already prepared full-file trigram set into the index.
     pub(crate) fn add_prepared(&mut self, path: &str, trigrams: &[[u8; 3]]) {
+        if self.mmap.is_some() {
+            let change = self
+                .delta
+                .entry(path.to_string())
+                .or_insert_with(|| FileTrigramDelta {
+                    exclude_base: false,
+                    trigrams: Some(Vec::new()),
+                });
+            let available = change.trigrams.get_or_insert_with(Vec::new);
+            available.extend_from_slice(trigrams);
+            available.sort_unstable();
+            available.dedup();
+            return;
+        }
         let file_idx = if let Some(&idx) = self.file_index.get(path) {
             idx
         } else {
@@ -1498,30 +2152,49 @@ impl FileTrigramIndex {
 
         for &tri in trigrams {
             let list = self.index.entry(tri).or_default();
-            // Maintain sorted order; dedup on insert to avoid duplicates
-            // when `add` is called multiple times for the same file.
-            if list.last() != Some(&file_idx) {
-                match list.binary_search(&file_idx) {
-                    Ok(_) => {} // already present
+            // Newly assigned file IDs are monotonic, so the normal indexing
+            // path appends in O(1). Updates can revisit an older ID and retain
+            // the sorted/deduplicated invariant through the binary-search path.
+            match list.last().copied() {
+                None => list.push(file_idx),
+                Some(last) if last < file_idx => list.push(file_idx),
+                Some(last) if last == file_idx => {}
+                Some(_) => match list.binary_search(&file_idx) {
+                    Ok(_) => {}
                     Err(pos) => list.insert(pos, file_idx),
-                }
+                },
             }
         }
     }
 
     /// Returns candidate file paths for a **literal** pattern.
     ///
-    /// Returns `None` when the literal is shorter than 3 bytes and trigram
-    /// pre-filtering cannot be applied — the caller should fall back to a full
-    /// scan.  Returns `Some([])` when the literal contains a trigram absent
-    /// from the index, meaning no file can match.
+    /// Returns `None` when trigram pre-filtering cannot be applied safely —
+    /// either the literal is shorter than 3 bytes or a lazily validated mapped
+    /// posting is corrupt. The caller must fall back to a full scan. Returns
+    /// `Some([])` only when a valid index proves that no file can match.
     pub fn candidates_for_literal<'a>(&'a self, literal: &[u8]) -> Option<Vec<&'a str>> {
-        if literal.len() < 3 {
+        if self.disabled || literal.len() < 3 {
             return None;
         }
-        let trigrams: Vec<[u8; 3]> = (0..literal.len() - 2)
+        let mut trigrams: Vec<[u8; 3]> = (0..literal.len() - 2)
             .map(|i| [literal[i], literal[i + 1], literal[i + 2]])
             .collect();
+        trigrams.sort_unstable();
+        trigrams.dedup();
+
+        if self.mmap.is_some() {
+            let mut candidates = Vec::new();
+            let result = self.visit_mapped_candidates(&trigrams, |path| {
+                candidates.push(path);
+                Ok(())
+            });
+            if let Err(error) = result {
+                tracing::warn!(%error, "invalid mapped file-trigram posting; disabling literal prefilter");
+                return None;
+            }
+            return Some(candidates);
+        }
 
         let mut lists: Vec<&Vec<u32>> = Vec::with_capacity(trigrams.len());
         for t in &trigrams {
@@ -1565,7 +2238,7 @@ impl FileTrigramIndex {
         literal: &[u8],
         mut visit: impl FnMut(&'a str) -> Result<()>,
     ) -> Result<Option<()>> {
-        if literal.len() < 3 {
+        if self.disabled || literal.len() < 3 {
             return Ok(None);
         }
 
@@ -1574,6 +2247,11 @@ impl FileTrigramIndex {
             .collect();
         trigrams.sort_unstable();
         trigrams.dedup();
+
+        if self.mmap.is_some() {
+            self.visit_mapped_candidates(&trigrams, visit)?;
+            return Ok(Some(()));
+        }
 
         let mut lists: Vec<&Vec<u32>> = Vec::with_capacity(trigrams.len());
         for trigram in &trigrams {
@@ -1603,11 +2281,28 @@ impl FileTrigramIndex {
     /// Returns candidate file paths given a set of trigrams that **all** must
     /// be present in any matching file (AND semantics).
     ///
-    /// Typically fed the output of [`extract_required_trigrams`].
-    /// Returns `None` when the trigram set is empty (can't pre-filter).
+    /// Typically fed the output of [`extract_required_trigrams`]. Returns
+    /// `None` when the trigram set is empty or mapped posting validation fails,
+    /// so callers conservatively scan without a prefilter.
     pub fn candidates_for_trigrams<'a>(&'a self, trigrams: &[[u8; 3]]) -> Option<Vec<&'a str>> {
-        if trigrams.is_empty() {
+        if self.disabled || trigrams.is_empty() {
             return None;
+        }
+
+        if self.mmap.is_some() {
+            let mut trigrams = trigrams.to_vec();
+            trigrams.sort_unstable();
+            trigrams.dedup();
+            let mut candidates = Vec::new();
+            let result = self.visit_mapped_candidates(&trigrams, |path| {
+                candidates.push(path);
+                Ok(())
+            });
+            if let Err(error) = result {
+                tracing::warn!(%error, "invalid mapped file-trigram posting; disabling regex prefilter");
+                return None;
+            }
+            return Some(candidates);
         }
 
         let mut lists: Vec<&Vec<u32>> = Vec::with_capacity(trigrams.len());
@@ -1644,6 +2339,20 @@ impl FileTrigramIndex {
     /// deferred to the checkpoint boundary, so one editor save never scans the
     /// repository-wide trigram map.
     pub fn remove_file(&mut self, path: &str) {
+        if let Some(backing) = self.mmap.as_ref() {
+            if Self::mmap_file_id(backing, path).is_some() {
+                self.delta.insert(
+                    path.to_string(),
+                    FileTrigramDelta {
+                        exclude_base: true,
+                        trigrams: None,
+                    },
+                );
+            } else {
+                self.delta.remove(path);
+            }
+            return;
+        }
         let file_idx = match self.file_index.remove(path) {
             Some(idx) => idx,
             None => return,
@@ -1655,6 +2364,12 @@ impl FileTrigramIndex {
     /// survivors. This global O(index) work belongs at the durable checkpoint,
     /// never on the changed-file hot path.
     pub(crate) fn compact_tombstones(&mut self) {
+        // Current mmap files are already canonical and cannot contain
+        // tombstones. Avoid materializing a read-only generation for a no-op
+        // checkpoint/save.
+        if self.mmap.is_some() {
+            return;
+        }
         if self.files.len() == self.file_index.len() {
             return;
         }
@@ -1730,28 +2445,749 @@ impl FileTrigramIndex {
 
     /// Number of files currently in the index.
     pub fn file_count(&self) -> usize {
-        self.file_index.len()
+        self.mmap.as_ref().map_or_else(
+            || self.file_index.len(),
+            |backing| {
+                self.delta
+                    .iter()
+                    .fold(backing.file_count as usize, |count, (path, change)| {
+                        let in_base = Self::mmap_file_id(backing, path).is_some();
+                        match (in_base, change.trigrams.is_some()) {
+                            (true, false) => count - 1,
+                            (false, true) => count + 1,
+                            _ => count,
+                        }
+                    })
+            },
+        )
     }
 
-    /// Save the file trigram index to a binary (bitcode) file.
+    #[cfg(test)]
+    pub(crate) fn is_mmap_backed_for_test(&self) -> bool {
+        self.mmap.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_delta_len_for_test(&self) -> usize {
+        self.delta.len()
+    }
+
+    /// Save the file trigram index to its mmap-friendly binary format.
     pub fn save_binary(&self, path: &Path) -> Result<()> {
-        let data = FileTrigramIndexData {
-            files: self.files.clone(),
-            index: self.index.iter().map(|(k, v)| (*k, v.clone())).collect(),
+        if self.disabled {
+            return Err(CodixingError::Serialization(
+                "cannot persist a disabled file trigram index".to_string(),
+            ));
+        }
+        if let Some(backing) = self.mmap.as_ref() {
+            if !self.delta.is_empty() {
+                return self.save_mmap_with_delta(path, backing);
+            }
+            return Self::save_mmap_bytes(path, backing);
+        }
+        let data = Self::canonical_data(
+            self.files.clone(),
+            self.index
+                .iter()
+                .map(|(trigram, postings)| (*trigram, postings.clone())),
+        )?;
+        Self::save_data(path, &data)
+    }
+
+    /// Persist and consume a freshly-built index without cloning every posting.
+    ///
+    /// Initialization does not retain this in-memory representation after the
+    /// durable file is published, so moving its vectors into the serializer
+    /// avoids stacking a corpus-sized clone on top of the live build state.
+    pub(crate) fn save_binary_consuming(self, path: &Path) -> Result<()> {
+        let Self {
+            files,
+            file_index,
+            index,
+            mmap,
+            delta,
+            disabled,
+        } = self;
+        debug_assert!(
+            !disabled,
+            "disabled file-trigram indexes are never persisted"
+        );
+        debug_assert!(delta.is_empty(), "fresh in-memory saves have no mmap delta");
+        if let Some(backing) = mmap.as_ref() {
+            return Self::save_mmap_bytes(path, backing);
+        }
+        drop(file_index);
+        let data = Self::canonical_data(files, index)?;
+        Self::save_data(path, &data)
+    }
+
+    /// Persist an unchanged mapping when a checkpoint targets another file.
+    ///
+    /// The source generation itself is already durable, so saving back to that
+    /// same existing file is a no-op. Every other destination receives the
+    /// validated bytes through the normal crash-safe atomic writer.
+    fn save_mmap_bytes(path: &Path, backing: &FileTrigramMmap) -> Result<()> {
+        let is_source = std::fs::canonicalize(path)
+            .ok()
+            .is_some_and(|destination| destination == backing.source_path);
+        if is_source {
+            return Ok(());
+        }
+        Self::validate_all_mmap_postings(backing)?;
+        crate::persistence::atomic_write(path, &backing.mmap[..])?;
+        Ok(())
+    }
+
+    #[cfg(all(unix, test))]
+    fn paths_alias(left: &Path, right: &Path) -> std::io::Result<bool> {
+        use std::os::unix::fs::MetadataExt;
+
+        let left = std::fs::metadata(left)?;
+        let right = std::fs::metadata(right)?;
+        Ok(left.dev() == right.dev() && left.ino() == right.ino())
+    }
+
+    #[cfg(windows)]
+    fn paths_alias(left: &Path, right: &Path) -> std::io::Result<bool> {
+        use std::ffi::c_void;
+        use std::mem::MaybeUninit;
+        use std::os::windows::io::AsRawHandle;
+
+        #[repr(C)]
+        #[allow(dead_code)]
+        struct FileTime {
+            low_date_time: u32,
+            high_date_time: u32,
+        }
+
+        #[repr(C)]
+        #[allow(dead_code)]
+        struct ByHandleFileInformation {
+            file_attributes: u32,
+            creation_time: FileTime,
+            last_access_time: FileTime,
+            last_write_time: FileTime,
+            volume_serial_number: u32,
+            file_size_high: u32,
+            file_size_low: u32,
+            number_of_links: u32,
+            file_index_high: u32,
+            file_index_low: u32,
+        }
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            #[link_name = "GetFileInformationByHandle"]
+            fn get_file_information_by_handle(
+                file: *mut c_void,
+                information: *mut ByHandleFileInformation,
+            ) -> i32;
+        }
+
+        fn identity(path: &Path) -> std::io::Result<(u32, u64)> {
+            let file = std::fs::File::open(path)?;
+            let mut information = MaybeUninit::<ByHandleFileInformation>::uninit();
+            // SAFETY: `information` points to writable storage for the exact
+            // Windows structure, and `file` remains open for the whole call.
+            let success = unsafe {
+                get_file_information_by_handle(
+                    file.as_raw_handle().cast::<c_void>(),
+                    information.as_mut_ptr(),
+                )
+            };
+            if success == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: a successful Win32 call initialized every field.
+            let information = unsafe { information.assume_init() };
+            let file_index = (u64::from(information.file_index_high) << 32)
+                | u64::from(information.file_index_low);
+            Ok((information.volume_serial_number, file_index))
+        }
+
+        Ok(identity(left)? == identity(right)?)
+    }
+
+    fn mmap_file_lower_bound(backing: &FileTrigramMmap, path: &str) -> u32 {
+        let mut low = 0u32;
+        let mut high = backing.file_count;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let candidate =
+                Self::mmap_file_path(backing, middle).expect("validated file-trigram path table");
+            if candidate < path {
+                low = middle + 1;
+            } else {
+                high = middle;
+            }
+        }
+        low
+    }
+
+    fn build_merge_plan<'a>(&'a self, backing: &FileTrigramMmap) -> FileTrigramMergePlan<'a> {
+        let mut removed_base_paths = Vec::new();
+        let mut added_paths = Vec::new();
+        let mut overlay_files = Vec::new();
+        for (path, change) in &self.delta {
+            let in_base = Self::mmap_file_id(backing, path).is_some();
+            match (in_base, change.trigrams.as_ref()) {
+                (true, None) => removed_base_paths.push(path.as_str()),
+                (false, Some(_)) => added_paths.push(path.as_str()),
+                _ => {}
+            }
+            if let Some(trigrams) = &change.trigrams {
+                overlay_files.push((path.as_str(), trigrams.as_slice()));
+            }
+        }
+        Self::record_checkpoint_scratch(
+            overlay_files
+                .len()
+                .max(removed_base_paths.len() + added_paths.len()),
+        );
+        FileTrigramMergePlan {
+            removed_base_paths,
+            added_paths,
+            overlay_files,
+        }
+    }
+
+    fn final_file_id(
+        backing: &FileTrigramMmap,
+        plan: &FileTrigramMergePlan<'_>,
+        path: &str,
+    ) -> Result<u32> {
+        let base_before = Self::mmap_file_lower_bound(backing, path) as usize;
+        let removed_before = plan
+            .removed_base_paths
+            .partition_point(|removed| *removed < path);
+        let added_before = plan.added_paths.partition_point(|added| *added < path);
+        u32::try_from(base_before - removed_before + added_before).map_err(|_| {
+            CodixingError::Serialization("file trigram merged file ID exceeds u32::MAX".to_string())
+        })
+    }
+
+    fn remapped_base_file_id(plan: &FileTrigramMergePlan<'_>, old_file_id: u32, path: &str) -> u32 {
+        let removed_before = plan
+            .removed_base_paths
+            .partition_point(|removed| *removed < path);
+        let added_before = plan.added_paths.partition_point(|added| *added < path);
+        old_file_id - removed_before as u32 + added_before as u32
+    }
+
+    fn visit_final_files(
+        &self,
+        backing: &FileTrigramMmap,
+        plan: &FileTrigramMergePlan<'_>,
+        mut visit: impl FnMut(&str) -> Result<()>,
+    ) -> Result<()> {
+        let mut added = plan.added_paths.iter().peekable();
+        for file_id in 0..backing.file_count {
+            let path =
+                Self::mmap_file_path(backing, file_id).expect("validated file-trigram path table");
+            while added.peek().is_some_and(|candidate| **candidate < path) {
+                visit(added.next().unwrap())?;
+            }
+            if self
+                .delta
+                .get(path)
+                .is_some_and(|change| change.trigrams.is_none())
+            {
+                continue;
+            }
+            visit(path)?;
+        }
+        for path in added {
+            visit(path)?;
+        }
+        Ok(())
+    }
+
+    fn visit_final_posting(
+        &self,
+        backing: &FileTrigramMmap,
+        plan: &FileTrigramMergePlan<'_>,
+        trigram: &[u8; 3],
+        overlay: &[&str],
+        mut visit: impl FnMut(u32) -> Result<()>,
+    ) -> Result<()> {
+        let mut overlay_index = 0usize;
+
+        if let Some(posting) = Self::mmap_lookup_trigram(backing, trigram) {
+            let mut previous_file_id = None;
+            for posting_index in 0..posting.count as usize {
+                let old_file_id = Self::mmap_posting_value(backing, posting, posting_index)
+                    .ok_or_else(|| {
+                        CodixingError::Serialization(
+                            "file trigram checkpoint found a truncated posting".to_string(),
+                        )
+                    })?;
+                if old_file_id >= backing.file_count {
+                    return Err(CodixingError::Serialization(format!(
+                        "file trigram checkpoint posting ID {old_file_id} exceeds file count {}",
+                        backing.file_count
+                    )));
+                }
+                if previous_file_id.is_some_and(|previous| previous >= old_file_id) {
+                    return Err(CodixingError::Serialization(
+                        "file trigram checkpoint posting IDs are not strictly increasing"
+                            .to_string(),
+                    ));
+                }
+                previous_file_id = Some(old_file_id);
+                let path = Self::mmap_file_path(backing, old_file_id).ok_or_else(|| {
+                    CodixingError::Serialization(
+                        "file trigram checkpoint posting path is invalid".to_string(),
+                    )
+                })?;
+                while overlay
+                    .get(overlay_index)
+                    .is_some_and(|overlay_path| *overlay_path < path)
+                {
+                    let overlay_path = overlay[overlay_index];
+                    visit(Self::final_file_id(backing, plan, overlay_path)?)?;
+                    overlay_index += 1;
+                }
+                if overlay
+                    .get(overlay_index)
+                    .is_some_and(|overlay_path| *overlay_path == path)
+                {
+                    visit(Self::final_file_id(backing, plan, path)?)?;
+                    overlay_index += 1;
+                    continue;
+                }
+                if self
+                    .delta
+                    .get(path)
+                    .is_some_and(|change| change.exclude_base)
+                {
+                    continue;
+                }
+                visit(Self::remapped_base_file_id(plan, old_file_id, path))?;
+            }
+        }
+        for path in &overlay[overlay_index..] {
+            visit(Self::final_file_id(backing, plan, path)?)?;
+        }
+        Ok(())
+    }
+
+    fn next_overlay_group<'a>(
+        plan: &FileTrigramMergePlan<'a>,
+        heap: &mut BinaryHeap<Reverse<([u8; 3], usize, usize)>>,
+        paths: &mut Vec<&'a str>,
+    ) -> Option<[u8; 3]> {
+        paths.clear();
+        let Reverse((trigram, file_index, position)) = heap.pop()?;
+        paths.push(plan.overlay_files[file_index].0);
+        #[cfg(test)]
+        FILE_TRIGRAM_OVERLAY_MEMBERSHIPS_VISITED.with(|count| count.set(count.get() + 1));
+        let trigrams = plan.overlay_files[file_index].1;
+        if let Some(next) = trigrams.get(position + 1) {
+            heap.push(Reverse((*next, file_index, position + 1)));
+        }
+        while heap.peek().is_some_and(|entry| entry.0.0 == trigram) {
+            let Reverse((_, duplicate_file, duplicate_position)) = heap.pop().unwrap();
+            paths.push(plan.overlay_files[duplicate_file].0);
+            #[cfg(test)]
+            FILE_TRIGRAM_OVERLAY_MEMBERSHIPS_VISITED.with(|count| count.set(count.get() + 1));
+            let duplicate_trigrams = plan.overlay_files[duplicate_file].1;
+            if let Some(next) = duplicate_trigrams.get(duplicate_position + 1) {
+                heap.push(Reverse((*next, duplicate_file, duplicate_position + 1)));
+            }
+        }
+        Self::record_checkpoint_scratch(heap.len().max(paths.len()));
+        Some(trigram)
+    }
+
+    fn visit_final_trigrams(
+        &self,
+        backing: &FileTrigramMmap,
+        plan: &FileTrigramMergePlan<'_>,
+        mut visit: impl FnMut([u8; 3], &[&str]) -> Result<()>,
+    ) -> Result<()> {
+        let mut overlay_heap: BinaryHeap<Reverse<([u8; 3], usize, usize)>> = BinaryHeap::new();
+        for (file_index, (_, trigrams)) in plan.overlay_files.iter().enumerate() {
+            if let Some(first) = trigrams.first() {
+                overlay_heap.push(Reverse((*first, file_index, 0)));
+            }
+        }
+        Self::record_checkpoint_scratch(overlay_heap.len());
+        let mut overlay_paths = Vec::with_capacity(plan.overlay_files.len());
+
+        let mut base_index = 0usize;
+        let mut overlay = Self::next_overlay_group(plan, &mut overlay_heap, &mut overlay_paths);
+        while base_index < backing.trigram_count as usize || overlay.is_some() {
+            let base = (base_index < backing.trigram_count as usize).then(|| {
+                let entry =
+                    backing.trigram_index_offset + base_index * FILE_TRIGRAM_MMAP_INDEX_ENTRY_SIZE;
+                [
+                    backing.mmap[entry],
+                    backing.mmap[entry + 1],
+                    backing.mmap[entry + 2],
+                ]
+            });
+            match (base, overlay) {
+                (Some(base), Some(overlay_trigram)) if base < overlay_trigram => {
+                    base_index += 1;
+                    visit(base, &[])?;
+                }
+                (Some(base), Some(overlay_trigram)) if overlay_trigram < base => {
+                    visit(overlay_trigram, &overlay_paths)?;
+                    overlay = Self::next_overlay_group(plan, &mut overlay_heap, &mut overlay_paths);
+                }
+                (Some(base), Some(_)) => {
+                    base_index += 1;
+                    visit(base, &overlay_paths)?;
+                    overlay = Self::next_overlay_group(plan, &mut overlay_heap, &mut overlay_paths);
+                }
+                (Some(base), None) => {
+                    base_index += 1;
+                    visit(base, &[])?;
+                }
+                (None, Some(overlay_trigram)) => {
+                    visit(overlay_trigram, &overlay_paths)?;
+                    overlay = Self::next_overlay_group(plan, &mut overlay_heap, &mut overlay_paths);
+                }
+                (None, None) => break,
+            }
+        }
+        Ok(())
+    }
+
+    /// Stream a mapped base plus bounded changed-file overlay into canonical
+    /// FTRI v1 without collecting corpus-sized paths, postings, or output bytes.
+    fn save_mmap_with_delta(&self, path: &Path, backing: &FileTrigramMmap) -> Result<()> {
+        use std::io::{Seek, SeekFrom, Write};
+
+        #[cfg(windows)]
+        if path.exists() && Self::paths_alias(path, &backing.source_path)? {
+            return Err(CodixingError::Serialization(
+                "cannot checkpoint a mapped file-trigram delta onto its Windows source or a hard-link alias"
+                    .to_string(),
+            ));
+        }
+
+        let plan = self.build_merge_plan(backing);
+        let to_u32 = |what: &str, value: usize| -> Result<u32> {
+            u32::try_from(value).map_err(|_| {
+                CodixingError::Serialization(format!(
+                    "file trigram {what} {value} exceeds u32::MAX"
+                ))
+            })
         };
-        let bytes = bitcode::serialize(&data).map_err(|e| {
-            CodixingError::Serialization(format!("failed to serialize file trigram index: {e}"))
+
+        let mut file_count = 0usize;
+        let mut string_pool_bytes = 0usize;
+        self.visit_final_files(backing, &plan, |file_path| {
+            file_count = file_count.checked_add(1).ok_or_else(|| {
+                CodixingError::Serialization("file trigram file count overflow".to_string())
+            })?;
+            string_pool_bytes =
+                string_pool_bytes
+                    .checked_add(file_path.len())
+                    .ok_or_else(|| {
+                        CodixingError::Serialization("file trigram path bytes overflow".to_string())
+                    })?;
+            Ok(())
         })?;
+
+        let mut trigram_count = 0usize;
+        let mut total_postings = 0usize;
+        self.visit_final_trigrams(backing, &plan, |trigram, overlay| {
+            let mut posting_count = 0usize;
+            self.visit_final_posting(backing, &plan, &trigram, overlay, |_| {
+                posting_count += 1;
+                Ok(())
+            })?;
+            if posting_count != 0 {
+                trigram_count += 1;
+                total_postings = total_postings.checked_add(posting_count).ok_or_else(|| {
+                    CodixingError::Serialization("file trigram posting count overflow".to_string())
+                })?;
+            }
+            Ok(())
+        })?;
+
+        let file_count_u32 = to_u32("file count", file_count)?;
+        let trigram_count_u32 = to_u32("trigram count", trigram_count)?;
+        let total_postings_u32 = to_u32("posting count", total_postings)?;
+        let string_pool_bytes_u32 = to_u32("path bytes", string_pool_bytes)?;
+        let posting_bytes = total_postings.checked_mul(4).ok_or_else(|| {
+            CodixingError::Serialization("file trigram posting bytes overflow".to_string())
+        })?;
+        let posting_bytes_u32 = to_u32("posting bytes", posting_bytes)?;
+        let file_table_bytes = file_count
+            .checked_mul(FILE_TRIGRAM_MMAP_FILE_ENTRY_SIZE)
+            .ok_or_else(|| {
+                CodixingError::Serialization("file trigram table size overflow".to_string())
+            })?;
+        let trigram_index_bytes = trigram_count
+            .checked_mul(FILE_TRIGRAM_MMAP_INDEX_ENTRY_SIZE)
+            .ok_or_else(|| {
+                CodixingError::Serialization("file trigram index size overflow".to_string())
+            })?;
+        let trigram_index_offset = FILE_TRIGRAM_MMAP_HEADER_SIZE + file_table_bytes;
+        let string_pool_offset = trigram_index_offset + trigram_index_bytes;
+        let postings_offset = string_pool_offset + string_pool_bytes;
+        let total_bytes = postings_offset + posting_bytes;
+
+        crate::persistence::atomic_write_with(path, |file| {
+            let write_result = (|| -> Result<()> {
+                // The merge walks millions of compact postings. Buffer each
+                // run so a four-byte posting does not become its own kernel
+                // write; seeks still flush at the trigram-table boundaries.
+                let mut file = std::io::BufWriter::new(file);
+                file.write_all(&FILE_TRIGRAM_MMAP_MAGIC.to_le_bytes())?;
+                file.write_all(&FILE_TRIGRAM_MMAP_VERSION.to_le_bytes())?;
+                file.write_all(&file_count_u32.to_le_bytes())?;
+                file.write_all(&trigram_count_u32.to_le_bytes())?;
+                file.write_all(&total_postings_u32.to_le_bytes())?;
+                file.write_all(&string_pool_bytes_u32.to_le_bytes())?;
+                file.write_all(&posting_bytes_u32.to_le_bytes())?;
+                file.write_all(&0u32.to_le_bytes())?;
+
+                let mut path_offset = 0usize;
+                self.visit_final_files(backing, &plan, |file_path| {
+                    file.write_all(&to_u32("path offset", path_offset)?.to_le_bytes())?;
+                    file.write_all(&to_u32("path length", file_path.len())?.to_le_bytes())?;
+                    path_offset += file_path.len();
+                    Ok(())
+                })?;
+                file.seek(SeekFrom::Start(string_pool_offset as u64))?;
+                self.visit_final_files(backing, &plan, |file_path| {
+                    file.write_all(file_path.as_bytes())?;
+                    Ok(())
+                })?;
+
+                let mut index_position = trigram_index_offset as u64;
+                let mut posting_offset = 0usize;
+                file.seek(SeekFrom::Start(postings_offset as u64))?;
+                self.visit_final_trigrams(backing, &plan, |trigram, overlay| {
+                    let mut posting_count = 0usize;
+                    self.visit_final_posting(backing, &plan, &trigram, overlay, |file_id| {
+                        file.write_all(&file_id.to_le_bytes())?;
+                        posting_count += 1;
+                        Ok(())
+                    })?;
+                    if posting_count == 0 {
+                        return Ok(());
+                    }
+                    let posting_end = file.stream_position()?;
+                    file.seek(SeekFrom::Start(index_position))?;
+                    file.write_all(&trigram)?;
+                    file.write_all(&[0])?;
+                    file.write_all(&to_u32("posting offset", posting_offset)?.to_le_bytes())?;
+                    file.write_all(&to_u32("posting length", posting_count)?.to_le_bytes())?;
+                    file.write_all(&0u32.to_le_bytes())?;
+                    index_position += FILE_TRIGRAM_MMAP_INDEX_ENTRY_SIZE as u64;
+                    posting_offset += posting_count * 4;
+                    file.seek(SeekFrom::Start(posting_end))?;
+                    Ok(())
+                })?;
+                file.flush()?;
+                file.get_mut().set_len(total_bytes as u64)?;
+                Ok(())
+            })();
+            write_result.map_err(|error| std::io::Error::other(error.to_string()))
+        })?;
+        Ok(())
+    }
+
+    /// Canonicalize file IDs and trigram ordering before persistence.
+    ///
+    /// Init workers merge files in scheduler order, while incremental indexes
+    /// can contain tombstoned IDs. Sorting live paths and remapping postings
+    /// makes equivalent indexes byte-identical without cloning posting vectors
+    /// in the consuming save path.
+    fn canonical_data(
+        files: Vec<String>,
+        index: impl IntoIterator<Item = ([u8; 3], Vec<u32>)>,
+    ) -> Result<FileTrigramIndexData> {
+        let original_file_count = files.len();
+        let mut live_files: Vec<(String, usize)> = files
+            .into_iter()
+            .enumerate()
+            .filter_map(|(old_id, path)| (!path.is_empty()).then_some((path, old_id)))
+            .collect();
+        live_files.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+
+        let mut remap = vec![None; original_file_count];
+        let mut files = Vec::with_capacity(live_files.len());
+        for (new_id, (path, old_id)) in live_files.into_iter().enumerate() {
+            remap[old_id] = Some(u32::try_from(new_id).map_err(|_| {
+                CodixingError::Serialization(
+                    "file trigram index exceeds the u32 file-ID limit".to_string(),
+                )
+            })?);
+            files.push(path);
+        }
+
+        let mut index: Vec<_> = index
+            .into_iter()
+            .filter_map(|(trigram, mut postings)| {
+                let mut write = 0usize;
+                for read in 0..postings.len() {
+                    let Some(new_id) = postings
+                        .get(read)
+                        .and_then(|old_id| remap.get(*old_id as usize))
+                        .copied()
+                        .flatten()
+                    else {
+                        continue;
+                    };
+                    postings[write] = new_id;
+                    write += 1;
+                }
+                postings.truncate(write);
+                postings.sort_unstable();
+                postings.dedup();
+                (!postings.is_empty()).then_some((trigram, postings))
+            })
+            .collect();
+        index.sort_unstable_by_key(|(trigram, _)| *trigram);
+
+        Ok(FileTrigramIndexData { files, index })
+    }
+
+    fn save_data(path: &Path, data: &FileTrigramIndexData) -> Result<()> {
+        let to_u32 = |what: &str, value: usize| -> Result<u32> {
+            u32::try_from(value).map_err(|_| {
+                CodixingError::Serialization(format!(
+                    "file trigram {what} {value} exceeds u32::MAX"
+                ))
+            })
+        };
+
+        let file_count = to_u32("file count", data.files.len())?;
+        let trigram_count = to_u32("trigram count", data.index.len())?;
+        let string_pool_bytes = data.files.iter().try_fold(0usize, |total, path| {
+            total.checked_add(path.len()).ok_or_else(|| {
+                CodixingError::Serialization("file trigram path bytes overflow".to_string())
+            })
+        })?;
+        let total_postings = data.index.iter().try_fold(0usize, |total, (_, postings)| {
+            total.checked_add(postings.len()).ok_or_else(|| {
+                CodixingError::Serialization("file trigram posting count overflow".to_string())
+            })
+        })?;
+        let posting_bytes = total_postings.checked_mul(4).ok_or_else(|| {
+            CodixingError::Serialization("file trigram posting bytes overflow".to_string())
+        })?;
+
+        let file_table_bytes = data
+            .files
+            .len()
+            .checked_mul(FILE_TRIGRAM_MMAP_FILE_ENTRY_SIZE)
+            .ok_or_else(|| {
+                CodixingError::Serialization("file trigram table size overflow".to_string())
+            })?;
+        let trigram_index_bytes = data
+            .index
+            .len()
+            .checked_mul(FILE_TRIGRAM_MMAP_INDEX_ENTRY_SIZE)
+            .ok_or_else(|| {
+                CodixingError::Serialization("file trigram index size overflow".to_string())
+            })?;
+        let total_bytes = FILE_TRIGRAM_MMAP_HEADER_SIZE
+            .checked_add(file_table_bytes)
+            .and_then(|size| size.checked_add(trigram_index_bytes))
+            .and_then(|size| size.checked_add(string_pool_bytes))
+            .and_then(|size| size.checked_add(posting_bytes))
+            .ok_or_else(|| {
+                CodixingError::Serialization("file trigram file size overflow".to_string())
+            })?;
+
+        let string_pool_bytes_u32 = to_u32("path bytes", string_pool_bytes)?;
+        let total_postings_u32 = to_u32("posting count", total_postings)?;
+        let posting_bytes_u32 = to_u32("posting bytes", posting_bytes)?;
+        let mut bytes = Vec::with_capacity(total_bytes);
+        bytes.extend_from_slice(&FILE_TRIGRAM_MMAP_MAGIC.to_le_bytes());
+        bytes.extend_from_slice(&FILE_TRIGRAM_MMAP_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&file_count.to_le_bytes());
+        bytes.extend_from_slice(&trigram_count.to_le_bytes());
+        bytes.extend_from_slice(&total_postings_u32.to_le_bytes());
+        bytes.extend_from_slice(&string_pool_bytes_u32.to_le_bytes());
+        bytes.extend_from_slice(&posting_bytes_u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+
+        let mut path_offset = 0usize;
+        for file_path in &data.files {
+            bytes.extend_from_slice(&to_u32("path offset", path_offset)?.to_le_bytes());
+            bytes.extend_from_slice(&to_u32("path length", file_path.len())?.to_le_bytes());
+            path_offset += file_path.len();
+        }
+
+        let mut posting_offset = 0usize;
+        for (trigram, postings) in &data.index {
+            bytes.extend_from_slice(trigram);
+            bytes.push(0);
+            bytes.extend_from_slice(&to_u32("posting offset", posting_offset)?.to_le_bytes());
+            bytes.extend_from_slice(&to_u32("posting length", postings.len())?.to_le_bytes());
+            bytes.extend_from_slice(&0u32.to_le_bytes());
+            posting_offset += postings.len() * 4;
+        }
+
+        for file_path in &data.files {
+            bytes.extend_from_slice(file_path.as_bytes());
+        }
+        for (_, postings) in &data.index {
+            for file_id in postings {
+                bytes.extend_from_slice(&file_id.to_le_bytes());
+            }
+        }
+
+        debug_assert_eq!(bytes.len(), total_bytes);
         crate::persistence::atomic_write(path, bytes)?;
         Ok(())
     }
 
-    /// Load the file trigram index from a binary (bitcode) file.
+    /// Load a file trigram index, mmaping current files and accepting legacy
+    /// bitcode generations for backwards compatibility.
     pub fn load_binary(path: &Path) -> Result<Self> {
+        let mut magic = [0u8; 4];
+        {
+            use std::io::Read;
+            let mut file = std::fs::File::open(path)?;
+            if file.read(&mut magic).unwrap_or(0) == magic.len()
+                && magic == FILE_TRIGRAM_MMAP_MAGIC.to_le_bytes()
+            {
+                return Self::load_mmap_binary(path);
+            }
+        }
+
+        // Existing bitcode generations remain readable and materialize only
+        // for this compatibility path. The next checkpoint writes mmap v1.
         let bytes = std::fs::read(path)?;
         let data: FileTrigramIndexData = bitcode::deserialize(&bytes).map_err(|e| {
             CodixingError::Serialization(format!("failed to deserialize file trigram index: {e}"))
         })?;
+        let mut seen_trigrams = HashSet::with_capacity(data.index.len());
+        for (trigram, postings) in &data.index {
+            if !seen_trigrams.insert(*trigram) {
+                return Err(CodixingError::Serialization(format!(
+                    "legacy file trigram index contains duplicate key {trigram:?}"
+                )));
+            }
+            if postings.is_empty() {
+                return Err(CodixingError::Serialization(format!(
+                    "legacy file trigram posting {trigram:?} is empty"
+                )));
+            }
+            let mut previous = None;
+            for &file_id in postings {
+                if file_id as usize >= data.files.len() {
+                    return Err(CodixingError::Serialization(format!(
+                        "legacy file trigram posting {trigram:?} has out-of-range file ID {file_id}"
+                    )));
+                }
+                if previous.is_some_and(|prior| prior >= file_id) {
+                    return Err(CodixingError::Serialization(format!(
+                        "legacy file trigram posting {trigram:?} is not strictly sorted"
+                    )));
+                }
+                previous = Some(file_id);
+            }
+        }
         let mut file_index = HashMap::new();
         for (i, f) in data.files.iter().enumerate() {
             if !f.is_empty() {
@@ -1762,8 +3198,301 @@ impl FileTrigramIndex {
             files: data.files,
             file_index,
             index: data.index.into_iter().collect(),
+            mmap: None,
+            delta: BTreeMap::new(),
+            disabled: false,
         })
     }
+
+    /// Load the immutable base and its complete changed-path overlay as one
+    /// logical index. A missing sidecar is accepted only for legacy active
+    /// generations; new publications require the canonical empty artifact.
+    pub(crate) fn load_binary_with_delta(path: &Path, delta_bytes: Option<&[u8]>) -> Result<Self> {
+        let mut index = Self::load_binary(path)?;
+        if let Some(bytes) = delta_bytes {
+            index.apply_delta_checkpoint(bytes)?;
+        }
+        Ok(index)
+    }
+
+    fn load_mmap_binary(path: &Path) -> Result<Self> {
+        let file = std::fs::File::open(path)?;
+        let source_path = std::fs::canonicalize(path).map_err(|error| {
+            CodixingError::Serialization(format!(
+                "failed to resolve file trigram mmap source {}: {error}",
+                path.display()
+            ))
+        })?;
+        let file_len = usize::try_from(file.metadata()?.len()).map_err(|_| {
+            CodixingError::Serialization("file trigram mmap length exceeds usize".to_string())
+        })?;
+        if file_len < FILE_TRIGRAM_MMAP_HEADER_SIZE {
+            return Err(CodixingError::Serialization(
+                "file trigram mmap is smaller than its header".to_string(),
+            ));
+        }
+
+        // SAFETY: the mapping is read-only and the generation file is opened
+        // read-only. Index generations are immutable while an Engine uses them.
+        let mmap = unsafe { Mmap::map(&file) }.map_err(|error| {
+            CodixingError::Serialization(format!("failed to mmap file trigram index: {error}"))
+        })?;
+        let read_u32 = |offset: usize| -> Result<u32> {
+            let end = offset.checked_add(4).ok_or_else(|| {
+                CodixingError::Serialization("file trigram header offset overflow".to_string())
+            })?;
+            let bytes = mmap.get(offset..end).ok_or_else(|| {
+                CodixingError::Serialization("truncated file trigram header".to_string())
+            })?;
+            Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+        };
+
+        let magic = read_u32(0)?;
+        if magic != FILE_TRIGRAM_MMAP_MAGIC {
+            return Err(CodixingError::Serialization(format!(
+                "invalid file trigram magic 0x{magic:08X}"
+            )));
+        }
+        let version = read_u32(4)?;
+        if version != FILE_TRIGRAM_MMAP_VERSION {
+            return Err(CodixingError::Serialization(format!(
+                "unsupported file trigram mmap version {version}"
+            )));
+        }
+
+        let file_count = read_u32(8)?;
+        let trigram_count = read_u32(12)?;
+        let total_postings = read_u32(16)?;
+        let string_pool_bytes = read_u32(20)? as usize;
+        let posting_bytes = read_u32(24)? as usize;
+        if read_u32(28)? != 0 {
+            return Err(CodixingError::Serialization(
+                "file trigram header reserved field is non-zero".to_string(),
+            ));
+        }
+        let expected_posting_bytes = (total_postings as usize).checked_mul(4).ok_or_else(|| {
+            CodixingError::Serialization("file trigram posting byte count overflow".to_string())
+        })?;
+        if posting_bytes != expected_posting_bytes {
+            return Err(CodixingError::Serialization(
+                "file trigram posting byte count does not match its header".to_string(),
+            ));
+        }
+
+        let file_table_offset = FILE_TRIGRAM_MMAP_HEADER_SIZE;
+        let file_table_bytes = (file_count as usize)
+            .checked_mul(FILE_TRIGRAM_MMAP_FILE_ENTRY_SIZE)
+            .ok_or_else(|| {
+                CodixingError::Serialization("file trigram table size overflow".to_string())
+            })?;
+        let trigram_index_offset =
+            file_table_offset
+                .checked_add(file_table_bytes)
+                .ok_or_else(|| {
+                    CodixingError::Serialization("file trigram index offset overflow".to_string())
+                })?;
+        let trigram_index_bytes = (trigram_count as usize)
+            .checked_mul(FILE_TRIGRAM_MMAP_INDEX_ENTRY_SIZE)
+            .ok_or_else(|| {
+                CodixingError::Serialization("file trigram index size overflow".to_string())
+            })?;
+        let string_pool_offset = trigram_index_offset
+            .checked_add(trigram_index_bytes)
+            .ok_or_else(|| {
+                CodixingError::Serialization("file trigram path offset overflow".to_string())
+            })?;
+        let postings_offset = string_pool_offset
+            .checked_add(string_pool_bytes)
+            .ok_or_else(|| {
+                CodixingError::Serialization("file trigram posting offset overflow".to_string())
+            })?;
+        let expected_len = postings_offset.checked_add(posting_bytes).ok_or_else(|| {
+            CodixingError::Serialization("file trigram mmap length overflow".to_string())
+        })?;
+        if expected_len != file_len {
+            return Err(CodixingError::Serialization(format!(
+                "file trigram mmap length mismatch: expected {expected_len}, found {file_len}"
+            )));
+        }
+
+        let backing = FileTrigramMmap {
+            mmap,
+            source_path,
+            file_count,
+            trigram_count,
+            file_table_offset,
+            trigram_index_offset,
+            string_pool_offset,
+            postings_offset,
+            posting_validation: Mutex::new(FilePostingValidationCache::default()),
+        };
+
+        let mut previous_path: Option<&str> = None;
+        let mut expected_path_offset = 0usize;
+        for file_id in 0..file_count {
+            let relative_entry = (file_id as usize)
+                .checked_mul(FILE_TRIGRAM_MMAP_FILE_ENTRY_SIZE)
+                .ok_or_else(|| {
+                    CodixingError::Serialization(
+                        "file trigram path table offset overflow".to_string(),
+                    )
+                })?;
+            let entry = file_table_offset
+                .checked_add(relative_entry)
+                .ok_or_else(|| {
+                    CodixingError::Serialization("file trigram path entry overflow".to_string())
+                })?;
+            let path_offset =
+                u32::from_le_bytes(backing.mmap[entry..entry + 4].try_into().unwrap()) as usize;
+            let path_len =
+                u32::from_le_bytes(backing.mmap[entry + 4..entry + 8].try_into().unwrap()) as usize;
+            if path_offset != expected_path_offset {
+                return Err(CodixingError::Serialization(
+                    "file trigram path ranges are not canonical and contiguous".to_string(),
+                ));
+            }
+            expected_path_offset = expected_path_offset.checked_add(path_len).ok_or_else(|| {
+                CodixingError::Serialization("file trigram path range overflow".to_string())
+            })?;
+            if expected_path_offset > string_pool_bytes {
+                return Err(CodixingError::Serialization(
+                    "file trigram path range exceeds its string pool".to_string(),
+                ));
+            }
+            let path = Self::mmap_file_path(&backing, file_id).ok_or_else(|| {
+                CodixingError::Serialization(format!(
+                    "invalid UTF-8 or range for file trigram path {file_id}"
+                ))
+            })?;
+            if path.is_empty() || previous_path.is_some_and(|previous| previous >= path) {
+                return Err(CodixingError::Serialization(
+                    "file trigram paths are not strictly sorted".to_string(),
+                ));
+            }
+            previous_path = Some(path);
+        }
+        if expected_path_offset != string_pool_bytes {
+            return Err(CodixingError::Serialization(
+                "file trigram path ranges do not cover the string pool".to_string(),
+            ));
+        }
+
+        let mut previous_trigram: Option<[u8; 3]> = None;
+        let mut expected_posting_offset = 0usize;
+        let mut counted_postings = 0u64;
+        for index in 0..trigram_count as usize {
+            let relative_entry = index
+                .checked_mul(FILE_TRIGRAM_MMAP_INDEX_ENTRY_SIZE)
+                .ok_or_else(|| {
+                    CodixingError::Serialization(
+                        "file trigram index entry offset overflow".to_string(),
+                    )
+                })?;
+            let entry = trigram_index_offset
+                .checked_add(relative_entry)
+                .ok_or_else(|| {
+                    CodixingError::Serialization("file trigram index entry overflow".to_string())
+                })?;
+            let trigram = [
+                backing.mmap[entry],
+                backing.mmap[entry + 1],
+                backing.mmap[entry + 2],
+            ];
+            if backing.mmap[entry + 3] != 0
+                || u32::from_le_bytes(backing.mmap[entry + 12..entry + 16].try_into().unwrap()) != 0
+            {
+                return Err(CodixingError::Serialization(
+                    "file trigram index reserved field is non-zero".to_string(),
+                ));
+            }
+            if previous_trigram.is_some_and(|previous| previous >= trigram) {
+                return Err(CodixingError::Serialization(
+                    "file trigram keys are not strictly sorted".to_string(),
+                ));
+            }
+            previous_trigram = Some(trigram);
+            let posting_offset =
+                u32::from_le_bytes(backing.mmap[entry + 4..entry + 8].try_into().unwrap()) as usize;
+            let posting_count =
+                u32::from_le_bytes(backing.mmap[entry + 8..entry + 12].try_into().unwrap())
+                    as usize;
+            if posting_count == 0 {
+                return Err(CodixingError::Serialization(
+                    "file trigram posting list is empty".to_string(),
+                ));
+            }
+            if !posting_offset.is_multiple_of(4) {
+                return Err(CodixingError::Serialization(
+                    "file trigram posting offset is not u32-aligned".to_string(),
+                ));
+            }
+            if posting_offset != expected_posting_offset {
+                return Err(CodixingError::Serialization(
+                    "file trigram posting ranges are not canonical and non-overlapping".to_string(),
+                ));
+            }
+            let posting_len = posting_count.checked_mul(4).ok_or_else(|| {
+                CodixingError::Serialization("file trigram posting range overflow".to_string())
+            })?;
+            let posting_end = posting_offset.checked_add(posting_len).ok_or_else(|| {
+                CodixingError::Serialization("file trigram posting range overflow".to_string())
+            })?;
+            if posting_end > posting_bytes {
+                return Err(CodixingError::Serialization(
+                    "file trigram posting range exceeds its mmap".to_string(),
+                ));
+            }
+            expected_posting_offset = posting_end;
+            counted_postings = counted_postings
+                .checked_add(posting_count as u64)
+                .ok_or_else(|| {
+                    CodixingError::Serialization("file trigram posting count overflow".to_string())
+                })?;
+        }
+        if expected_posting_offset != posting_bytes {
+            return Err(CodixingError::Serialization(
+                "file trigram posting ranges do not cover the posting section".to_string(),
+            ));
+        }
+        if counted_postings != u64::from(total_postings) {
+            return Err(CodixingError::Serialization(
+                "file trigram posting count does not match its index".to_string(),
+            ));
+        }
+
+        Ok(Self {
+            files: Vec::new(),
+            file_index: HashMap::new(),
+            index: HashMap::new(),
+            mmap: Some(backing),
+            delta: BTreeMap::new(),
+            disabled: false,
+        })
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn corrupt_file_posting_for_test(path: &Path, trigram: [u8; 3], file_id: u32) {
+    let mut bytes = std::fs::read(path).expect("read file-trigram test artifact");
+    let read_u32 =
+        |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+    let file_count = read_u32(8);
+    let trigram_count = read_u32(12);
+    let string_pool_bytes = read_u32(20);
+    assert!(file_count > 0 && trigram_count > 0);
+    let trigram_index_offset =
+        FILE_TRIGRAM_MMAP_HEADER_SIZE + file_count * FILE_TRIGRAM_MMAP_FILE_ENTRY_SIZE;
+    let postings_offset = trigram_index_offset
+        + trigram_count * FILE_TRIGRAM_MMAP_INDEX_ENTRY_SIZE
+        + string_pool_bytes;
+    let entry = (0..trigram_count)
+        .map(|index| trigram_index_offset + index * FILE_TRIGRAM_MMAP_INDEX_ENTRY_SIZE)
+        .find(|entry| bytes[*entry..*entry + 3] == trigram)
+        .expect("test trigram must exist");
+    let posting_offset = read_u32(entry + 4);
+    let target = postings_offset + posting_offset;
+    bytes[target..target + 4].copy_from_slice(&file_id.to_le_bytes());
+    std::fs::write(path, bytes).expect("corrupt file-trigram test posting");
 }
 
 // ── Regex → QueryPlan (Russ Cox / trigrep technique) ─────────────────────────
@@ -2124,6 +3853,21 @@ mod tests {
     }
 
     #[test]
+    fn file_trigram_fast_append_falls_back_for_out_of_order_updates() {
+        let mut idx = FileTrigramIndex::new();
+        idx.add_prepared("first.rs", &[]);
+        idx.add_prepared("second.rs", &[*b"abc"]);
+        idx.add_prepared("first.rs", &[*b"abc"]);
+        idx.add_prepared("first.rs", &[*b"abc"]);
+
+        assert_eq!(idx.index.get(b"abc").unwrap().as_slice(), &[0, 1]);
+        assert_eq!(
+            idx.candidates_for_literal(b"abc").unwrap(),
+            vec!["first.rs", "second.rs"]
+        );
+    }
+
+    #[test]
     fn binary_save_and_load_round_trip() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("trigram.bin");
@@ -2363,6 +4107,10 @@ mod tests {
         let path = dir.path().join("file_trigram.bin");
         idx.save_binary(&path).unwrap();
         let loaded = FileTrigramIndex::load_binary(&path).unwrap();
+        assert!(loaded.mmap.is_some(), "current format must stay zero-copy");
+        assert!(loaded.files.is_empty());
+        assert!(loaded.file_index.is_empty());
+        assert!(loaded.index.is_empty());
         assert_eq!(loaded.file_count(), 2);
         assert_eq!(
             loaded.candidates_for_literal(b"obsolete_target").unwrap(),
@@ -2399,6 +4147,840 @@ mod tests {
         let c = loaded.candidates_for_literal(b"process_batch").unwrap();
         assert!(c.contains(&"a.rs"));
         assert!(c.contains(&"b.rs"));
+    }
+
+    #[test]
+    fn file_trigram_consuming_save_load_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("file_trigram.bin");
+
+        let mut idx = FileTrigramIndex::new();
+        idx.add("a.rs", b"fn process_batch() {}");
+        idx.add("b.rs", b"fn main() { process_batch(); }");
+        idx.save_binary_consuming(&path).unwrap();
+
+        let loaded = FileTrigramIndex::load_binary(&path).unwrap();
+        assert_eq!(loaded.file_count(), 2);
+        let candidates = loaded.candidates_for_literal(b"process_batch").unwrap();
+        assert!(candidates.contains(&"a.rs"));
+        assert!(candidates.contains(&"b.rs"));
+    }
+
+    #[test]
+    fn file_trigram_serialization_is_canonical_across_insertion_order_and_tombstones() {
+        fn build(order: &[&str]) -> FileTrigramIndex {
+            let mut index = FileTrigramIndex::new();
+            for path in order {
+                let content: &[u8] = match *path {
+                    "a.rs" => b"fn alpha_target() { shared_target(); }",
+                    "b.rs" => b"fn beta_target() { shared_target(); }",
+                    "removed.rs" => b"fn removed_target() {}",
+                    _ => unreachable!(),
+                };
+                index.add(path, content);
+            }
+            index.remove_file("removed.rs");
+            index
+        }
+
+        let dir = tempdir().unwrap();
+        let borrowed_path = dir.path().join("borrowed.bin");
+        let consuming_path = dir.path().join("consuming.bin");
+        let borrowed = build(&["removed.rs", "b.rs", "a.rs"]);
+        let consuming = build(&["a.rs", "removed.rs", "b.rs"]);
+
+        borrowed.save_binary(&borrowed_path).unwrap();
+        consuming.save_binary_consuming(&consuming_path).unwrap();
+
+        let borrowed_bytes = std::fs::read(&borrowed_path).unwrap();
+        let consuming_bytes = std::fs::read(&consuming_path).unwrap();
+        assert_eq!(borrowed_bytes, consuming_bytes);
+
+        let loaded = FileTrigramIndex::load_binary(&consuming_path).unwrap();
+        assert!(loaded.mmap.is_some());
+        let backing = loaded.mmap.as_ref().unwrap();
+        let paths: Vec<_> = (0..backing.file_count)
+            .map(|file_id| FileTrigramIndex::mmap_file_path(backing, file_id).unwrap())
+            .collect();
+        assert_eq!(paths, vec!["a.rs", "b.rs"]);
+        assert_eq!(
+            loaded.candidates_for_literal(b"shared_target").unwrap(),
+            vec!["a.rs", "b.rs"]
+        );
+        assert!(
+            loaded
+                .candidates_for_literal(b"removed_target")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn file_trigram_mmap_load_defers_posting_validation_and_caches_queries() {
+        const FILES: usize = 128;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("file_trigram.bin");
+        let mut original = FileTrigramIndex::new();
+        for index in 0..FILES {
+            original.add(
+                &format!("src/file_{index:03}.rs"),
+                b"fn shared_lazy_validation_target() {}",
+            );
+        }
+        original.save_binary_consuming(&path).unwrap();
+
+        FILE_TRIGRAM_POSTING_VALUES_VALIDATED.with(|count| count.set(0));
+        let loaded = FileTrigramIndex::load_binary(&path).unwrap();
+        FILE_TRIGRAM_POSTING_VALUES_VALIDATED.with(|count| assert_eq!(count.get(), 0));
+
+        assert_eq!(
+            loaded
+                .candidates_for_literal(b"lazy_validation_target")
+                .unwrap()
+                .len(),
+            FILES
+        );
+        let first_validation_count =
+            FILE_TRIGRAM_POSTING_VALUES_VALIDATED.with(|count| count.get());
+        assert!(first_validation_count > 0);
+        assert_eq!(
+            loaded
+                .candidates_for_literal(b"lazy_validation_target")
+                .unwrap()
+                .len(),
+            FILES
+        );
+        FILE_TRIGRAM_POSTING_VALUES_VALIDATED
+            .with(|count| assert_eq!(count.get(), first_validation_count));
+    }
+
+    #[test]
+    fn file_trigram_mmap_streaming_visit_does_not_collect_candidates() {
+        const FILES: usize = 256;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("file_trigram.bin");
+        let mut original = FileTrigramIndex::new();
+        for index in 0..FILES {
+            original.add(
+                &format!("src/file_{index:03}.rs"),
+                b"fn shared_streaming_target() {}",
+            );
+        }
+        original.save_binary_consuming(&path).unwrap();
+
+        let loaded = FileTrigramIndex::load_binary(&path).unwrap();
+        assert!(loaded.mmap.is_some());
+
+        let mut visited = std::collections::HashSet::new();
+        loaded
+            .visit_literal_candidates(b"shared_streaming_target", |path| {
+                assert!(visited.insert(path.to_string()));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(visited.len(), FILES);
+
+        assert_eq!(
+            loaded
+                .candidates_for_literal(b"shared_streaming_target")
+                .unwrap()
+                .len(),
+            FILES
+        );
+        assert!(loaded.is_mmap_backed_for_test());
+    }
+
+    #[test]
+    fn file_trigram_mmap_mutation_stays_in_bounded_delta() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("file_trigram.bin");
+
+        let mut original = FileTrigramIndex::new();
+        original.add("a.rs", b"fn shared_target() {}");
+        original.add("b.rs", b"fn shared_target() { old_target(); }");
+        original.save_binary_consuming(&path).unwrap();
+
+        let mut loaded = FileTrigramIndex::load_binary(&path).unwrap();
+        assert!(loaded.mmap.is_some());
+        assert_eq!(
+            loaded.candidates_for_literal(b"shared_target").unwrap(),
+            vec!["a.rs", "b.rs"]
+        );
+        assert!(loaded.mmap.is_some(), "reads must not materialize the mmap");
+
+        loaded.remove_file("a.rs");
+        assert!(loaded.mmap.is_some(), "mutation must retain the mmap base");
+        loaded.remove_file("b.rs");
+        loaded.add("b.rs", b"fn replacement_target() {}");
+        loaded.add("c.rs", b"fn shared_target() { new_target(); }");
+        assert_eq!(loaded.pending_delta_len_for_test(), 3);
+        assert_eq!(
+            loaded.candidates_for_literal(b"shared_target").unwrap(),
+            vec!["c.rs"]
+        );
+        assert!(
+            loaded
+                .candidates_for_literal(b"old_target")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            loaded
+                .candidates_for_literal(b"replacement_target")
+                .unwrap(),
+            vec!["b.rs"]
+        );
+        assert!(
+            loaded
+                .candidates_for_literal(b"new_target")
+                .unwrap()
+                .contains(&"c.rs")
+        );
+
+        let checkpoint = dir.path().join("checkpoint.bin");
+        loaded.save_binary(&checkpoint).unwrap();
+        let checkpointed = FileTrigramIndex::load_binary(&checkpoint).unwrap();
+        assert!(checkpointed.is_mmap_backed_for_test());
+        assert_eq!(checkpointed.file_count(), 2);
+        assert_eq!(
+            checkpointed
+                .candidates_for_literal(b"replacement_target")
+                .unwrap(),
+            vec!["b.rs"]
+        );
+        assert_eq!(
+            checkpointed
+                .candidates_for_literal(b"shared_target")
+                .unwrap(),
+            vec!["c.rs"]
+        );
+        assert!(
+            checkpointed
+                .candidates_for_literal(b"old_target")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn file_trigram_mmap_delta_candidates_stay_sorted_across_checkpoint() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("base.bin");
+        let checkpoint = dir.path().join("checkpoint.bin");
+        let mut original = FileTrigramIndex::new();
+        for path in ["a.rs", "c.rs", "e.rs"] {
+            original.add(path, b"shared_sorted_target");
+        }
+        original.save_binary_consuming(&source).unwrap();
+
+        let mut loaded = FileTrigramIndex::load_binary(&source).unwrap();
+        loaded.remove_file("c.rs");
+        loaded.add("b.rs", b"shared_sorted_target");
+        loaded.add("d.rs", b"shared_sorted_target");
+        loaded.remove_file("e.rs");
+        loaded.add("e.rs", b"replacement shared_sorted_target");
+        let expected = vec!["a.rs", "b.rs", "d.rs", "e.rs"];
+
+        assert_eq!(
+            loaded
+                .candidates_for_literal(b"shared_sorted_target")
+                .unwrap(),
+            expected
+        );
+        let mut streamed = Vec::new();
+        loaded
+            .visit_literal_candidates(b"shared_sorted_target", |path| {
+                streamed.push(path);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(streamed, expected);
+
+        loaded.save_binary(&checkpoint).unwrap();
+        let checkpointed = FileTrigramIndex::load_binary(&checkpoint).unwrap();
+        assert_eq!(
+            checkpointed
+                .candidates_for_literal(b"shared_sorted_target")
+                .unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn file_trigram_checkpoint_scratch_is_bounded_by_changed_files() {
+        const BASE_FILES: usize = 512;
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("base.bin");
+        let checkpoint = dir.path().join("checkpoint.bin");
+        let mut original = FileTrigramIndex::new();
+        for index in 0..BASE_FILES {
+            original.add(
+                &format!("src/file_{index:03}.rs"),
+                b"common_corpus_wide_target",
+            );
+        }
+        original.save_binary_consuming(&source).unwrap();
+
+        let mut loaded = FileTrigramIndex::load_binary(&source).unwrap();
+        let changes: [(&str, &[u8]); 3] = [
+            (
+                "src/file_000.rs",
+                b"delta_alpha_unique_target abcdefghijklmnopqrstuvwxyz 0123456789",
+            ),
+            (
+                "src/file_001.rs",
+                b"delta_beta_unique_target zyxwvutsrqponmlkjihgfedcba 9876543210",
+            ),
+            (
+                "src/file_002.rs",
+                b"delta_gamma_unique_target the_quick_brown_fox_jumps_over_the_lazy_dog",
+            ),
+        ];
+        for (path, content) in changes {
+            loaded.remove_file(path);
+            loaded.add(path, content);
+        }
+        let delta_trigram_memberships: usize = loaded
+            .delta
+            .values()
+            .filter_map(|change| change.trigrams.as_ref())
+            .map(Vec::len)
+            .sum();
+        FILE_TRIGRAM_CHECKPOINT_SCRATCH_PEAK.with(|peak| peak.set(0));
+        FILE_TRIGRAM_OVERLAY_MEMBERSHIPS_VISITED.with(|count| count.set(0));
+        loaded.save_binary(&checkpoint).unwrap();
+
+        FILE_TRIGRAM_CHECKPOINT_SCRATCH_PEAK.with(|peak| {
+            assert!(
+                peak.get() <= changes.len(),
+                "checkpoint scratch {} must scale with {} changed paths, not their trigrams",
+                peak.get(),
+                changes.len()
+            )
+        });
+        FILE_TRIGRAM_OVERLAY_MEMBERSHIPS_VISITED.with(|count| {
+            assert_eq!(
+                count.get(),
+                delta_trigram_memberships * 2,
+                "the sizing and writing passes must each visit every delta trigram once, independent of the base trigram count"
+            )
+        });
+        assert!(loaded.is_mmap_backed_for_test());
+        assert_eq!(loaded.pending_delta_len_for_test(), changes.len());
+        let checkpointed = FileTrigramIndex::load_binary(&checkpoint).unwrap();
+        assert!(checkpointed.is_mmap_backed_for_test());
+        assert_eq!(
+            checkpointed
+                .candidates_for_literal(b"delta_alpha_unique_target")
+                .unwrap(),
+            vec!["src/file_000.rs"]
+        );
+    }
+
+    #[test]
+    fn file_trigram_mmap_add_preserves_union_semantics_across_checkpoint() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("base.bin");
+        let checkpoint = dir.path().join("checkpoint.bin");
+        let mut original = FileTrigramIndex::new();
+        original.add("a.rs", b"abc");
+        original.save_binary_consuming(&source).unwrap();
+
+        let mut loaded = FileTrigramIndex::load_binary(&source).unwrap();
+        loaded.add("a.rs", b"def");
+        let required = [*b"abc", *b"def"];
+        assert_eq!(
+            loaded.candidates_for_trigrams(&required).unwrap(),
+            vec!["a.rs"]
+        );
+        loaded.save_binary(&checkpoint).unwrap();
+        let checkpointed = FileTrigramIndex::load_binary(&checkpoint).unwrap();
+        assert_eq!(
+            checkpointed.candidates_for_trigrams(&required).unwrap(),
+            vec!["a.rs"]
+        );
+    }
+
+    #[test]
+    fn file_trigram_delta_replaces_deletes_and_reopens_cumulatively() {
+        let dir = tempdir().unwrap();
+        let base = dir.path().join("base.bin");
+        let mut original = FileTrigramIndex::new();
+        original.add("a.rs", b"old_alpha_target");
+        original.add("b.rs", b"deleted_beta_target");
+        original.add("c.rs", b"old_gamma_target");
+        original.save_binary_consuming(&base).unwrap();
+
+        let mut first = FileTrigramIndex::load_binary(&base).unwrap();
+        first.remove_file("a.rs");
+        first.add("a.rs", b"new_alpha_target");
+        first.remove_file("b.rs");
+        first.add("d.rs", b"added_delta_target");
+        first.add("e.rs", b"added_epsilon_target");
+        let first_bytes = first.delta_checkpoint_bytes().unwrap().unwrap();
+
+        let mut reopened =
+            FileTrigramIndex::load_binary_with_delta(&base, Some(&first_bytes)).unwrap();
+        assert_eq!(reopened.pending_delta_len_for_test(), 4);
+        assert!(
+            reopened
+                .candidates_for_literal(b"old_alpha_target")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            reopened
+                .candidates_for_literal(b"new_alpha_target")
+                .unwrap(),
+            vec!["a.rs"]
+        );
+        assert!(
+            reopened
+                .candidates_for_literal(b"deleted_beta_target")
+                .unwrap()
+                .is_empty()
+        );
+
+        reopened.remove_file("c.rs");
+        reopened.add("c.rs", b"new_gamma_target");
+        // Paths introduced only by the prior sidecar must still support both
+        // replacement and deletion after a reopen.
+        reopened.remove_file("d.rs");
+        reopened.add("d.rs", b"replaced_delta_target");
+        reopened.remove_file("e.rs");
+        let cumulative = reopened.delta_checkpoint_bytes().unwrap().unwrap();
+        let final_index =
+            FileTrigramIndex::load_binary_with_delta(&base, Some(&cumulative)).unwrap();
+        assert_eq!(final_index.pending_delta_len_for_test(), 4);
+        for (query, path) in [
+            (b"new_alpha_target".as_slice(), "a.rs"),
+            (b"new_gamma_target".as_slice(), "c.rs"),
+            (b"replaced_delta_target".as_slice(), "d.rs"),
+        ] {
+            assert_eq!(
+                final_index.candidates_for_literal(query).unwrap(),
+                vec![path]
+            );
+        }
+        assert!(
+            final_index
+                .candidates_for_literal(b"added_delta_target")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            final_index
+                .candidates_for_literal(b"added_epsilon_target")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn file_trigram_delta_encoding_is_deterministic() {
+        let dir = tempdir().unwrap();
+        let base = dir.path().join("base.bin");
+        let mut original = FileTrigramIndex::new();
+        original.add("a.rs", b"old_target");
+        original.save_binary_consuming(&base).unwrap();
+
+        let mut left = FileTrigramIndex::load_binary(&base).unwrap();
+        left.remove_file("a.rs");
+        left.add("a.rs", b"new_target");
+        left.add("z.rs", b"added_target");
+        left.add("module:/logical.rs", b"colon_path_target");
+
+        let mut right = FileTrigramIndex::load_binary(&base).unwrap();
+        right.add("module:/logical.rs", b"colon_path_target");
+        right.add("z.rs", b"added_target");
+        right.remove_file("a.rs");
+        right.add("a.rs", b"new_target");
+
+        assert_eq!(
+            left.delta_checkpoint_bytes().unwrap(),
+            right.delta_checkpoint_bytes().unwrap()
+        );
+    }
+
+    #[test]
+    fn file_trigram_delta_preserves_live_empty_trigram_sets() {
+        let dir = tempdir().unwrap();
+        let base = dir.path().join("base.bin");
+        let mut original = FileTrigramIndex::new();
+        original.add("replaced.rs", b"old_target");
+        original.save_binary_consuming(&base).unwrap();
+
+        let mut loaded = FileTrigramIndex::load_binary(&base).unwrap();
+        loaded.remove_file("replaced.rs");
+        loaded.add("replaced.rs", b"x");
+        loaded.add("new.rs", b"y");
+        let bytes = loaded.delta_checkpoint_bytes().unwrap().unwrap();
+        let reopened = FileTrigramIndex::load_binary_with_delta(&base, Some(&bytes)).unwrap();
+
+        assert_eq!(reopened.file_count(), 2);
+        assert!(
+            reopened
+                .candidates_for_literal(b"old_target")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn file_trigram_delta_rejects_corrupt_paths_and_trigram_order() {
+        let dir = tempdir().unwrap();
+        let base = dir.path().join("base.bin");
+        let mut original = FileTrigramIndex::new();
+        original.add("a.rs", b"base_target");
+        original.save_binary_consuming(&base).unwrap();
+
+        for (checkpoint, expected) in [
+            (
+                FileTrigramIndex::delta_checkpoint(vec![FileTrigramDeltaEntry {
+                    path: "../escape.rs".to_string(),
+                    exclude_base: false,
+                    trigrams: Some(vec![*b"abc"]),
+                }]),
+                "safe normalized relative path",
+            ),
+            (
+                FileTrigramIndex::delta_checkpoint(vec![FileTrigramDeltaEntry {
+                    path: "new.rs".to_string(),
+                    exclude_base: false,
+                    trigrams: Some(vec![*b"def", *b"abc"]),
+                }]),
+                "trigrams are not strictly sorted",
+            ),
+            (
+                FileTrigramIndex::delta_checkpoint(vec![FileTrigramDeltaEntry {
+                    path: "C:escape.rs".to_string(),
+                    exclude_base: false,
+                    trigrams: Some(vec![*b"abc"]),
+                }]),
+                "safe normalized relative path",
+            ),
+        ] {
+            let bytes = FileTrigramIndex::serialize_delta_checkpoint(checkpoint.entries).unwrap();
+            let error = FileTrigramIndex::load_binary_with_delta(&base, Some(&bytes))
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
+
+        let mut unsafe_encoder = FileTrigramIndex::load_binary(&base).unwrap();
+        unsafe_encoder.add("../escape.rs", b"abc");
+        assert!(unsafe_encoder.delta_checkpoint_bytes().is_err());
+
+        let mut wrong_magic = FileTrigramIndex::empty_delta_checkpoint().unwrap();
+        wrong_magic[0] ^= 0xFF;
+        assert!(FileTrigramIndex::load_binary_with_delta(&base, Some(&wrong_magic)).is_err());
+    }
+
+    #[test]
+    fn file_trigram_delta_path_threshold_requests_compaction() {
+        let dir = tempdir().unwrap();
+        let base = dir.path().join("base.bin");
+        let compacted = dir.path().join("compacted.bin");
+        FileTrigramIndex::new()
+            .save_binary_consuming(&base)
+            .unwrap();
+        let mut loaded = FileTrigramIndex::load_binary(&base).unwrap();
+        for index in 0..=FILE_TRIGRAM_DELTA_MAX_PATHS {
+            loaded.add(&format!("src/new_{index:04}.rs"), b"abc");
+        }
+        assert!(loaded.delta_checkpoint_bytes().unwrap().is_none());
+        loaded.save_binary(&compacted).unwrap();
+        let empty = FileTrigramIndex::empty_delta_checkpoint().unwrap();
+        let reopened = FileTrigramIndex::load_binary_with_delta(&compacted, Some(&empty)).unwrap();
+        assert_eq!(reopened.pending_delta_len_for_test(), 0);
+        assert_eq!(
+            reopened.candidates_for_literal(b"abc").unwrap().len(),
+            FILE_TRIGRAM_DELTA_MAX_PATHS + 1
+        );
+    }
+
+    #[test]
+    fn file_trigram_delta_rejects_legacy_base_even_when_empty() {
+        let dir = tempdir().unwrap();
+        let legacy = dir.path().join("legacy.bin");
+        let data = FileTrigramIndexData {
+            files: vec!["a.rs".to_string()],
+            index: vec![(*b"abc", vec![0])],
+        };
+        std::fs::write(&legacy, bitcode::serialize(&data).unwrap()).unwrap();
+        let empty = FileTrigramIndex::empty_delta_checkpoint().unwrap();
+        assert!(FileTrigramIndex::load_binary_with_delta(&legacy, Some(&empty)).is_err());
+    }
+
+    #[test]
+    fn file_trigram_legacy_bitcode_remains_readable() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("legacy_file_trigram.bin");
+        let data = FileTrigramIndexData {
+            files: vec!["legacy.rs".to_string()],
+            index: FileTrigramIndex::prepare_trigrams(b"fn legacy_target() {}")
+                .into_iter()
+                .map(|trigram| (trigram, vec![0]))
+                .collect(),
+        };
+        std::fs::write(&path, bitcode::serialize(&data).unwrap()).unwrap();
+
+        let loaded = FileTrigramIndex::load_binary(&path).unwrap();
+        assert!(loaded.mmap.is_none());
+        assert_eq!(
+            loaded.candidates_for_literal(b"legacy_target").unwrap(),
+            vec!["legacy.rs"]
+        );
+    }
+
+    #[test]
+    fn file_trigram_legacy_bitcode_rejects_invalid_posting_ids() {
+        let dir = tempdir().unwrap();
+        for (case, postings) in [
+            ("out_of_range", vec![2]),
+            ("unsorted", vec![1, 0]),
+            ("duplicate", vec![0, 0]),
+        ] {
+            let path = dir.path().join(format!("legacy_{case}.bin"));
+            let data = FileTrigramIndexData {
+                files: vec!["a.rs".to_string(), "b.rs".to_string()],
+                index: vec![(*b"abc", postings)],
+            };
+            std::fs::write(&path, bitcode::serialize(&data).unwrap()).unwrap();
+            assert!(
+                FileTrigramIndex::load_binary(&path).is_err(),
+                "legacy {case} postings must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn file_trigram_legacy_bitcode_rejects_duplicate_keys_and_empty_postings() {
+        let dir = tempdir().unwrap();
+        for (case, index) in [
+            (
+                "duplicate_key",
+                vec![(*b"abc", vec![0]), (*b"abc", vec![0])],
+            ),
+            ("empty_posting", vec![(*b"abc", Vec::new())]),
+        ] {
+            let path = dir.path().join(format!("legacy_{case}.bin"));
+            let data = FileTrigramIndexData {
+                files: vec!["a.rs".to_string()],
+                index,
+            };
+            std::fs::write(&path, bitcode::serialize(&data).unwrap()).unwrap();
+            assert!(
+                FileTrigramIndex::load_binary(&path).is_err(),
+                "legacy {case} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn file_trigram_mmap_rejects_truncated_posting_range() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("file_trigram.bin");
+        let mut index = FileTrigramIndex::new();
+        index.add("a.rs", b"abc");
+        index.save_binary_consuming(&path).unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let trigram_entry = FILE_TRIGRAM_MMAP_HEADER_SIZE + FILE_TRIGRAM_MMAP_FILE_ENTRY_SIZE;
+        bytes[trigram_entry + 8..trigram_entry + 12].copy_from_slice(&2u32.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+
+        let error = FileTrigramIndex::load_binary(&path).err().unwrap();
+        assert!(error.to_string().contains("posting range exceeds"));
+    }
+
+    fn file_trigram_test_layout(bytes: &[u8]) -> (usize, usize) {
+        let read_u32 = |offset: usize| {
+            u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize
+        };
+        let file_count = read_u32(8);
+        let trigram_count = read_u32(12);
+        let string_pool_bytes = read_u32(20);
+        let trigram_index_offset =
+            FILE_TRIGRAM_MMAP_HEADER_SIZE + file_count * FILE_TRIGRAM_MMAP_FILE_ENTRY_SIZE;
+        let postings_offset = trigram_index_offset
+            + trigram_count * FILE_TRIGRAM_MMAP_INDEX_ENTRY_SIZE
+            + string_pool_bytes;
+        (trigram_index_offset, postings_offset)
+    }
+
+    #[test]
+    fn file_trigram_mmap_save_to_new_file_survives_source_deletion() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.bin");
+        let destination = dir.path().join("destination.bin");
+        let mut original = FileTrigramIndex::new();
+        original.add("src/a.rs", b"fn durable_target() {}");
+        original.save_binary_consuming(&source).unwrap();
+
+        let loaded = FileTrigramIndex::load_binary(&source).unwrap();
+        loaded.save_binary(&destination).unwrap();
+        assert_eq!(
+            std::fs::read(&source).unwrap(),
+            std::fs::read(&destination).unwrap()
+        );
+
+        drop(loaded);
+        std::fs::remove_file(&source).unwrap();
+        let copied = FileTrigramIndex::load_binary(&destination).unwrap();
+        assert_eq!(
+            copied.candidates_for_literal(b"durable_target").unwrap(),
+            vec!["src/a.rs"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_trigram_paths_alias_detects_hard_links() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.bin");
+        let alias = dir.path().join("alias.bin");
+        let other = dir.path().join("other.bin");
+        std::fs::write(&source, b"source").unwrap();
+        std::fs::hard_link(&source, &alias).unwrap();
+        std::fs::write(&other, b"source").unwrap();
+
+        assert!(FileTrigramIndex::paths_alias(&source, &alias).unwrap());
+        assert!(!FileTrigramIndex::paths_alias(&source, &other).unwrap());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_trigram_windows_delta_checkpoint_rejects_source_aliases() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.bin");
+        let alias = dir.path().join("alias.bin");
+        let mut original = FileTrigramIndex::new();
+        original.add("a.rs", b"durable_target");
+        original.save_binary_consuming(&source).unwrap();
+        std::fs::hard_link(&source, &alias).unwrap();
+
+        let mut loaded = FileTrigramIndex::load_binary(&source).unwrap();
+        loaded.add("b.rs", b"delta_target");
+        assert!(loaded.save_binary(&source).is_err());
+        assert!(loaded.save_binary(&alias).is_err());
+        assert_eq!(
+            FileTrigramIndex::load_binary(&source)
+                .unwrap()
+                .candidates_for_literal(b"durable_target")
+                .unwrap(),
+            vec!["a.rs"]
+        );
+    }
+
+    #[test]
+    fn file_trigram_mmap_detects_out_of_range_file_id_lazily() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("file_trigram.bin");
+        let checkpoint = dir.path().join("checkpoint.bin");
+        let mut index = FileTrigramIndex::new();
+        index.add("a.rs", b"target");
+        index.save_binary_consuming(&path).unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let (_, postings_offset) = file_trigram_test_layout(&bytes);
+        bytes[postings_offset..postings_offset + 4].copy_from_slice(&1u32.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+
+        FILE_TRIGRAM_POSTING_VALUES_VALIDATED.with(|count| count.set(0));
+        let mut loaded = FileTrigramIndex::load_binary(&path).unwrap();
+        FILE_TRIGRAM_POSTING_VALUES_VALIDATED.with(|count| assert_eq!(count.get(), 0));
+        let error = loaded
+            .visit_literal_candidates(b"target", |_| Ok(()))
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("file ID 1 exceeds file count 1"));
+        assert!(
+            loaded.candidates_for_literal(b"target").is_none(),
+            "the infallible wrapper must disable the prefilter so grep scans all files"
+        );
+
+        std::fs::write(&checkpoint, b"unchanged").unwrap();
+        assert!(loaded.save_binary(&checkpoint).is_err());
+        assert_eq!(std::fs::read(&checkpoint).unwrap(), b"unchanged");
+        loaded.add("b.rs", b"checkpoint_delta");
+        std::fs::write(&checkpoint, b"unchanged").unwrap();
+        assert!(loaded.save_binary(&checkpoint).is_err());
+        assert_eq!(std::fs::read(&checkpoint).unwrap(), b"unchanged");
+    }
+
+    #[test]
+    fn file_trigram_mmap_detects_unsorted_or_duplicate_file_ids_lazily() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("file_trigram.bin");
+        let checkpoint = dir.path().join("checkpoint.bin");
+        let mut index = FileTrigramIndex::new();
+        index.add("a.rs", b"target");
+        index.add("b.rs", b"target");
+        index.save_binary_consuming(&path).unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let (_, postings_offset) = file_trigram_test_layout(&bytes);
+        bytes[postings_offset..postings_offset + 4].copy_from_slice(&1u32.to_le_bytes());
+        bytes[postings_offset + 4..postings_offset + 8].copy_from_slice(&0u32.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+
+        FILE_TRIGRAM_POSTING_VALUES_VALIDATED.with(|count| count.set(0));
+        let mut loaded = FileTrigramIndex::load_binary(&path).unwrap();
+        FILE_TRIGRAM_POSTING_VALUES_VALIDATED.with(|count| assert_eq!(count.get(), 0));
+        let error = loaded
+            .visit_literal_candidates(b"target", |_| Ok(()))
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("not strictly increasing"));
+        assert!(
+            loaded.candidates_for_literal(b"target").is_none(),
+            "the infallible wrapper must disable the prefilter so grep scans all files"
+        );
+
+        std::fs::write(&checkpoint, b"unchanged").unwrap();
+        assert!(loaded.save_binary(&checkpoint).is_err());
+        assert_eq!(std::fs::read(&checkpoint).unwrap(), b"unchanged");
+        loaded.add("c.rs", b"checkpoint_delta");
+        std::fs::write(&checkpoint, b"unchanged").unwrap();
+        assert!(loaded.save_binary(&checkpoint).is_err());
+        assert_eq!(std::fs::read(&checkpoint).unwrap(), b"unchanged");
+    }
+
+    #[test]
+    fn file_trigram_mmap_rejects_misaligned_posting_range() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("file_trigram.bin");
+        let mut index = FileTrigramIndex::new();
+        index.add("a.rs", b"target");
+        index.save_binary_consuming(&path).unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let (trigram_index_offset, _) = file_trigram_test_layout(&bytes);
+        bytes[trigram_index_offset + 4..trigram_index_offset + 8]
+            .copy_from_slice(&1u32.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+
+        let error = FileTrigramIndex::load_binary(&path).err().unwrap();
+        assert!(error.to_string().contains("not u32-aligned"));
+    }
+
+    #[test]
+    fn file_trigram_mmap_rejects_overlapping_posting_ranges() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("file_trigram.bin");
+        let mut index = FileTrigramIndex::new();
+        index.add("a.rs", b"target");
+        index.save_binary_consuming(&path).unwrap();
+
+        let mut bytes = std::fs::read(&path).unwrap();
+        let (trigram_index_offset, _) = file_trigram_test_layout(&bytes);
+        let second_entry = trigram_index_offset + FILE_TRIGRAM_MMAP_INDEX_ENTRY_SIZE;
+        bytes[second_entry + 4..second_entry + 8].copy_from_slice(&0u32.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+
+        let error = FileTrigramIndex::load_binary(&path).err().unwrap();
+        assert!(error.to_string().contains("canonical and non-overlapping"));
     }
 
     #[test]

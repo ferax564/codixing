@@ -1,5 +1,7 @@
 mod daemon_proxy;
 
+include!(concat!(env!("OUT_DIR"), "/build_provenance.rs"));
+
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -81,9 +83,10 @@ enum Command {
 
         /// Cap the number of parallel worker threads used for indexing.
         ///
-        /// Default: `num_cpus` on Unix/macOS, `min(num_cpus, 4)` on Windows
-        /// (works around issue #107: NTFS races on `.term` file creation
-        /// when more than ~4 Rayon workers feed Tantivy concurrently).
+        /// Default: `min(num_cpus, 8)` on non-Windows platforms and
+        /// `min(num_cpus, 4)` on Windows (works around issue #107: NTFS races
+        /// on `.term` file creation when more than ~4 Rayon workers feed
+        /// Tantivy concurrently).
         ///
         /// Override only if you know what you're doing — values above the
         /// platform default reintroduce the Windows race; values below
@@ -213,21 +216,24 @@ enum Command {
         action: HookAction,
     },
 
-    /// Self-heal a partially deleted `.codixing/` index.
+    /// Repair recoverable `.codixing/` metadata and expired vector crash debris.
     ///
     /// When the directory exists but `config.json` or `meta.json` are missing
     /// (e.g. an interrupted upgrade or a stray cleanup), every command fails
     /// with a confusing "I/O error: No such file or directory". `repair`
     /// rebuilds the missing metadata files in place using safe defaults and
-    /// preserves the existing tantivy/, vectors/, graph/, and symbol blobs.
-    /// Run `codixing sync` afterwards to refresh the entry counts.
+    /// preserves published tantivy/, vectors/, graph/, and symbol blobs. It
+    /// also reclaims unpublished vector generations older than 24 hours after
+    /// proving that no writer, rebuild, or vector publication is active.
+    /// Run `codixing sync` afterwards to refresh the entry counts when metadata
+    /// files were recreated.
     Repair {
         /// Project root containing the `.codixing/` directory.
         #[arg(default_value = ".")]
         path: PathBuf,
 
-        /// Skip the post-repair `sync` step. Use when you only want to write
-        /// the missing metadata files without touching the rest of the index.
+        /// Skip the post-repair `sync` step. Expired unpublished vector cleanup
+        /// still runs because it does not change searchable index contents.
         #[arg(long)]
         no_sync: bool,
     },
@@ -462,9 +468,9 @@ enum Command {
 
         /// Cap the number of parallel worker threads used during sync.
         ///
-        /// Default: `num_cpus` on Unix/macOS, `min(num_cpus, 4)` on Windows
-        /// (mirrors `init --threads`; same Windows NTFS race rationale,
-        /// see issue #107).
+        /// Default: `min(num_cpus, 8)` on non-Windows platforms and
+        /// `min(num_cpus, 4)` on Windows (mirrors `init --threads`; same
+        /// Windows NTFS race rationale, see issue #107).
         #[arg(long, value_name = "N")]
         threads: Option<usize>,
     },
@@ -904,6 +910,10 @@ enum StrategyArg {
 }
 
 impl StrategyArg {
+    fn uses_lexical_read_profile(&self) -> bool {
+        matches!(self, Self::Exact | Self::Instant)
+    }
+
     /// Resolve this argument to a concrete [`Strategy`], using auto-detection when `Auto`.
     fn resolve(self, engine: &Engine, query: &str) -> Strategy {
         match self {
@@ -923,6 +933,10 @@ impl StrategyArg {
 const WINDOWS_CLI_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 fn main() -> Result<()> {
+    if build_provenance::write_if_requested()? {
+        return Ok(());
+    }
+
     #[cfg(windows)]
     {
         let handle = std::thread::Builder::new()
@@ -1169,20 +1183,39 @@ async fn async_main() -> Result<()> {
 /// the pool to 4 workers on Windows eliminates the race in the reporter's
 /// repro (22-core box, fails at 8+ workers, succeeds at 4).
 ///
-/// On Unix/macOS, no race exists — the cap is `num_cpus` (Rayon's own
-/// default), and `--threads` only narrows it.
+/// On non-Windows platforms, cap the default at 8 workers. Large-repository
+/// indexing keeps parser, chunk, graph, and Tantivy staging state live per
+/// worker; in the same-machine 100K benchmark, 8 workers reduced peak RSS and
+/// writer contention while improving throughput. `--threads` remains an
+/// explicit override for workloads that benefit from a different trade-off.
 ///
-/// `build_global` is one-shot; if another caller has already initialized
-/// the pool (e.g. tests sharing a process), the second call returns an
-/// error which we silently ignore.
-fn configure_thread_pool(threads: Option<usize>) {
+/// `build_global` is one-shot. Default-mode callers may share a process in
+/// tests, so a pre-existing pool remains non-fatal there. An explicit
+/// `--threads` request fails closed if its pool cannot be installed; benchmark
+/// evidence must never report the requested count as effective after an error.
+fn configure_thread_pool(threads: Option<usize>) -> Result<()> {
+    configure_thread_pool_with(threads, |n| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build_global()
+            .map_err(|error| error.to_string())
+    })
+}
+
+fn configure_thread_pool_with<F>(threads: Option<usize>, build: F) -> Result<()>
+where
+    F: FnOnce(usize) -> std::result::Result<(), String>,
+{
     let n = threads.unwrap_or_else(default_thread_cap);
-    if let Err(e) = rayon::ThreadPoolBuilder::new()
-        .num_threads(n)
-        .build_global()
-    {
-        tracing::debug!("rayon global pool already initialized: {e}");
+    if let Err(error) = build(n) {
+        if threads.is_some() {
+            anyhow::bail!(
+                "failed to configure the explicitly requested {n}-worker Rayon pool: {error}"
+            );
+        }
+        tracing::debug!("Rayon global pool already initialized or unavailable: {error}");
     }
+    Ok(())
 }
 
 /// Default Rayon thread count for indexing when `--threads` is unset.
@@ -1190,10 +1223,15 @@ fn default_thread_cap() -> usize {
     let cpus = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
+    default_thread_cap_for(cpus)
+}
+
+fn default_thread_cap_for(cpus: usize) -> usize {
+    let cpus = cpus.max(1);
     if cfg!(target_os = "windows") {
         cpus.min(4)
     } else {
-        cpus
+        cpus.min(8)
     }
 }
 
@@ -1284,7 +1322,7 @@ fn cmd_init(
     threads: Option<usize>,
     max_file_bytes: u64,
 ) -> Result<()> {
-    configure_thread_pool(threads);
+    configure_thread_pool(threads)?;
 
     let root = path
         .canonicalize()
@@ -1458,7 +1496,16 @@ fn cmd_search(
         }
     }
 
-    let engine = open_read_engine(&root)?;
+    let engine = if strategy.uses_lexical_read_profile() {
+        Engine::open_read_only_lexical(&root).with_context(|| {
+            format!(
+                "no index found at {} — run `codixing init` first",
+                root.display()
+            )
+        })?
+    } else {
+        open_read_engine(&root)?
+    };
 
     let resolved_strategy = strategy.resolve(&engine, &query);
     let mut sq = SearchQuery::new(&query)
@@ -2473,7 +2520,7 @@ fn cmd_sync(
     rebuild_graph: bool,
     threads: Option<usize>,
 ) -> Result<()> {
-    configure_thread_pool(threads);
+    configure_thread_pool(threads)?;
 
     let root = path
         .canonicalize()
@@ -3717,29 +3764,46 @@ fn cmd_repair(path: PathBuf, no_sync: bool) -> Result<()> {
         println!("Found existing `.codixing/` directory (meta.json missing or unreadable).");
     }
 
-    if audit.essentials_missing.is_empty() {
-        println!("All essential metadata files are present — nothing to repair.");
+    let metadata_complete = audit.essentials_missing.is_empty();
+    if metadata_complete {
+        println!("All essential metadata files are present.");
         for p in &audit.essentials_present {
             println!("  ok: {}", p.display());
         }
-        return Ok(());
-    }
-
-    println!("Missing essential files:");
-    for p in &audit.essentials_missing {
-        println!("  missing: {}", p.display());
-    }
-    if !audit.optional_present.is_empty() {
-        println!("Preserved artifacts:");
-        for p in &audit.optional_present {
-            println!("  keep: {}", p.display());
+    } else {
+        println!("Missing essential files:");
+        for p in &audit.essentials_missing {
+            println!("  missing: {}", p.display());
+        }
+        if !audit.optional_present.is_empty() {
+            println!("Preserved artifacts:");
+            for p in &audit.optional_present {
+                println!("  keep: {}", p.display());
+            }
         }
     }
 
     let report = IndexStore::repair(&root)?;
-    println!("\nRepaired:");
-    for p in &report.created {
-        println!("  created: {}", p.display());
+    if !report.created.is_empty() {
+        println!("\nRepaired metadata:");
+        for p in &report.created {
+            println!("  created: {}", p.display());
+        }
+    }
+    if !report.removed_vector_artifacts.is_empty() {
+        println!("\nReclaimed expired unpublished vector artifacts:");
+        for p in &report.removed_vector_artifacts {
+            println!("  removed: {}", p.display());
+        }
+    }
+
+    if report.created.is_empty() {
+        if report.removed_vector_artifacts.is_empty() {
+            println!("No recoverable metadata or expired vector crash debris found.");
+        } else {
+            println!("Repair complete. Published index contents were unchanged.");
+        }
+        return Ok(());
     }
 
     if no_sync {
@@ -3901,11 +3965,55 @@ mod tests {
     }
 
     #[test]
-    fn default_thread_cap_caps_on_windows() {
+    fn default_thread_cap_is_bounded() {
         let n = default_thread_cap();
         assert!(n >= 1, "thread cap must be ≥ 1, got {n}");
         if cfg!(target_os = "windows") {
             assert!(n <= 4, "Windows cap must be ≤ 4 (issue #107), got {n}");
+            assert_eq!(default_thread_cap_for(usize::MAX), 4);
+        } else {
+            assert!(n <= 8, "non-Windows cap must be ≤ 8, got {n}");
+            assert_eq!(default_thread_cap_for(usize::MAX), 8);
+        }
+        assert_eq!(default_thread_cap_for(0), 1);
+        assert_eq!(default_thread_cap_for(1), 1);
+    }
+
+    #[test]
+    fn explicit_thread_pool_setup_failure_is_fatal() {
+        let error = configure_thread_pool_with(Some(8), |workers| {
+            assert_eq!(workers, 8);
+            Err("simulated pool setup failure".to_string())
+        })
+        .expect_err("an explicit worker request must fail closed");
+
+        let message = error.to_string();
+        assert!(message.contains("explicitly requested 8-worker"));
+        assert!(message.contains("simulated pool setup failure"));
+    }
+
+    #[test]
+    fn default_thread_pool_setup_failure_remains_non_fatal() {
+        configure_thread_pool_with(None, |_workers| {
+            Err("simulated shared-process pool".to_string())
+        })
+        .expect("tests may share an already initialized global pool");
+    }
+
+    #[test]
+    fn only_explicit_lexical_strategies_use_the_lean_read_profile() {
+        assert!(StrategyArg::Exact.uses_lexical_read_profile());
+        assert!(StrategyArg::Instant.uses_lexical_read_profile());
+
+        for strategy in [
+            StrategyArg::Auto,
+            StrategyArg::Fast,
+            StrategyArg::Thorough,
+            StrategyArg::Explore,
+            StrategyArg::Deep,
+            StrategyArg::Semantic,
+        ] {
+            assert!(!strategy.uses_lexical_read_profile(), "{strategy:?}");
         }
     }
 }

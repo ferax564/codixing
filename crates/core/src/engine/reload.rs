@@ -47,7 +47,7 @@ impl Engine {
         let loaded_generation = self.store.generation().map(str::to_owned);
         if active_generation != loaded_generation {
             let reload_interval = self.reload_interval;
-            let mut replacement = Self::open_read_only(&root)?;
+            let mut replacement = Self::open_read_only_with_mode(&root, self.read_only_load_mode)?;
             replacement.reload_interval = reload_interval;
             replacement.last_staleness_check = Some(check_time);
             *self = replacement;
@@ -82,8 +82,8 @@ impl Engine {
     ///
     /// Reloads symbols, chunk metadata, the dependency graph, the vector
     /// index (if present), and refreshes the Tantivy reader.
-    fn reload_from_disk(&mut self) -> Result<()> {
-        self.symbols = load_persisted_symbols(&self.store);
+    pub(super) fn reload_from_disk(&mut self) -> Result<()> {
+        self.symbols = load_persisted_symbols(&self.store)?;
 
         // Reload chunk_meta (compact format first, fall back to legacy).
         if self.store.chunk_meta_path().exists() {
@@ -95,54 +95,57 @@ impl Engine {
             }
         }
 
-        // Rebuild file_chunk_counts from chunk_meta.
-        self.file_chunk_counts.clear();
-        for entry in self.chunk_meta.iter() {
-            *self
-                .file_chunk_counts
-                .entry(entry.value().file_path.clone())
-                .or_insert(0) += 1;
-        }
+        // Rebuild exact per-file chunk postings from compact metadata.
+        self.file_chunk_ids = super::collect_file_chunk_ids(&self.chunk_meta);
 
         // Refresh first so the rebuild observes the newest committed segments.
         self.tantivy.refresh_reader()?;
 
         // Reload the published shared trigram artifact so raw-source grep
         // trigrams and parser-transformed exact-search trigrams stay intact.
-        // Tantivy remains a recovery fallback for missing or corrupt artifacts.
-        let ft = match crate::index::trigram::FileTrigramIndex::load_binary(
-            &self.store.file_trigram_path(),
-        ) {
-            Ok(index) => index,
-            Err(error) => {
-                warn!(error = %error, "failed to reload file trigram — rebuilding from Tantivy");
-                build_file_trigram_from_tantivy(&self.tantivy)
+        // Indexes old enough to predate both trigram artifacts retain their
+        // historical Tantivy recovery path. Once either half of the durable
+        // pair exists, malformed or unpaired state must fail the reload rather
+        // than resurrecting deleted/replaced paths from a stale base.
+        let ft = if !self.store.file_trigram_path().exists()
+            && !self.store.file_trigram_delta_path().exists()
+        {
+            if self.store.file_trigram_delta_required() {
+                return Err(crate::error::CodixingError::Serialization(
+                    "active generation is missing the required file trigram pair".to_string(),
+                ));
             }
+            build_file_trigram_from_tantivy(&self.tantivy)
+        } else {
+            super::load_persisted_file_trigram(&self.store)?
         };
         self.file_trigram = std::sync::OnceLock::new();
         let _ = self.file_trigram.set(ft);
 
-        // Reload graph.
-        self.graph = match self.store.load_graph() {
-            Ok(Some(data)) => {
-                let mut g = CodeGraph::from_flat(data);
-                match self.store.load_symbol_graph() {
-                    Ok(Some(sym_graph)) => {
-                        g.inner = sym_graph.inner;
+        if self.read_only_load_mode.loads_graph() {
+            self.graph = match self.store.load_graph() {
+                Ok(Some(data)) => {
+                    let mut g = CodeGraph::from_flat(data);
+                    match self.store.load_symbol_graph() {
+                        Ok(Some(sym_graph)) => {
+                            g.replace_symbol_graph(sym_graph);
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            warn!(error = %e, "failed to load symbol graph during reload");
+                        }
                     }
-                    Ok(None) => {}
-                    Err(e) => {
-                        warn!(error = %e, "failed to load symbol graph during reload");
-                    }
+                    Some(g)
                 }
-                Some(g)
-            }
-            Ok(None) => None,
-            Err(e) => {
-                warn!(error = %e, "failed to reload graph");
-                self.graph.take()
-            }
-        };
+                Ok(None) => None,
+                Err(e) => {
+                    warn!(error = %e, "failed to reload graph");
+                    self.graph.take()
+                }
+            };
+        } else {
+            self.graph = None;
+        }
 
         self.reload_vector_from_disk();
 
@@ -150,7 +153,7 @@ impl Engine {
         self.concept_index = std::sync::OnceLock::new();
         self.reformulations = std::sync::OnceLock::new();
 
-        info!("read-only engine reloaded from disk");
+        info!("engine reloaded from disk");
         Ok(())
     }
 
@@ -161,6 +164,10 @@ impl Engine {
     /// progresses. Failures preserve the previous snapshot and are retried on
     /// a later staleness check.
     fn reload_vector_from_disk(&mut self) -> bool {
+        if !self.read_only_load_mode.loads_vectors() {
+            return false;
+        }
+
         let index_path = self.store.vector_index_path();
         let file_chunks_path = self.store.file_chunks_path();
         let Some(publication) = crate::vector::publication_token(&index_path, &file_chunks_path)

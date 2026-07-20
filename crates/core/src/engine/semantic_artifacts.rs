@@ -5,20 +5,19 @@
 //! temporarily disable semantic expansion, but can never serve stale mappings.
 
 use std::fs;
-use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use tracing::info;
 
 use super::concepts::{ConceptIndex, ConceptIndexBuilder};
 use super::reformulation::{LearnedReformulations, ReformulationBuilder};
+use crate::compressed_artifact::{
+    ArtifactKind, read_compressed_or_legacy, write_compressed_artifact,
+};
 use crate::error::{CodixingError, Result};
 use crate::graph::CodeGraph;
 use crate::persistence::IndexStore;
 use crate::symbols::SymbolTable;
-
-static SEMANTIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Rebuild both semantic artifacts from the current authoritative symbol/graph
 /// state. Existing artifacts are removed before construction so concurrent
@@ -55,7 +54,7 @@ pub(super) fn rebuild_semantic_artifacts(
         let bytes = concept_index.encode_persisted().map_err(|error| {
             CodixingError::Serialization(format!("failed to encode concept index: {error}"))
         })?;
-        atomic_write(&store.concepts_path(), &bytes)?;
+        write_compressed_artifact(&store.concepts_path(), ArtifactKind::Concepts, &bytes)?;
         bytes.len()
     };
     drop(concept_index);
@@ -76,7 +75,11 @@ pub(super) fn rebuild_semantic_artifacts(
         let bytes = reformulations.encode_persisted().map_err(|error| {
             CodixingError::Serialization(format!("failed to encode reformulations: {error}"))
         })?;
-        atomic_write(&store.reformulations_path(), &bytes)?;
+        write_compressed_artifact(
+            &store.reformulations_path(),
+            ArtifactKind::Reformulations,
+            &bytes,
+        )?;
         bytes.len()
     };
 
@@ -94,14 +97,14 @@ pub(super) fn invalidate_semantic_artifacts(store: &IndexStore) -> Result<()> {
 }
 
 pub(super) fn load_concept_index(path: &Path) -> Result<ConceptIndex> {
-    let bytes = fs::read(path)?;
+    let bytes = read_compressed_or_legacy(path, ArtifactKind::Concepts)?;
     ConceptIndex::decode_persisted(&bytes).map_err(|error| {
         CodixingError::Serialization(format!("failed to decode concept index: {error}"))
     })
 }
 
 pub(super) fn load_reformulations(path: &Path) -> Result<LearnedReformulations> {
-    let bytes = fs::read(path)?;
+    let bytes = read_compressed_or_legacy(path, ArtifactKind::Reformulations)?;
     LearnedReformulations::decode_persisted(&bytes).map_err(|error| {
         CodixingError::Serialization(format!("failed to decode reformulations: {error}"))
     })
@@ -115,25 +118,65 @@ fn remove_if_present(path: &Path) -> Result<()> {
     }
 }
 
-fn atomic_write(path: &Path, contents: &[u8]) -> std::io::Result<()> {
-    let directory = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(directory)?;
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("semantic");
-    let sequence = SEMANTIC_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let temporary = directory.join(format!(".{name}.tmp.{}.{}", std::process::id(), sequence));
-    {
-        let mut file = fs::File::create(&temporary)?;
-        file.write_all(contents)?;
-        file.sync_all()?;
-    }
-    match fs::rename(&temporary, path) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = fs::remove_file(&temporary);
-            Err(error)
-        }
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn semantic_loaders_accept_compressed_and_legacy_artifacts() {
+        let directory = tempdir().unwrap();
+
+        let mut concept_builder = ConceptIndexBuilder::new();
+        concept_builder.add_symbol("auth_login", "src/auth.rs", None);
+        concept_builder.add_symbol("auth_token", "src/token.rs", None);
+        let concepts = concept_builder.build();
+        let concept_bytes = concepts.encode_persisted().unwrap();
+        let concept_path = directory.path().join("concepts.bin");
+        write_compressed_artifact(&concept_path, ArtifactKind::Concepts, &concept_bytes).unwrap();
+        assert_eq!(
+            load_concept_index(&concept_path)
+                .unwrap()
+                .encode_persisted()
+                .unwrap(),
+            concept_bytes
+        );
+        fs::write(&concept_path, &concept_bytes).unwrap();
+        assert_eq!(
+            load_concept_index(&concept_path)
+                .unwrap()
+                .encode_persisted()
+                .unwrap(),
+            concept_bytes
+        );
+
+        let mut reformulation_builder = ReformulationBuilder::new();
+        reformulation_builder.add_identifier("parse_json", "src/parser.rs");
+        reformulation_builder.add_identifier("json_decode", "src/parser.rs");
+        let reformulations = reformulation_builder.build();
+        let reformulation_bytes = reformulations.encode_persisted().unwrap();
+        let reformulation_path = directory.path().join("reformulations.bin");
+        write_compressed_artifact(
+            &reformulation_path,
+            ArtifactKind::Reformulations,
+            &reformulation_bytes,
+        )
+        .unwrap();
+        assert_eq!(
+            load_reformulations(&reformulation_path)
+                .unwrap()
+                .encode_persisted()
+                .unwrap(),
+            reformulation_bytes
+        );
+        fs::write(&reformulation_path, &reformulation_bytes).unwrap();
+        assert_eq!(
+            load_reformulations(&reformulation_path)
+                .unwrap()
+                .encode_persisted()
+                .unwrap(),
+            reformulation_bytes
+        );
     }
 }

@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use tantivy::collector::TopDocs;
+use tantivy::merge_policy::{LogMergePolicy, MergePolicy, NoMergePolicy};
 use tantivy::query::{QueryParser, TermSetQuery};
 use tantivy::schema::{Field, IndexRecordOption, Value};
 use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
@@ -271,6 +272,41 @@ pub struct TantivyIndex {
     bm25_config: Bm25Config,
 }
 
+/// Prevent Tantivy from starting merges that can outlive a generation commit.
+///
+/// Codixing publishes immutable index generations, so compaction must complete
+/// before the generation manifest is swapped. [`TantivyIndex::commit`] runs a
+/// tiered policy explicitly and waits for every selected merge.
+fn configure_writer(writer: &IndexWriter) {
+    writer.set_merge_policy(Box::new(NoMergePolicy));
+}
+
+/// Keep tiny checkpoint segments in their own logarithmic levels.
+///
+/// Tantivy's 10,000-document default puts a one-document editor update in the
+/// same level as a large repository's base segments, periodically rewriting the
+/// complete text index. A one-document floor retains bounded tiered compaction
+/// without folding tiny deltas into the bulk level.
+fn checkpoint_merge_policy() -> LogMergePolicy {
+    let mut policy = LogMergePolicy::default();
+    policy.set_min_layer_size(1);
+    policy
+}
+
+/// Compact committed segments synchronously until the tiered policy is stable.
+fn compact_committed_segments(index: &Index, writer: &mut IndexWriter) -> Result<()> {
+    let policy = checkpoint_merge_policy();
+    loop {
+        let candidates = policy.compute_merge_candidates(&index.searchable_segment_metas()?);
+        if candidates.is_empty() {
+            return Ok(());
+        }
+        for candidate in candidates {
+            writer.merge(&candidate.0).wait()?;
+        }
+    }
+}
+
 /// Register the custom `"code"` tokenizer on a [`tantivy::Index`].
 fn register_code_tokenizer(index: &Index) {
     let analyzer = tantivy::tokenizer::TextAnalyzer::builder(CodeTokenizer).build();
@@ -336,6 +372,7 @@ impl TantivyIndex {
         register_code_tokenizer(&index);
         register_code_stemmed_tokenizer(&index);
         let writer = index.writer(50_000_000)?;
+        configure_writer(&writer);
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::OnCommitWithDelay)
@@ -374,6 +411,7 @@ impl TantivyIndex {
             register_code_tokenizer(&index);
             register_code_stemmed_tokenizer(&index);
             let writer = index.writer(50_000_000)?;
+            configure_writer(&writer);
             let reader = index
                 .reader_builder()
                 .reload_policy(ReloadPolicy::OnCommitWithDelay)
@@ -436,6 +474,7 @@ impl TantivyIndex {
             };
 
             let writer = index.writer(50_000_000)?;
+            configure_writer(&writer);
             let reader = index
                 .reader_builder()
                 .reload_policy(ReloadPolicy::OnCommitWithDelay)
@@ -607,6 +646,12 @@ impl TantivyIndex {
         crate::index::windows_retry::retry_transient_io(|| -> Result<()> {
             writer.commit()?;
             Ok(())
+        })?;
+        // Recompute candidates on every retry: a merge may have completed
+        // before a transient Windows filesystem error was reported, and its
+        // former segment IDs must not be submitted again.
+        crate::index::windows_retry::retry_transient_io(|| -> Result<()> {
+            compact_committed_segments(&self.index, &mut writer)
         })?;
         crate::index::windows_retry::retry_transient_io(|| -> Result<()> {
             self.reader.reload()?;
@@ -964,6 +1009,27 @@ mod tests {
         }
     }
 
+    fn create_in_ram_single_writer() -> TantivyIndex {
+        let (schema, fields) = build_schema();
+        let index = Index::create_in_ram(schema);
+        register_code_tokenizer(&index);
+        register_code_stemmed_tokenizer(&index);
+        let writer = index.writer_with_num_threads(1, 50_000_000).unwrap();
+        configure_writer(&writer);
+        let reader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            .try_into()
+            .unwrap();
+        TantivyIndex {
+            index,
+            reader,
+            writer: Some(Mutex::new(writer)),
+            fields,
+            bm25_config: Bm25Config::default(),
+        }
+    }
+
     // --- Tokenizer tests ---
 
     #[test]
@@ -1076,6 +1142,100 @@ mod tests {
             assert!(!results.is_empty(), "expected results after reopen");
             assert_eq!(results[0].0, "7");
         }
+    }
+
+    #[test]
+    fn incremental_merge_keeps_bulk_segments_out_of_tiny_delta_level() {
+        let idx = create_in_ram_single_writer();
+
+        // Six bulk commits deliberately stay below the eight-segment merge
+        // threshold. Tantivy's default 10,000-document floor would then put
+        // the two one-document deltas in the same level and merge everything.
+        for batch in 0..6_u64 {
+            for offset in 0..32_u64 {
+                let id = batch * 32 + offset;
+                let file_path = format!("src/bulk_{batch}_{offset}.rs");
+                let content = format!("fn bulk_token_{id}() {{}}");
+                idx.add_chunk(&make_chunk(id, &file_path, &content))
+                    .unwrap();
+            }
+            idx.commit().unwrap();
+        }
+
+        let bulk_segment_ids: HashSet<_> = idx
+            .index
+            .searchable_segment_metas()
+            .unwrap()
+            .into_iter()
+            .map(|segment| segment.id())
+            .collect();
+        assert_eq!(bulk_segment_ids.len(), 6);
+
+        for id in 192..194_u64 {
+            let file_path = format!("src/tiny_{id}.rs");
+            let content = format!("fn tiny_delta_{id}() {{}}");
+            idx.add_chunk(&make_chunk(id, &file_path, &content))
+                .unwrap();
+            idx.commit().unwrap();
+        }
+
+        let after_segment_ids: HashSet<_> = idx
+            .index
+            .searchable_segment_metas()
+            .unwrap()
+            .into_iter()
+            .map(|segment| segment.id())
+            .collect();
+        assert!(bulk_segment_ids.is_subset(&after_segment_ids));
+        assert_eq!(after_segment_ids.len(), 8);
+        assert_eq!(idx.reader.searcher().num_docs(), 194);
+
+        let requested: HashSet<u64> = [192, 193].into_iter().collect();
+        assert_eq!(idx.lookup_chunks_by_ids(&requested).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn commit_finishes_tiered_merge_before_return() {
+        let idx = TantivyIndex::create_in_ram().unwrap();
+        for id in 0..8_u64 {
+            let file_path = format!("src/tier_{id}.rs");
+            let content = format!("fn tiered_token_{id}() {{}}");
+            idx.add_chunk(&make_chunk(id, &file_path, &content))
+                .unwrap();
+            idx.commit().unwrap();
+        }
+
+        let segments = idx.index.searchable_segment_metas().unwrap();
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].max_doc(), 8);
+        assert_eq!(idx.reader.searcher().num_docs(), 8);
+    }
+
+    #[test]
+    fn tiered_merge_is_durable_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tiered_merge_idx");
+
+        {
+            let idx = TantivyIndex::create_in_dir(&path).unwrap();
+            for id in 0..8_u64 {
+                let file_path = format!("src/persisted_tier_{id}.rs");
+                let content = format!("fn persisted_tier_token_{id}() {{}}");
+                idx.add_chunk(&make_chunk(id, &file_path, &content))
+                    .unwrap();
+                idx.commit().unwrap();
+            }
+            let segments = idx.index.searchable_segment_metas().unwrap();
+            assert_eq!(segments.len(), 1);
+            assert_eq!(segments[0].max_doc(), 8);
+        }
+
+        let idx = TantivyIndex::open_read_only(&path).unwrap();
+        let segments = idx.index.searchable_segment_metas().unwrap();
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].max_doc(), 8);
+        let requested: HashSet<u64> = (0..8).collect();
+        assert_eq!(idx.lookup_chunks_by_ids(&requested).unwrap().len(), 8);
     }
 
     #[test]

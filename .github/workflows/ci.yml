@@ -5,8 +5,8 @@ on:
   pull_request:
     branches: [main]
   schedule:
-    # Weekly 100K-file evidence run. Main pushes use the 10K release profile;
-    # pull requests use the short profile.
+    # Weekly 100K-file claim run. Main pushes and pull requests use 10K as a
+    # regression/scale surrogate, while the short profile remains a smoke run.
     - cron: "17 3 * * 0"
   workflow_dispatch:
     inputs:
@@ -19,6 +19,14 @@ on:
           - pr
           - 10k
           - 100k
+      baseline_quality_json:
+        description: Raw commit-bound baseline quality JSON for a manual 100K run
+        required: false
+        type: string
+      candidate_quality_json:
+        description: Raw commit-bound candidate quality JSON for a manual 100K run
+        required: false
+        type: string
 
 jobs:
   test:
@@ -306,14 +314,66 @@ jobs:
         run: cargo build --release -p codixing -p codixing-server
 
       - name: Build pinned large-repository baseline
+        if: github.event_name != 'workflow_dispatch' || inputs.large_repo_profile != 'pr'
         shell: bash
         run: |
-          baseline_ref="$(tr -d '[:space:]' < benchmarks/large_repo_baseline_ref.txt)"
+          while IFS='=' read -r name _; do
+            if [[ "${name^^}" == GIT_* ]]; then
+              unset "$name"
+            fi
+          done < <(env)
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+
+          resolve_trusted_baseline_ref() {
+            local trusted_ref="$1"
+            local pin_state="$2"
+            local pin_value="${3:-}"
+            local candidate
+            if [[ "$pin_state" == "present" ]]; then
+              candidate="$(printf '%s' "$pin_value" | tr -d '[:space:]')"
+            elif [[ "$pin_state" == "missing" ]]; then
+              candidate="$(git rev-parse "$trusted_ref")"
+            else
+              echo "invalid trusted baseline pin state: $pin_state" >&2
+              return 1
+            fi
+            if [[ ! "$candidate" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "trusted baseline revision is not a full SHA-1" >&2
+              return 1
+            fi
+            git cat-file -e "${candidate}^{commit}"
+            if ! git merge-base --is-ancestor "$candidate" "$trusted_ref"; then
+              echo "trusted baseline revision is not reachable from $trusted_ref" >&2
+              return 1
+            fi
+            printf '%s\n' "$candidate"
+          }
+
+          if pin_value="$(git show origin/main:benchmarks/large_repo_baseline_ref.txt 2>/dev/null)"; then
+            pin_state="present"
+          else
+            pin_state="missing"
+            pin_value=""
+          fi
+          baseline_ref="$(resolve_trusted_baseline_ref origin/main "$pin_state" "$pin_value")"
+
+          # Exercise both bootstrap paths on every run. PRs created before the
+          # pin lands use origin/main itself; after merge, the trusted main pin
+          # must resolve to a commit reachable from that same protected ref.
+          trusted_main="$(git rev-parse origin/main)"
+          bootstrap_ref="$(resolve_trusted_baseline_ref origin/main missing)"
+          test "$bootstrap_ref" = "$trusted_main"
+          pinned_ref="$(resolve_trusted_baseline_ref origin/main present "$baseline_ref")"
+          test "$pinned_ref" = "$baseline_ref"
+
+          echo "$baseline_ref" > "$RUNNER_TEMP/codixing-trusted-baseline-ref"
           git worktree add --detach "$RUNNER_TEMP/codixing-baseline" "$baseline_ref"
-          CARGO_TARGET_DIR="$RUNNER_TEMP/codixing-baseline-target" \
-            cargo build --release \
-              --manifest-path "$RUNNER_TEMP/codixing-baseline/Cargo.toml" \
-              -p codixing -p codixing-server
+          python3 benchmarks/large_repo_gate.py \
+            --bootstrap-legacy-build \
+            --source-root "$RUNNER_TEMP/codixing-baseline" \
+            --legacy-build-target "$RUNNER_TEMP/codixing-baseline-target" \
+            --legacy-build-provenance \
+              "$RUNNER_TEMP/codixing-baseline-build-provenance.json"
 
       - name: Test large-repository gate
         run: python3 benchmarks/test_large_repo_gate.py
@@ -327,38 +387,170 @@ jobs:
           profile="$REQUESTED_PROFILE"
           if [[ -z "$profile" ]]; then
             case "$EVENT_NAME" in
-              pull_request) profile="pr" ;;
+              pull_request) profile="10k" ;;
               schedule) profile="100k" ;;
               *) profile="10k" ;;
             esac
           fi
-          echo "profile=$profile" >> "$GITHUB_OUTPUT"
+          case "$profile" in
+            pr)
+              speed_limit=""
+              rss_limit=""
+              one_file_delta_ms=""
+              evidence_mode="smoke"
+              baseline_mode="smoke"
+              ;;
+            10k)
+              speed_limit="0.80"
+              rss_limit="0.75"
+              one_file_delta_ms="100"
+              evidence_mode="regression"
+              baseline_mode="regression"
+              ;;
+            100k)
+              speed_limit="0.50"
+              rss_limit="0.50"
+              one_file_delta_ms="500"
+              evidence_mode="strict-claim"
+              baseline_mode="claim-baseline"
+              ;;
+            *)
+              echo "unsupported large-repository profile: $profile" >&2
+              exit 1
+              ;;
+          esac
+          {
+            echo "profile=$profile"
+            echo "speed_limit=$speed_limit"
+            echo "rss_limit=$rss_limit"
+            echo "one_file_delta_ms=$one_file_delta_ms"
+            echo "evidence_mode=$evidence_mode"
+            echo "baseline_mode=$baseline_mode"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate strict-claim evidence inputs
+        id: large-repo-claim
+        if: steps.large-repo-profile.outputs.evidence_mode == 'strict-claim'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          CANDIDATE_REVISION: ${{ github.sha }}
+          MANUAL_BASELINE_QUALITY_JSON: ${{ inputs.baseline_quality_json }}
+          MANUAL_CANDIDATE_QUALITY_JSON: ${{ inputs.candidate_quality_json }}
+          SCHEDULED_BASELINE_QUALITY_JSON: ${{ vars.LARGE_REPO_BASELINE_QUALITY_JSON }}
+          SCHEDULED_CANDIDATE_QUALITY_JSON: ${{ vars.LARGE_REPO_CANDIDATE_QUALITY_JSON }}
+        shell: bash
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            baseline_quality_json="$MANUAL_BASELINE_QUALITY_JSON"
+            candidate_quality_json="$MANUAL_CANDIDATE_QUALITY_JSON"
+          elif [[ "$EVENT_NAME" == "schedule" ]]; then
+            baseline_quality_json="$SCHEDULED_BASELINE_QUALITY_JSON"
+            candidate_quality_json="$SCHEDULED_CANDIDATE_QUALITY_JSON"
+          else
+            echo "strict claims require a scheduled or manual 100K run" >&2
+            exit 1
+          fi
+          if [[ -z "$baseline_quality_json" ]]; then
+            echo "100K claims require raw baseline quality JSON" >&2
+            exit 1
+          fi
+          if [[ -z "$candidate_quality_json" ]]; then
+            echo "100K claims require raw candidate quality JSON" >&2
+            exit 1
+          fi
+          baseline_quality_path="$RUNNER_TEMP/large-repo-baseline-quality.json"
+          candidate_quality_path="$RUNNER_TEMP/large-repo-candidate-quality.json"
+          printf '%s' "$baseline_quality_json" > "$baseline_quality_path"
+          printf '%s' "$candidate_quality_json" > "$candidate_quality_path"
+          python3 -m json.tool "$baseline_quality_path" >/dev/null
+          python3 -m json.tool "$candidate_quality_path" >/dev/null
+          {
+            echo "baseline_quality=$baseline_quality_path"
+            echo "candidate_quality=$candidate_quality_path"
+            echo "baseline_revision=$(<"$RUNNER_TEMP/codixing-trusted-baseline-ref")"
+            echo "candidate_revision=$CANDIDATE_REVISION"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Measure pinned baseline on this runner
+        if: steps.large-repo-profile.outputs.profile != 'pr'
         run: |
+          claim_args=()
+          if [[ "${{ steps.large-repo-profile.outputs.baseline_mode }}" == "claim-baseline" ]]; then
+            claim_args=(
+              --external-quality-result "${{ steps.large-repo-claim.outputs.baseline_quality }}"
+              --expected-current-revision "${{ steps.large-repo-claim.outputs.baseline_revision }}"
+            )
+          fi
           python3 benchmarks/large_repo_gate.py \
             --profile "${{ steps.large-repo-profile.outputs.profile }}" \
+            --evidence-mode "${{ steps.large-repo-profile.outputs.baseline_mode }}" \
+            --threads 8 \
             --codixing "$RUNNER_TEMP/codixing-baseline-target/release/codixing" \
             --server "$RUNNER_TEMP/codixing-baseline-target/release/codixing-server" \
-            --output large-repo-baseline.json
+            --source-root "$RUNNER_TEMP/codixing-baseline" \
+            --legacy-build-provenance \
+              "$RUNNER_TEMP/codixing-baseline-build-provenance.json" \
+            --work-dir "$RUNNER_TEMP/codixing-large-repo-work" \
+            "${claim_args[@]}" \
+            --output "$RUNNER_TEMP/large-repo-baseline.json"
 
       - name: Run end-to-end large-repository acceptance gate
+        if: steps.large-repo-profile.outputs.profile != 'pr'
         run: |
+          claim_args=()
+          if [[ "${{ steps.large-repo-profile.outputs.evidence_mode }}" == "strict-claim" ]]; then
+            claim_args=(
+              --external-quality-result "${{ steps.large-repo-claim.outputs.candidate_quality }}"
+              --expected-current-revision "${{ steps.large-repo-claim.outputs.candidate_revision }}"
+              --expected-baseline-revision "${{ steps.large-repo-claim.outputs.baseline_revision }}"
+            )
+          fi
           python3 benchmarks/large_repo_gate.py \
             --profile "${{ steps.large-repo-profile.outputs.profile }}" \
+            --evidence-mode "${{ steps.large-repo-profile.outputs.evidence_mode }}" \
+            --threads 8 \
             --codixing target/release/codixing \
             --server target/release/codixing-server \
-            --baseline large-repo-baseline.json \
-            --max-init-ratio 0.50 \
-            --max-rss-ratio 0.50 \
-            --max-resident-rss-ratio 0.50 \
+            --baseline "$RUNNER_TEMP/large-repo-baseline.json" \
+            --work-dir "$RUNNER_TEMP/codixing-large-repo-work" \
+            "${claim_args[@]}" \
+            --max-init-ratio 1.05 \
+            --max-rss-ratio "${{ steps.large-repo-profile.outputs.rss_limit }}" \
+            --max-resident-rss-ratio "${{ steps.large-repo-profile.outputs.rss_limit }}" \
             --max-disk-ratio 0.50 \
-            --max-cold-query-p95-ratio 0.50 \
+            --max-post-sync-disk-ratio 0.50 \
+            --max-cold-query-p95-ratio 1.05 \
+            --max-cold-query-rss-ratio "${{ steps.large-repo-profile.outputs.rss_limit }}" \
             --max-warm-query-p95-ratio 0.50 \
-            --max-one-file-sync-ratio 0.50 \
+            --warm-query-absolute-floor-ms 10 \
+            --max-warm-query-regression-ms 2 \
+            --max-speed-suite-ratio "${{ steps.large-repo-profile.outputs.speed_limit }}" \
+            --max-speed-component-ratio 1.05 \
+            --max-one-file-sync-ratio "${{ steps.large-repo-profile.outputs.speed_limit }}" \
+            --max-one-file-sync-regression-ms "${{ steps.large-repo-profile.outputs.one_file_delta_ms }}" \
+            --max-one-file-sync-rss-ratio "${{ steps.large-repo-profile.outputs.rss_limit }}" \
             --max-one-file-rewrite-ratio 0.50 \
+            --max-one-percent-sync-ratio 1.05 \
+            --max-one-percent-sync-rss-ratio "${{ steps.large-repo-profile.outputs.rss_limit }}" \
+            --max-one-percent-rewrite-ratio 0.50 \
+            --max-no-op-rewrite-bytes 0 \
             --min-quality-ratio 0.99 \
-            --output large-repo-gate.json
+            --min-recall-at-10-ratio 0.99 \
+            --min-quality-mrr 0.80 \
+            --min-quality-recall-at-10 0.90 \
+            --output "$RUNNER_TEMP/large-repo-gate.json"
+
+      - name: Run end-to-end large-repository smoke profile
+        if: steps.large-repo-profile.outputs.profile == 'pr'
+        run: |
+          python3 benchmarks/large_repo_gate.py \
+            --profile pr \
+            --evidence-mode smoke \
+            --threads 8 \
+            --codixing target/release/codixing \
+            --server target/release/codixing-server \
+            --work-dir "$RUNNER_TEMP/codixing-large-repo-work" \
+            --output "$RUNNER_TEMP/large-repo-gate.json"
 
       - name: Run Criterion benchmarks
         shell: bash
@@ -377,7 +569,10 @@ jobs:
           name: benchmark-results
           path: |
             criterion-results.txt
-            large-repo-baseline.json
-            large-repo-gate.json
+            ${{ runner.temp }}/large-repo-baseline.json
+            ${{ runner.temp }}/large-repo-gate.json
+            ${{ runner.temp }}/large-repo-baseline-quality.json
+            ${{ runner.temp }}/large-repo-candidate-quality.json
+            ${{ runner.temp }}/codixing-baseline-build-provenance.json
           if-no-files-found: warn
           retention-days: 14

@@ -21,6 +21,7 @@
 
 pub mod chunker;
 pub mod complexity;
+mod compressed_artifact;
 pub mod config;
 pub mod context_assembly;
 pub mod embedder;

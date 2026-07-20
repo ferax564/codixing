@@ -12,7 +12,6 @@
 //! 3. **Identifier decomposition** — splits `camelCase`/`snake_case`
 //!    identifiers into parts and groups symbols sharing common parts.
 
-use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
@@ -429,25 +428,16 @@ impl ConceptIndexBuilder {
 
         // term → list of symbol indices that contain this term
         let mut term_to_symbol_indices: HashMap<String, Vec<usize>> = HashMap::new();
-        let decomposed: Vec<Vec<String>> = self
-            .symbols
-            .iter()
-            .enumerate()
-            .map(|(idx, rec)| {
-                let mut parts = decompose_identifier(&rec.name);
-                parts.sort();
-                parts.dedup();
-                parts.sort_by_key(|part| (Reverse(part.len()), part.clone()));
-                parts.truncate(MAX_IDENTIFIER_PARTS_PER_SYMBOL);
-                for part in &parts {
-                    term_to_symbol_indices
-                        .entry(part.clone())
-                        .or_default()
-                        .push(idx);
-                }
-                parts
-            })
-            .collect();
+        for (idx, rec) in self.symbols.iter().enumerate() {
+            let mut parts = decompose_identifier(&rec.name);
+            parts.sort();
+            parts.dedup();
+            parts.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+            parts.truncate(MAX_IDENTIFIER_PARTS_PER_SYMBOL);
+            for part in parts {
+                term_to_symbol_indices.entry(part).or_default().push(idx);
+            }
+        }
 
         // Build clusters from shared terms (skip singletons)
         let mut clusters: Vec<ConceptCluster> = Vec::new();
@@ -751,9 +741,6 @@ impl ConceptIndexBuilder {
             ranked.truncate(MAX_CONCEPT_TERMS);
             term_to_clusters = ranked.into_iter().collect();
         }
-
-        // Drop the intermediate decomposed data.
-        drop(decomposed);
 
         ConceptIndex {
             clusters,

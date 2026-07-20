@@ -5,14 +5,12 @@
 // symbols, completions, signature help, inlay hints, and complexity diagnostics.
 
 import * as vscode from 'vscode';
-import * as fs from 'fs';
-import * as path from 'path';
 import {
     LanguageClient,
     LanguageClientOptions,
     ServerOptions,
 } from 'vscode-languageclient/node';
-import { findBinary, getWorkspaceRoot } from './utils';
+import { findBinary, getIndexState, getWorkspaceRoot } from './utils';
 
 let lspClient: LanguageClient | null = null;
 
@@ -28,8 +26,8 @@ export async function startLspClient(
         return;
     }
 
-    // Only start if an index exists
-    if (!fs.existsSync(path.join(root, '.codixing'))) {
+    // Only start against a complete legacy or atomically published index.
+    if (getIndexState(root) !== 'ready') {
         return;
     }
 

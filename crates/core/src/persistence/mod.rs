@@ -32,19 +32,55 @@ pub(crate) fn atomic_write(
     contents: impl AsRef<[u8]>,
 ) -> std::io::Result<()> {
     use std::io::Write;
+    atomic_write_with_parent_sync(path, ParentDirectorySync::Immediate, |file| {
+        file.write_all(contents.as_ref())
+    })
+}
+
+/// Atomically replace `path` while producing the contents incrementally.
+///
+/// This is the streaming counterpart to [`atomic_write`]: callers can write
+/// large artifacts without first assembling a second corpus-sized byte
+/// buffer. The temporary file is synced before rename and the containing
+/// directory is synced afterwards, preserving the same durability contract.
+pub(crate) fn atomic_write_with(
+    path: impl AsRef<Path>,
+    write: impl FnOnce(&mut fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    atomic_write_with_parent_sync(path, ParentDirectorySync::Immediate, write)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ParentDirectorySync {
+    Immediate,
+    PublicationBarrier,
+}
+
+fn atomic_write_with_parent_sync(
+    path: impl AsRef<Path>,
+    parent_sync: ParentDirectorySync,
+    write: impl FnOnce(&mut fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     let path = path.as_ref();
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("tmp");
     let seq = ATOMIC_WRITE_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp = dir.join(format!(".{stem}.tmp.{}.{seq}", std::process::id()));
-    {
+    let write_result = (|| {
         let mut f = fs::File::create(&tmp)?;
-        f.write_all(contents.as_ref())?;
+        write(&mut f)?;
         f.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
     }
     match fs::rename(&tmp, path) {
         Ok(()) => {
-            sync_directory(dir)?;
+            if parent_sync == ParentDirectorySync::Immediate {
+                sync_directory(dir)?;
+            }
             Ok(())
         }
         Err(e) => {
@@ -74,7 +110,19 @@ fn sync_directory(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn sync_tree(path: &Path) -> std::io::Result<()> {
+/// Validate an unpublished generation and persist its directory entries.
+///
+/// Artifact writers are responsible for syncing every new or modified file
+/// before returning: Codixing sidecars file-sync before atomic rename, Tantivy
+/// commits sync their segment/control files, and checkpoint fallback copies
+/// are synced by [`copy_checkpoint_file`]. Files inherited through hard links
+/// already belong to the durable active generation. Re-syncing every one of
+/// those immutable inodes here made a one-file checkpoint scale with total
+/// index size without adding crash safety. The publication barrier therefore
+/// fsyncs directories only, including the parent entries intentionally batched
+/// by unpublished-generation sidecar writes, after recursively rejecting
+/// symlinks and special files.
+fn sync_publication_directories(path: &Path) -> std::io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() {
         return Err(std::io::Error::new(
@@ -86,15 +134,21 @@ fn sync_tree(path: &Path) -> std::io::Result<()> {
         ));
     }
     if metadata.is_file() {
-        return fs::File::open(path)?.sync_all();
+        return Ok(());
     }
     if metadata.is_dir() {
         for entry in fs::read_dir(path)? {
-            sync_tree(&entry?.path())?;
+            sync_publication_directories(&entry?.path())?;
         }
-        sync_directory(path)?;
+        return sync_directory(path);
     }
-    Ok(())
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!(
+            "refusing to publish unsupported index artifact: {}",
+            path.display()
+        ),
+    ))
 }
 
 fn remove_file_durable(path: &Path) -> std::io::Result<()> {
@@ -130,8 +184,10 @@ const GRAPH_FILE: &str = "graph.bin";
 const SCHEMA_VERSION_FILE: &str = "schema.version";
 const MMAP_VECTOR_FILE: &str = "vectors.mmap";
 const FILE_TRIGRAM_FILE: &str = "file_trigram.bin";
+const FILE_TRIGRAM_DELTA_FILE: &str = "file_trigram_delta.bin";
 const CHUNK_TRIGRAM_FILE: &str = "chunk_trigram.bin";
 const SYMBOLS_V2_FILE: &str = "symbols_v2.bin";
+const SYMBOLS_DELTA_FILE: &str = "symbols_delta.bin";
 const CONCEPTS_FILE: &str = "concepts.bin";
 const REFORMULATIONS_FILE: &str = "reformulations.bin";
 const GENERATIONS_DIR: &str = "generations";
@@ -267,6 +323,11 @@ impl Default for IndexMeta {
 struct GenerationManifest {
     layout_version: u32,
     active: String,
+    /// Distinguishes generations published with the mandatory trigram
+    /// base+delta pair from older manifests where a base-only artifact is a
+    /// valid legacy representation.
+    #[serde(default)]
+    file_trigram_delta_required: bool,
 }
 
 fn new_generation_name() -> String {
@@ -334,11 +395,11 @@ fn require_real_directory(path: &Path, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn resolve_index_dir(root: &Path) -> Result<(PathBuf, Option<String>)> {
+fn resolve_index_dir(root: &Path) -> Result<(PathBuf, Option<String>, bool)> {
     let control_dir = root.join(CODEFORGE_DIR);
     require_real_directory(&control_dir, "index control directory")?;
     let Some(manifest) = read_generation_manifest(&control_dir)? else {
-        return Ok((control_dir, None));
+        return Ok((control_dir, None, false));
     };
     let index_dir = control_dir.join(GENERATIONS_DIR).join(&manifest.active);
     let metadata = fs::symlink_metadata(&index_dir).map_err(|e| {
@@ -353,7 +414,11 @@ fn resolve_index_dir(root: &Path) -> Result<(PathBuf, Option<String>)> {
             index_dir.display()
         )));
     }
-    Ok((index_dir, Some(manifest.active)))
+    Ok((
+        index_dir,
+        Some(manifest.active),
+        manifest.file_trigram_delta_required,
+    ))
 }
 
 fn remove_generation_if_safe(control_dir: &Path, generation: &str) {
@@ -470,6 +535,8 @@ fn cleanup_legacy_artifacts(control_dir: &Path) {
         META_FILE,
         SYMBOLS_FILE,
         SYMBOLS_V2_FILE,
+        SYMBOLS_DELTA_FILE,
+        FILE_TRIGRAM_DELTA_FILE,
         TREE_HASHES_FILE,
         TREE_HASHES_V2_FILE,
         TREE_SIGNATURES_FILE,
@@ -539,6 +606,8 @@ pub struct IndexStore {
     root: PathBuf,
     index_dir: PathBuf,
     generation: Option<String>,
+    file_trigram_delta_required: bool,
+    defer_artifact_directory_sync: bool,
     rebuild_lock: Option<fs::File>,
     generation_lease: Option<fs::File>,
 }
@@ -647,12 +716,30 @@ fn clone_tree_copy_on_write(
                 && TANTIVY_MUTABLE_CONTROL_FILES
                     .iter()
                     .any(|control| name_str.as_ref() == *control);
-            if tantivy_control || fs::hard_link(&source_path, &destination_path).is_err() {
+            // Windows cannot atomically replace a hard-link alias while the
+            // active generation's mmap is live. Detach the two fixed-name
+            // mmap artifacts before a checkpoint can rewrite them; immutable
+            // files and Unix rename semantics still retain cheap hard links.
+            let windows_mapped_rewrite_target =
+                cfg!(windows) && matches!(name_str.as_ref(), FILE_TRIGRAM_FILE | SYMBOLS_V2_FILE);
+            if windows_mapped_rewrite_target {
+                // This copy is mandatory even when hard links work. It is not
+                // fallback amplification, so large resident sidecars must not
+                // be rejected by the hard-link-failure safety budget.
                 copy_checkpoint_file(
                     &source_path,
                     &destination_path,
                     metadata.len(),
                     fallback_copy_bytes,
+                    true,
+                )?;
+            } else if tantivy_control || fs::hard_link(&source_path, &destination_path).is_err() {
+                copy_checkpoint_file(
+                    &source_path,
+                    &destination_path,
+                    metadata.len(),
+                    fallback_copy_bytes,
+                    false,
                 )?;
             }
         } else {
@@ -670,21 +757,42 @@ fn copy_checkpoint_file(
     destination: &Path,
     bytes: u64,
     fallback_copy_bytes: &mut u64,
+    required_detachment: bool,
 ) -> Result<()> {
-    let copied = fallback_copy_bytes.checked_add(bytes).ok_or_else(|| {
+    let copied = checkpoint_fallback_copy_total(*fallback_copy_bytes, bytes, required_detachment)?;
+    fs::copy(source, destination)?;
+    // Unlike a hard link, a fallback copy creates a new inode whose contents
+    // are not durable until explicitly flushed. The directory entry is synced
+    // by the publication barrier after the complete generation is validated.
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(destination)?
+        .sync_all()?;
+    *fallback_copy_bytes = copied;
+    Ok(())
+}
+
+fn checkpoint_fallback_copy_total(
+    current: u64,
+    bytes: u64,
+    required_detachment: bool,
+) -> Result<u64> {
+    if required_detachment {
+        return Ok(current);
+    }
+    let copied = current.checked_add(bytes).ok_or_else(|| {
         CodixingError::Config(
             "checkpoint fallback copy size overflowed; run a full rebuild".to_string(),
         )
     })?;
     if copied > MAX_CHECKPOINT_FALLBACK_COPY_BYTES {
         return Err(CodixingError::Config(format!(
-            "checkpoint would copy more than {} MiB because hard links are unavailable or an explicitly detached control file is too large (run `codixing init` for a fresh generation)",
+            "checkpoint would copy more than {} MiB because hard links are unavailable (run `codixing init` for a fresh generation)",
             MAX_CHECKPOINT_FALLBACK_COPY_BYTES / (1024 * 1024)
         )));
     }
-    fs::copy(source, destination)?;
-    *fallback_copy_bytes = copied;
-    Ok(())
+    Ok(copied)
 }
 
 /// An extra shared lease retained by work that can outlive its [`Engine`],
@@ -744,6 +852,8 @@ impl IndexStore {
             root: root.to_path_buf(),
             index_dir: codixing_dir,
             generation: None,
+            file_trigram_delta_required: false,
+            defer_artifact_directory_sync: false,
             rebuild_lock: None,
             generation_lease: None,
         };
@@ -791,6 +901,8 @@ impl IndexStore {
             root: root.to_path_buf(),
             index_dir,
             generation: Some(generation),
+            file_trigram_delta_required: true,
+            defer_artifact_directory_sync: true,
             rebuild_lock: Some(rebuild_lock),
             generation_lease: Some(generation_lease),
         };
@@ -887,6 +999,8 @@ impl IndexStore {
             root: self.root.clone(),
             index_dir,
             generation: Some(generation),
+            file_trigram_delta_required: self.file_trigram_delta_required,
+            defer_artifact_directory_sync: true,
             rebuild_lock: Some(rebuild_lock),
             generation_lease: Some(generation_lease),
         })
@@ -894,6 +1008,53 @@ impl IndexStore {
 
     pub(crate) fn owns_rebuild_lock(&self) -> bool {
         self.rebuild_lock.is_some()
+    }
+
+    fn artifact_parent_directory_sync(&self, path: &Path) -> ParentDirectorySync {
+        if !self.defer_artifact_directory_sync
+            || self.rebuild_lock.is_none()
+            || self.generation.is_none()
+        {
+            return ParentDirectorySync::Immediate;
+        }
+
+        let Ok(relative) = path.strip_prefix(&self.index_dir) else {
+            return ParentDirectorySync::Immediate;
+        };
+        if relative.as_os_str().is_empty()
+            || !relative
+                .components()
+                .all(|component| matches!(component, std::path::Component::Normal(_)))
+        {
+            return ParentDirectorySync::Immediate;
+        }
+
+        ParentDirectorySync::PublicationBarrier
+    }
+
+    /// Replace an index artifact without mutating a hard-linked active inode.
+    ///
+    /// A working generation still syncs each file before rename. Its parent
+    /// directory sync may be batched into `publish_generation`'s recursive
+    /// directory barrier because a crash before that barrier leaves the old
+    /// manifest authoritative. Active, legacy, control-directory, and
+    /// out-of-generation paths retain an immediate parent-directory sync.
+    fn atomic_write_artifact(
+        &self,
+        path: impl AsRef<Path>,
+        contents: impl AsRef<[u8]>,
+    ) -> std::io::Result<()> {
+        let path = path.as_ref();
+        let parent_sync = self.artifact_parent_directory_sync(path);
+        atomic_write_with_parent_sync(path, parent_sync, |file| file.write_all(contents.as_ref()))
+    }
+
+    /// Retry best-effort cleanup after callers release mmap-backed artifacts
+    /// from the superseded generation. Windows keeps mapped files undeletable
+    /// until those mappings are dropped, which can happen just after the
+    /// publication commit point.
+    pub(crate) fn retry_inactive_generation_cleanup(&self) {
+        cleanup_abandoned_generations(&self.control_dir(), std::time::Duration::ZERO);
     }
 
     /// Hold this generation open for background work that may outlive the
@@ -951,10 +1112,19 @@ impl IndexStore {
         }
         self.validate_for_publication()?;
 
-        // Flush the generation directory before publishing the pointer. The
-        // artifact writers fsync their files; this persists the containing
-        // directory entry as well on platforms that support directory fsync.
-        sync_tree(&self.index_dir)?;
+        // Every new or modified file has already been flushed by its writer.
+        // Persist the generation's directory entries, including hard links to
+        // immutable active artifacts, before publishing the pointer. Sync the
+        // parent as well so the generation directory itself survives a crash.
+        sync_publication_directories(&self.index_dir)?;
+        if let Some(generations_dir) = self.index_dir.parent() {
+            sync_directory(generations_dir)?;
+        }
+        // From this point on the generation's directory entries are durable.
+        // Never defer another artifact rename, even if the manifest rename
+        // succeeds and its parent-directory sync subsequently reports an
+        // error: the working store may already be visible to new readers.
+        self.defer_artifact_directory_sync = false;
 
         let control_dir = self.control_dir();
         let old_active = read_generation_manifest(&control_dir)
@@ -964,6 +1134,7 @@ impl IndexStore {
         let manifest = GenerationManifest {
             layout_version: GENERATION_LAYOUT_VERSION,
             active: generation.to_string(),
+            file_trigram_delta_required: true,
         };
         let bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| {
             CodixingError::Serialization(format!(
@@ -974,6 +1145,7 @@ impl IndexStore {
         // could roll the rename back after cleanup removed the old active
         // generation.
         atomic_write_durable(control_dir.join(ACTIVE_GENERATION_FILE), bytes)?;
+        self.file_trigram_delta_required = true;
 
         // Cleanup is deliberately non-fatal after the commit point. A failed
         // cleanup costs disk but must not turn a successful atomic activation
@@ -1001,6 +1173,7 @@ impl IndexStore {
             self.symbols_v2_path(),
             self.chunk_meta_path(),
             self.file_trigram_path(),
+            self.file_trigram_delta_path(),
             self.tree_hashes_v2_path(),
         ];
         let missing: Vec<PathBuf> = required
@@ -1019,6 +1192,16 @@ impl IndexStore {
             config.bm25,
         )?;
         drop(index);
+        let delta = self.load_file_trigram_delta_bytes()?.ok_or_else(|| {
+            CodixingError::Serialization(
+                "published generation is missing file_trigram_delta.bin".to_string(),
+            )
+        })?;
+        let file_trigram = crate::index::trigram::FileTrigramIndex::load_binary_with_delta(
+            &self.file_trigram_path(),
+            Some(&delta),
+        )?;
+        drop(file_trigram);
         Ok(())
     }
 
@@ -1050,7 +1233,7 @@ impl IndexStore {
         }
 
         for _ in 0..3 {
-            let (index_dir, generation) = resolve_index_dir(root)?;
+            let (index_dir, generation, file_trigram_delta_required) = resolve_index_dir(root)?;
             let lease_result = if writable {
                 acquire_or_create_generation_lease(&index_dir).map(Some)
             } else {
@@ -1075,8 +1258,12 @@ impl IndexStore {
             // Publication can race the resolve/lease window. Recheck the tiny
             // manifest while holding the lease: if it changed, release this
             // snapshot and retry against the new active generation.
-            let (confirmed_dir, confirmed_generation) = resolve_index_dir(root)?;
-            if index_dir == confirmed_dir && generation == confirmed_generation {
+            let (confirmed_dir, confirmed_generation, confirmed_trigram_requirement) =
+                resolve_index_dir(root)?;
+            if index_dir == confirmed_dir
+                && generation == confirmed_generation
+                && file_trigram_delta_required == confirmed_trigram_requirement
+            {
                 let missing: Vec<PathBuf> = [CONFIG_FILE, META_FILE]
                     .into_iter()
                     .map(|name| index_dir.join(name))
@@ -1092,6 +1279,8 @@ impl IndexStore {
                     root: root.to_path_buf(),
                     index_dir,
                     generation,
+                    file_trigram_delta_required,
+                    defer_artifact_directory_sync: false,
                     rebuild_lock: None,
                     generation_lease,
                 });
@@ -1115,17 +1304,17 @@ impl IndexStore {
 
     /// Inspect a `.codixing/` directory layout without instantiating the engine.
     ///
-    /// Reports which essential metadata files are present or missing so the
-    /// CLI can tell users whether to run `codixing repair` (rebuild the
-    /// missing pieces) or `codixing init` (build and atomically activate a
-    /// clean generation).
+    /// Reports which structural artifacts are present or missing so the CLI
+    /// can tell users whether to run `codixing repair` (rebuild the missing
+    /// pieces) or `codixing init` (build and atomically activate a clean
+    /// generation).
     pub fn audit_layout(root: &Path) -> LayoutAudit {
         let control_dir = root.join(CODEFORGE_DIR);
         let dir_exists = control_dir.is_dir();
         let mut layout_error = None;
         let (index_dir, active_generation) = if dir_exists {
             match resolve_index_dir(root) {
-                Ok(value) => value,
+                Ok((index_dir, generation, _)) => (index_dir, generation),
                 Err(error) => {
                     layout_error = Some(error.to_string());
                     (control_dir.clone(), None)
@@ -1138,12 +1327,24 @@ impl IndexStore {
         let mut essentials_present = Vec::new();
         let mut essentials_missing = Vec::new();
         if dir_exists {
-            for file in &[CONFIG_FILE, META_FILE] {
-                let path = index_dir.join(file);
-                // Use `is_file` rather than `exists` so a stray directory
-                // named `meta.json` does not fool the audit into thinking
-                // the index is healthy.
-                if path.is_file() {
+            let tantivy_dir = index_dir.join(TANTIVY_DIR);
+            for (path, expect_directory) in [
+                (index_dir.join(CONFIG_FILE), false),
+                (index_dir.join(META_FILE), false),
+                (tantivy_dir.clone(), true),
+                (tantivy_dir.join(META_FILE), false),
+            ] {
+                // `symlink_metadata` is deliberate: readiness requires real
+                // regular files and a real Tantivy directory, never symlinks
+                // or lookalike paths of the wrong type.
+                let present = fs::symlink_metadata(&path).is_ok_and(|metadata| {
+                    if expect_directory {
+                        metadata.file_type().is_dir()
+                    } else {
+                        metadata.file_type().is_file()
+                    }
+                });
+                if present {
                     essentials_present.push(path);
                 } else {
                     essentials_missing.push(path);
@@ -1152,10 +1353,10 @@ impl IndexStore {
         }
 
         // Optional artifacts — useful to mention in the repair report so
-        // users know whether tantivy/embeddings/symbols were preserved.
+        // users know whether embeddings/graph/symbol sidecars were preserved.
         let mut optional_present = Vec::new();
         if dir_exists {
-            for sub in &[TANTIVY_DIR, VECTORS_DIR, GRAPH_DIR] {
+            for sub in &[VECTORS_DIR, GRAPH_DIR] {
                 let path = index_dir.join(sub);
                 if path.exists() {
                     optional_present.push(path);
@@ -1164,6 +1365,9 @@ impl IndexStore {
             for file in &[
                 SYMBOLS_FILE,
                 SYMBOLS_V2_FILE,
+                SYMBOLS_DELTA_FILE,
+                FILE_TRIGRAM_FILE,
+                FILE_TRIGRAM_DELTA_FILE,
                 CHUNK_META_FILE,
                 CONCEPTS_FILE,
                 REFORMULATIONS_FILE,
@@ -1234,37 +1438,56 @@ impl IndexStore {
 
     /// Rebuild missing metadata files in place using safe defaults.
     ///
-    /// Preserves any existing artifacts (tantivy/, vectors/, graph/, symbols
-    /// blobs). Writes a default [`IndexConfig`] and [`IndexMeta`] when those
-    /// files are absent. Returns the list of files that were created so the
-    /// caller can surface a recovery report.
+    /// Preserves any published artifacts (tantivy/, vectors/, graph/, symbols
+    /// blobs), and reclaims expired unpublished vector generations while the
+    /// repository writer, rebuild, and vector-publication locks are exclusive.
+    /// Writes a default [`IndexConfig`] and [`IndexMeta`] when those files are
+    /// absent. Returns created and reclaimed paths for the recovery report.
     ///
     /// This does *not* re-index source files — call `codixing sync` (or
     /// `Engine::open` followed by sync) afterwards to repopulate counts.
     pub fn repair(root: &Path) -> Result<RepairReport> {
         let control_dir = root.join(CODEFORGE_DIR);
         fs::create_dir_all(&control_dir)?;
+        let _writer_lock = Self::try_acquire_writer_lock(root)?.ok_or_else(|| {
+            CodixingError::Config(
+                "cannot repair the index while another writer or background embedding task is active"
+                    .to_string(),
+            )
+        })?;
         let rebuild_lock = fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(control_dir.join(REBUILD_LOCK_FILE))?;
-        FileExt::lock_exclusive(&rebuild_lock)?;
-        let (index_dir, generation) = resolve_index_dir(root)?;
+        if !FileExt::try_lock_exclusive(&rebuild_lock)? {
+            return Err(CodixingError::Config(
+                "cannot repair the index while a rebuild or checkpoint is active".to_string(),
+            ));
+        }
+        let (index_dir, generation, file_trigram_delta_required) = resolve_index_dir(root)?;
 
         let generation_lease = Some(acquire_or_create_generation_lease(&index_dir)?);
         let store = Self {
             root: root.to_path_buf(),
             index_dir,
             generation,
+            file_trigram_delta_required,
+            defer_artifact_directory_sync: false,
             rebuild_lock: Some(rebuild_lock),
             generation_lease,
         };
         fs::create_dir_all(store.codixing_dir())?;
         fs::create_dir_all(store.tantivy_dir())?;
         fs::create_dir_all(store.vectors_dir())?;
+        require_real_directory(&store.vectors_dir(), "vector artifact directory")?;
         fs::create_dir_all(store.graph_dir())?;
+
+        let removed_vector_artifacts = crate::vector::cleanup_abandoned_unpublished_generations(
+            &store.vector_index_path(),
+            crate::vector::VECTOR_ORPHAN_GRACE,
+        )?;
 
         let mut created = Vec::new();
         let config_path = store.codixing_dir().join(CONFIG_FILE);
@@ -1278,11 +1501,14 @@ impl IndexStore {
             created.push(meta_path);
         }
 
-        Ok(RepairReport { created })
+        Ok(RepairReport {
+            created,
+            removed_vector_artifacts,
+        })
     }
 }
 
-/// Snapshot of which `.codixing/` files are present, missing, or salvageable.
+/// Snapshot of which `.codixing/` artifacts are present, missing, or salvageable.
 #[derive(Debug, Clone)]
 pub struct LayoutAudit {
     pub dir_exists: bool,
@@ -1300,7 +1526,7 @@ pub struct LayoutAudit {
 }
 
 impl LayoutAudit {
-    /// True when every file required to open the engine is in place.
+    /// True when the minimum structural index artifacts are real and present.
     pub fn is_complete(&self) -> bool {
         self.dir_exists && self.essentials_missing.is_empty() && self.layout_error.is_none()
     }
@@ -1312,12 +1538,19 @@ pub struct RepairReport {
     /// Paths of the files this call created. Empty when the layout was already
     /// complete and nothing needed to be recreated.
     pub created: Vec<PathBuf>,
+    /// Expired unpublished vector artifacts reclaimed under the exclusive
+    /// repair locks. Published and possibly-active generations are excluded.
+    pub removed_vector_artifacts: Vec<PathBuf>,
 }
 
 impl IndexStore {
-    /// Check if a `.codixing/` directory exists at root.
+    /// Check whether root contains a structurally complete index layout.
+    ///
+    /// A stray control directory, an unpublished generation, or a layout with
+    /// missing structural artifacts is not an existing index from a caller's
+    /// perspective. This intentionally avoids parsing Tantivy internals.
     pub fn exists(root: &Path) -> bool {
-        root.join(CODEFORGE_DIR).is_dir()
+        Self::audit_layout(root).is_complete()
     }
 
     /// Return the generation currently named by the atomic manifest.
@@ -1355,6 +1588,16 @@ impl IndexStore {
         self.generation.as_deref()
     }
 
+    /// Whether the active manifest guarantees that this generation was
+    /// published with the mandatory file-trigram base+delta pair.
+    ///
+    /// Older manifests deserialize this capability as `false`, preserving
+    /// base-only compatibility without allowing a missing sidecar from a new
+    /// generation to masquerade as legacy state.
+    pub(crate) fn file_trigram_delta_required(&self) -> bool {
+        self.file_trigram_delta_required
+    }
+
     /// Path to the tantivy index directory.
     pub fn tantivy_dir(&self) -> PathBuf {
         self.codixing_dir().join(TANTIVY_DIR)
@@ -1368,6 +1611,11 @@ impl IndexStore {
     /// Path to the `symbols_v2.bin` file (mmap format).
     pub fn symbols_v2_path(&self) -> PathBuf {
         self.codixing_dir().join(SYMBOLS_V2_FILE)
+    }
+
+    /// Path to the bounded changed-file overlay over `symbols_v2.bin`.
+    pub fn symbols_delta_path(&self) -> PathBuf {
+        self.codixing_dir().join(SYMBOLS_DELTA_FILE)
     }
 
     /// Path to the `tree_hashes.bin` file (legacy v1 format).
@@ -1465,6 +1713,11 @@ impl IndexStore {
         self.codixing_dir().join(FILE_TRIGRAM_FILE)
     }
 
+    /// Path to the bounded changed-file overlay over `file_trigram.bin`.
+    pub fn file_trigram_delta_path(&self) -> PathBuf {
+        self.codixing_dir().join(FILE_TRIGRAM_DELTA_FILE)
+    }
+
     /// Path to the chunk-level trigram index (Strategy::Exact fast-path).
     pub fn chunk_trigram_path(&self) -> PathBuf {
         self.codixing_dir().join(CHUNK_TRIGRAM_FILE)
@@ -1486,7 +1739,7 @@ impl IndexStore {
         let json = serde_json::to_string_pretty(config).map_err(|e| {
             CodixingError::Serialization(format!("failed to serialize config: {e}"))
         })?;
-        atomic_write(&path, json)?;
+        self.atomic_write_artifact(&path, json)?;
         Ok(())
     }
 
@@ -1505,7 +1758,7 @@ impl IndexStore {
         let path = self.codixing_dir().join(META_FILE);
         let json = serde_json::to_string_pretty(meta)
             .map_err(|e| CodixingError::Serialization(format!("failed to serialize meta: {e}")))?;
-        atomic_write(&path, json)?;
+        self.atomic_write_artifact(&path, json)?;
         Ok(())
     }
 
@@ -1552,10 +1805,10 @@ impl IndexStore {
         fs::create_dir_all(self.graph_dir())?;
         let bytes = bitcode::serialize(data)
             .map_err(|e| CodixingError::Serialization(format!("failed to serialize graph: {e}")))?;
-        atomic_write(self.graph_path(), bytes)?;
+        self.atomic_write_artifact(self.graph_path(), bytes)?;
         // Stamp the schema version the edges were extracted with, so syncs can
         // detect graphs built by an older extractor/resolver and auto-rebuild.
-        atomic_write(
+        self.atomic_write_artifact(
             self.graph_schema_version_path(),
             crate::graph::GRAPH_SCHEMA_VERSION.to_string().into_bytes(),
         )?;
@@ -1597,7 +1850,7 @@ impl IndexStore {
 
     /// Save raw bytes to the `symbols.bin` file.
     pub fn save_symbols_bytes(&self, bytes: &[u8]) -> Result<()> {
-        atomic_write(self.symbols_path(), bytes)?;
+        self.atomic_write_artifact(self.symbols_path(), bytes)?;
         Ok(())
     }
 
@@ -1607,12 +1860,162 @@ impl IndexStore {
         Ok(bytes)
     }
 
+    /// Atomically persist the bounded changed-file file-trigram overlay.
+    pub fn save_file_trigram_delta_bytes(&self, bytes: &[u8]) -> Result<()> {
+        if bytes.len() > crate::index::trigram::FILE_TRIGRAM_DELTA_MAX_BYTES {
+            return Err(CodixingError::Serialization(format!(
+                "file trigram delta is {} bytes; maximum is {}",
+                bytes.len(),
+                crate::index::trigram::FILE_TRIGRAM_DELTA_MAX_BYTES
+            )));
+        }
+        self.atomic_write_artifact(self.file_trigram_delta_path(), bytes)?;
+        Ok(())
+    }
+
+    /// Load the file-trigram overlay through one bounded, non-following file
+    /// handle so path replacement cannot race validation and allocation.
+    pub fn load_file_trigram_delta_bytes(&self) -> Result<Option<Vec<u8>>> {
+        use std::io::Read;
+
+        let path = self.file_trigram_delta_path();
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        }
+
+        let file = match options.open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let metadata = file.metadata()?;
+        #[cfg(windows)]
+        let is_reparse_point = {
+            use std::os::windows::fs::MetadataExt;
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+            metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        };
+        #[cfg(not(windows))]
+        let is_reparse_point = false;
+        if is_reparse_point || !metadata.file_type().is_file() {
+            return Err(CodixingError::Serialization(format!(
+                "file trigram delta is not a regular file: {}",
+                path.display()
+            )));
+        }
+        let maximum = crate::index::trigram::FILE_TRIGRAM_DELTA_MAX_BYTES;
+        if metadata.len() > maximum as u64 {
+            return Err(CodixingError::Serialization(format!(
+                "file trigram delta is {} bytes; maximum is {maximum}",
+                metadata.len()
+            )));
+        }
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(metadata.len())
+                .unwrap_or(maximum)
+                .min(maximum),
+        );
+        file.take(maximum as u64 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() > maximum {
+            return Err(CodixingError::Serialization(format!(
+                "file trigram delta grew beyond the maximum of {maximum} bytes while being read"
+            )));
+        }
+        Ok(Some(bytes))
+    }
+
+    /// Atomically persist the bounded changed-file symbol overlay.
+    pub fn save_symbol_delta_bytes(&self, bytes: &[u8]) -> Result<()> {
+        if bytes.len() > crate::symbols::persistence::SYMBOL_DELTA_MAX_BYTES {
+            return Err(CodixingError::Serialization(format!(
+                "symbol delta is {} bytes; maximum is {}",
+                bytes.len(),
+                crate::symbols::persistence::SYMBOL_DELTA_MAX_BYTES
+            )));
+        }
+        self.atomic_write_artifact(self.symbols_delta_path(), bytes)?;
+        Ok(())
+    }
+
+    /// Load the symbol overlay without allowing a corrupt or hostile artifact
+    /// to allocate unbounded memory before format validation.
+    pub fn load_symbol_delta_bytes(&self) -> Result<Option<Vec<u8>>> {
+        use std::io::Read;
+
+        let path = self.symbols_delta_path();
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // Open the reparse point itself so a symlink cannot redirect the
+            // validated handle between path inspection and the bounded read.
+            const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        }
+
+        let file = match options.open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let metadata = file.metadata()?;
+        #[cfg(windows)]
+        let is_reparse_point = {
+            use std::os::windows::fs::MetadataExt;
+            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+            metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        };
+        #[cfg(not(windows))]
+        let is_reparse_point = false;
+        if is_reparse_point || !metadata.file_type().is_file() {
+            return Err(CodixingError::Serialization(format!(
+                "symbol delta is not a regular file: {}",
+                path.display()
+            )));
+        }
+        let maximum = crate::symbols::persistence::SYMBOL_DELTA_MAX_BYTES;
+        if metadata.len() > maximum as u64 {
+            return Err(CodixingError::Serialization(format!(
+                "symbol delta is {} bytes; maximum is {maximum}",
+                metadata.len()
+            )));
+        }
+        let mut bytes = Vec::with_capacity(
+            usize::try_from(metadata.len())
+                .unwrap_or(maximum)
+                .min(maximum),
+        );
+        file.take(maximum as u64 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() > maximum {
+            return Err(CodixingError::Serialization(format!(
+                "symbol delta grew beyond the maximum of {maximum} bytes while being read"
+            )));
+        }
+        Ok(Some(bytes))
+    }
+
     /// Save tree hashes (bitcode-serialized `Vec<(PathBuf, u64)>`).
     pub fn save_tree_hashes(&self, hashes: &[(PathBuf, u64)]) -> Result<()> {
         let bytes = bitcode::serialize(hashes).map_err(|e| {
             CodixingError::Serialization(format!("failed to serialize tree hashes: {e}"))
         })?;
-        atomic_write_durable(self.tree_hashes_path(), bytes)?;
+        self.atomic_write_artifact(self.tree_hashes_path(), bytes)?;
         Ok(())
     }
 
@@ -1626,11 +2029,21 @@ impl IndexStore {
     }
 
     /// Save extended tree hashes (v2 format with mtime+size) to `tree_hashes_v2.bin`.
+    ///
+    /// Paths under the primary repository root are stored relative to it. The
+    /// freshness map otherwise repeats the same absolute root once per file,
+    /// making the artifact size depend on where the repository is checked out.
+    /// Extra-root entries remain absolute because `IndexStore` intentionally
+    /// does not duplicate the full indexing configuration.
     pub fn save_tree_hashes_v2(&self, hashes: &[(PathBuf, FileHashEntry)]) -> Result<()> {
-        let bytes = bitcode::serialize(hashes).map_err(|e| {
+        let compact: Vec<_> = hashes
+            .iter()
+            .map(|(path, entry)| (path.strip_prefix(&self.root).unwrap_or(path), entry))
+            .collect();
+        let bytes = bitcode::serialize(&compact).map_err(|e| {
             CodixingError::Serialization(format!("failed to serialize tree hashes v2: {e}"))
         })?;
-        atomic_write_durable(self.tree_hashes_v2_path(), bytes)?;
+        self.atomic_write_artifact(self.tree_hashes_v2_path(), bytes)?;
         Ok(())
     }
 
@@ -1641,7 +2054,7 @@ impl IndexStore {
     /// full content-hash check on the first sync, then v2 is written).
     pub fn load_tree_hashes_v2(&self) -> Result<Vec<(PathBuf, FileHashEntry)>> {
         let v2_path = self.tree_hashes_v2_path();
-        let hashes = if v2_path.exists() {
+        let mut hashes = if v2_path.exists() {
             let bytes = fs::read(&v2_path)?;
             let hashes: Vec<(PathBuf, FileHashEntry)> =
                 bitcode::deserialize(&bytes).map_err(|e| {
@@ -1668,6 +2081,16 @@ impl IndexStore {
                 })
                 .collect()
         };
+
+        // New snapshots store primary-root entries relative to avoid repeating
+        // the checkout path for every file. Old snapshots already contain
+        // absolute paths, so leaving those untouched provides an in-place,
+        // format-compatible migration on the next successful write.
+        for (path, _) in &mut hashes {
+            if path.is_relative() {
+                *path = self.root.join(&*path);
+            }
+        }
 
         // Incremental watcher publications live in a small overlay until the
         // next full sync. Applying it here keeps every freshness consumer
@@ -1731,7 +2154,7 @@ impl IndexStore {
         let bytes = bitcode::serialize(&delta).map_err(|e| {
             CodixingError::Serialization(format!("failed to serialize tree hash delta: {e}"))
         })?;
-        atomic_write_durable(self.tree_hash_delta_path(), bytes)?;
+        self.atomic_write_artifact(self.tree_hash_delta_path(), bytes)?;
         Ok(())
     }
 
@@ -1741,7 +2164,7 @@ impl IndexStore {
         let bytes = bitcode::serialize(&empty).map_err(|e| {
             CodixingError::Serialization(format!("failed to serialize tree hash delta: {e}"))
         })?;
-        atomic_write_durable(self.tree_hash_delta_path(), bytes)?;
+        self.atomic_write_artifact(self.tree_hash_delta_path(), bytes)?;
         Ok(())
     }
 
@@ -1922,7 +2345,7 @@ impl IndexStore {
         let bytes = bitcode::serialize(sigs).map_err(|e| {
             CodixingError::Serialization(format!("failed to serialize tree signatures: {e}"))
         })?;
-        atomic_write(self.tree_signatures_path(), bytes)?;
+        self.atomic_write_artifact(self.tree_signatures_path(), bytes)?;
         Ok(())
     }
 
@@ -1971,7 +2394,7 @@ impl IndexStore {
     /// Accepts a flat list of `(chunk_id, meta)` pairs rather than the DashMap
     /// directly to avoid depending on DashMap in persistence.
     pub fn save_chunk_meta_bytes(&self, bytes: &[u8]) -> Result<()> {
-        atomic_write(self.chunk_meta_path(), bytes)?;
+        self.atomic_write_artifact(self.chunk_meta_path(), bytes)?;
         Ok(())
     }
 
@@ -1986,7 +2409,60 @@ impl IndexStore {
 mod tests {
     use super::*;
     use crate::config::IndexConfig;
+    use crate::index::TantivyIndex;
+    use filetime::{FileTime, set_file_mtime};
     use tempfile::tempdir;
+
+    struct TestVectorArtifacts {
+        manifest: PathBuf,
+        index: PathBuf,
+        chunks: PathBuf,
+        manifest_tmp: PathBuf,
+    }
+
+    fn test_vector_artifacts(store: &IndexStore, generation: &str) -> TestVectorArtifacts {
+        let index_path = store.vector_index_path();
+        let parent = index_path.parent().unwrap();
+        let index_name = index_path.file_name().unwrap().to_string_lossy();
+        let manifest = parent.join(format!(
+            "{index_name}.manifest.generation-{generation}.json"
+        ));
+        TestVectorArtifacts {
+            manifest_tmp: manifest.with_extension("json.tmp"),
+            manifest,
+            index: parent.join(format!("{index_name}.generation-{generation}")),
+            chunks: parent.join(format!("{index_name}.file-chunks.generation-{generation}")),
+        }
+    }
+
+    fn mark_vector_artifacts_old(paths: &[&Path]) {
+        for path in paths {
+            set_file_mtime(path, FileTime::from_unix_time(0, 0)).unwrap();
+        }
+    }
+
+    fn commit_empty_tantivy(store: &IndexStore) {
+        let tantivy = TantivyIndex::create_in_dir(&store.tantivy_dir()).unwrap();
+        tantivy.commit().unwrap();
+    }
+
+    fn activate_structural_test_generation(root: &Path) -> PathBuf {
+        let store = IndexStore::begin_generation(root, &IndexConfig::new(root)).unwrap();
+        commit_empty_tantivy(&store);
+        let manifest = GenerationManifest {
+            layout_version: GENERATION_LAYOUT_VERSION,
+            active: store.generation().unwrap().to_owned(),
+            file_trigram_delta_required: true,
+        };
+        let tantivy_dir = store.tantivy_dir();
+        atomic_write_durable(
+            root.join(CODEFORGE_DIR).join(ACTIVE_GENERATION_FILE),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        drop(store);
+        tantivy_dir
+    }
 
     #[test]
     fn init_creates_directory_structure() {
@@ -2000,7 +2476,82 @@ mod tests {
         assert!(store.tantivy_dir().is_dir());
         assert!(store.codixing_dir().join(CONFIG_FILE).is_file());
         assert!(store.codixing_dir().join(META_FILE).is_file());
+        assert!(
+            !IndexStore::exists(root),
+            "a bare layout is incomplete before Tantivy commits metadata"
+        );
+
+        commit_empty_tantivy(&store);
         assert!(IndexStore::exists(root));
+    }
+
+    #[test]
+    fn unpublished_generation_defers_only_scoped_artifact_directory_sync() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let store = IndexStore::begin_generation(root, &IndexConfig::new(root)).unwrap();
+
+        assert_eq!(
+            store.artifact_parent_directory_sync(&store.chunk_meta_path()),
+            ParentDirectorySync::PublicationBarrier
+        );
+        assert_eq!(
+            store.artifact_parent_directory_sync(&store.graph_path()),
+            ParentDirectorySync::PublicationBarrier
+        );
+        assert_eq!(
+            store.artifact_parent_directory_sync(&store.dirty_paths_path()),
+            ParentDirectorySync::Immediate,
+            "control-directory journals must retain their own durability barrier"
+        );
+        assert_eq!(
+            store.artifact_parent_directory_sync(&root.join("outside.bin")),
+            ParentDirectorySync::Immediate
+        );
+        assert_eq!(
+            store.artifact_parent_directory_sync(
+                &store
+                    .codixing_dir()
+                    .join("nested")
+                    .join("..")
+                    .join("escape.bin")
+            ),
+            ParentDirectorySync::Immediate,
+            "lexical traversal must never inherit the publication barrier"
+        );
+
+        let active_dir = tempdir().unwrap();
+        let active_root = active_dir.path();
+        let active = IndexStore::init(active_root, &IndexConfig::new(active_root)).unwrap();
+        assert_eq!(
+            active.artifact_parent_directory_sync(&active.chunk_meta_path()),
+            ParentDirectorySync::Immediate,
+            "active and legacy stores must make each rename durable immediately"
+        );
+    }
+
+    #[test]
+    fn deferred_parent_sync_keeps_atomic_file_replacement_contract() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("artifact.bin");
+
+        atomic_write_with_parent_sync(&path, ParentDirectorySync::PublicationBarrier, |file| {
+            file.write_all(b"before")
+        })
+        .unwrap();
+        atomic_write_with_parent_sync(&path, ParentDirectorySync::PublicationBarrier, |file| {
+            file.write_all(b"after")
+        })
+        .unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"after");
+        assert!(fs::read_dir(dir.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".tmp.")
+        }));
     }
 
     #[test]
@@ -2081,7 +2632,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
         let config = IndexConfig::new(root);
-        IndexStore::init(root, &config).unwrap();
+        let store = IndexStore::init(root, &config).unwrap();
+        commit_empty_tantivy(&store);
+        drop(store);
 
         // Drop the metadata files but keep a marker file under tantivy/ so
         // we can prove repair did not nuke the rest of the index.
@@ -2105,6 +2658,124 @@ mod tests {
 
         // Sanity: store is now openable.
         IndexStore::open(root).unwrap();
+    }
+
+    #[test]
+    fn repair_reclaims_expired_unpublished_vector_artifacts_only_explicitly() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let store = IndexStore::init(root, &IndexConfig::new(root)).unwrap();
+        commit_empty_tantivy(&store);
+        let artifacts = test_vector_artifacts(
+            &store,
+            "11111111111111111111111111111111-11111111-1111111111111111",
+        );
+        fs::write(&artifacts.index, b"abandoned index").unwrap();
+        fs::write(&artifacts.chunks, b"abandoned chunks").unwrap();
+        fs::write(&artifacts.manifest_tmp, b"abandoned manifest temp").unwrap();
+        mark_vector_artifacts_old(&[&artifacts.index, &artifacts.chunks, &artifacts.manifest_tmp]);
+        drop(store);
+
+        // Ordinary open is observational and must never run maintenance.
+        drop(IndexStore::open(root).unwrap());
+        assert!(artifacts.index.exists());
+        assert!(artifacts.chunks.exists());
+        assert!(artifacts.manifest_tmp.exists());
+
+        let report = IndexStore::repair(root).unwrap();
+        assert!(report.created.is_empty());
+        assert_eq!(
+            report.removed_vector_artifacts,
+            vec![artifacts.chunks, artifacts.index, artifacts.manifest_tmp]
+        );
+    }
+
+    #[test]
+    fn repair_preserves_generation_when_any_unpublished_artifact_is_young() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let store = IndexStore::init(root, &IndexConfig::new(root)).unwrap();
+        commit_empty_tantivy(&store);
+        let artifacts = test_vector_artifacts(
+            &store,
+            "22222222222222222222222222222222-22222222-2222222222222222",
+        );
+        fs::write(&artifacts.index, b"old index").unwrap();
+        fs::write(&artifacts.chunks, b"possibly active chunks").unwrap();
+        mark_vector_artifacts_old(&[&artifacts.index]);
+        drop(store);
+
+        let report = IndexStore::repair(root).unwrap();
+        assert!(report.removed_vector_artifacts.is_empty());
+        assert!(artifacts.index.exists());
+        assert!(artifacts.chunks.exists());
+    }
+
+    #[test]
+    fn repair_never_reclaims_a_manifested_vector_generation() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let store = IndexStore::init(root, &IndexConfig::new(root)).unwrap();
+        commit_empty_tantivy(&store);
+        let artifacts = test_vector_artifacts(
+            &store,
+            "33333333333333333333333333333333-33333333-3333333333333333",
+        );
+        fs::write(&artifacts.index, b"published index").unwrap();
+        fs::write(&artifacts.chunks, b"published chunks").unwrap();
+        fs::write(&artifacts.manifest, b"publication point").unwrap();
+        mark_vector_artifacts_old(&[&artifacts.index, &artifacts.chunks, &artifacts.manifest]);
+        drop(store);
+
+        let report = IndexStore::repair(root).unwrap();
+        assert!(report.removed_vector_artifacts.is_empty());
+        assert!(artifacts.manifest.exists());
+        assert!(artifacts.index.exists());
+        assert!(artifacts.chunks.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repair_rejects_symlinked_vector_directory_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let store = IndexStore::init(root, &IndexConfig::new(root)).unwrap();
+        commit_empty_tantivy(&store);
+        let vectors_dir = store.vectors_dir();
+        drop(store);
+
+        fs::remove_dir(&vectors_dir).unwrap();
+        let outside = root.join("outside-vectors");
+        fs::create_dir(&outside).unwrap();
+        let victim = outside.join(
+            "index.usearch.generation-44444444444444444444444444444444-44444444-4444444444444444",
+        );
+        fs::write(&victim, b"outside victim").unwrap();
+        mark_vector_artifacts_old(&[&victim]);
+        symlink(&outside, &vectors_dir).unwrap();
+
+        let error = IndexStore::repair(root)
+            .expect_err("repair must reject a symlinked vector artifact directory");
+        assert!(error.to_string().contains("vector artifact directory"));
+        assert_eq!(fs::read(&victim).unwrap(), b"outside victim");
+    }
+
+    #[test]
+    fn repair_fails_fast_while_a_writable_engine_is_active() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let mut config = IndexConfig::new(root);
+        config.embedding.enabled = false;
+        let engine = crate::Engine::init(root, config).unwrap();
+
+        let error = IndexStore::repair(root)
+            .expect_err("repair must not race a live writer or background embedder");
+        assert!(error.to_string().contains("another writer"));
+
+        drop(engine);
+        IndexStore::repair(root).unwrap();
     }
 
     #[test]
@@ -2187,9 +2858,98 @@ mod tests {
     }
 
     #[test]
-    fn exists_returns_false_for_no_index() {
+    fn exists_requires_a_structurally_complete_layout() {
+        let missing = tempdir().unwrap();
+        assert!(!IndexStore::exists(missing.path()));
+
+        let partial_legacy = tempdir().unwrap();
+        let partial_store = IndexStore::init(
+            partial_legacy.path(),
+            &IndexConfig::new(partial_legacy.path()),
+        )
+        .unwrap();
+        commit_empty_tantivy(&partial_store);
+        drop(partial_store);
+        fs::remove_file(partial_legacy.path().join(CODEFORGE_DIR).join(CONFIG_FILE)).unwrap();
+        assert!(!IndexStore::exists(partial_legacy.path()));
+
+        let unpublished = tempdir().unwrap();
+        let unpublished_store =
+            IndexStore::begin_generation(unpublished.path(), &IndexConfig::new(unpublished.path()))
+                .unwrap();
+        commit_empty_tantivy(&unpublished_store);
+        assert!(!IndexStore::exists(unpublished.path()));
+        drop(unpublished_store);
+
+        let legacy = tempdir().unwrap();
+        let legacy_store =
+            IndexStore::init(legacy.path(), &IndexConfig::new(legacy.path())).unwrap();
+        assert!(
+            !IndexStore::exists(legacy.path()),
+            "missing legacy tantivy/meta.json must be incomplete"
+        );
+        commit_empty_tantivy(&legacy_store);
+        assert!(IndexStore::exists(legacy.path()));
+        let legacy_tantivy_dir = legacy_store.tantivy_dir();
+        drop(legacy_store);
+        fs::remove_dir_all(legacy_tantivy_dir).unwrap();
+        assert!(
+            !IndexStore::exists(legacy.path()),
+            "missing legacy Tantivy directory must be incomplete"
+        );
+
+        let active = tempdir().unwrap();
+        let active_root = active.path();
+        let active_tantivy_dir = activate_structural_test_generation(active_root);
+        assert!(IndexStore::exists(active_root));
+        fs::remove_file(active_tantivy_dir.join(META_FILE)).unwrap();
+        assert!(
+            !IndexStore::exists(active_root),
+            "missing active-generation tantivy/meta.json must be incomplete"
+        );
+
+        let active_without_tantivy = tempdir().unwrap();
+        let active_tantivy_dir = activate_structural_test_generation(active_without_tantivy.path());
+        fs::remove_dir_all(active_tantivy_dir).unwrap();
+        assert!(
+            !IndexStore::exists(active_without_tantivy.path()),
+            "missing active-generation Tantivy directory must be incomplete"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exists_rejects_symlinked_structural_artifacts() {
+        use std::os::unix::fs::symlink;
+
         let dir = tempdir().unwrap();
-        assert!(!IndexStore::exists(dir.path()));
+        let root = dir.path();
+        let store = IndexStore::init(root, &IndexConfig::new(root)).unwrap();
+        commit_empty_tantivy(&store);
+        assert!(IndexStore::exists(root));
+
+        let config_path = store.codixing_dir().join(CONFIG_FILE);
+        let real_config = root.join("real-config.json");
+        fs::rename(&config_path, &real_config).unwrap();
+        symlink(&real_config, &config_path).unwrap();
+        assert!(!IndexStore::exists(root));
+        fs::remove_file(&config_path).unwrap();
+        fs::rename(&real_config, &config_path).unwrap();
+
+        let tantivy_meta = store.tantivy_dir().join(META_FILE);
+        let real_tantivy_meta = root.join("real-tantivy-meta.json");
+        fs::rename(&tantivy_meta, &real_tantivy_meta).unwrap();
+        symlink(&real_tantivy_meta, &tantivy_meta).unwrap();
+        assert!(!IndexStore::exists(root));
+        fs::remove_file(&tantivy_meta).unwrap();
+        fs::rename(&real_tantivy_meta, &tantivy_meta).unwrap();
+
+        let tantivy_dir = store.tantivy_dir();
+        let real_tantivy_dir = root.join("real-tantivy");
+        drop(store);
+        fs::rename(&tantivy_dir, &real_tantivy_dir).unwrap();
+        symlink(&real_tantivy_dir, &tantivy_dir).unwrap();
+        assert!(!IndexStore::exists(root));
     }
 
     #[test]
@@ -2267,8 +3027,133 @@ mod tests {
         store.save_tree_hashes_v2(&hashes).unwrap();
         let loaded = store.load_tree_hashes_v2().unwrap();
         assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].0, root.join("src/main.rs"));
+        assert_eq!(loaded[1].0, root.join("src/lib.rs"));
         assert_eq!(loaded[0].1.content_hash, hashes[0].1.content_hash);
         assert_eq!(loaded[1].1.size, 2048);
+    }
+
+    #[test]
+    fn tree_hashes_v2_compacts_primary_root_and_preserves_external_paths() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("repo");
+        fs::create_dir(&root).unwrap();
+        let store = IndexStore::init(&root, &IndexConfig::new(&root)).unwrap();
+        let primary = root.join("src/lib.rs");
+        let external = dir.path().join("shared/src/lib.rs");
+        let hashes = vec![
+            (primary.clone(), FileHashEntry::new(1, None, 10)),
+            (external.clone(), FileHashEntry::new(2, None, 20)),
+        ];
+
+        store.save_tree_hashes_v2(&hashes).unwrap();
+
+        let bytes = fs::read(store.tree_hashes_v2_path()).unwrap();
+        let persisted: Vec<(PathBuf, FileHashEntry)> = bitcode::deserialize(&bytes).unwrap();
+        assert_eq!(persisted[0].0, PathBuf::from("src/lib.rs"));
+        assert_eq!(persisted[1].0, external);
+        assert_eq!(store.load_tree_hashes_v2().unwrap(), hashes);
+    }
+
+    #[test]
+    fn symbol_delta_loader_rejects_oversized_regular_file() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let store = IndexStore::init(root, &IndexConfig::new(root)).unwrap();
+        let file = fs::File::create(store.symbols_delta_path()).unwrap();
+        file.set_len(crate::symbols::persistence::SYMBOL_DELTA_MAX_BYTES as u64 + 1)
+            .unwrap();
+
+        let error = store.load_symbol_delta_bytes().unwrap_err();
+        assert!(error.to_string().contains("maximum"));
+    }
+
+    #[test]
+    fn file_trigram_delta_loader_rejects_oversized_regular_file() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let store = IndexStore::init(root, &IndexConfig::new(root)).unwrap();
+        let file = fs::File::create(store.file_trigram_delta_path()).unwrap();
+        file.set_len(crate::index::trigram::FILE_TRIGRAM_DELTA_MAX_BYTES as u64 + 1)
+            .unwrap();
+
+        let error = store.load_file_trigram_delta_bytes().unwrap_err();
+        assert!(error.to_string().contains("maximum"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symbol_delta_loader_does_not_follow_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let store = IndexStore::init(root, &IndexConfig::new(root)).unwrap();
+        let target = root.join("outside-symbol-delta.bin");
+        fs::write(&target, b"not a sidecar").unwrap();
+        symlink(&target, store.symbols_delta_path()).unwrap();
+
+        assert!(store.load_symbol_delta_bytes().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_trigram_delta_loader_does_not_follow_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let store = IndexStore::init(root, &IndexConfig::new(root)).unwrap();
+        let target = root.join("outside-file-trigram-delta.bin");
+        fs::write(&target, b"not a sidecar").unwrap();
+        symlink(&target, store.file_trigram_delta_path()).unwrap();
+
+        assert!(store.load_file_trigram_delta_bytes().is_err());
+    }
+
+    #[test]
+    fn tree_hashes_v2_loads_legacy_absolute_snapshot() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let store = IndexStore::init(root, &IndexConfig::new(root)).unwrap();
+        let legacy = vec![(
+            root.join("src/legacy.rs"),
+            FileHashEntry::new(0xABCD, None, 42),
+        )];
+        let bytes = bitcode::serialize(&legacy).unwrap();
+        atomic_write_durable(store.tree_hashes_v2_path(), bytes).unwrap();
+
+        assert_eq!(store.load_tree_hashes_v2().unwrap(), legacy);
+    }
+
+    #[test]
+    fn tree_hashes_v2_size_is_independent_of_primary_root_length() {
+        let dir = tempdir().unwrap();
+        let short_root = dir.path().join("a");
+        let long_root = dir
+            .path()
+            .join("a-much-longer-checkout-location-used-for-the-same-repository");
+        fs::create_dir(&short_root).unwrap();
+        fs::create_dir(&long_root).unwrap();
+        let short_store = IndexStore::init(&short_root, &IndexConfig::new(&short_root)).unwrap();
+        let long_store = IndexStore::init(&long_root, &IndexConfig::new(&long_root)).unwrap();
+        let entry = FileHashEntry::new(0xCAFE, None, 123);
+
+        short_store
+            .save_tree_hashes_v2(&[(short_root.join("src/lib.rs"), entry.clone())])
+            .unwrap();
+        long_store
+            .save_tree_hashes_v2(&[(long_root.join("src/lib.rs"), entry)])
+            .unwrap();
+
+        assert_eq!(
+            fs::metadata(short_store.tree_hashes_v2_path())
+                .unwrap()
+                .len(),
+            fs::metadata(long_store.tree_hashes_v2_path())
+                .unwrap()
+                .len()
+        );
     }
 
     #[test]
@@ -2359,5 +3244,69 @@ mod tests {
         assert_eq!(decoded.working_generation, legacy.working_generation);
         assert_eq!(decoded.paths, expected);
         assert_eq!(decoded.retry_after_publish, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkpoint_clone_hardlinks_immutable_files_and_detaches_tantivy_controls() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("active");
+        let destination = dir.path().join("working");
+        let source_tantivy = source.join(TANTIVY_DIR);
+        fs::create_dir_all(&source_tantivy).unwrap();
+        fs::create_dir(&destination).unwrap();
+
+        let segment = source_tantivy.join("segment.fast");
+        let control = source_tantivy.join("meta.json");
+        fs::write(&segment, b"immutable segment").unwrap();
+        fs::write(&control, b"mutable control").unwrap();
+
+        let mut fallback_copy_bytes = 0;
+        clone_tree_copy_on_write(&source, &destination, false, &mut fallback_copy_bytes).unwrap();
+        sync_publication_directories(&destination).unwrap();
+
+        let cloned_segment = destination.join(TANTIVY_DIR).join("segment.fast");
+        let cloned_control = destination.join(TANTIVY_DIR).join("meta.json");
+        let segment_before = fs::metadata(&segment).unwrap();
+        let segment_after = fs::metadata(&cloned_segment).unwrap();
+        let control_before = fs::metadata(&control).unwrap();
+        let control_after = fs::metadata(&cloned_control).unwrap();
+
+        assert_eq!(segment_before.dev(), segment_after.dev());
+        assert_eq!(segment_before.ino(), segment_after.ino());
+        assert_ne!(control_before.ino(), control_after.ino());
+        assert_eq!(fs::read(cloned_control).unwrap(), b"mutable control");
+        assert_eq!(fallback_copy_bytes, control_before.len());
+    }
+
+    #[test]
+    fn required_mmap_detachment_is_not_charged_to_fallback_copy_budget() {
+        let over_budget = MAX_CHECKPOINT_FALLBACK_COPY_BYTES + 1;
+
+        assert_eq!(
+            checkpoint_fallback_copy_total(7, over_budget, true).unwrap(),
+            7,
+            "mandatory Windows mmap detachment must remain possible for large sidecars"
+        );
+        assert!(checkpoint_fallback_copy_total(0, over_budget, false).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_directory_sync_rejects_nested_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let generation = dir.path().join("generation");
+        let nested = generation.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(generation.join("artifact.bin"), b"durable").unwrap();
+        symlink(generation.join("artifact.bin"), nested.join("escape.bin")).unwrap();
+
+        let error = sync_publication_directories(&generation).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("symlinked index artifact"));
     }
 }

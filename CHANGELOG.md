@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Large-repository v2 storage and gate** — copy-on-write incremental
+  checkpoints, shared file-level trigram storage (no duplicate chunk trigram),
+  full-fidelity mmap symbols with bounded deltas, compressed semantic artifacts,
+  bounded local personalized PageRank, and a machine-readable
+  `benchmarks/large_repo_gate.py` acceptance harness (PR 10K regression +
+  weekly/manual 100K strict-claim modes) wired into CI. Build provenance is
+  embedded for gate baseline attestation.
+
 - **Crash-safe generational rebuilds** — `codixing init` now constructs a clean
   sibling generation, validates its metadata and Tantivy index, then atomically
   swaps a small active-generation manifest. Repeated init no longer appends
@@ -38,8 +46,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   repeated paths/symbols with deterministic byte output while reading legacy
   files. Builders stream the symbol table instead of cloning the full corpus and
   retain only a small ranked vocabulary from each doc comment. Every mutation
-   invalidates the old artifacts before rebuilding, so a failed update degrades
-   to primary search rather than serving stale concepts.
+  invalidates the old artifacts before rebuilding, so a failed update degrades
+  to primary search rather than serving stale concepts. On repositories with
+  more than 1,000 files, incremental checkpoints leave concepts/reformulations
+  invalidated (primary BM25/graph search stays correct) and rebuild them on the
+  next full `init` or explicit graph rebuild so one-file edits stay proportional
+  to the change set.
 
 - **External-context import** — `codixing import <source> <path>` ingests project
   context that lives outside the source tree as first-class, searchable

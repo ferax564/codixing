@@ -54,6 +54,12 @@ download or index load is not cut off by the default startup timeout.
 Codixing skips individual source files over 2 MiB by default so generated or
 minified bundles cannot dominate parsing memory; override this with
 `--max-file-bytes N` (or `0` for no limit).
+Indexing uses at most `min(available CPUs, 8)` workers by default on
+non-Windows platforms and `min(available CPUs, 4)` on Windows; `--threads N`
+is an explicit tuning override. For one-shot searches on a large index,
+`--strategy instant` and `--strategy exact` use a lean lexical read profile
+that skips graph, vector, and reranker loading. `auto` and the other strategies
+retain the full read profile because they may need those artifacts.
 Auxiliary
 concept and learned-vocabulary artifacts are evidence-ranked and bounded: at
 most 32 vocabulary terms are paired per file, 12 expansions are retained per
@@ -382,7 +388,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Optional RustQueue embedding primitives** — Feature-gated, file-grouped job and bounded-channel worker implementation for embedding experiments; the supported CLI durability path is `codixing embed` with generation checkpoints
 - **Streaming embeddings** — Fixed-window batch processing (256 chunks) with progress reporting; incremental vector reuse via content hashing
 - **Federation auto-discovery** — Auto-detects Cargo, npm, pnpm, Go workspaces, git submodules, and nested projects; lazy federation keeps a bounded stable resident set and searches overflow projects through short-lived read-only engines instead of churning the whole cache
-- **Read-only concurrent access** — CLI analysis/search commands and federated project members open the index without probing or owning the Tantivy writer lock, so reads start immediately alongside sync/indexing; periodic reload detects writer updates automatically
+- **Read-only concurrent access** — CLI analysis/search commands and federated project members open the index without probing or owning the Tantivy writer lock, so reads start immediately alongside sync/indexing; explicit `--strategy instant` and `--strategy exact` additionally skip graph, vector, and reranker loading for lean one-shot large-index reads; periodic reload detects writer updates automatically
 - **Changed-file checkpoints** — Incremental updates hard-link immutable artifacts into an unpublished generation, retain a mmap-backed symbol overlay and tombstoned file-trigram updates while edits arrive, then atomically publish once per 2 s idle / 30 s maximum / 256-path batch. A durable path journal recovers interrupted work; unsupported hard-link filesystems fail before copying more than 64 MiB instead of silently duplicating a multi-GB index
 - **Incremental embedding** — `sync` skips re-embedding unchanged chunks (content hash comparison)
 - **Cosmetic-edit embedding reuse** — `sync` computes a deterministic per-file *signature fingerprint* (symbol signatures, imports, exports) from the AST; when a file's content changed but its fingerprint did not (a comment/whitespace/internal-logic edit), it refreshes BM25/symbols but reuses the cached embedding vectors instead of recomputing them. Conservative: any file without a stable fingerprint re-embeds

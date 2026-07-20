@@ -12,7 +12,7 @@ impl Engine {
     /// Combines naming conventions, directory conventions, and import graph
     /// analysis to link test files to their corresponding source files.
     pub fn build_test_map(&self, options: TestMappingOptions) -> Vec<TestMapping> {
-        let all_files: Vec<String> = self.file_chunk_counts.keys().cloned().collect();
+        let all_files: Vec<String> = self.file_chunk_ids.keys().cloned().collect();
 
         // Build import dependency map from the graph (if available).
         let import_deps: Option<HashMap<String, Vec<String>>> = self.graph.as_ref().map(|g| {

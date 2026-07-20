@@ -3,42 +3,80 @@
 //! Converts an `InMemorySymbolTable` (the current `DashMap`-backed table)
 //! into the memory-mappable format described in [`super::mmap`].
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::io::{BufWriter, Seek, Write};
 use std::path::Path;
 
 use crate::error::{CodixingError, Result};
-use crate::language::Visibility;
-use crate::symbols::InMemorySymbolTable;
 use crate::symbols::mmap::{
-    FILE_INDEX_ENTRY_SIZE, FORMAT_VERSION, HEADER_SIZE, MAGIC, NAME_INDEX_ENTRY_SIZE,
-    PREFIX_INDEX_ENTRY_SIZE, entity_kind_to_u8, language_to_u8, type_relation_kind_to_u8,
+    FORMAT_VERSION, HEADER_SIZE, MAGIC, NAME_INDEX_ENTRY_SIZE, PREFIX_INDEX_ENTRY_SIZE,
+    SYMBOL_FILE_INDEX_ENTRY_SIZE, entity_kind_to_u8, language_to_u8, type_relation_kind_to_u8,
     visibility_to_u8,
 };
+use crate::symbols::{InMemorySymbolTable, Symbol, SymbolTable};
+
+trait SymbolBucketSource {
+    fn names(&self) -> Vec<String>;
+    fn symbols_for_exact_name(&self, name: &str) -> Vec<Symbol>;
+}
+
+impl SymbolBucketSource for InMemorySymbolTable {
+    fn names(&self) -> Vec<String> {
+        self.symbols
+            .iter()
+            .map(|entry| entry.key().to_string())
+            .collect()
+    }
+
+    fn symbols_for_exact_name(&self, name: &str) -> Vec<Symbol> {
+        self.lookup(name)
+    }
+}
+
+impl SymbolBucketSource for SymbolTable {
+    fn names(&self) -> Vec<String> {
+        self.checkpoint_names()
+    }
+
+    fn symbols_for_exact_name(&self, name: &str) -> Vec<Symbol> {
+        self.checkpoint_symbols_for_exact_name(name)
+    }
+}
+
+#[derive(Debug, Default)]
+struct WriteStats {
+    name_count: usize,
+    symbol_count: usize,
+    peak_bucket_symbols: usize,
+    final_output_buffer_bytes: usize,
+}
 
 /// Write the mmap-format `symbols_v2.bin` from an in-memory symbol table.
 pub fn write_mmap_symbols(table: &InMemorySymbolTable, path: &Path) -> Result<()> {
+    write_mmap_symbols_from_source(table, path).map(|_| ())
+}
+
+/// Write an mmap checkpoint directly from any symbol-table representation.
+///
+/// Mmap overlays are merged one exact-name bucket at a time, so a one-file
+/// checkpoint never constructs an `InMemorySymbolTable` for the whole repo.
+pub(crate) fn write_mmap_symbol_table(table: &SymbolTable, path: &Path) -> Result<()> {
+    write_mmap_symbols_from_source(table, path).map(|_| ())
+}
+
+#[cfg(test)]
+fn write_mmap_symbol_table_with_stats(table: &SymbolTable, path: &Path) -> Result<WriteStats> {
+    write_mmap_symbols_from_source(table, path)
+}
+
+fn write_mmap_symbols_from_source(
+    source: &impl SymbolBucketSource,
+    path: &Path,
+) -> Result<WriteStats> {
     // ── 1. Collect all unique strings into a pool ────────────────────────
     let mut string_pool = StringPool::new();
-
-    // Pre-register all strings in the pool.
-    for entry in &table.symbols {
-        string_pool.intern(entry.key())?;
-        for sym in entry.value() {
-            string_pool.intern(&sym.file_path)?;
-            if let Some(sig) = &sym.signature {
-                string_pool.intern(sig)?;
-            }
-            if let Some(doc_comment) = &sym.doc_comment {
-                string_pool.intern(doc_comment)?;
-            }
-            for scope_entry in &sym.scope {
-                string_pool.intern(scope_entry)?;
-            }
-            for relation in &sym.type_relations {
-                string_pool.intern(&relation.target)?;
-            }
-        }
-    }
+    let mut write_stats = WriteStats::default();
 
     // ── 2. Build name index sorted by xxh3(lowercase_name) ──────────────
     struct NameEntry {
@@ -49,11 +87,10 @@ pub fn write_mmap_symbols(table: &InMemorySymbolTable, path: &Path) -> Result<()
 
     // Keep only one name per bucket. Symbol records remain borrowed from the
     // DashMap while writing instead of cloning the complete corpus in memory.
-    let mut name_entries: Vec<NameEntry> = table
-        .symbols
-        .iter()
-        .map(|entry| {
-            let name = entry.key().clone();
+    let mut name_entries: Vec<NameEntry> = source
+        .names()
+        .into_iter()
+        .map(|name| {
             let lower_name = name.to_lowercase();
             let hash = xxhash_rust::xxh3::xxh3_64(lower_name.as_bytes());
             NameEntry {
@@ -74,14 +111,7 @@ pub fn write_mmap_symbols(table: &InMemorySymbolTable, path: &Path) -> Result<()
     let name_count = u32::try_from(name_entries.len()).map_err(|_| {
         CodixingError::Serialization("too many symbol names for mmap format".to_string())
     })?;
-    let symbol_count = table.symbols.iter().try_fold(0u32, |total, entry| {
-        let bucket = u32::try_from(entry.value().len()).map_err(|_| {
-            CodixingError::Serialization("too many symbols for mmap format".to_string())
-        })?;
-        total.checked_add(bucket).ok_or_else(|| {
-            CodixingError::Serialization("too many symbols for mmap format".to_string())
-        })
-    })?;
+    write_stats.name_count = name_count as usize;
 
     let mut prefix_slots: Vec<usize> = (0..name_entries.len()).collect();
     prefix_slots.sort_by(|left, right| {
@@ -99,66 +129,65 @@ pub fn write_mmap_symbols(table: &InMemorySymbolTable, path: &Path) -> Result<()
         })
         .collect::<Result<_>>()?;
 
-    struct PublicFileEntry {
-        hash: u64,
-        path: String,
-        lines: Vec<u32>,
-    }
-    let mut public_lines_by_file: HashMap<String, Vec<u32>> = HashMap::new();
-    for entry in &table.symbols {
-        for symbol in entry.value() {
-            if symbol.visibility == Visibility::Public {
-                public_lines_by_file
-                    .entry(symbol.file_path.clone())
-                    .or_default()
-                    .push(u32_field(symbol.line_start, "line_start", &symbol.name)?);
-            }
-        }
-    }
-    let mut public_files: Vec<PublicFileEntry> = public_lines_by_file
-        .into_iter()
-        .map(|(path, mut lines)| {
-            lines.sort_unstable();
-            lines.dedup();
-            PublicFileEntry {
-                hash: xxhash_rust::xxh3::xxh3_64(path.as_bytes()),
-                path,
-                lines,
-            }
-        })
-        .collect();
-    public_files.sort_by(|left, right| {
-        left.hash
-            .cmp(&right.hash)
-            .then_with(|| left.path.cmp(&right.path))
-    });
-
     // ── 3. Build symbol data blob ────────────────────────────────────────
     let mut symbol_data = Vec::new();
     let mut symbol_offsets: Vec<u32> = Vec::with_capacity(name_entries.len());
+    let mut symbol_postings_by_file: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
+    let mut symbol_count = 0u32;
 
-    for entry in &name_entries {
+    for (name_slot, entry) in name_entries.iter().enumerate() {
+        string_pool.intern(&entry.name)?;
         let offset = u32::try_from(symbol_data.len()).map_err(|_| {
             CodixingError::Serialization("symbol data exceeds mmap format limit".to_string())
         })?;
         symbol_offsets.push(offset);
 
-        // Write count.
-        let symbols = table.symbols.get(&entry.name).ok_or_else(|| {
-            CodixingError::Serialization(format!(
-                "symbol bucket {} disappeared while writing mmap",
-                entry.name
-            ))
-        })?;
-        let count = u32::try_from(symbols.value().len()).map_err(|_| {
+        // Decode and sort just this exact-name bucket. Peak decoded Symbol
+        // storage is therefore bounded by the largest overload set, not the
+        // repository's total symbol count.
+        let mut symbols = source.symbols_for_exact_name(&entry.name);
+        write_stats.peak_bucket_symbols = write_stats.peak_bucket_symbols.max(symbols.len());
+        symbols.sort_unstable_by(compare_symbols);
+        let count = u32::try_from(symbols.len()).map_err(|_| {
             CodixingError::Serialization(format!(
                 "symbol name {} has too many definitions for mmap format",
                 entry.name
             ))
         })?;
+        symbol_count = symbol_count.checked_add(count).ok_or_else(|| {
+            CodixingError::Serialization("too many symbols for mmap format".to_string())
+        })?;
+        // Preserve the canonical string-pool order while decoding each bucket
+        // only once. Offsets are stable after interning, so the second loop can
+        // serialize the same sorted bucket without retaining corpus-wide data.
+        for sym in &symbols {
+            string_pool.intern(&sym.file_path)?;
+            if let Some(sig) = &sym.signature {
+                string_pool.intern(sig)?;
+            }
+            if let Some(doc_comment) = &sym.doc_comment {
+                string_pool.intern(doc_comment)?;
+            }
+            for scope_entry in &sym.scope {
+                string_pool.intern(scope_entry)?;
+            }
+            for relation in &sym.type_relations {
+                string_pool.intern(&relation.target)?;
+            }
+        }
         symbol_data.extend_from_slice(&count.to_le_bytes());
 
-        for sym in symbols.value() {
+        let name_slot = u32::try_from(name_slot).map_err(|_| {
+            CodixingError::Serialization("too many symbol names for mmap format".to_string())
+        })?;
+        for sym in &symbols {
+            let record_offset = u32::try_from(symbol_data.len()).map_err(|_| {
+                CodixingError::Serialization("symbol data exceeds mmap format limit".to_string())
+            })?;
+            symbol_postings_by_file
+                .entry(sym.file_path.clone())
+                .or_default()
+                .push((name_slot, record_offset));
             // kind: u8
             symbol_data.push(entity_kind_to_u8(&sym.kind));
             // language: u8
@@ -223,27 +252,69 @@ pub fn write_mmap_symbols(table: &InMemorySymbolTable, path: &Path) -> Result<()
             }
         }
     }
+    write_stats.symbol_count = symbol_count as usize;
 
-    let file_count = u32::try_from(public_files.len()).map_err(|_| {
-        CodixingError::Serialization("too many public-symbol files for mmap format".to_string())
+    struct SymbolFileEntry {
+        hash: u64,
+        path: String,
+        postings: Vec<(u32, u32)>,
+    }
+    let mut symbol_files: Vec<SymbolFileEntry> = symbol_postings_by_file
+        .into_iter()
+        .map(|(path, mut postings)| {
+            postings.sort_unstable();
+            SymbolFileEntry {
+                hash: xxhash_rust::xxh3::xxh3_64(path.as_bytes()),
+                path,
+                postings,
+            }
+        })
+        .collect();
+    symbol_files.sort_by(|left, right| {
+        left.hash
+            .cmp(&right.hash)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+
+    let symbol_file_count = u32::try_from(symbol_files.len()).map_err(|_| {
+        CodixingError::Serialization("too many symbol files for mmap format".to_string())
     })?;
-    let mut public_line_data = Vec::new();
-    let mut public_line_offsets = Vec::with_capacity(public_files.len());
-    let mut public_line_counts = Vec::with_capacity(public_files.len());
-    for entry in &public_files {
-        public_line_offsets.push(u32::try_from(public_line_data.len()).map_err(|_| {
-            CodixingError::Serialization(
-                "public symbol line index exceeds mmap format limit".to_string(),
-            )
-        })?);
-        public_line_counts.push(u32::try_from(entry.lines.len()).map_err(|_| {
-            CodixingError::Serialization(
-                "too many public symbol lines in one file for mmap format".to_string(),
-            )
-        })?);
-        for line in &entry.lines {
-            public_line_data.extend_from_slice(&line.to_le_bytes());
-        }
+    let mut symbol_file_posting_offsets = Vec::with_capacity(symbol_files.len());
+    let mut symbol_file_posting_counts = Vec::with_capacity(symbol_files.len());
+    let mut symbol_file_posting_count = 0u32;
+    let mut symbol_file_posting_data_size = 0usize;
+    for entry in &symbol_files {
+        symbol_file_posting_offsets.push(u32::try_from(symbol_file_posting_data_size).map_err(
+            |_| {
+                CodixingError::Serialization(
+                    "symbol file postings exceed mmap format limit".to_string(),
+                )
+            },
+        )?);
+        let count = u32::try_from(entry.postings.len()).map_err(|_| {
+            CodixingError::Serialization("too many symbols in one file for mmap format".to_string())
+        })?;
+        symbol_file_posting_counts.push(count);
+        symbol_file_posting_count =
+            symbol_file_posting_count
+                .checked_add(count)
+                .ok_or_else(|| {
+                    CodixingError::Serialization(
+                        "too many symbol file postings for mmap format".to_string(),
+                    )
+                })?;
+        let entry_size = entry
+            .postings
+            .len()
+            .checked_mul(crate::symbols::mmap::SYMBOL_FILE_POSTING_SIZE)
+            .ok_or_else(|| {
+                CodixingError::Serialization("symbol file postings size overflow".to_string())
+            })?;
+        symbol_file_posting_data_size = symbol_file_posting_data_size
+            .checked_add(entry_size)
+            .ok_or_else(|| {
+                CodixingError::Serialization("symbol file postings size overflow".to_string())
+            })?;
     }
 
     // ── 4. Collect name offsets before consuming the string pool ────────
@@ -251,7 +322,7 @@ pub fn write_mmap_symbols(table: &InMemorySymbolTable, path: &Path) -> Result<()
         .iter()
         .map(|entry| string_pool.offset(&entry.name))
         .collect();
-    let public_file_path_offsets: Vec<u32> = public_files
+    let symbol_file_path_offsets: Vec<u32> = symbol_files
         .iter()
         .map(|entry| string_pool.offset(&entry.path))
         .collect();
@@ -271,77 +342,79 @@ pub fn write_mmap_symbols(table: &InMemorySymbolTable, path: &Path) -> Result<()
         .ok_or_else(|| {
             CodixingError::Serialization("symbol prefix index size overflow".to_string())
         })?;
-    let file_index_size = public_files
+    let symbol_file_index_size = symbol_files
         .len()
-        .checked_mul(FILE_INDEX_ENTRY_SIZE)
+        .checked_mul(SYMBOL_FILE_INDEX_ENTRY_SIZE)
         .ok_or_else(|| {
-            CodixingError::Serialization("public symbol file index size overflow".to_string())
+            CodixingError::Serialization("symbol file index size overflow".to_string())
         })?;
     let total_size = HEADER_SIZE
         .checked_add(name_index_size)
         .and_then(|size| size.checked_add(prefix_index_size))
         .and_then(|size| size.checked_add(4))
-        .and_then(|size| size.checked_add(file_index_size))
+        .and_then(|size| size.checked_add(symbol_file_index_size))
+        .and_then(|size| size.checked_add(4))
+        .and_then(|size| size.checked_add(symbol_file_posting_data_size))
         .and_then(|size| size.checked_add(8))
         .and_then(|size| size.checked_add(pool_bytes.len()))
         .and_then(|size| size.checked_add(symbol_data.len()))
-        .and_then(|size| size.checked_add(public_line_data.len()))
         .ok_or_else(|| CodixingError::Serialization("mmap symbol size overflow".to_string()))?;
-
-    let mut buf = Vec::with_capacity(total_size);
-
-    // Header.
-    buf.extend_from_slice(&MAGIC.to_le_bytes());
-    buf.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
-    buf.extend_from_slice(&name_count.to_le_bytes());
-    buf.extend_from_slice(&symbol_count.to_le_bytes());
-
-    // Name index.
-    for (i, entry) in name_entries.iter().enumerate() {
-        buf.extend_from_slice(&entry.hash.to_le_bytes());
-        buf.extend_from_slice(&name_offsets[i].to_le_bytes());
-        buf.extend_from_slice(&symbol_offsets[i].to_le_bytes());
-    }
-
-    // Case-insensitive prefix index into the hash-sorted name index.
-    for slot in &prefix_slots {
-        buf.extend_from_slice(&slot.to_le_bytes());
-    }
-
-    // Public-definition file/range index.
-    buf.extend_from_slice(&file_count.to_le_bytes());
-    for (index, entry) in public_files.iter().enumerate() {
-        buf.extend_from_slice(&entry.hash.to_le_bytes());
-        buf.extend_from_slice(&public_file_path_offsets[index].to_le_bytes());
-        buf.extend_from_slice(&public_line_offsets[index].to_le_bytes());
-        buf.extend_from_slice(&public_line_counts[index].to_le_bytes());
-    }
-
-    // Section sizes + bytes.
     let pool_size = u32::try_from(pool_bytes.len()).map_err(|_| {
         CodixingError::Serialization("symbol string pool exceeds mmap format limit".to_string())
     })?;
     let symbol_data_size = u32::try_from(symbol_data.len()).map_err(|_| {
         CodixingError::Serialization("symbol data exceeds mmap format limit".to_string())
     })?;
-    buf.extend_from_slice(&pool_size.to_le_bytes());
-    buf.extend_from_slice(&symbol_data_size.to_le_bytes());
-    buf.extend_from_slice(&pool_bytes);
+    write_stats.final_output_buffer_bytes = 0;
 
-    // Symbol data.
-    buf.extend_from_slice(&symbol_data);
+    // ── 6. Stream directly into the durable atomic scratch file ─────────
+    crate::persistence::atomic_write_with(path, move |file| {
+        // Symbol tables contain hundreds of thousands of small fixed-width
+        // fields. Writing each one directly to `File` turns checkpointing into
+        // one syscall per field on large repositories. Keep the streaming
+        // memory bound while coalescing those fields into normal buffered I/O.
+        let mut writer = BufWriter::new(file);
+        writer.write_all(&MAGIC.to_le_bytes())?;
+        writer.write_all(&FORMAT_VERSION.to_le_bytes())?;
+        writer.write_all(&name_count.to_le_bytes())?;
+        writer.write_all(&symbol_count.to_le_bytes())?;
 
-    // Sorted public definition lines, grouped by file index entry.
-    buf.extend_from_slice(&public_line_data);
+        for (index, entry) in name_entries.iter().enumerate() {
+            writer.write_all(&entry.hash.to_le_bytes())?;
+            writer.write_all(&name_offsets[index].to_le_bytes())?;
+            writer.write_all(&symbol_offsets[index].to_le_bytes())?;
+        }
+        for slot in &prefix_slots {
+            writer.write_all(&slot.to_le_bytes())?;
+        }
 
-    debug_assert_eq!(buf.len(), total_size);
+        writer.write_all(&symbol_file_count.to_le_bytes())?;
+        for (index, entry) in symbol_files.iter().enumerate() {
+            writer.write_all(&entry.hash.to_le_bytes())?;
+            writer.write_all(&symbol_file_path_offsets[index].to_le_bytes())?;
+            writer.write_all(&symbol_file_posting_offsets[index].to_le_bytes())?;
+            writer.write_all(&symbol_file_posting_counts[index].to_le_bytes())?;
+        }
+        writer.write_all(&symbol_file_posting_count.to_le_bytes())?;
+        for entry in symbol_files {
+            for (name_slot, record_offset) in entry.postings {
+                writer.write_all(&name_slot.to_le_bytes())?;
+                writer.write_all(&record_offset.to_le_bytes())?;
+            }
+        }
 
-    // ── 6. Write atomically ──────────────────────────────────────────────
-    crate::persistence::atomic_write(path, &buf).map_err(|e| {
-        CodixingError::Serialization(format!("failed to write symbols_v2.bin: {e}"))
-    })?;
+        writer.write_all(&pool_size.to_le_bytes())?;
+        writer.write_all(&symbol_data_size.to_le_bytes())?;
+        writer.write_all(&pool_bytes)?;
+        writer.write_all(&symbol_data)?;
 
-    Ok(())
+        writer.flush()?;
+        debug_assert_eq!(writer.stream_position()?, total_size as u64);
+        Ok(())
+    })
+    .map_err(|e| CodixingError::Serialization(format!("failed to write symbols_v2.bin: {e}")))?;
+
+    Ok(write_stats)
 }
 
 // ── String pool builder ──────────────────────────────────────────────────
@@ -411,6 +484,34 @@ impl StringPool {
     }
 }
 
+fn compare_symbols(left: &Symbol, right: &Symbol) -> Ordering {
+    left.file_path
+        .cmp(&right.file_path)
+        .then_with(|| left.line_start.cmp(&right.line_start))
+        .then_with(|| left.line_end.cmp(&right.line_end))
+        .then_with(|| left.byte_start.cmp(&right.byte_start))
+        .then_with(|| left.byte_end.cmp(&right.byte_end))
+        .then_with(|| entity_kind_to_u8(&left.kind).cmp(&entity_kind_to_u8(&right.kind)))
+        .then_with(|| language_to_u8(left.language).cmp(&language_to_u8(right.language)))
+        .then_with(|| left.signature.cmp(&right.signature))
+        .then_with(|| left.scope.cmp(&right.scope))
+        .then_with(|| left.doc_comment.cmp(&right.doc_comment))
+        .then_with(|| visibility_to_u8(&left.visibility).cmp(&visibility_to_u8(&right.visibility)))
+        .then_with(|| compare_type_relations(left, right))
+}
+
+fn compare_type_relations(left: &Symbol, right: &Symbol) -> Ordering {
+    for (left_relation, right_relation) in left.type_relations.iter().zip(&right.type_relations) {
+        let ordering = type_relation_kind_to_u8(&left_relation.kind)
+            .cmp(&type_relation_kind_to_u8(&right_relation.kind))
+            .then_with(|| left_relation.target.cmp(&right_relation.target));
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    left.type_relations.len().cmp(&right.type_relations.len())
+}
+
 fn u32_field(value: usize, field: &str, symbol: &str) -> Result<u32> {
     u32::try_from(value).map_err(|_| {
         CodixingError::Serialization(format!(
@@ -422,6 +523,28 @@ fn u32_field(value: usize, field: &str, symbol: &str) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::language::{EntityKind, Language, Visibility};
+    use crate::symbols::mmap::MmapSymbolTable;
+    use std::cell::Cell;
+    use tempfile::tempdir;
+
+    fn symbol(name: &str, file_path: &str, line: usize) -> Symbol {
+        Symbol {
+            name: name.to_string(),
+            kind: EntityKind::Function,
+            language: Language::Rust,
+            file_path: file_path.to_string(),
+            line_start: line,
+            line_end: line + 1,
+            byte_start: line * 10,
+            byte_end: line * 10 + 5,
+            signature: Some(format!("fn {name}()")),
+            scope: Vec::new(),
+            doc_comment: None,
+            visibility: Visibility::Public,
+            type_relations: Vec::new(),
+        }
+    }
 
     #[test]
     fn string_pool_deduplication() {
@@ -433,5 +556,153 @@ mod tests {
         assert_ne!(off1, off2); // different strings -> different offsets
         // offset 0 is the sentinel
         assert!(off1 >= 4);
+    }
+
+    #[test]
+    fn mmap_writer_decodes_each_name_bucket_once_with_byte_parity() {
+        struct CountingSource {
+            names: Vec<String>,
+            buckets: HashMap<String, Vec<Symbol>>,
+            bucket_reads: Cell<usize>,
+        }
+
+        impl SymbolBucketSource for CountingSource {
+            fn names(&self) -> Vec<String> {
+                self.names.clone()
+            }
+
+            fn symbols_for_exact_name(&self, name: &str) -> Vec<Symbol> {
+                self.bucket_reads.set(self.bucket_reads.get() + 1);
+                self.buckets.get(name).cloned().unwrap_or_default()
+            }
+        }
+
+        let symbols = vec![
+            symbol("same", "src/b.rs", 3),
+            symbol("Alpha", "src/a.rs", 1),
+            symbol("same", "src/a.rs", 2),
+        ];
+        let expected = InMemorySymbolTable::new();
+        let mut buckets: HashMap<String, Vec<Symbol>> = HashMap::new();
+        for symbol in symbols {
+            expected.insert(symbol.clone());
+            buckets.entry(symbol.name.clone()).or_default().push(symbol);
+        }
+        let source = CountingSource {
+            names: vec!["same".to_string(), "Alpha".to_string()],
+            buckets,
+            bucket_reads: Cell::new(0),
+        };
+
+        let dir = tempdir().unwrap();
+        let expected_path = dir.path().join("expected.bin");
+        let actual_path = dir.path().join("actual.bin");
+        write_mmap_symbols(&expected, &expected_path).unwrap();
+        write_mmap_symbols_from_source(&source, &actual_path).unwrap();
+
+        assert_eq!(source.bucket_reads.get(), source.names.len());
+        assert_eq!(
+            std::fs::read(expected_path).unwrap(),
+            std::fs::read(actual_path).unwrap()
+        );
+    }
+
+    #[test]
+    fn mmap_writer_streams_without_a_corpus_sized_final_buffer_or_leftover_scratch() {
+        let table = SymbolTable::new();
+        for index in 0..256 {
+            table.insert(symbol(
+                &format!("symbol_{index:04}"),
+                &format!("src/file_{index:04}.rs"),
+                index + 1,
+            ));
+        }
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("symbols_v2.bin");
+
+        let stats = write_mmap_symbol_table_with_stats(&table, &path).unwrap();
+
+        assert_eq!(stats.final_output_buffer_bytes, 0);
+        assert!(std::fs::metadata(&path).unwrap().len() > 0);
+        let leftover_scratch: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(leftover_scratch.is_empty());
+    }
+
+    #[test]
+    fn overlay_checkpoint_matches_materialized_table_exactly() {
+        let dir = tempdir().unwrap();
+        let base_path = dir.path().join("base.bin");
+        let overlay_path = dir.path().join("overlay.bin");
+        let expected_path = dir.path().join("expected.bin");
+
+        let base = InMemorySymbolTable::new();
+        base.insert(symbol("removed", "src/changed.rs", 1));
+        base.insert(symbol("shared", "src/changed.rs", 2));
+        base.insert(symbol("shared", "src/keep.rs", 3));
+        base.insert(symbol("Untouched", "src/keep.rs", 4));
+        base.insert(symbol("untouched", "src/keep.rs", 5));
+        write_mmap_symbols(&base, &base_path).unwrap();
+
+        let mut overlay = SymbolTable::Mmap(MmapSymbolTable::load(&base_path).unwrap());
+        overlay.ensure_mutable();
+        overlay.remove_file("src/changed.rs");
+        overlay.insert(symbol("replacement", "src/changed.rs", 10));
+        overlay.insert(symbol("shared", "src/changed.rs", 11));
+        write_mmap_symbol_table(&overlay, &overlay_path).unwrap();
+
+        let expected = InMemorySymbolTable::new();
+        expected.insert(symbol("shared", "src/keep.rs", 3));
+        expected.insert(symbol("Untouched", "src/keep.rs", 4));
+        expected.insert(symbol("untouched", "src/keep.rs", 5));
+        expected.insert(symbol("replacement", "src/changed.rs", 10));
+        expected.insert(symbol("shared", "src/changed.rs", 11));
+        write_mmap_symbols(&expected, &expected_path).unwrap();
+
+        assert_eq!(
+            std::fs::read(&overlay_path).unwrap(),
+            std::fs::read(&expected_path).unwrap()
+        );
+        let restored = MmapSymbolTable::load(&overlay_path).unwrap();
+        assert_eq!(restored.len(), 4);
+        assert_eq!(restored.symbols_in_file("src/changed.rs", None).len(), 2);
+        assert!(restored.lookup("removed").is_empty());
+    }
+
+    #[test]
+    fn overlay_checkpoint_decodes_at_most_one_name_bucket() {
+        const BASE_NAMES: usize = 4_096;
+        let dir = tempdir().unwrap();
+        let base_path = dir.path().join("base.bin");
+        let checkpoint_path = dir.path().join("checkpoint.bin");
+
+        let base = InMemorySymbolTable::new();
+        for index in 0..BASE_NAMES {
+            base.insert(symbol(
+                &format!("symbol_{index:05}"),
+                &format!("src/file_{index:05}.rs"),
+                index + 1,
+            ));
+        }
+        write_mmap_symbols(&base, &base_path).unwrap();
+
+        let mut overlay = SymbolTable::Mmap(MmapSymbolTable::load(&base_path).unwrap());
+        overlay.ensure_mutable();
+        overlay.remove_file("src/file_02048.rs");
+        overlay.insert(symbol("symbol_02048", "src/file_02048.rs", 9_000));
+        overlay.insert(symbol("brand_new", "src/new.rs", 9_001));
+
+        assert_eq!(overlay.len(), BASE_NAMES + 1);
+        let stats = write_mmap_symbol_table_with_stats(&overlay, &checkpoint_path).unwrap();
+        assert_eq!(stats.name_count, BASE_NAMES + 1);
+        assert_eq!(stats.symbol_count, BASE_NAMES + 1);
+        assert_eq!(
+            stats.peak_bucket_symbols, 1,
+            "checkpointing must not decode the full mmap corpus"
+        );
+        assert_eq!(stats.final_output_buffer_bytes, 0);
     }
 }
