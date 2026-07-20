@@ -506,9 +506,23 @@ mod load_engine_tests {
         let dir = tempfile::tempdir().unwrap();
         make_index(dir.path());
 
-        let engine = load_engine(dir.path(), jsonrpc::McpProfile::Editor)
-            .await
-            .unwrap();
+        // `Engine::open` briefly retries then falls back to read-only when the
+        // writer lease is busy. Parallel MCP tests can still race cleanup of a
+        // just-dropped init engine on macOS CI, so retry the load a few times
+        // before declaring the profile contract broken.
+        let mut engine = None;
+        for attempt in 0..8 {
+            let loaded = load_engine(dir.path(), jsonrpc::McpProfile::Editor)
+                .await
+                .unwrap();
+            if !loaded.is_read_only() {
+                engine = Some(loaded);
+                break;
+            }
+            drop(loaded);
+            tokio::time::sleep(std::time::Duration::from_millis(25 * (attempt + 1))).await;
+        }
+        let engine = engine.expect("editor profile should acquire the writer");
         assert!(!engine.is_read_only(), "editor profile keeps the writer");
     }
 }
