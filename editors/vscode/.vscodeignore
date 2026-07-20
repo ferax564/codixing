@@ -1,8 +1,6 @@
 src/**
-node_modules/**
 .vscode/**
 tsconfig.json
 **/*.map
 **/*.ts
-!out/**
 !resources/**

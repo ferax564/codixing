@@ -8,11 +8,12 @@
 //!
 //! Built during `Engine::init()` and loaded from disk during `Engine::open()`.
 
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::concepts::{decompose_identifier, extract_concept_words};
+use super::concepts::{decompose_identifier, extract_ranked_concept_words};
 
 // ---------------------------------------------------------------------------
 // Data type
@@ -84,6 +85,127 @@ impl LearnedReformulations {
             && self.doc_to_code.is_empty()
             && self.session_expansions.is_empty()
     }
+
+    pub(super) fn encode_persisted(&self) -> std::result::Result<Vec<u8>, String> {
+        let compact = CompactReformulations::from_reformulations(self)?;
+        let payload = bitcode::serialize(&compact).map_err(|error| error.to_string())?;
+        let mut bytes = Vec::with_capacity(REFORMULATION_FORMAT_MAGIC.len() + payload.len());
+        bytes.extend_from_slice(REFORMULATION_FORMAT_MAGIC);
+        bytes.extend_from_slice(&payload);
+        Ok(bytes)
+    }
+
+    pub(super) fn decode_persisted(bytes: &[u8]) -> std::result::Result<Self, String> {
+        if let Some(payload) = bytes.strip_prefix(REFORMULATION_FORMAT_MAGIC) {
+            let compact: CompactReformulations =
+                bitcode::deserialize(payload).map_err(|error| error.to_string())?;
+            compact.into_reformulations()
+        } else {
+            bitcode::deserialize(bytes).map_err(|error| error.to_string())
+        }
+    }
+}
+
+const REFORMULATION_FORMAT_MAGIC: &[u8] = b"CXRF2\0";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CompactReformulations {
+    strings: Vec<String>,
+    term_expansions: Vec<(u32, Vec<u32>)>,
+    doc_to_code: Vec<(u32, Vec<u32>)>,
+    session_expansions: Vec<(u32, Vec<u32>)>,
+}
+
+impl CompactReformulations {
+    fn from_reformulations(value: &LearnedReformulations) -> std::result::Result<Self, String> {
+        let mut strings = BTreeSet::new();
+        for map in [
+            &value.term_expansions,
+            &value.doc_to_code,
+            &value.session_expansions,
+        ] {
+            for (term, expansions) in map {
+                strings.insert(term.clone());
+                strings.extend(expansions.iter().cloned());
+            }
+        }
+        let strings: Vec<String> = strings.into_iter().collect();
+        let ids: BTreeMap<&str, u32> = strings
+            .iter()
+            .enumerate()
+            .map(|(idx, value)| {
+                u32::try_from(idx)
+                    .map(|idx| (value.as_str(), idx))
+                    .map_err(|_| "reformulation string table exceeds u32".to_string())
+            })
+            .collect::<std::result::Result<_, _>>()?;
+        let term_expansions = encode_expansion_map(&value.term_expansions, &ids)?;
+        let doc_to_code = encode_expansion_map(&value.doc_to_code, &ids)?;
+        let session_expansions = encode_expansion_map(&value.session_expansions, &ids)?;
+        Ok(Self {
+            strings,
+            term_expansions,
+            doc_to_code,
+            session_expansions,
+        })
+    }
+
+    fn into_reformulations(self) -> std::result::Result<LearnedReformulations, String> {
+        Ok(LearnedReformulations {
+            term_expansions: decode_expansion_map(&self.strings, self.term_expansions)?,
+            doc_to_code: decode_expansion_map(&self.strings, self.doc_to_code)?,
+            session_expansions: decode_expansion_map(&self.strings, self.session_expansions)?,
+        })
+    }
+}
+
+fn encode_expansion_map(
+    map: &HashMap<String, Vec<String>>,
+    ids: &BTreeMap<&str, u32>,
+) -> std::result::Result<Vec<(u32, Vec<u32>)>, String> {
+    let mut entries: Vec<_> = map.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    entries
+        .into_iter()
+        .map(|(term, expansions)| {
+            let term = ids
+                .get(term.as_str())
+                .copied()
+                .ok_or_else(|| format!("missing interned reformulation term: {term}"))?;
+            let expansions = expansions
+                .iter()
+                .map(|expansion| {
+                    ids.get(expansion.as_str()).copied().ok_or_else(|| {
+                        format!("missing interned reformulation expansion: {expansion}")
+                    })
+                })
+                .collect::<std::result::Result<_, _>>()?;
+            Ok((term, expansions))
+        })
+        .collect()
+}
+
+fn decode_expansion_map(
+    strings: &[String],
+    entries: Vec<(u32, Vec<u32>)>,
+) -> std::result::Result<HashMap<String, Vec<String>>, String> {
+    let resolve = |id: u32| {
+        strings
+            .get(id as usize)
+            .cloned()
+            .ok_or_else(|| format!("reformulation string id {id} is out of bounds"))
+    };
+    let mut map = HashMap::with_capacity(entries.len());
+    for (term, expansions) in entries {
+        map.insert(
+            resolve(term)?,
+            expansions
+                .into_iter()
+                .map(resolve)
+                .collect::<std::result::Result<_, _>>()?,
+        );
+    }
+    Ok(map)
 }
 
 // ---------------------------------------------------------------------------
@@ -95,13 +217,15 @@ impl LearnedReformulations {
 struct IdentifierRecord {
     name: String,
     file: String,
+    part_count: usize,
 }
 
 /// Intermediate record of a documented symbol.
 #[derive(Debug)]
 struct DocSymbolRecord {
     name: String,
-    doc: String,
+    doc_words: Vec<String>,
+    word_count: usize,
 }
 
 /// Intermediate record of an agent session event: the query issued, the
@@ -122,6 +246,29 @@ const SESSION_FREQ_THRESHOLD: usize = 3;
 /// distinct session ids. Prevents a single chatty session from injecting
 /// noise into the learned vocabulary.
 const SESSION_DISTINCT_SESSIONS_THRESHOLD: usize = 2;
+
+/// Hard limits for learned vocabulary construction. These are intentionally
+/// constants rather than user-facing knobs: they are safety invariants, and
+/// tuning them per repository would make index size and query behaviour hard
+/// to predict.
+///
+/// The old builder connected every vocabulary word in a file to every other
+/// word (`O(k^2)`) and retained every resulting edge. A generated file with
+/// thousands of identifiers could therefore dominate both RAM and disk. The
+/// ranked limits below retain the terms with the strongest within-file and
+/// cross-file evidence while making every stage explicitly bounded.
+pub const MAX_REFORMULATION_TERMS: usize = 16_384;
+pub const MAX_TERMS_PER_FILE: usize = 32;
+pub const MAX_CANDIDATES_PER_TERM: usize = 24;
+pub const MAX_EXPANSIONS_PER_TERM: usize = 12;
+pub const MAX_DOC_TERMS: usize = 16_384;
+pub const MAX_DOC_WORDS_PER_SYMBOL: usize = 8;
+pub const MAX_DOC_SYMBOLS_PER_TERM: usize = 8;
+const MAX_SOURCE_IDENTIFIERS: usize = 200_000;
+const MAX_DOCUMENTED_SYMBOLS: usize = 100_000;
+const MAX_SESSION_EVENTS: usize = 10_000;
+const MAX_SESSION_QUERY_TERMS: usize = 16;
+const MAX_SESSION_FILE_TERMS: usize = 32;
 
 /// Builds [`LearnedReformulations`] from symbol data.
 ///
@@ -145,15 +292,24 @@ impl ReformulationBuilder {
         self.identifiers.push(IdentifierRecord {
             name: name.to_string(),
             file: file.to_string(),
+            part_count: decompose_identifier(name).len(),
         });
+        if self.identifiers.len() >= MAX_SOURCE_IDENTIFIERS.saturating_mul(2) {
+            retain_best_identifiers(&mut self.identifiers);
+        }
     }
 
     /// Register a documented symbol for doc-to-code bridge building.
     pub fn add_documented_symbol(&mut self, name: &str, doc: &str) {
+        let doc_words = extract_ranked_concept_words(doc, MAX_DOC_WORDS_PER_SYMBOL);
         self.doc_symbols.push(DocSymbolRecord {
             name: name.to_string(),
-            doc: doc.to_string(),
+            word_count: doc_words.len(),
+            doc_words,
         });
+        if self.doc_symbols.len() >= MAX_DOCUMENTED_SYMBOLS.saturating_mul(2) {
+            retain_best_doc_symbols(&mut self.doc_symbols);
+        }
     }
 
     /// Register an agent session event for session-driven reformulation.
@@ -170,11 +326,20 @@ impl ReformulationBuilder {
     /// path's basename (split on `_` / `-` / camelCase) and directory
     /// components (e.g. `src/auth/middleware.rs` → `auth`, `middleware`).
     pub fn add_session_event(&mut self, query: &str, visited_files: &[String], session_id: &str) {
-        let query_terms = tokenize_query_for_session(query);
+        if self.session_events.len() >= MAX_SESSION_EVENTS {
+            return;
+        }
+        let mut query_terms = tokenize_query_for_session(query);
+        query_terms.sort_by_key(|term| (Reverse(term.len()), term.clone()));
+        query_terms.dedup();
+        query_terms.truncate(MAX_SESSION_QUERY_TERMS);
         if query_terms.is_empty() {
             return;
         }
-        let file_vocab = extract_file_vocab(visited_files);
+        let mut file_vocab = extract_file_vocab(visited_files);
+        file_vocab.sort_by_key(|term| (Reverse(term.len()), term.clone()));
+        file_vocab.dedup();
+        file_vocab.truncate(MAX_SESSION_FILE_TERMS);
         if file_vocab.is_empty() {
             return;
         }
@@ -199,7 +364,17 @@ impl ReformulationBuilder {
     ///
     /// 3. **Identifier decomposition similarity**: Handled by source 1
     ///    (decomposing identifiers into parts and grouping by file).
-    pub fn build(self) -> LearnedReformulations {
+    pub fn build(mut self) -> LearnedReformulations {
+        retain_best_identifiers(&mut self.identifiers);
+        retain_best_doc_symbols(&mut self.doc_symbols);
+        self.identifiers
+            .sort_by(|a, b| (&a.file, &a.name).cmp(&(&b.file, &b.name)));
+        self.identifiers
+            .dedup_by(|a, b| a.file == b.file && a.name == b.name);
+        self.doc_symbols
+            .sort_by(|a, b| (&a.name, &a.doc_words).cmp(&(&b.name, &b.doc_words)));
+        self.doc_symbols
+            .dedup_by(|a, b| a.name == b.name && a.doc_words == b.doc_words);
         let term_expansions = self.build_term_cooccurrence();
         let doc_to_code = self.build_doc_to_code();
         let session_expansions = self.build_session_learning();
@@ -216,52 +391,78 @@ impl ReformulationBuilder {
     /// Groups identifiers by file, decomposes each into parts, and creates
     /// bidirectional links between parts that co-occur in the same file.
     fn build_term_cooccurrence(&self) -> HashMap<String, Vec<String>> {
-        // Group identifiers by file.
-        let mut file_to_parts: HashMap<&str, Vec<Vec<String>>> = HashMap::new();
+        // Group identifiers by file and count within-file evidence. A BTreeMap
+        // makes the later bounded pass independent of HashMap random seeding.
+        let mut file_to_parts: BTreeMap<&str, HashMap<String, u16>> = BTreeMap::new();
         for rec in &self.identifiers {
-            let parts = decompose_identifier(&rec.name);
-            // Filter to parts with length >= 3.
-            let parts: Vec<String> = parts.into_iter().filter(|p| p.len() >= 3).collect();
-            if !parts.is_empty() {
-                file_to_parts
-                    .entry(rec.file.as_str())
-                    .or_default()
-                    .push(parts);
+            let mut parts = decompose_identifier(&rec.name);
+            parts.retain(|p| p.len() >= 3);
+            parts.sort();
+            parts.dedup();
+            let counts = file_to_parts.entry(rec.file.as_str()).or_default();
+            for part in parts {
+                let count = counts.entry(part).or_default();
+                *count = count.saturating_add(1);
             }
         }
 
-        // For each file, collect all unique parts and create bidirectional links.
-        let mut term_links: HashMap<String, HashSet<String>> = HashMap::new();
-        for identifier_parts_list in file_to_parts.values() {
-            // Collect all unique parts across all identifiers in this file.
-            let mut all_parts: HashSet<String> = HashSet::new();
-            for parts in identifier_parts_list {
-                for part in parts {
-                    all_parts.insert(part.clone());
-                }
+        // Cross-file document frequency ranks vocabulary by repeated evidence.
+        // Rare generated terms are discarded before any pair enumeration.
+        let mut document_frequency: HashMap<String, u32> = HashMap::new();
+        for counts in file_to_parts.values() {
+            for term in counts.keys() {
+                *document_frequency.entry(term.clone()).or_default() += 1;
             }
+        }
+        let mut vocabulary: Vec<(String, u32)> = document_frequency.into_iter().collect();
+        vocabulary.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| b.0.len().cmp(&a.0.len()))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        vocabulary.truncate(MAX_REFORMULATION_TERMS);
+        let vocabulary: HashSet<String> = vocabulary.into_iter().map(|(term, _)| term).collect();
 
-            // Create bidirectional links between all parts in the same file.
-            let parts_vec: Vec<&String> = all_parts.iter().collect();
+        // Each file contributes at most MAX_TERMS_PER_FILE terms, ranked by
+        // within-file frequency and then lexical order. Pair generation is now
+        // O(files * MAX_TERMS_PER_FILE^2), never O(unbounded k^2).
+        let mut term_links: HashMap<String, HashMap<String, u32>> = HashMap::new();
+        for counts in file_to_parts.values() {
+            let mut parts_vec: Vec<(&String, u16)> = counts
+                .iter()
+                .filter(|(term, _)| vocabulary.contains(*term))
+                .map(|(term, &count)| (term, count))
+                .collect();
+            parts_vec.sort_by(|a, b| {
+                b.1.cmp(&a.1)
+                    .then_with(|| b.0.len().cmp(&a.0.len()))
+                    .then_with(|| a.0.cmp(b.0))
+            });
+            parts_vec.truncate(MAX_TERMS_PER_FILE);
             for i in 0..parts_vec.len() {
                 for j in (i + 1)..parts_vec.len() {
-                    let a = parts_vec[i];
-                    let b = parts_vec[j];
+                    let a = parts_vec[i].0;
+                    let b = parts_vec[j].0;
                     if a != b {
-                        term_links.entry(a.clone()).or_default().insert(b.clone());
-                        term_links.entry(b.clone()).or_default().insert(a.clone());
+                        increment_bounded_candidate(&mut term_links, a, b);
+                        increment_bounded_candidate(&mut term_links, b, a);
                     }
                 }
             }
         }
 
-        // Convert HashSets to sorted Vecs for deterministic output.
+        // Keep the strongest co-occurrences. Lexical tie-breaking makes the
+        // compact persisted bytes reproducible across processes.
         term_links
             .into_iter()
-            .map(|(k, v)| {
-                let mut sorted: Vec<String> = v.into_iter().collect();
-                sorted.sort();
-                (k, sorted)
+            .map(|(term, candidates)| {
+                let mut ranked: Vec<(String, u32)> = candidates.into_iter().collect();
+                ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                ranked.truncate(MAX_EXPANSIONS_PER_TERM);
+                (
+                    term,
+                    ranked.into_iter().map(|(candidate, _)| candidate).collect(),
+                )
             })
             .collect()
     }
@@ -300,21 +501,32 @@ impl ReformulationBuilder {
             }
         }
 
-        // Apply thresholds and collect into the term → Vec<vocab> map.
-        let mut out: HashMap<String, HashSet<String>> = HashMap::new();
+        // Apply thresholds, rank by repeated/distinct-session evidence, and
+        // keep the same per-term bound as the other reformulation sources.
+        let mut out: HashMap<String, Vec<(String, usize, usize)>> = HashMap::new();
         for ((qt, fv), (freq, sessions)) in pair_stats {
             if freq >= SESSION_FREQ_THRESHOLD
                 && sessions.len() >= SESSION_DISTINCT_SESSIONS_THRESHOLD
             {
-                out.entry(qt).or_default().insert(fv);
+                out.entry(qt).or_default().push((fv, freq, sessions.len()));
             }
         }
 
         out.into_iter()
-            .map(|(k, v)| {
-                let mut sorted: Vec<String> = v.into_iter().collect();
-                sorted.sort();
-                (k, sorted)
+            .map(|(term, mut candidates)| {
+                candidates.sort_by(|a, b| {
+                    b.1.cmp(&a.1)
+                        .then_with(|| b.2.cmp(&a.2))
+                        .then_with(|| a.0.cmp(&b.0))
+                });
+                candidates.truncate(MAX_EXPANSIONS_PER_TERM);
+                (
+                    term,
+                    candidates
+                        .into_iter()
+                        .map(|(candidate, _, _)| candidate)
+                        .collect(),
+                )
             })
             .collect()
     }
@@ -333,27 +545,80 @@ impl ReformulationBuilder {
         let mut word_to_symbols: HashMap<String, HashSet<String>> = HashMap::new();
 
         for rec in &self.doc_symbols {
-            let words = extract_concept_words(&rec.doc);
-            for word in words {
-                word_to_symbols
-                    .entry(word)
-                    .or_default()
-                    .insert(rec.name.clone());
+            for word in &rec.doc_words {
+                let symbols = word_to_symbols.entry(word.clone()).or_default();
+                // 21 is the generic-term sentinel used by the filter below.
+                if symbols.len() <= 20 {
+                    symbols.insert(rec.name.clone());
+                }
             }
         }
 
         // Filter out overly common words (appearing in >20 symbols).
         let max_symbol_count = 20;
 
-        word_to_symbols
+        let mut ranked_terms: Vec<(String, HashSet<String>)> = word_to_symbols
             .into_iter()
             .filter(|(_word, symbols)| symbols.len() <= max_symbol_count)
+            .collect();
+        ranked_terms.sort_by(|a, b| {
+            b.1.len()
+                .cmp(&a.1.len())
+                .then_with(|| b.0.len().cmp(&a.0.len()))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        ranked_terms.truncate(MAX_DOC_TERMS);
+        ranked_terms
+            .into_iter()
             .map(|(word, symbols)| {
                 let mut sorted: Vec<String> = symbols.into_iter().collect();
                 sorted.sort();
+                sorted.truncate(MAX_DOC_SYMBOLS_PER_TERM);
                 (word, sorted)
             })
             .collect()
+    }
+}
+
+fn retain_best_identifiers(records: &mut Vec<IdentifierRecord>) {
+    if records.len() <= MAX_SOURCE_IDENTIFIERS {
+        return;
+    }
+    records.sort_by(|a, b| {
+        b.part_count
+            .cmp(&a.part_count)
+            .then_with(|| a.file.cmp(&b.file))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    records.truncate(MAX_SOURCE_IDENTIFIERS);
+}
+
+fn retain_best_doc_symbols(records: &mut Vec<DocSymbolRecord>) {
+    if records.len() <= MAX_DOCUMENTED_SYMBOLS {
+        return;
+    }
+    records.sort_by(|a, b| {
+        b.word_count
+            .cmp(&a.word_count)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.doc_words.cmp(&b.doc_words))
+    });
+    records.truncate(MAX_DOCUMENTED_SYMBOLS);
+}
+
+fn increment_bounded_candidate(
+    links: &mut HashMap<String, HashMap<String, u32>>,
+    term: &str,
+    candidate: &str,
+) {
+    let candidates = links.entry(term.to_string()).or_default();
+    let count = candidates.entry(candidate.to_string()).or_default();
+    *count = count.saturating_add(1);
+    if candidates.len() > MAX_CANDIDATES_PER_TERM.saturating_mul(2) {
+        let mut ranked: Vec<(String, u32)> = candidates.drain().collect();
+        ranked.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        ranked.truncate(MAX_CANDIDATES_PER_TERM);
+        candidates.extend(ranked);
     }
 }
 
@@ -689,5 +954,91 @@ mod tests {
         // Verify expand produces same results.
         assert_eq!(original.expand("json"), decoded.expand("json"));
         assert_eq!(original.expand("validate"), decoded.expand("validate"));
+    }
+
+    #[test]
+    fn pathological_file_vocabulary_is_ranked_and_bounded() {
+        let mut builder = ReformulationBuilder::new();
+        for idx in 0..500 {
+            // `shared` has the strongest evidence and must survive alongside a
+            // bounded selection of generated one-off vocabulary.
+            builder.add_identifier(&format!("shared_generated_term_{idx}"), "src/generated.rs");
+        }
+        builder.add_identifier("shared_auth_token", "src/generated.rs");
+        let reformulations = builder.build();
+        assert!(reformulations.term_expansions.len() <= MAX_REFORMULATION_TERMS);
+        assert!(
+            reformulations
+                .term_expansions
+                .values()
+                .all(|values| values.len() <= MAX_EXPANSIONS_PER_TERM)
+        );
+        assert!(
+            !reformulations.expand("shared").is_empty(),
+            "the repeated high-evidence term should retain useful neighbors"
+        );
+    }
+
+    #[test]
+    fn compact_reformulations_are_deterministic_across_input_order() {
+        fn build(reverse: bool) -> LearnedReformulations {
+            let mut symbols = vec![
+                ("auth_login", "src/auth.rs", "Authenticate credentials"),
+                ("auth_token", "src/auth.rs", "Validate credentials"),
+                ("cache_read", "src/cache.rs", "Read cached values"),
+                ("cache_write", "src/cache.rs", "Write cached values"),
+            ];
+            if reverse {
+                symbols.reverse();
+            }
+            let mut builder = ReformulationBuilder::new();
+            for (name, file, doc) in symbols {
+                builder.add_identifier(name, file);
+                builder.add_documented_symbol(name, doc);
+            }
+            builder.build()
+        }
+        assert_eq!(
+            build(false).encode_persisted().unwrap(),
+            build(true).encode_persisted().unwrap()
+        );
+    }
+
+    #[test]
+    fn interned_reformulation_format_is_less_than_half_legacy_size() {
+        let shared: Vec<String> = (0..12).map(|idx| format!("shared_term_{idx}")).collect();
+        let reformulations = LearnedReformulations {
+            term_expansions: (0..2_000)
+                .map(|idx| (format!("source_term_{idx}"), shared.clone()))
+                .collect(),
+            doc_to_code: (0..1_000)
+                .map(|idx| (format!("doc_term_{idx}"), shared[..8].to_vec()))
+                .collect(),
+            session_expansions: HashMap::new(),
+        };
+        let legacy = bitcode::serialize(&reformulations).unwrap();
+        let compact = reformulations.encode_persisted().unwrap();
+        assert!(
+            compact.len().saturating_mul(2) <= legacy.len(),
+            "compact={} legacy={}",
+            compact.len(),
+            legacy.len()
+        );
+        let decoded = LearnedReformulations::decode_persisted(&compact).unwrap();
+        assert_eq!(
+            decoded.expand("source_term_42"),
+            reformulations.expand("source_term_42")
+        );
+    }
+
+    #[test]
+    fn persisted_reformulation_decoder_accepts_legacy_bytes() {
+        let mut builder = ReformulationBuilder::new();
+        builder.add_identifier("parse_json", "src/parser.rs");
+        builder.add_identifier("json_decode", "src/parser.rs");
+        let original = builder.build();
+        let legacy = bitcode::serialize(&original).unwrap();
+        let decoded = LearnedReformulations::decode_persisted(&legacy).unwrap();
+        assert_eq!(decoded.expand("json"), original.expand("json"));
     }
 }

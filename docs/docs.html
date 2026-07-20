@@ -622,6 +622,8 @@ startup_timeout_sec = 120</code></pre>
           <tbody>
             <tr><td>--embed</td><td>false</td><td>Enable vector embeddings. BM25-only is the fast default.</td></tr>
             <tr><td>--model &lt;name&gt;</td><td>bge-base-en</td><td>Select the model used with <code>--embed</code>. Supported families include BGE, Jina Code, Nomic, Snowflake Arctic, Qwen3 (feature-gated), and the ONNX-free <code>model2vec</code> variants; run <code>codixing init --help</code> for the accepted names.</td></tr>
+            <tr><td>--threads &lt;N&gt;</td><td>min(CPUs, 8); min(CPUs, 4) on Windows</td><td>Override the bounded indexing worker count. Start with the default and change it only after measuring on your repository and storage.</td></tr>
+            <tr><td>--max-file-bytes &lt;BYTES&gt;</td><td>2 MiB</td><td>Skip larger files during indexing to bound work and memory. Use <code>0</code> only when an unlimited file size is intentional.</td></tr>
             <tr><td>--also &lt;DIR&gt;</td><td>—</td><td>Add an extra root directory to the same index (multi-repo mode).</td></tr>
           </tbody>
         </table>
@@ -844,6 +846,7 @@ codixing impact --json src/path/to/file.rs
       <section class="doc-section" id="strategies">
         <h2>Search Strategies</h2>
         <p><code>codixing search</code> and the MCP <code>code_search</code> tool accept a <code>strategy</code> parameter. The default <code>auto</code> route selects an appropriate strategy from the query and available index capabilities.</p>
+        <p>For a one-shot CLI query on a very large repository, explicitly selecting <code>instant</code> or <code>exact</code> opens a lean lexical read profile that skips graph, vector, and reranker loading. The <code>auto</code> route and every other strategy open the full index so their ranking features remain available.</p>
 
         <div class="strategy-grid">
           <div class="strategy-card">
@@ -1537,17 +1540,20 @@ codixing impact --json src/path/to/file.rs
         <h3>.codixing/ directory layout</h3>
         <div class="pre-label">directory</div>
         <pre><code>.codixing/
-├── tantivy/             <span class="tok-comment"># BM25 segments and stored chunk content</span>
-├── vectors/             <span class="tok-comment"># generation-based vector snapshots</span>
-├── graph/
-│   ├── graph.bin        <span class="tok-comment"># file dependency graph</span>
-│   └── symbol_graph.bin <span class="tok-comment"># symbol-level call graph</span>
-├── symbols_v2.bin       <span class="tok-comment"># persisted symbol table</span>
-├── chunk_meta.bin       <span class="tok-comment"># compact resident chunk metadata</span>
-├── *_trigram.bin        <span class="tok-comment"># exact-search candidate indexes</span>
-├── tree_hashes_v2.bin   <span class="tok-comment"># authoritative sync baseline</span>
-├── config.json          <span class="tok-comment"># persisted index configuration</span>
-└── meta.json            <span class="tok-comment"># counts, format version, and git commit</span></code></pre>
+├── active-generation.json    <span class="tok-comment"># atomically selected readable generation</span>
+├── generations/
+│   └── gen-&lt;id&gt;/
+│       ├── tantivy/          <span class="tok-comment"># BM25 segments and stored chunk content</span>
+│       ├── vectors/          <span class="tok-comment"># vector index snapshots, when enabled</span>
+│       ├── graph/            <span class="tok-comment"># file and symbol dependency graphs</span>
+│       ├── symbols_v2.bin    <span class="tok-comment"># persisted symbol table</span>
+│       ├── chunk_meta.bin    <span class="tok-comment"># compact chunk metadata</span>
+│       ├── file_trigram.bin  <span class="tok-comment"># shared exact-search file candidates</span>
+│       ├── tree_hashes_v2.bin <span class="tok-comment"># authoritative sync baseline</span>
+│       ├── config.json       <span class="tok-comment"># persisted index configuration</span>
+│       └── meta.json         <span class="tok-comment"># counts, format version, and git commit</span>
+└── …                         <span class="tok-comment"># writer locks, journals, and session state</span></code></pre>
+        <p>Rebuilds and incremental checkpoints publish a complete new generation, then switch <code>active-generation.json</code> last. Readers therefore keep using the previous valid generation if publication is interrupted. A full rebuild temporarily needs room for both the active and replacement generations; on a large repository, budget roughly one additional index footprint of free disk. Use <code>codixing doctor . --json</code> to inspect the active generation and recovery status, <code>codixing repair .</code> to restore recoverable metadata and safely reclaim unpublished vector crash debris older than 24 hours, or <code>codixing init .</code> for a clean rebuild.</p>
       </section>
 
       <!-- Embeddings -->

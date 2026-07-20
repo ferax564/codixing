@@ -71,16 +71,15 @@ pub fn detect_surprises(graph: &CodeGraph, top_n: usize) -> Vec<SurprisingEdge> 
         let mut reasons = Vec::new();
 
         // Factor 1: Cross-community (+0.3).
-        if has_communities {
-            if let (Some(&c_from), Some(&c_to)) = (communities.get(*from), communities.get(*to)) {
-                if c_from != c_to {
-                    score += 0.3;
-                    reasons.push(format!(
-                        "cross-community: community {} -> community {}",
-                        c_from, c_to
-                    ));
-                }
-            }
+        if has_communities
+            && let (Some(&c_from), Some(&c_to)) = (communities.get(*from), communities.get(*to))
+            && c_from != c_to
+        {
+            score += 0.3;
+            reasons.push(format!(
+                "cross-community: community {} -> community {}",
+                c_from, c_to
+            ));
         }
 
         // Factor 2: PageRank disparity (+0.3 max).

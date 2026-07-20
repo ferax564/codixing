@@ -38,7 +38,7 @@ jobs:
       - name: Package VSIX
         run: npm run package
 
-      - name: Verify packaged version, icon, and license
+      - name: Verify packaged metadata and runtime imports
         shell: bash
         run: |
           EXPECTED_VERSION=$(node -p "require('./package.json').version")
@@ -54,6 +54,7 @@ jobs:
           EXPECTED_VERSION="$EXPECTED_VERSION" VERIFY_DIR="$VERIFY_DIR" node - <<'NODE'
           const assert = require('node:assert/strict');
           const fs = require('node:fs');
+          const { builtinModules } = require('node:module');
           const path = require('node:path');
 
           function verifyPng(file) {
@@ -70,6 +71,90 @@ jobs:
             assert.equal(data.readUInt32BE(20), 256, `${file} must be 256 px high`);
           }
 
+          function verifyRuntimeImports(extensionRoot, manifest) {
+            const builtins = new Set(
+              builtinModules.flatMap((name) => [name, `node:${name}`]),
+            );
+            const failures = [];
+            const pending = [];
+            const visited = new Set();
+            const requirePattern = /\brequire\(\s*(['"])([^'"]+)\1\s*\)/g;
+
+            function isPackaged(file) {
+              const relative = path.relative(extensionRoot, file);
+              return relative === '' || (
+                !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
+              );
+            }
+
+            try {
+              const entryPoint = require.resolve(
+                path.resolve(extensionRoot, manifest.main),
+              );
+              if (isPackaged(entryPoint)) {
+                pending.push(entryPoint);
+              } else {
+                failures.push(`extension entry point resolved outside VSIX (${entryPoint})`);
+              }
+            } catch (error) {
+              failures.push(`extension entry point: ${error.code ?? error.message}`);
+            }
+
+            while (pending.length > 0) {
+              const file = pending.pop();
+              if (visited.has(file)) {
+                continue;
+              }
+              visited.add(file);
+              const source = fs.readFileSync(file, 'utf8');
+              for (const match of source.matchAll(requirePattern)) {
+                const request = match[2];
+                if (request === 'vscode' || builtins.has(request)) {
+                  continue;
+                }
+                try {
+                  const resolved = require.resolve(request, {
+                    paths: [path.dirname(file)],
+                  });
+                  if (!isPackaged(resolved)) {
+                    failures.push(
+                      `${path.relative(extensionRoot, file)} -> ${request}: resolved outside VSIX (${resolved})`,
+                    );
+                  } else if (/\.[cm]?js$/i.test(resolved)) {
+                    pending.push(resolved);
+                  }
+                } catch (error) {
+                  failures.push(
+                    `${path.relative(extensionRoot, file)} -> ${request}: ${error.code ?? error.message}`,
+                  );
+                }
+              }
+            }
+
+            for (const dependency of Object.keys(manifest.dependencies ?? {})) {
+              try {
+                const resolved = require.resolve(dependency, {
+                  paths: [extensionRoot],
+                });
+                if (!isPackaged(resolved)) {
+                  failures.push(
+                    `package dependency ${dependency}: resolved outside VSIX (${resolved})`,
+                  );
+                }
+              } catch (error) {
+                failures.push(
+                  `package dependency ${dependency}: ${error.code ?? error.message}`,
+                );
+              }
+            }
+
+            assert.deepEqual(
+              failures,
+              [],
+              `VSIX has unresolved runtime imports:\n${failures.join('\n')}`,
+            );
+          }
+
           const root = process.cwd();
           const extracted = path.join(process.env.VERIFY_DIR, 'extension');
           verifyPng(path.join(root, 'icon.png'));
@@ -81,6 +166,7 @@ jobs:
           assert.equal(manifest.version, process.env.EXPECTED_VERSION);
           assert.equal(manifest.license, 'Apache-2.0');
           assert.equal(manifest.icon, 'icon.png');
+          verifyRuntimeImports(extracted, manifest);
 
           const vsixManifest = fs.readFileSync(
             path.join(process.env.VERIFY_DIR, 'extension.vsixmanifest'),

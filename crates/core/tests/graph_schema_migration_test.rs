@@ -10,6 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use codixing_core::graph::GRAPH_SCHEMA_VERSION;
+use codixing_core::persistence::IndexStore;
 use codixing_core::{Engine, IndexConfig};
 use tempfile::tempdir;
 
@@ -26,7 +27,7 @@ fn setup_mod_project(root: &Path) {
 }
 
 fn schema_version_path(root: &Path) -> PathBuf {
-    root.join(".codixing").join("graph").join("schema.version")
+    IndexStore::open(root).unwrap().graph_schema_version_path()
 }
 
 #[test]

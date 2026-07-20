@@ -215,6 +215,7 @@ pub(crate) fn call_rename_symbol(engine: &mut Engine, args: &Value) -> (String, 
     let mut modified = 0usize;
     let mut replacements = 0usize;
     let mut errors = Vec::new();
+    let mut changed_paths = Vec::new();
 
     for path in &files {
         let content = match std::fs::read_to_string(path) {
@@ -237,9 +238,7 @@ pub(crate) fn call_rename_symbol(engine: &mut Engine, args: &Value) -> (String, 
         }
         replacements += count;
         modified += 1;
-        if let Err(e) = engine.reindex_file(path) {
-            errors.push(format!("Reindex error for {}: {e}", path.display()));
-        }
+        changed_paths.push(path.clone());
     }
 
     if dry_run {
@@ -254,7 +253,18 @@ pub(crate) fn call_rename_symbol(engine: &mut Engine, args: &Value) -> (String, 
         );
     }
 
-    let _ = engine.persist_incremental();
+    if !changed_paths.is_empty() {
+        let changes: Vec<_> = changed_paths
+            .into_iter()
+            .map(|path| codixing_core::watcher::FileChange {
+                path,
+                kind: codixing_core::watcher::ChangeKind::Modified,
+            })
+            .collect();
+        if let Err(error) = engine.apply_changes(&changes) {
+            errors.push(format!("Batch reindex error: {error}"));
+        }
+    }
 
     if !errors.is_empty() {
         return (
@@ -476,10 +486,10 @@ pub(crate) fn call_find_tests(engine: &Engine, args: &Value) -> (String, bool) {
     let file_filter = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
 
     // Fast-path: when a source file is given, try the test-mapping index first.
-    if !file_filter.is_empty() {
-        if let Some(result) = find_tests_via_mapping(engine, file_filter, pattern) {
-            return result;
-        }
+    if !file_filter.is_empty()
+        && let Some(result) = find_tests_via_mapping(engine, file_filter, pattern)
+    {
+        return result;
     }
 
     // Fallback: symbol-based discovery.
@@ -849,10 +859,10 @@ pub(crate) fn call_generate_onboarding(engine: &mut Engine) -> (String, bool) {
     doc.push_str("\n\n---\n*Regenerate with:* `codixing-mcp generate_onboarding`\n");
 
     // Write to disk.
-    if let Some(parent) = output_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            return (format!("Failed to create .codixing/ directory: {e}"), true);
-        }
+    if let Some(parent) = output_path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        return (format!("Failed to create .codixing/ directory: {e}"), true);
     }
     if let Err(e) = std::fs::write(&output_path, &doc) {
         return (format!("Failed to write ONBOARDING.md: {e}"), true);

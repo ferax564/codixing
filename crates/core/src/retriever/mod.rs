@@ -29,7 +29,7 @@ pub enum Strategy {
     /// Highest precision available; requires `reranker_enabled = true` in config.
     /// Falls back to `Thorough` if the reranker model is not loaded.
     Deep,
-    /// Trigram index fast-path for exact identifier lookups.
+    /// File-trigram candidate fast-path with exact substring verification.
     /// Uses the trigram inverted index for sub-millisecond exact substring
     /// matching, with BM25 fallback when trigram yields < 3 results.
     Exact,
@@ -262,6 +262,22 @@ impl From<&ChunkMeta> for ChunkMetaCompact {
     }
 }
 
+impl From<ChunkMeta> for ChunkMetaCompact {
+    fn from(meta: ChunkMeta) -> Self {
+        Self {
+            chunk_id: meta.chunk_id,
+            file_path: meta.file_path,
+            language: meta.language,
+            line_start: meta.line_start,
+            line_end: meta.line_end,
+            signature: meta.signature,
+            scope_chain: meta.scope_chain,
+            entity_names: meta.entity_names,
+            content_hash: meta.content_hash,
+        }
+    }
+}
+
 impl From<ChunkMetaCompact> for ChunkMeta {
     fn from(compact: ChunkMetaCompact) -> Self {
         Self {
@@ -283,4 +299,52 @@ impl From<ChunkMetaCompact> for ChunkMeta {
 pub trait Retriever: Send + Sync {
     /// Execute a search query and return ranked results.
     fn search(&self, query: &SearchQuery) -> Result<Vec<SearchResult>>;
+}
+
+#[cfg(test)]
+mod chunk_meta_conversion_tests {
+    use super::{ChunkMeta, ChunkMetaCompact};
+
+    #[test]
+    fn consuming_compact_conversion_moves_owned_fields() {
+        let meta = ChunkMeta {
+            chunk_id: 42,
+            file_path: "src/lib.rs".to_string(),
+            language: "rust".to_string(),
+            line_start: 3,
+            line_end: 9,
+            signature: "pub fn answer() -> u64".to_string(),
+            scope_chain: vec!["crate".to_string(), "module".to_string()],
+            entity_names: vec!["answer".to_string(), "Result".to_string()],
+            content: "pub fn answer() -> u64 { 42 }".to_string(),
+            content_hash: 99,
+        };
+        let file_path_ptr = meta.file_path.as_ptr();
+        let language_ptr = meta.language.as_ptr();
+        let signature_ptr = meta.signature.as_ptr();
+        let scope_ptr = meta.scope_chain.as_ptr();
+        let entity_names_ptr = meta.entity_names.as_ptr();
+        let first_entity_ptr = meta.entity_names[0].as_ptr();
+
+        let compact = ChunkMetaCompact::from(meta);
+
+        assert_eq!(compact.file_path.as_ptr(), file_path_ptr);
+        assert_eq!(compact.language.as_ptr(), language_ptr);
+        assert_eq!(compact.signature.as_ptr(), signature_ptr);
+        assert_eq!(compact.scope_chain.as_ptr(), scope_ptr);
+        assert_eq!(compact.entity_names.as_ptr(), entity_names_ptr);
+        assert_eq!(compact.entity_names[0].as_ptr(), first_entity_ptr);
+
+        let restored = ChunkMeta::from(compact);
+        assert_eq!(restored.chunk_id, 42);
+        assert_eq!(restored.file_path, "src/lib.rs");
+        assert_eq!(restored.language, "rust");
+        assert_eq!(restored.line_start, 3);
+        assert_eq!(restored.line_end, 9);
+        assert_eq!(restored.signature, "pub fn answer() -> u64");
+        assert_eq!(restored.scope_chain, ["crate", "module"]);
+        assert_eq!(restored.entity_names, ["answer", "Result"]);
+        assert!(restored.content.is_empty());
+        assert_eq!(restored.content_hash, 99);
+    }
 }

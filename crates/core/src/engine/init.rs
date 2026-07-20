@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use dashmap::DashMap;
 use rayon::prelude::*;
@@ -25,15 +25,107 @@ use crate::retriever::{ChunkMeta, ChunkMetaCompact};
 use crate::session::SessionState;
 use crate::shared_session::SharedSession;
 use crate::symbols::SymbolTable;
-use crate::symbols::persistence::{deserialize_symbols, serialize_symbols};
+use crate::symbols::persistence::deserialize_symbols;
 use crate::symbols::writer::write_mmap_symbols;
 use crate::vector::VectorIndex;
 
 use super::indexing::{
-    IndexContext, PendingSymbolGraph, add_call_edges, add_doc_edges, build_file_trigram_from_files,
-    build_graph, populate_symbol_graph, process_file, unix_timestamp_string, walk_source_files,
+    IndexContext, PendingSymbolGraph, add_call_edges, add_doc_edges, build_graph,
+    populate_symbol_graph, process_file, unix_timestamp_string, walk_source_files,
 };
-use super::{Engine, git_head_commit};
+use super::{Engine, ReadOnlyLoadMode, git_head_commit};
+
+fn open_read_only_tantivy_with<F>(root: &Path, open: F) -> Result<TantivyIndex>
+where
+    F: FnOnce() -> Result<TantivyIndex>,
+{
+    match open() {
+        Ok(index) => Ok(index),
+        Err(CodixingError::Tantivy(ref error))
+            if error.to_string().contains("IncompatibleIndex")
+                || error.to_string().contains("index version")
+                || error.to_string().contains("incompatible") =>
+        {
+            Err(CodixingError::Index(format!(
+                "index format at {}/.codixing is incompatible with this Codixing version; \
+                 read-only open never rebuilds or modifies the index. Run `codixing init {}` \
+                 from a writable process to rebuild it, then retry",
+                root.display(),
+                root.display()
+            )))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub(super) fn load_persisted_symbols(store: &IndexStore) -> Result<SymbolTable> {
+    let delta_bytes = store.load_symbol_delta_bytes()?;
+    let delta_present = delta_bytes.is_some();
+    let replacements = delta_bytes
+        .as_deref()
+        .map(crate::symbols::persistence::deserialize_symbol_delta)
+        .transpose()?
+        .unwrap_or_default();
+
+    if store.symbols_v2_path().exists() {
+        match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path()) {
+            Ok(mmap_table) if mmap_table.preserves_full_fidelity() => {
+                debug!("loaded full-fidelity symbols_v2.bin via mmap (read-only)");
+                return Ok(SymbolTable::from_mmap_with_file_replacements(
+                    mmap_table,
+                    replacements,
+                ));
+            }
+            Ok(mmap_table) => {
+                if !store.symbols_path().exists() {
+                    if delta_present {
+                        return Err(CodixingError::Serialization(
+                            "symbol delta requires a full-fidelity symbols_v2.bin base".to_string(),
+                        ));
+                    }
+                    warn!(
+                        "legacy symbols_v2.bin has no full-fidelity symbols.bin fallback; using compatible reduced metadata"
+                    );
+                    return Ok(SymbolTable::Mmap(mmap_table));
+                }
+                debug!("legacy mmap symbols require full-fidelity symbols.bin fallback");
+            }
+            Err(error) => {
+                if delta_present {
+                    return Err(CodixingError::Serialization(format!(
+                        "symbol delta base could not be loaded: {error}"
+                    )));
+                }
+                warn!(%error, "failed to load symbols_v2.bin; trying symbols.bin");
+            }
+        }
+    } else if delta_present {
+        return Err(CodixingError::Serialization(
+            "symbol delta exists without symbols_v2.bin base".to_string(),
+        ));
+    }
+
+    if store.symbols_path().exists() {
+        match store
+            .load_symbols_bytes()
+            .and_then(|bytes| deserialize_symbols(&bytes))
+        {
+            Ok(table) => return Ok(table),
+            Err(error) => warn!(%error, "failed to load symbols.bin"),
+        }
+    }
+
+    Ok(SymbolTable::new())
+}
+
+pub(super) fn persisted_meta_mtime(store: &IndexStore) -> Option<std::time::SystemTime> {
+    store
+        .codixing_dir()
+        .join("meta.json")
+        .metadata()
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+}
 
 impl Engine {
     /// Initialize a new index for the project at `root`.
@@ -41,7 +133,10 @@ impl Engine {
     /// Walks the directory tree, parses all supported source files in parallel
     /// using rayon, chunks them with the cAST algorithm, indexes chunks in
     /// Tantivy, optionally embeds them into the HNSW index, and populates the
-    /// symbol table. All state is persisted to the `.codixing/` directory.
+    /// symbol table. The complete result is built in an unpublished generation
+    /// and atomically activated only after validation, so rerunning init cannot
+    /// append stale Tantivy documents or destroy the previous searchable index
+    /// on failure.
     pub fn init(root: impl AsRef<Path>, mut config: IndexConfig) -> Result<Self> {
         let root = root
             .as_ref()
@@ -52,12 +147,14 @@ impl Engine {
         // macOS `/var` vs `/private/var`, or any symlinked project dir)
         // would make every later sync see all paths as added+removed.
         config.root = root.clone();
+        let starting_git_commit = git_head_commit(&root);
 
-        let store = IndexStore::init(&root, &config)?;
+        let writer_lock = IndexStore::acquire_writer_lock(&root)?;
+        let mut store = IndexStore::begin_generation(&root, &config)?;
         let tantivy =
             TantivyIndex::create_in_dir_with_config(&store.tantivy_dir(), config.bm25.clone())?;
         let parser = Parser::new();
-        let symbols = SymbolTable::new();
+        let mut symbols = SymbolTable::new();
 
         // Initialise the embedder (if enabled).
         let embedder: Option<Arc<Embedder>> = if config.embedding.enabled {
@@ -82,7 +179,7 @@ impl Engine {
         info!(file_count = files.len(), "discovered source files");
 
         let chunk_count = AtomicUsize::new(0);
-        let file_chunk_map = DashMap::<String, usize>::new();
+        let file_chunk_map = DashMap::<String, Box<[u64]>>::new();
         let chunk_meta_map = DashMap::<u64, ChunkMeta>::new();
 
         // Collect embeddings per file for later batch insertion.
@@ -101,6 +198,7 @@ impl Engine {
             DashMap::new();
         let pending_signatures: DashMap<String, u64> = DashMap::new();
         let pending_hashes: DashMap<std::path::PathBuf, FileHashEntry> = DashMap::new();
+        let file_trigram = Mutex::new(crate::index::trigram::FileTrigramIndex::new());
 
         {
             let ctx = IndexContext {
@@ -120,57 +218,88 @@ impl Engine {
                 pending_doc_refs: &pending_doc_refs,
                 pending_signatures: &pending_signatures,
                 pending_hashes: &pending_hashes,
+                file_trigram: &file_trigram,
             };
 
             // Process files in parallel: parse → chunk → index → extract symbols.
-            files.par_iter().for_each(|path| {
-                if let Err(e) = process_file(path, &ctx) {
-                    warn!(path = %path.display(), error = %e, "skipping file");
-                }
-            });
+            files
+                .par_iter()
+                .try_for_each(|path| process_file(path, &ctx))?;
         }
+        drop(files);
 
         tantivy.commit()?;
+
+        // A file can grow beyond max_file_bytes after discovery. The bounded
+        // read path omits it safely; downstream graph/trigram phases and metadata
+        // must use only files whose exact bytes were successfully indexed.
+        let mut indexed_files: Vec<_> = pending_hashes
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+        indexed_files.sort_unstable();
+        let indexed_file_count = indexed_files.len();
 
         let total_chunks = chunk_count.load(Ordering::Relaxed);
         let total_symbols = symbols.len();
 
         // Convert DashMaps to owned types.
-        let file_chunk_counts: HashMap<String, usize> = file_chunk_map.into_iter().collect();
+        let file_chunk_ids: HashMap<String, Box<[u64]>> = file_chunk_map.into_iter().collect();
 
-        // Build graph and trigram indexes in parallel — they read from shared
-        // DashMaps but don't write to each other.
-        let (graph, (trigram_idx, ft_idx)) = rayon::join(
-            || {
-                // Graph construction
-                if config.graph.enabled {
-                    let mut g = build_graph(&files, &root, &config, &parser, &pending_imports);
-                    // Resolve call-site edges using the now-complete symbol table.
-                    add_call_edges(&mut g, &symbols, &pending_calls);
-                    // Resolve doc symbol references into DocumentedBy edges.
-                    add_doc_edges(&mut g, &symbols, &pending_doc_refs);
-                    // Populate the symbol-level inner graph with function-level call edges.
-                    populate_symbol_graph(&mut g, pending_symbol_graph);
-                    let scores =
-                        compute_pagerank(&g, config.graph.damping, config.graph.iterations);
-                    g.apply_pagerank(&scores);
-                    Some(g)
-                } else {
-                    None
-                }
-            },
-            || {
-                // Trigram index construction (chunk + file level)
-                let mut tri = crate::index::TrigramIndex::new();
-                tri.build_batch(
-                    chunk_meta_map
-                        .iter()
-                        .map(|e| (*e.key(), e.value().content.clone())),
-                );
-                let ft = build_file_trigram_from_files(&files, &root, &config);
-                (tri, ft)
-            },
-        );
+        let ft_idx = file_trigram
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // This corpus-scaled structure has no in-memory consumers after the
+        // primary parse. Persist it inside the unpublished generation and
+        // release its postings before constructing the graph and semantic maps.
+        ft_idx.save_binary_consuming(&store.file_trigram_path())?;
+        store.save_file_trigram_delta_bytes(
+            &crate::index::trigram::FileTrigramIndex::empty_delta_checkpoint()?,
+        )?;
+
+        // BM25-only init has committed every source body to Tantivy and the
+        // file trigram index. Exact and lexical search hydrate compact metadata
+        // from Tantivy, so release this duplicate corpus before serializing the
+        // symbol table, which has its own large temporary writer allocations.
+        if embedder.is_none() {
+            clear_chunk_contents(&chunk_meta_map);
+        }
+
+        // Persist the full-fidelity symbol table before the graph and semantic
+        // builders add their own corpus-scaled allocations. The generation is
+        // still unpublished, so an error remains atomic and invisible.
+        if let Some(in_mem) = symbols.as_in_memory() {
+            write_mmap_symbols(in_mem, &store.symbols_v2_path())?;
+        }
+
+        // Build the graph after parsing. The file trigram index was populated
+        // from each exact source read during the primary pass and now serves
+        // both grep pre-filtering and exact-search candidate selection.
+        let graph = if config.graph.enabled {
+            let mut g = build_graph(&indexed_files, &root, &config, &parser, &pending_imports);
+            add_call_edges(&mut g, &symbols, &pending_calls);
+            add_doc_edges(&mut g, &symbols, &pending_doc_refs);
+            populate_symbol_graph(&mut g, pending_symbol_graph);
+            let scores = compute_pagerank(&g, config.graph.damping, config.graph.iterations);
+            g.apply_pagerank(&scores);
+            Some(g)
+        } else {
+            None
+        };
+        drop(indexed_files);
+
+        // Graph construction was the final consumer that needs the mutable
+        // construction table. Reopen the full-fidelity mmap now so graph
+        // persistence and semantic artifact construction do not overlap the
+        // corpus-sized DashMaps and per-name symbol buckets.
+        let persisted_symbols = load_persisted_symbols(&store)?;
+        if persisted_symbols.is_in_memory() {
+            return Err(CodixingError::Serialization(
+                "fresh symbols_v2.bin could not be reopened after initialization".to_string(),
+            ));
+        }
+        symbols = persisted_symbols;
 
         // These parse-phase caches have reached their final consumers. Free
         // them before concept/reformulation construction and persistence so
@@ -179,77 +308,56 @@ impl Engine {
         drop(pending_calls);
         drop(pending_doc_refs);
 
+        // `process_file` records every successfully indexed file directly.
+        // Graph construction was the final consumer of the absolute paths, so
+        // persist and release both freshness maps before graph serialization
+        // and semantic construction allocate their own corpus-scaled buffers.
+        let mut v2_hashes: Vec<(std::path::PathBuf, FileHashEntry)> =
+            pending_hashes.into_iter().collect();
+        v2_hashes.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Metadata was captured around the exact source read. Re-statting here
+        // could pair old indexed bytes with a newer mtime/size after a long init.
+        // Fresh generations write only the authoritative v2 snapshot. The v1
+        // reader remains for migrating legacy indexes, but duplicating every
+        // path and hash in tree_hashes.bin wastes O(repo files) time and disk.
+        store.save_tree_hashes_v2(&v2_hashes)?;
+        drop(v2_hashes);
+
+        // Persist signature fingerprints (keyed by normalized relative path) so
+        // the first sync after init can classify cosmetic edits without
+        // re-parsing the whole tree.
+        let mut signatures: Vec<(std::path::PathBuf, u64)> = pending_signatures
+            .into_iter()
+            .map(|(path, signature)| (std::path::PathBuf::from(path), signature))
+            .collect();
+        signatures.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        store.save_tree_signatures(&signatures)?;
+        drop(signatures);
+
+        // The in-memory symbol table, file trigram builder, parse caches, and
+        // freshness maps have now all been released. macOS's scalable malloc
+        // retains their empty regions by default; a one-shot pressure hint at
+        // this phase boundary returns only unused pages and cannot invalidate
+        // live Rust allocations. Other allocators keep their native policy.
+        release_allocator_pages();
+
         // Persist graph.
         if let Some(ref g) = graph {
             let flat = g.to_flat();
             store.save_graph(&flat)?;
+            // File-graph serialization is complete. Release its corpus-scaled
+            // flattened copy before symbol-graph serialization allocates its
+            // own output buffer, so the two persistence peaks cannot overlap.
+            drop(flat);
             store.save_symbol_graph(g)?;
         }
 
-        // Build concept index from symbols + graph co-occurrences.
-        let concept_index = {
-            let mut builder = super::concepts::ConceptIndexBuilder::new();
-            for sym in symbols.all_symbols() {
-                builder.add_symbol(&sym.name, &sym.file_path, sym.doc_comment.as_deref());
-            }
-            // Add import co-occurrences from graph edges.
-            if let Some(ref g) = graph {
-                let flat = g.to_flat();
-                for (from, to, _edge) in &flat.edges {
-                    builder.add_cooccurrence(from, to);
-                }
-            }
-            let idx = builder.build();
-            if !idx.is_empty() {
-                let bytes = bitcode::serialize(&idx).map_err(|e| {
-                    CodixingError::Serialization(format!("failed to serialize concept index: {e}"))
-                })?;
-                std::fs::write(store.concepts_path(), &bytes)?;
-                Some(idx)
-            } else {
-                // A stale prior artifact would be loaded as current data, so a
-                // cleanup failure is fatal just like a failed write.
-                if let Err(e) = std::fs::remove_file(store.concepts_path()) {
-                    if e.kind() != std::io::ErrorKind::NotFound {
-                        return Err(e.into());
-                    }
-                }
-                None
-            }
-        };
-
-        // Build learned reformulations from symbols (name + file + doc_comment).
-        let reformulations = {
-            let mut builder = super::reformulation::ReformulationBuilder::new();
-            for sym in symbols.all_symbols() {
-                builder.add_identifier(&sym.name, &sym.file_path);
-                if let Some(ref doc) = sym.doc_comment {
-                    builder.add_documented_symbol(&sym.name, doc);
-                }
-            }
-            let reform = builder.build();
-            if !reform.is_empty() {
-                let bytes = bitcode::serialize(&reform).map_err(|e| {
-                    CodixingError::Serialization(format!("failed to serialize reformulations: {e}"))
-                })?;
-                std::fs::write(store.reformulations_path(), &bytes)?;
-                Some(reform)
-            } else {
-                if let Err(e) = std::fs::remove_file(store.reformulations_path()) {
-                    if e.kind() != std::io::ErrorKind::NotFound {
-                        return Err(e.into());
-                    }
-                }
-                None
-            }
-        };
-
-        // Persist trigram indexes.
-        trigram_idx.save_mmap_binary_v2(
-            &store.chunk_trigram_path(),
-            crate::index::trigram::PostingCodec::DeltaVarint,
-        )?;
-        ft_idx.save_binary(&store.file_trigram_path())?;
+        // Auxiliary semantic data is built sequentially from one symbol
+        // snapshot, bounded at every stage, string-interned on disk, and
+        // invalidated before construction so a failed build cannot leave stale
+        // mappings behind.
+        super::semantic_artifacts::rebuild_semantic_artifacts(&store, &symbols, graph.as_ref())?;
 
         let (graph_nodes, graph_edges) = graph
             .as_ref()
@@ -259,62 +367,58 @@ impl Engine {
             })
             .unwrap_or((0, 0));
 
-        // Persist everything.
-        let sym_bytes = serialize_symbols(&symbols)?;
-        store.save_symbols_bytes(&sym_bytes)?;
-
-        // Also write the mmap-format v2 for zero-deserialization open().
-        if let Some(in_mem) = symbols.as_in_memory() {
-            if let Err(e) = write_mmap_symbols(in_mem, &store.symbols_v2_path()) {
-                warn!(error = %e, "failed to write symbols_v2.bin (non-fatal)");
-            }
-        }
-
-        // `process_file` records every successfully indexed file directly.
-        // This remains complete even though bulk parsing drops AST cache entries
-        // immediately, and avoids a third source-file read for doc/config files.
-        let mut v2_hashes: Vec<(std::path::PathBuf, FileHashEntry)> =
-            pending_hashes.into_iter().collect();
-        v2_hashes.sort_by(|a, b| a.0.cmp(&b.0));
-        let hashes: Vec<(std::path::PathBuf, u64)> = v2_hashes
-            .iter()
-            .map(|(path, entry)| (path.clone(), entry.content_hash))
-            .collect();
-        store.save_tree_hashes(&hashes)?;
-
-        // Metadata was captured around the exact source read. Re-statting here
-        // could pair old indexed bytes with a newer mtime/size after a long init.
-        store.save_tree_hashes_v2(&v2_hashes)?;
-
-        // Persist signature fingerprints (keyed by normalized relative path) so
-        // the first sync after init can classify cosmetic edits without
-        // re-parsing the whole tree.
-        let signatures: Vec<(std::path::PathBuf, u64)> = pending_signatures
-            .iter()
-            .map(|e| (std::path::PathBuf::from(e.key()), *e.value()))
-            .collect();
-        if let Err(e) = store.save_tree_signatures(&signatures) {
-            warn!(error = %e, "failed to persist tree signatures at init (non-fatal)");
-        }
-
         // Persist chunk_meta in compact format (without content — content lives in Tantivy).
-        let meta_pairs: Vec<(u64, ChunkMetaCompact)> = chunk_meta_map
-            .iter()
-            .map(|e| (*e.key(), ChunkMetaCompact::from(e.value())))
-            .collect();
+        // BM25-only init can consume the construction map and move every owned
+        // field into the compact representation. Embedding-enabled init keeps
+        // the original map because its background worker still needs content.
+        let (mut meta_pairs, retained_chunk_meta) = if embedder.is_none() {
+            (
+                chunk_meta_map
+                    .into_iter()
+                    .map(|(chunk_id, meta)| (chunk_id, ChunkMetaCompact::from(meta)))
+                    .collect::<Vec<_>>(),
+                None,
+            )
+        } else {
+            let pairs = chunk_meta_map
+                .iter()
+                .map(|entry| (*entry.key(), ChunkMetaCompact::from(entry.value())))
+                .collect::<Vec<_>>();
+            (pairs, Some(chunk_meta_map))
+        };
+        meta_pairs.sort_unstable_by_key(|(chunk_id, _)| *chunk_id);
         let meta_bytes = bitcode::serialize(&meta_pairs).map_err(|e| {
             CodixingError::Serialization(format!("failed to serialize chunk_meta: {e}"))
         })?;
         store.save_chunk_meta_bytes(&meta_bytes)?;
+        drop(meta_bytes);
+        let chunk_meta_map = match retained_chunk_meta {
+            Some(chunk_meta_map) => {
+                drop(meta_pairs);
+                chunk_meta_map
+            }
+            None => meta_pairs
+                .into_iter()
+                .map(|(chunk_id, compact)| (chunk_id, ChunkMeta::from(compact)))
+                .collect(),
+        };
 
         // Note: the vector index is built and persisted by the background embedding
         // thread spawned below. We do not persist it here.
 
         // Record the current git HEAD so git_sync() can diff from this point.
-        let git_commit = git_head_commit(&root);
+        let ending_git_commit = git_head_commit(&root);
+        let git_commit = if ending_git_commit == starting_git_commit {
+            ending_git_commit
+        } else {
+            // A checkout raced the build. Publishing the starting marker makes
+            // the next git_sync repair every path changed since that snapshot;
+            // claiming the later HEAD could permanently hide mixed artifacts.
+            starting_git_commit
+        };
         let idx_meta = IndexMeta {
             version: "0.3.0".to_string(),
-            file_count: files.len(),
+            file_count: indexed_file_count,
             chunk_count: total_chunks,
             symbol_count: total_symbols,
             last_indexed: unix_timestamp_string(),
@@ -322,8 +426,13 @@ impl Engine {
         };
         store.save_meta(&idx_meta)?;
 
+        // A complete rebuild is authoritative. Only after every synchronous
+        // searchable artifact and freshness baseline is durable may stale
+        // transaction state from an older index be cleared.
+        store.clear_tree_hash_delta()?;
+
         info!(
-            files = files.len(),
+            files = indexed_file_count,
             chunks = total_chunks,
             symbols = total_symbols,
             graph_nodes,
@@ -331,16 +440,21 @@ impl Engine {
             "index initialized (embeddings starting in background)"
         );
 
+        // This is the sole commit point for the rebuild. Every required
+        // lexical artifact exists and Tantivy can be reopened before the tiny
+        // active-generation manifest is atomically replaced. Any earlier error
+        // leaves the previous generation untouched and searchable.
+        store.publish_generation()?;
+        if let Err(error) = store.clear_all_dirty_paths() {
+            // The manifest is already durable. A stale journal can only cause
+            // conservative replay on the next writer; it must not turn a
+            // successful rebuild into a reported failure.
+            warn!(%error, "published rebuild journal cleanup deferred");
+        }
+
         // Shared vector slot — starts as None. The background thread will
         // populate it and swap it in when embedding completes.
         let vector_arc: Arc<RwLock<Option<VectorIndex>>> = Arc::new(RwLock::new(None));
-
-        // BM25-only init no longer needs in-memory source bodies after the
-        // trigram indexes and compact metadata have been persisted. Tantivy is
-        // the canonical hydration store, so release this final corpus copy.
-        if embedder.is_none() {
-            clear_chunk_contents(&chunk_meta_map);
-        }
 
         // Wrap chunk_meta in Arc so the background thread can share it.
         let chunk_meta_arc: Arc<DashMap<u64, ChunkMeta>> = Arc::new(chunk_meta_map);
@@ -358,79 +472,128 @@ impl Engine {
                 let root_clone = root.to_path_buf();
                 let file_chunks_path = store.file_chunks_path().to_path_buf();
                 let vector_index_path = store.vector_index_path().to_path_buf();
+                let background_generation_lease = store.background_generation_lease();
+                let background_writer_lock = writer_lock.try_clone();
 
-                let handle = std::thread::Builder::new()
-                    .name("codixing-embed-bg".into())
-                    .spawn(move || {
-                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            match VectorIndex::new(dims, quantize) {
-                                Ok(bg_vector) => background_embed(
-                                    &emb_clone,
-                                    &pending_embeds,
-                                    &chunk_meta_clone,
-                                    bg_vector,
-                                    contextual,
-                                    &root_clone,
-                                    &state_clone,
-                                ),
-                                Err(e) => {
+                let handle = match (background_generation_lease, background_writer_lock) {
+                    (Ok(background_generation_lease), Ok(background_writer_lock)) => {
+                        let background_task = move || {
+                            // Keep the generation searchable and its files in
+                            // place, and retain the stable writer lease, even if
+                            // the Engine is dropped before embedding ends.
+                            let _background_generation_lease = background_generation_lease;
+                            let _background_writer_lock = background_writer_lock;
+                            let result =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    match VectorIndex::new(dims, quantize) {
+                                        Ok(bg_vector) => background_embed(
+                                            &emb_clone,
+                                            &pending_embeds,
+                                            &chunk_meta_clone,
+                                            bg_vector,
+                                            contextual,
+                                            &root_clone,
+                                            &state_clone,
+                                        ),
+                                        Err(e) => {
+                                            tracing::error!(
+                                                error = %e,
+                                                "background embedding: failed to create VectorIndex"
+                                            );
+                                            Err(e)
+                                        }
+                                    }
+                                }));
+                            match result {
+                                Ok(Ok(completed_vector)) => {
+                                    // Persist to disk before exposing to readers.
+                                    match completed_vector
+                                        .save(&vector_index_path, &file_chunks_path)
+                                    {
+                                        Ok(()) => {
+                                            *vector_slot
+                                                .write()
+                                                .unwrap_or_else(|e| e.into_inner()) =
+                                                Some(completed_vector);
+                                            state_clone.mark_ready();
+                                            tracing::info!(
+                                                chunks = state_clone.progress().0,
+                                                "background embedding complete"
+                                            );
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                error = %e,
+                                                "background embedding: failed to persist vector index"
+                                            );
+                                            state_clone.mark_failed();
+                                        }
+                                    }
+                                }
+                                Ok(Err(e)) => {
                                     tracing::error!(
                                         error = %e,
-                                        "background embedding: failed to create VectorIndex"
+                                        "background embedding failed"
                                     );
-                                    Err(e)
+                                    state_clone.mark_failed();
+                                }
+                                Err(_panic) => {
+                                    tracing::error!("background embedding panicked");
+                                    state_clone.mark_failed();
                                 }
                             }
-                        }));
-                        match result {
-                            Ok(Ok(completed_vector)) => {
-                                // Persist to disk before exposing to readers.
-                                match completed_vector.save(&vector_index_path, &file_chunks_path) {
-                                    Ok(()) => {
-                                        *vector_slot.write().unwrap_or_else(|e| e.into_inner()) =
-                                            Some(completed_vector);
-                                        state_clone.mark_ready();
-                                        tracing::info!(
-                                            chunks = state_clone.progress().0,
-                                            "background embedding complete"
-                                        );
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            error = %e,
-                                            "background embedding: failed to persist vector index"
-                                        );
-                                        state_clone.mark_failed();
-                                    }
-                                }
-                            }
-                            Ok(Err(e)) => {
-                                tracing::error!(
-                                    error = %e,
-                                    "background embedding failed"
-                                );
-                                state_clone.mark_failed();
-                            }
-                            Err(_panic) => {
-                                tracing::error!("background embedding panicked");
-                                state_clone.mark_failed();
-                            }
-                        }
-                        // Success, model/runtime errors, cancellation, and
-                        // caught panics are all terminal. None of them should
-                        // pin a corpus-sized duplicate of the Tantivy bodies
-                        // for the remaining Engine lifetime.
-                        clear_chunk_contents(&chunk_meta_clone);
-                    })
-                    .map_err(|e| {
-                        CodixingError::Config(format!("failed to spawn embed thread: {e}"))
-                    })?;
+                            // Success, model/runtime errors, cancellation, and
+                            // caught panics are all terminal. None of them should
+                            // pin a corpus-sized duplicate of the Tantivy bodies
+                            // for the remaining Engine lifetime.
+                            clear_chunk_contents(&chunk_meta_clone);
+                        };
+                        Some(
+                            std::thread::Builder::new()
+                                .name("codixing-embed-bg".into())
+                                .spawn(background_task),
+                        )
+                    }
+                    (Err(error), _) => {
+                        warn!(
+                            error = %error,
+                            "failed to acquire generation lease for background embedding"
+                        );
+                        state.mark_failed();
+                        None
+                    }
+                    (_, Err(error)) => {
+                        warn!(
+                            error = %error,
+                            "failed to retain writer lease for background embedding"
+                        );
+                        state.mark_failed();
+                        None
+                    }
+                };
 
-                state
-                    .handle
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .replace(handle);
+                if let Some(handle) = handle {
+                    match handle {
+                        Ok(handle) => {
+                            state
+                                .handle
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .replace(handle);
+                        }
+                        Err(error) => {
+                            // The durable BM25 generation is already active.
+                            // Treat thread-creation failure like any other
+                            // embedding failure rather than reporting that
+                            // initialization rolled back when it did not.
+                            warn!(
+                                error = %error,
+                                "failed to spawn background embedding thread"
+                            );
+                            state.mark_failed();
+                        }
+                    }
+                }
 
                 Some(state)
             } else {
@@ -453,23 +616,18 @@ impl Engine {
             None
         };
 
+        let shared_session_path = store.control_dir().join("shared_session.jsonl");
         let session = Arc::new(SessionState::with_root(true, &root));
         session.cleanup_old_sessions();
+        let shared_session = SharedSession::with_persistence_or_default(&shared_session_path);
 
-        // The freshly-built auxiliary indexes have already been persisted.
-        // Release their construction-time HashMaps and let the existing lazy
-        // loaders reopen them on demand (the chunk trigram then uses mmap).
-        drop(trigram_idx);
-        drop(ft_idx);
-        drop(concept_index);
-        drop(reformulations);
-        let trigram = std::sync::OnceLock::new();
+        // The freshly-built auxiliary index has already been persisted.
+        // Release its construction-time HashMaps and let the lazy loader
+        // reopen it on demand.
         let file_trigram = std::sync::OnceLock::new();
 
-        let filter_pipeline = FilterPipeline::load(&store.codixing_dir());
+        let filter_pipeline = FilterPipeline::load(&store.control_dir());
         filter_pipeline.clear();
-
-        let shared_session_path = store.codixing_dir().join("shared_session.jsonl");
 
         Ok(Self {
             config,
@@ -477,18 +635,19 @@ impl Engine {
             parser,
             tantivy,
             symbols,
-            file_chunk_counts,
+            file_chunk_ids,
             embedder,
+            last_vector_publication: None,
             vector: vector_arc,
             chunk_meta: chunk_meta_arc,
             graph,
             concept_index: std::sync::OnceLock::new(),
             reformulations: std::sync::OnceLock::new(),
             reranker,
-            trigram,
             session,
-            shared_session: SharedSession::with_persistence_or_default(&shared_session_path),
+            shared_session,
             read_only: false,
+            read_only_load_mode: ReadOnlyLoadMode::Full,
             file_trigram,
             recency_map: std::sync::OnceLock::new(),
             last_load_time: None,
@@ -497,6 +656,8 @@ impl Engine {
             embed_state,
             concept_reranker: std::sync::OnceLock::new(),
             filter_pipeline,
+            writer_lock: Some(writer_lock),
+            pending_checkpoint: super::sync::ApplyChangesOutcome::default(),
         })
     }
 
@@ -527,12 +688,20 @@ impl Engine {
             .canonicalize()
             .map_err(|e| CodixingError::Config(format!("cannot resolve root path: {e}")))?;
 
-        let store = IndexStore::open(&root)?;
+        // Resolve and lease the active snapshot without creating anything.
+        // Legacy indexes are upgraded to a mutation lease only after Tantivy's
+        // writer lock is actually acquired below.
+        let mut store = IndexStore::open_read_only(&root)?;
         let mut config = store.load_config()?;
         // The persisted root may be stale (index dir moved/cloned) or
         // non-canonical (symlinked path at init time); the canonical open
         // root is the truth.
         config.root = root.clone();
+
+        // Claim the stable writer lease before Tantivy's generation-local
+        // lock. Without it, a process pinned to generation A could continue
+        // mutating A after another process publishes generation B.
+        let writer_lock = IndexStore::try_acquire_writer_lock(&root)?;
 
         // Try read-write first, retrying briefly on lock conflict to absorb
         // the common intra-process drop-then-reopen race. Fall back to
@@ -545,6 +714,9 @@ impl Engine {
         let mut last_err: Option<CodixingError> = None;
         let mut acquired: Option<TantivyIndex> = None;
         for attempt in 0..10u32 {
+            if writer_lock.is_none() {
+                break;
+            }
             match TantivyIndex::open_in_dir_with_config(&store.tantivy_dir(), bm25_config.clone()) {
                 Ok(idx) => {
                     acquired = Some(idx);
@@ -568,6 +740,7 @@ impl Engine {
                         error = %e,
                         "index format incompatible with current Tantivy version — rebuilding automatically"
                     );
+                    drop(writer_lock);
                     return Self::init(root, config);
                 }
                 Err(e) => return Err(e),
@@ -586,48 +759,11 @@ impl Engine {
             }
         };
 
-        // Restore symbols: prefer bitcode symbols.bin (preserves all fields
-        // including doc_comment, visibility, type_relations) over mmap
-        // symbols_v2.bin (which doesn't persist those fields).
-        let symbols = if store.symbols_path().exists() {
-            match store
-                .load_symbols_bytes()
-                .and_then(|b| deserialize_symbols(&b))
-            {
-                Ok(table) => {
-                    debug!("loaded symbols.bin via bitcode (full-fidelity)");
-                    table
-                }
-                Err(e) => {
-                    warn!(error = %e, "failed to load symbols.bin — falling back to symbols_v2.bin");
-                    if store.symbols_v2_path().exists() {
-                        match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path())
-                        {
-                            Ok(mmap_table) => SymbolTable::Mmap(mmap_table),
-                            Err(e2) => {
-                                warn!(error = %e2, "failed to load symbols_v2.bin too");
-                                SymbolTable::new()
-                            }
-                        }
-                    } else {
-                        SymbolTable::new()
-                    }
-                }
-            }
-        } else if store.symbols_v2_path().exists() {
-            match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path()) {
-                Ok(mmap_table) => {
-                    debug!("loaded symbols_v2.bin via mmap (no symbols.bin available)");
-                    SymbolTable::Mmap(mmap_table)
-                }
-                Err(e) => {
-                    warn!(error = %e, "failed to load symbols_v2.bin");
-                    SymbolTable::new()
-                }
-            }
-        } else {
-            SymbolTable::new()
-        };
+        if !read_only {
+            store.ensure_generation_lease_for_mutation()?;
+        }
+
+        let symbols = load_persisted_symbols(&store)?;
 
         let parser = Parser::new();
         let meta = store.load_meta()?;
@@ -640,13 +776,8 @@ impl Engine {
             DashMap::new()
         };
 
-        // Rebuild file_chunk_counts from chunk_meta (derived view, not separately persisted).
-        let mut file_chunk_counts: HashMap<String, usize> = HashMap::new();
-        for entry in chunk_meta.iter() {
-            *file_chunk_counts
-                .entry(entry.value().file_path.clone())
-                .or_insert(0) += 1;
-        }
+        // Rebuild exact per-file chunk postings from compact metadata.
+        let file_chunk_ids = super::collect_file_chunk_ids(&chunk_meta);
 
         // Restore vector index if it exists.
         let (embedder, vector) = if config.embedding.enabled
@@ -679,7 +810,7 @@ impl Engine {
                 // Merge the symbol-level graph if persisted.
                 match store.load_symbol_graph() {
                     Ok(Some(sym_graph)) => {
-                        g.inner = sym_graph.inner;
+                        g.replace_symbol_graph(sym_graph);
                     }
                     Ok(None) => {}
                     Err(e) => {
@@ -732,48 +863,54 @@ impl Engine {
             None
         };
 
-        let session = Arc::new(SessionState::with_root(true, &root));
-        session.cleanup_old_sessions();
+        let shared_session_path = store.control_dir().join("shared_session.jsonl");
+        let (session, shared_session) = if read_only {
+            (
+                Arc::new(SessionState::with_root_read_only(true, &root)),
+                SharedSession::from_persistence_read_only(&shared_session_path),
+            )
+        } else {
+            let session = Arc::new(SessionState::with_root(true, &root));
+            session.cleanup_old_sessions();
+            (
+                session,
+                SharedSession::with_persistence_or_default(&shared_session_path),
+            )
+        };
 
         if read_only {
             info!("engine opened in read-only mode — search works, writes disabled");
         }
 
-        // Record the on-disk mtime of meta.json for read-only staleness detection.
-        let meta_mtime = store
-            .codixing_dir()
-            .join("meta.json")
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok());
+        // Record the lexical publication mtime for read-only staleness detection.
+        let meta_mtime = persisted_meta_mtime(&store);
 
-        // Trigram indexes are lazy-loaded on first use via OnceLock.
-        // The 175MB chunk trigram takes ~55s to deserialize — too slow for
-        // eager loading. Stays lazy so open() is fast; only paid on first
-        // exact-strategy search.
-        let trigram = std::sync::OnceLock::new();
+        // The shared file trigram is lazy-loaded on first grep/exact search.
         let file_trigram = std::sync::OnceLock::new();
-        let filter_pipeline = FilterPipeline::load(&store.codixing_dir());
-        let shared_session_path = store.codixing_dir().join("shared_session.jsonl");
+        let filter_pipeline = FilterPipeline::load(&store.control_dir());
+        let last_vector_publication = vector.as_ref().and_then(|_| {
+            crate::vector::publication_token(&store.vector_index_path(), &store.file_chunks_path())
+        });
 
-        Ok(Self {
+        let mut engine = Self {
             config,
             store,
             parser,
             tantivy,
             symbols,
-            file_chunk_counts,
+            file_chunk_ids,
             embedder,
+            last_vector_publication,
             vector: Arc::new(RwLock::new(vector)),
             chunk_meta: Arc::new(chunk_meta),
             graph,
             concept_index,
             reformulations,
             reranker,
-            trigram,
             session,
-            shared_session: SharedSession::with_persistence_or_default(&shared_session_path),
+            shared_session,
             read_only,
+            read_only_load_mode: ReadOnlyLoadMode::Full,
             file_trigram,
             recency_map: std::sync::OnceLock::new(),
             last_load_time: meta_mtime,
@@ -782,7 +919,17 @@ impl Engine {
             embed_state: None,
             concept_reranker: std::sync::OnceLock::new(),
             filter_pipeline,
-        })
+            writer_lock: if read_only { None } else { writer_lock },
+            pending_checkpoint: super::sync::ApplyChangesOutcome::default(),
+        };
+
+        // A writable engine repairs an interrupted working generation before
+        // it can serve requests. Read-only engines remain free to serve the
+        // previous immutable active snapshot while another process recovers.
+        if !engine.read_only {
+            engine.apply_changes(&[])?;
+        }
+        Ok(engine)
     }
 
     /// Open an existing index in **read-only mode**.
@@ -792,76 +939,42 @@ impl Engine {
     /// (`reindex_file`, `remove_file`, `sync`, `apply_changes`) return
     /// [`CodixingError::ReadOnly`].
     pub fn open_read_only(root: impl AsRef<Path>) -> Result<Self> {
+        Self::open_read_only_with_mode(root, ReadOnlyLoadMode::Full)
+    }
+
+    /// Open an existing index with only the state required by explicit
+    /// [`crate::retriever::Strategy::Exact`] and
+    /// [`crate::retriever::Strategy::Instant`] searches.
+    ///
+    /// Symbols and exact-search metadata remain resident so ranking and
+    /// results are identical to [`Self::open_read_only`]. Graph, vector, and
+    /// reranker artifacts are intentionally skipped to bound cold-start time
+    /// and memory on large repositories. Other strategies return a
+    /// configuration error instead of silently running with missing state.
+    pub fn open_read_only_lexical(root: impl AsRef<Path>) -> Result<Self> {
+        Self::open_read_only_with_mode(root, ReadOnlyLoadMode::Lexical)
+    }
+
+    pub(super) fn open_read_only_with_mode(
+        root: impl AsRef<Path>,
+        read_only_load_mode: ReadOnlyLoadMode,
+    ) -> Result<Self> {
         let root = root
             .as_ref()
             .canonicalize()
             .map_err(|e| CodixingError::Config(format!("cannot resolve root path: {e}")))?;
 
-        let store = IndexStore::open(&root)?;
+        let store = IndexStore::open_read_only(&root)?;
         let mut config = store.load_config()?;
         // Same canonicalization rule as open(): the canonical root is the truth.
         config.root = root.clone();
-        let tantivy = match TantivyIndex::open_read_only_with_config(
-            &store.tantivy_dir(),
-            config.bm25.clone(),
-        ) {
-            Ok(idx) => idx,
-            Err(CodixingError::Tantivy(ref e))
-                if e.to_string().contains("IncompatibleIndex")
-                    || e.to_string().contains("index version")
-                    || e.to_string().contains("incompatible") =>
-            {
-                warn!(
-                    error = %e,
-                    "index format incompatible with current Tantivy version — rebuilding automatically"
-                );
-                return Self::init(root, config);
-            }
-            Err(e) => return Err(e),
-        };
+        let tantivy = open_read_only_tantivy_with(&root, || {
+            TantivyIndex::open_read_only_with_config(&store.tantivy_dir(), config.bm25.clone())
+        })?;
 
-        // Restore symbols: prefer bitcode symbols.bin (preserves all fields
-        // including doc_comment, visibility, type_relations) over mmap
-        // symbols_v2.bin (which doesn't persist those fields).
-        let symbols = if store.symbols_path().exists() {
-            match store
-                .load_symbols_bytes()
-                .and_then(|b| deserialize_symbols(&b))
-            {
-                Ok(table) => {
-                    debug!("loaded symbols.bin via bitcode (full-fidelity, read-only)");
-                    table
-                }
-                Err(e) => {
-                    warn!(error = %e, "failed to load symbols.bin — falling back to symbols_v2.bin (read-only)");
-                    if store.symbols_v2_path().exists() {
-                        match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path())
-                        {
-                            Ok(mmap_table) => SymbolTable::Mmap(mmap_table),
-                            Err(e2) => {
-                                warn!(error = %e2, "failed to load symbols_v2.bin too");
-                                SymbolTable::new()
-                            }
-                        }
-                    } else {
-                        SymbolTable::new()
-                    }
-                }
-            }
-        } else if store.symbols_v2_path().exists() {
-            match crate::symbols::mmap::MmapSymbolTable::load(&store.symbols_v2_path()) {
-                Ok(mmap_table) => {
-                    debug!("loaded symbols_v2.bin via mmap (no symbols.bin available, read-only)");
-                    SymbolTable::Mmap(mmap_table)
-                }
-                Err(e) => {
-                    warn!(error = %e, "failed to load symbols_v2.bin");
-                    SymbolTable::new()
-                }
-            }
-        } else {
-            SymbolTable::new()
-        };
+        // New indexes use the full-fidelity mmap format. Legacy mmap files fall
+        // back to bitcode when available so compatibility never drops fields.
+        let symbols = load_persisted_symbols(&store)?;
 
         let parser = Parser::new();
         let meta = store.load_meta()?;
@@ -874,16 +987,12 @@ impl Engine {
             DashMap::new()
         };
 
-        // Rebuild file_chunk_counts from chunk_meta.
-        let mut file_chunk_counts: HashMap<String, usize> = HashMap::new();
-        for entry in chunk_meta.iter() {
-            *file_chunk_counts
-                .entry(entry.value().file_path.clone())
-                .or_insert(0) += 1;
-        }
+        // Rebuild exact per-file chunk postings from compact metadata.
+        let file_chunk_ids = super::collect_file_chunk_ids(&chunk_meta);
 
         // Restore vector index if it exists.
-        let (embedder, vector) = if config.embedding.enabled
+        let (embedder, vector) = if read_only_load_mode.loads_vectors()
+            && config.embedding.enabled
             && VectorIndex::artifacts_exist(&store.vector_index_path(), &store.file_chunks_path())
         {
             match Embedder::new(&config.embedding.model) {
@@ -906,27 +1015,32 @@ impl Engine {
             (None, None)
         };
 
-        // Restore graph.
-        let graph = match store.load_graph() {
-            Ok(Some(data)) => {
-                let mut g = CodeGraph::from_flat(data);
-                // Merge the symbol-level graph if persisted.
-                match store.load_symbol_graph() {
-                    Ok(Some(sym_graph)) => {
-                        g.inner = sym_graph.inner;
+        // Exact and Instant never consult the dependency graph, whose decoded
+        // representation is one of the largest cold-start allocations.
+        let graph = if read_only_load_mode.loads_graph() {
+            match store.load_graph() {
+                Ok(Some(data)) => {
+                    let mut g = CodeGraph::from_flat(data);
+                    // Merge the symbol-level graph if persisted.
+                    match store.load_symbol_graph() {
+                        Ok(Some(sym_graph)) => {
+                            g.replace_symbol_graph(sym_graph);
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            warn!(error = %e, "failed to load symbol graph");
+                        }
                     }
-                    Ok(None) => {}
-                    Err(e) => {
-                        warn!(error = %e, "failed to load symbol graph");
-                    }
+                    Some(g)
                 }
-                Some(g)
+                Ok(None) => None,
+                Err(e) => {
+                    warn!(error = %e, "failed to load graph; running without graph intelligence");
+                    None
+                }
             }
-            Ok(None) => None,
-            Err(e) => {
-                warn!(error = %e, "failed to load graph; running without graph intelligence");
-                None
-            }
+        } else {
+            None
         };
 
         // concept_index and reformulations are lazy-loaded via OnceLock on first use.
@@ -953,7 +1067,7 @@ impl Engine {
         );
 
         // Load reranker if requested.
-        let reranker = if config.embedding.reranker_enabled {
+        let reranker = if read_only_load_mode.loads_vectors() && config.embedding.reranker_enabled {
             match Reranker::new() {
                 Ok(r) => Some(Arc::new(r)),
                 Err(e) => {
@@ -965,20 +1079,18 @@ impl Engine {
             None
         };
 
-        let session = Arc::new(SessionState::with_root(true, &root));
-        session.cleanup_old_sessions();
+        // Replay persisted ranking context without attaching any writers.
+        let session = Arc::new(SessionState::with_root_read_only(true, &root));
 
         // Record the on-disk mtime of meta.json for read-only staleness detection.
-        let meta_mtime = store
-            .codixing_dir()
-            .join("meta.json")
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok());
+        let meta_mtime = persisted_meta_mtime(&store);
 
-        // Trigram indexes are lazy-loaded on first use via OnceLock.
-        let filter_pipeline = FilterPipeline::load(&store.codixing_dir());
-        let shared_session_path = store.codixing_dir().join("shared_session.jsonl");
+        // The shared file trigram is lazy-loaded on first grep/exact search.
+        let filter_pipeline = FilterPipeline::load(&store.control_dir());
+        let shared_session_path = store.control_dir().join("shared_session.jsonl");
+        let last_vector_publication = vector.as_ref().and_then(|_| {
+            crate::vector::publication_token(&store.vector_index_path(), &store.file_chunks_path())
+        });
 
         Ok(Self {
             config,
@@ -986,18 +1098,19 @@ impl Engine {
             parser,
             tantivy,
             symbols,
-            file_chunk_counts,
+            file_chunk_ids,
             embedder,
+            last_vector_publication,
             vector: Arc::new(RwLock::new(vector)),
             chunk_meta: Arc::new(chunk_meta),
             graph,
             concept_index,
             reformulations,
             reranker,
-            trigram: std::sync::OnceLock::new(),
             session,
-            shared_session: SharedSession::with_persistence_or_default(&shared_session_path),
+            shared_session: SharedSession::from_persistence_read_only(&shared_session_path),
             read_only: true,
+            read_only_load_mode,
             file_trigram: std::sync::OnceLock::new(),
             recency_map: std::sync::OnceLock::new(),
             last_load_time: meta_mtime,
@@ -1006,6 +1119,8 @@ impl Engine {
             embed_state: None,
             concept_reranker: std::sync::OnceLock::new(),
             filter_pipeline,
+            writer_lock: None,
+            pending_checkpoint: super::sync::ApplyChangesOutcome::default(),
         })
     }
 
@@ -1026,6 +1141,39 @@ fn clear_chunk_contents(chunk_meta: &DashMap<u64, ChunkMeta>) {
         entry.content = String::new();
     }
 }
+
+/// Return allocator-owned pages from completed initialization phases to macOS.
+///
+/// `malloc_zone_pressure_relief` only purges free pages from the selected zone;
+/// it never moves or invalidates live allocations. Calling it once after all
+/// corpus-scale construction maps have been dropped prevents scalable malloc's
+/// empty regions from inflating the process peak during semantic persistence.
+#[cfg(target_os = "macos")]
+fn release_allocator_pages() {
+    use std::ffi::c_void;
+
+    unsafe extern "C" {
+        fn malloc_default_zone() -> *mut c_void;
+        fn malloc_zone_pressure_relief(zone: *mut c_void, goal: usize) -> usize;
+    }
+
+    // SAFETY: both functions are provided by macOS libSystem. The default zone
+    // remains process-global for the program lifetime, and a zero goal asks the
+    // allocator to release as many currently-unused pages as practical.
+    let released = unsafe {
+        let zone = malloc_default_zone();
+        if zone.is_null() {
+            0
+        } else {
+            malloc_zone_pressure_relief(zone, 0)
+        }
+    };
+    debug!(released_bytes = released, "released unused allocator pages");
+}
+
+/// Non-macOS allocators retain their native page-release policy.
+#[cfg(not(target_os = "macos"))]
+fn release_allocator_pages() {}
 
 /// Embed all pending chunks in a background thread, processing file by file.
 ///
@@ -1071,4 +1219,219 @@ fn background_embed(
     }
 
     Ok(vector)
+}
+
+#[cfg(test)]
+mod read_only_tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn incompatible_read_only_open_requires_explicit_rebuild_without_writing() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let marker = root.join("existing-index-marker");
+        fs::write(&marker, b"must stay unchanged").unwrap();
+
+        let result = open_read_only_tantivy_with(root, || {
+            Err(CodixingError::Tantivy(
+                tantivy::TantivyError::InternalError(
+                    "IncompatibleIndex: unsupported index version".to_owned(),
+                ),
+            ))
+        });
+
+        let error = match result {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("incompatible read-only open unexpectedly succeeded"),
+        };
+        assert!(error.contains("read-only open never rebuilds or modifies"));
+        assert!(error.contains("codixing init"));
+        assert_eq!(fs::read(&marker).unwrap(), b"must stay unchanged");
+        assert!(!root.join(".codixing").exists());
+    }
+
+    #[test]
+    fn fresh_init_returns_mmap_backed_full_fidelity_symbols() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("lib.rs"),
+            "/// Kept in the mmap artifact.\npub fn mmap_ready(value: usize) -> usize { value }\n",
+        )
+        .unwrap();
+        let mut config = IndexConfig::new(root);
+        config.embedding.enabled = false;
+
+        let engine = Engine::init(root, config).unwrap();
+
+        assert!(!engine.symbols.is_in_memory());
+        let symbols = engine.symbols.lookup("mmap_ready");
+        assert_eq!(symbols.len(), 1);
+        let symbol = &symbols[0];
+        let initialized_symbol = serde_json::to_value(symbol).unwrap();
+        assert_eq!(symbol.file_path, "lib.rs");
+        assert!(matches!(symbol.kind, crate::language::EntityKind::Function));
+        assert!(
+            symbol
+                .signature
+                .as_deref()
+                .is_some_and(|signature| signature.contains("mmap_ready"))
+        );
+        assert!(
+            symbol
+                .doc_comment
+                .as_deref()
+                .is_some_and(|doc| doc.contains("mmap artifact"))
+        );
+
+        assert!(engine.__test_force_load_concept());
+        assert!(engine.__test_force_load_reformulations());
+        let initialized_concepts = engine.__test_concept_symbols("mmap_ready");
+        let initialized_reformulations = engine.__test_reformulation_expansions("mmap_ready");
+        let mut initialized_chunk_meta: Vec<_> = engine
+            .chunk_meta
+            .iter()
+            .map(|entry| (*entry.key(), serde_json::to_value(entry.value()).unwrap()))
+            .collect();
+        initialized_chunk_meta.sort_unstable_by_key(|(chunk_id, _)| *chunk_id);
+        assert_eq!(initialized_chunk_meta.len(), 1);
+        let chunk_id = initialized_chunk_meta[0].0;
+        assert_eq!(initialized_chunk_meta[0].1["content"], "");
+        assert!(
+            engine
+                .resolve_chunk_content(chunk_id)
+                .is_some_and(|content| content.contains("mmap_ready")),
+            "BM25 init must hydrate content from Tantivy after rebuilding compact metadata"
+        );
+        drop(engine);
+
+        let reopened = Engine::open(root).unwrap();
+        assert!(!reopened.symbols.is_in_memory());
+        let reopened_symbols = reopened.symbols.lookup("mmap_ready");
+        assert_eq!(reopened_symbols.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&reopened_symbols[0]).unwrap(),
+            initialized_symbol,
+            "all full-fidelity Symbol fields must survive init and reopen"
+        );
+        assert!(reopened.__test_force_load_concept());
+        assert!(reopened.__test_force_load_reformulations());
+        assert_eq!(
+            reopened.__test_concept_symbols("mmap_ready"),
+            initialized_concepts
+        );
+        assert_eq!(
+            reopened.__test_reformulation_expansions("mmap_ready"),
+            initialized_reformulations
+        );
+        let mut reopened_chunk_meta: Vec<_> = reopened
+            .chunk_meta
+            .iter()
+            .map(|entry| (*entry.key(), serde_json::to_value(entry.value()).unwrap()))
+            .collect();
+        reopened_chunk_meta.sort_unstable_by_key(|(chunk_id, _)| *chunk_id);
+        assert_eq!(reopened_chunk_meta, initialized_chunk_meta);
+        assert!(
+            reopened
+                .resolve_chunk_content(chunk_id)
+                .is_some_and(|content| content.contains("mmap_ready")),
+            "reopened engine must hydrate the same compact metadata from Tantivy"
+        );
+    }
+
+    #[test]
+    fn symbol_delta_is_restored_by_writable_and_read_only_open() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(
+            root.join("lib.rs"),
+            "pub fn replaced_symbol() -> usize { 1 }\npub fn kept_symbol() -> usize { 2 }\n",
+        )
+        .unwrap();
+        let mut config = IndexConfig::new(root);
+        config.embedding.enabled = false;
+        drop(Engine::init(root, config).unwrap());
+
+        let store = IndexStore::open(root).unwrap();
+        let base = load_persisted_symbols(&store).unwrap();
+        let mut replacement = base.lookup("replaced_symbol").pop().unwrap();
+        replacement.name = "replacement_from_delta".to_string();
+        replacement.signature = Some("pub fn replacement_from_delta() -> usize".to_string());
+        replacement.doc_comment = Some("Persisted only in the bounded delta".to_string());
+        let bytes = crate::symbols::persistence::serialize_symbol_delta(&[(
+            "lib.rs".to_string(),
+            vec![replacement],
+        )])
+        .unwrap();
+        store.save_symbol_delta_bytes(&bytes).unwrap();
+        drop(store);
+
+        let writable = Engine::open(root).unwrap();
+        assert!(matches!(&writable.symbols, SymbolTable::Overlay(_)));
+        assert!(writable.symbols.lookup("replaced_symbol").is_empty());
+        let replacement = writable.symbols.lookup("replacement_from_delta");
+        assert_eq!(replacement.len(), 1);
+        assert_eq!(
+            replacement[0].doc_comment.as_deref(),
+            Some("Persisted only in the bounded delta")
+        );
+        // A per-file replacement is authoritative: symbols omitted from the
+        // replacement list do not leak through from the mmap base.
+        assert!(writable.symbols.lookup("kept_symbol").is_empty());
+        drop(writable);
+
+        let read_only = Engine::open_read_only(root).unwrap();
+        assert_eq!(read_only.symbols.lookup("replacement_from_delta").len(), 1);
+        assert!(read_only.symbols.lookup("replaced_symbol").is_empty());
+    }
+
+    #[test]
+    fn malformed_oversized_and_unpaired_symbol_deltas_fail_open_closed() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("lib.rs"), "pub fn stable_symbol() {}\n").unwrap();
+        let mut config = IndexConfig::new(root);
+        config.embedding.enabled = false;
+        drop(Engine::init(root, config).unwrap());
+
+        let store = IndexStore::open(root).unwrap();
+        fs::write(store.symbols_delta_path(), b"malformed symbol delta").unwrap();
+        drop(store);
+        let malformed = match Engine::open_read_only(root) {
+            Ok(_) => panic!("malformed symbol delta unexpectedly opened"),
+            Err(error) => error,
+        };
+        assert!(malformed.to_string().contains("symbol delta"));
+
+        let store = IndexStore::open(root).unwrap();
+        let oversized = fs::File::create(store.symbols_delta_path()).unwrap();
+        oversized
+            .set_len(crate::symbols::persistence::SYMBOL_DELTA_MAX_BYTES as u64 + 1)
+            .unwrap();
+        drop(oversized);
+        drop(store);
+        let oversized = match Engine::open_read_only(root) {
+            Ok(_) => panic!("oversized symbol delta unexpectedly opened"),
+            Err(error) => error,
+        };
+        assert!(oversized.to_string().contains("maximum"));
+
+        let store = IndexStore::open(root).unwrap();
+        store
+            .save_symbol_delta_bytes(
+                &crate::symbols::persistence::serialize_symbol_delta(&[]).unwrap(),
+            )
+            .unwrap();
+        fs::remove_file(store.symbols_v2_path()).unwrap();
+        drop(store);
+        let unpaired = match Engine::open_read_only(root) {
+            Ok(_) => panic!("symbol delta without its mmap base unexpectedly opened"),
+            Err(error) => error,
+        };
+        assert!(unpaired.to_string().contains("without symbols_v2.bin"));
+    }
 }

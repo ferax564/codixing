@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -10,9 +10,6 @@ use crate::config::IndexConfig;
 use crate::error::Result;
 use crate::language::detect_language;
 
-#[cfg(target_os = "macos")]
-type BackendWatcher = notify::PollWatcher;
-#[cfg(not(target_os = "macos"))]
 type BackendWatcher = notify::RecommendedWatcher;
 
 /// Default debounce window — events within this period are coalesced.
@@ -33,7 +30,9 @@ const STARTUP_SETTLE_MS: u64 = 150;
 pub struct FileWatcher {
     _watcher: BackendWatcher,
     receiver: mpsc::Receiver<notify::Result<notify::Event>>,
+    root: PathBuf,
     exclude_patterns: HashSet<String>,
+    languages: HashSet<String>,
 }
 
 /// The kind of change detected for a file.
@@ -43,6 +42,10 @@ pub enum ChangeKind {
     Modified,
     /// File was deleted.
     Removed,
+    /// A directory was deleted or moved; Engine expands its indexed prefix.
+    RemovedDirectory,
+    /// A directory was created or moved; Engine expands it off the event loop.
+    CreatedDirectory,
 }
 
 /// A single file-change event after debouncing.
@@ -61,17 +64,6 @@ impl FileWatcher {
     pub fn new(root: &Path, config: &IndexConfig) -> Result<Self> {
         let (tx, rx) = mpsc::channel();
 
-        #[cfg(target_os = "macos")]
-        let mut watcher = BackendWatcher::new(
-            move |res| {
-                let _ = tx.send(res);
-            },
-            Config::default()
-                .with_poll_interval(Duration::from_millis(100))
-                .with_compare_contents(true),
-        )?;
-
-        #[cfg(not(target_os = "macos"))]
         let mut watcher = BackendWatcher::new(
             move |res| {
                 let _ = tx.send(res);
@@ -89,7 +81,9 @@ impl FileWatcher {
         Ok(Self {
             _watcher: watcher,
             receiver: rx,
+            root: root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
             exclude_patterns,
+            languages: config.languages.clone(),
         })
     }
 
@@ -136,34 +130,55 @@ impl FileWatcher {
 
     /// Convert raw notify events into deduplicated `FileChange`s.
     fn process_events(&self, events: Vec<notify::Event>) -> Vec<FileChange> {
-        let mut changes = std::collections::HashMap::<PathBuf, ChangeKind>::new();
+        use notify::event::{ModifyKind, RenameMode};
 
+        let mut changes = HashMap::<PathBuf, ChangeKind>::new();
         for event in events {
-            let kind = match event.kind {
+            match &event.kind {
+                EventKind::Modify(ModifyKind::Name(RenameMode::From)) if event.paths.len() == 1 => {
+                    let path = &event.paths[0];
+                    self.record_change(&mut changes, path, ChangeKind::RemovedDirectory);
+                    continue;
+                }
+                EventKind::Modify(ModifyKind::Name(RenameMode::To)) if event.paths.len() == 1 => {
+                    self.record_created_path(&mut changes, &event.paths[0]);
+                    continue;
+                }
+                EventKind::Modify(ModifyKind::Name(_)) if event.paths.len() >= 2 => {
+                    let old_path = &event.paths[0];
+                    let new_path = &event.paths[event.paths.len() - 1];
+                    self.record_rename(&mut changes, old_path, new_path);
+                    continue;
+                }
+                _ => {}
+            }
+
+            let rename_event = matches!(&event.kind, EventKind::Modify(ModifyKind::Name(_)));
+            let create_event = matches!(&event.kind, EventKind::Create(_));
+            let default_kind = match &event.kind {
                 EventKind::Create(_) | EventKind::Modify(_) => ChangeKind::Modified,
-                EventKind::Remove(_) => ChangeKind::Removed,
+                EventKind::Remove(notify::event::RemoveKind::File) => ChangeKind::Removed,
+                EventKind::Remove(_) => ChangeKind::RemovedDirectory,
                 _ => continue,
             };
 
             for path in event.paths {
-                // Skip directories.
-                if path.is_dir() {
+                if (rename_event || create_event) && path.is_dir() {
+                    self.record_created_path(&mut changes, &path);
                     continue;
                 }
-
-                // Skip excluded paths.
-                if self.is_excluded(&path) {
-                    debug!(path = %path.display(), "ignored excluded path");
-                    continue;
-                }
-
-                // Skip unsupported file types.
-                if kind == ChangeKind::Modified && detect_language(&path).is_none() {
-                    continue;
-                }
-
-                // Later events for the same path override earlier ones.
-                changes.insert(path, kind.clone());
+                let kind = if rename_event {
+                    // Backends may split a rename into one-path From/To events.
+                    // The current filesystem state disambiguates them safely.
+                    if path.exists() {
+                        ChangeKind::Modified
+                    } else {
+                        ChangeKind::RemovedDirectory
+                    }
+                } else {
+                    default_kind.clone()
+                };
+                self.record_change(&mut changes, &path, kind);
             }
         }
 
@@ -173,15 +188,83 @@ impl FileWatcher {
             .collect()
     }
 
+    fn record_rename(
+        &self,
+        changes: &mut HashMap<PathBuf, ChangeKind>,
+        old_path: &Path,
+        new_path: &Path,
+    ) {
+        // The source may already be gone, so its file type is unknowable. A
+        // conservative directory hint is safe: Engine turns an exact indexed
+        // file key into an O(1) removal and prefix-expands only otherwise.
+        self.record_change(changes, old_path, ChangeKind::RemovedDirectory);
+        if new_path.is_dir() {
+            // Removal and destination enumeration are deliberately independent.
+            // Split/interleaved rename events cannot pair the wrong trees, and
+            // a destination read failure still leaves the old prefix removable.
+            self.record_directory_create(changes, new_path);
+        } else {
+            self.record_change(changes, new_path, ChangeKind::Modified);
+        }
+    }
+
+    fn record_created_path(&self, changes: &mut HashMap<PathBuf, ChangeKind>, path: &Path) {
+        if path.is_dir() {
+            self.record_directory_create(changes, path);
+        } else {
+            self.record_change(changes, path, ChangeKind::Modified);
+        }
+    }
+
+    /// Record a directory intent without walking it on notify's event-drain path.
+    /// Engine expands it with the same ignore, language, size, and path-safety
+    /// rules as a full index build.
+    fn record_directory_create(&self, changes: &mut HashMap<PathBuf, ChangeKind>, new_root: &Path) {
+        // FSEvents can attach a rename flag to the watched root as aggregate
+        // metadata. Expanding that would turn one moved directory into a full
+        // repository rescan.
+        if new_root == self.root {
+            return;
+        }
+        self.record_change(changes, new_root, ChangeKind::CreatedDirectory);
+    }
+
+    fn record_change(
+        &self,
+        changes: &mut HashMap<PathBuf, ChangeKind>,
+        path: &Path,
+        kind: ChangeKind,
+    ) {
+        if kind == ChangeKind::Modified && path.is_dir() {
+            return;
+        }
+        if self.is_excluded(path) {
+            debug!(path = %path.display(), "ignored excluded path");
+            return;
+        }
+        if kind == ChangeKind::Modified {
+            let Some(language) = detect_language(path) else {
+                return;
+            };
+            if !self.languages.is_empty()
+                && !self.languages.contains(&language.name().to_lowercase())
+            {
+                return;
+            }
+        }
+
+        // Later events for the same path override earlier ones.
+        changes.insert(path.to_path_buf(), kind);
+    }
+
     /// Check if a path should be excluded based on config patterns.
     fn is_excluded(&self, path: &Path) -> bool {
         for component in path.components() {
-            if let std::path::Component::Normal(name) = component {
-                if let Some(name_str) = name.to_str() {
-                    if self.exclude_patterns.contains(name_str) {
-                        return true;
-                    }
-                }
+            if let std::path::Component::Normal(name) = component
+                && let Some(name_str) = name.to_str()
+                && self.exclude_patterns.contains(name_str)
+            {
+                return true;
             }
         }
         false
@@ -295,5 +378,187 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn paired_rename_removes_old_path_and_indexes_new_path() {
+        use notify::event::{ModifyKind, RenameMode};
+
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let config = IndexConfig::new(root);
+        let watcher = FileWatcher::new(root, &config).unwrap();
+        let old_path = root.join("old.rs");
+        let new_path = root.join("new.rs");
+        fs::write(&new_path, "fn renamed() {}").unwrap();
+
+        let event = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+            .add_path(old_path.clone())
+            .add_path(new_path.clone());
+        let changes = watcher.process_events(vec![event]);
+
+        assert!(changes.iter().any(|change| {
+            change.path == old_path && change.kind == ChangeKind::RemovedDirectory
+        }));
+        assert!(
+            changes
+                .iter()
+                .any(|change| { change.path == new_path && change.kind == ChangeKind::Modified })
+        );
+    }
+
+    #[test]
+    fn split_rename_removes_old_path_and_indexes_new_path() {
+        use notify::event::{ModifyKind, RenameMode};
+
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let watcher = FileWatcher::new(root, &IndexConfig::new(root)).unwrap();
+        let old_path = root.join("old.rs");
+        let new_path = root.join("new.rs");
+        fs::write(&new_path, "fn renamed() {}").unwrap();
+
+        let from = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::From)))
+            .add_path(old_path.clone());
+        let to = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::To)))
+            .add_path(new_path.clone());
+        let changes = watcher.process_events(vec![from, to]);
+
+        assert!(changes.iter().any(|change| {
+            change.path == old_path && change.kind == ChangeKind::RemovedDirectory
+        }));
+        assert!(
+            changes
+                .iter()
+                .any(|change| { change.path == new_path && change.kind == ChangeKind::Modified })
+        );
+    }
+
+    #[test]
+    fn paired_directory_rename_emits_constant_size_directory_intent() {
+        use notify::event::{ModifyKind, RenameMode};
+
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let watcher = FileWatcher::new(root, &IndexConfig::new(root)).unwrap();
+        let old_dir = root.join("old_module");
+        let new_dir = root.join("new_module");
+        let new_nested = new_dir.join("nested").join("code.rs");
+        fs::create_dir_all(new_nested.parent().unwrap()).unwrap();
+        fs::write(&new_nested, "fn renamed_directory_file() {}").unwrap();
+        fs::write(new_dir.join("ignored.png"), [0_u8; 8]).unwrap();
+
+        let event = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+            .add_path(old_dir.clone())
+            .add_path(new_dir.clone());
+        let changes = watcher.process_events(vec![event]);
+        assert!(changes.iter().any(|change| {
+            change.path == old_dir && change.kind == ChangeKind::RemovedDirectory
+        }));
+        assert!(changes.iter().any(|change| {
+            change.path == new_dir && change.kind == ChangeKind::CreatedDirectory
+        }));
+        assert!(!changes.iter().any(|change| change.path == new_nested));
+        assert!(
+            !changes
+                .iter()
+                .any(|change| change.path.ends_with("ignored.png"))
+        );
+    }
+
+    #[test]
+    fn unpaired_directory_to_emits_directory_intent() {
+        use notify::event::{ModifyKind, RenameMode};
+
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let watcher = FileWatcher::new(root, &IndexConfig::new(root)).unwrap();
+        let new_dir = root.join("new_module");
+        let nested = new_dir.join("nested.rs");
+        fs::create_dir_all(&new_dir).unwrap();
+        fs::write(&nested, "fn arrived_in_later_window() {}").unwrap();
+
+        let to = notify::Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::To)))
+            .add_path(new_dir.clone());
+        let changes = watcher.process_events(vec![to]);
+
+        assert!(changes.iter().any(|change| {
+            change.path == new_dir && change.kind == ChangeKind::CreatedDirectory
+        }));
+        assert!(!changes.iter().any(|change| change.path == nested));
+    }
+
+    #[test]
+    fn generic_folder_create_emits_directory_intent() {
+        use notify::event::CreateKind;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let watcher = FileWatcher::new(root, &IndexConfig::new(root)).unwrap();
+        let new_dir = root.join("generated_tree");
+        let nested = new_dir.join("nested.rs");
+        fs::create_dir_all(&new_dir).unwrap();
+        fs::write(&nested, "fn created_folder_file() {}").unwrap();
+
+        let event =
+            notify::Event::new(EventKind::Create(CreateKind::Folder)).add_path(new_dir.clone());
+        let changes = watcher.process_events(vec![event]);
+
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, new_dir);
+        assert_eq!(changes[0].kind, ChangeKind::CreatedDirectory);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn native_watcher_reports_nested_directory_rename() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let old_dir = root.join("old_module");
+        fs::create_dir_all(&old_dir).unwrap();
+        fs::write(old_dir.join("nested.rs"), "fn native_rename() {}").unwrap();
+        let watcher = FileWatcher::new(root, &IndexConfig::new(root)).unwrap();
+
+        let new_dir = root.join("new_module");
+        fs::rename(&old_dir, &new_dir).unwrap();
+        // FSEvents documents the two sides of a rename as independent events;
+        // they can legitimately land in adjacent debounce windows. Drain a
+        // few bounded batches just like the daemon loop does.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut changes = Vec::new();
+        while Instant::now() < deadline {
+            changes.extend(watcher.poll_changes(Duration::from_secs(1)));
+            let saw_old = changes.iter().any(|change| {
+                ((change.path == old_dir || change.path.ends_with("old_module"))
+                    && change.kind == ChangeKind::RemovedDirectory)
+                    || (change.path.ends_with("old_module/nested.rs")
+                        && change.kind == ChangeKind::Removed)
+            });
+            let saw_new = changes.iter().any(|change| {
+                ((change.path == new_dir || change.path.ends_with("new_module"))
+                    && change.kind == ChangeKind::CreatedDirectory)
+                    || (change.path.ends_with("new_module/nested.rs")
+                        && change.kind == ChangeKind::Modified)
+            });
+            if saw_old && saw_new {
+                break;
+            }
+        }
+
+        assert!(
+            changes.iter().any(|change| {
+                ((change.path == old_dir || change.path.ends_with("old_module"))
+                    && change.kind == ChangeKind::RemovedDirectory)
+                    || (change.path.ends_with("old_module/nested.rs")
+                        && change.kind == ChangeKind::Removed)
+            }),
+            "missing old rename side: {changes:?}"
+        );
+        assert!(changes.iter().any(|change| {
+            ((change.path == new_dir || change.path.ends_with("new_module"))
+                && change.kind == ChangeKind::CreatedDirectory)
+                || (change.path.ends_with("new_module/nested.rs")
+                    && change.kind == ChangeKind::Modified)
+        }));
     }
 }

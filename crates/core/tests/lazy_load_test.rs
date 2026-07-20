@@ -1,14 +1,16 @@
 //! Tests that `concept_index` and `reformulations` are lazy-loaded on first
 //! access rather than eagerly during `Engine::open`.
 //!
-//! These two artifacts can be massive (~2.1 GB and ~528 MB on the Linux
-//! kernel) and bitcode-deserializing them on every cold start dominates
-//! `codixing grep`'s startup time even though grep never touches them. The
+//! These two artifacts used to reach ~2.1 GB and ~528 MB on the Linux kernel;
+//! they are now bounded and string-interned, but decoding them still does not
+//! belong on commands that never use semantic expansion. The
 //! v0.37 refactor moved both behind `OnceLock<Option<T>>` getters; these
 //! tests pin that behavior so future regressions trip CI rather than
 //! silently re-introducing the cold-start tax.
 
 mod common;
+
+use std::fs;
 
 use codixing_core::{Engine, IndexConfig};
 use tempfile::tempdir;
@@ -80,4 +82,63 @@ fn reformulations_lazy_loaded_on_open() {
         engine.__test_reformulations_loaded(),
         "reformulations OnceLock should be set after the first get_reformulations() call"
     );
+}
+
+#[test]
+fn init_then_sync_refreshes_added_changed_and_removed_semantics() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let source_dir = root.join("src");
+    fs::create_dir_all(&source_dir).unwrap();
+    let source = source_dir.join("semantic.rs");
+    fs::write(
+        &source,
+        r#"
+/// Authentication credential handler.
+pub fn auth_login() {}
+/// Authentication credential validator.
+pub fn auth_token() {}
+"#,
+    )
+    .unwrap();
+
+    let mut engine = Engine::init(root, no_embed_config(root)).unwrap();
+    assert!(
+        engine
+            .__test_concept_symbols("authentication")
+            .iter()
+            .any(|symbol| symbol == "auth_login")
+    );
+    assert!(!engine.__test_reformulation_expansions("auth").is_empty());
+
+    fs::write(
+        &source,
+        r#"
+/// Caching storage reader.
+pub fn cache_read() {}
+/// Caching storage writer.
+pub fn cache_write() {}
+"#,
+    )
+    .unwrap();
+    engine.sync().unwrap();
+    assert!(engine.__test_concept_symbols("authentication").is_empty());
+    assert!(
+        engine
+            .__test_concept_symbols("caching")
+            .iter()
+            .any(|symbol| symbol == "cache_read")
+    );
+    assert!(engine.__test_reformulation_expansions("auth").is_empty());
+    assert!(!engine.__test_reformulation_expansions("cache").is_empty());
+
+    fs::remove_file(&source).unwrap();
+    engine.sync().unwrap();
+    assert!(engine.__test_concept_symbols("caching").is_empty());
+    assert!(engine.__test_reformulation_expansions("cache").is_empty());
+
+    drop(engine);
+    let reopened = Engine::open(root).unwrap();
+    assert!(reopened.__test_concept_symbols("caching").is_empty());
+    assert!(reopened.__test_reformulation_expansions("cache").is_empty());
 }

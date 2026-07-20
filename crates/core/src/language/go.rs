@@ -181,20 +181,20 @@ fn extract_go_type_relations(node: &Node, source: &[u8], kind: &EntityKind) -> V
             // Struct field types → Contains
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                if child.kind() == "struct_type" {
-                    if let Some(field_list) = child.child_by_field_name("fields") {
-                        let mut fcursor = field_list.walk();
-                        for field in field_list.children(&mut fcursor) {
-                            if field.kind() == "field_declaration" {
-                                if let Some(type_node) = field.child_by_field_name("type") {
-                                    let text = node_text(&type_node, source).to_string();
-                                    if !text.is_empty() {
-                                        relations.push(TypeRelation {
-                                            kind: TypeRelationKind::Contains,
-                                            target: text,
-                                        });
-                                    }
-                                }
+                if child.kind() == "struct_type"
+                    && let Some(field_list) = child.child_by_field_name("fields")
+                {
+                    let mut fcursor = field_list.walk();
+                    for field in field_list.children(&mut fcursor) {
+                        if field.kind() == "field_declaration"
+                            && let Some(type_node) = field.child_by_field_name("type")
+                        {
+                            let text = node_text(&type_node, source).to_string();
+                            if !text.is_empty() {
+                                relations.push(TypeRelation {
+                                    kind: TypeRelationKind::Contains,
+                                    target: text,
+                                });
                             }
                         }
                     }

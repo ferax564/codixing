@@ -7,6 +7,7 @@ mod common;
 
 use std::{fs, sync::Mutex};
 
+use codixing_core::persistence::IndexStore;
 use codixing_core::{Engine, IndexConfig, SearchQuery, Strategy};
 use tempfile::tempdir;
 
@@ -158,7 +159,7 @@ fn search_no_results() {
 }
 
 #[test]
-fn exact_search_hydrates_content_after_reopen() {
+fn exact_search_hydrates_content_after_init_and_reopen() {
     let dir = tempdir().unwrap();
     let root = dir.path();
     let src = root.join("src");
@@ -170,7 +171,26 @@ fn exact_search_hydrates_content_after_reopen() {
     )
     .unwrap();
 
-    drop(Engine::init(root, bm25_config(root)).unwrap());
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
+    let initialized_results = engine
+        .search(
+            SearchQuery::new(marker)
+                .with_limit(10)
+                .with_strategy(Strategy::Exact),
+        )
+        .unwrap();
+    assert!(
+        initialized_results
+            .iter()
+            .any(|result| result.content.contains(marker)),
+        "exact search should hydrate compact metadata content from Tantivy immediately after init"
+    );
+    drop(engine);
+
+    let store = IndexStore::open(root).unwrap();
+    assert!(!store.chunk_trigram_path().exists());
+    fs::write(store.chunk_trigram_path(), b"ignored legacy corruption").unwrap();
+    drop(store);
     let engine = Engine::open(root).unwrap();
     let results = engine
         .search(
@@ -183,6 +203,129 @@ fn exact_search_hydrates_content_after_reopen() {
     assert!(
         results.iter().any(|result| result.content.contains(marker)),
         "exact search should hydrate compact metadata content from Tantivy after reopen"
+    );
+}
+
+#[test]
+fn exact_search_streams_across_file_batches_and_preserves_global_ranking() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let src = root.join("src");
+    fs::create_dir_all(&src).unwrap();
+
+    for file_index in 0..70 {
+        let repeats = if file_index == 69 { 5 } else { 1 };
+        let body = "abcd ".repeat(repeats);
+        fs::write(
+            src.join(format!("file_{file_index:02}.rs")),
+            format!("// {body}\npub fn fixture_{file_index}() {{}}\n"),
+        )
+        .unwrap();
+    }
+    fs::write(
+        src.join("false_positive.rs"),
+        "// abc is separated, while bcd only shares the required trigrams\npub fn decoy() {}\n",
+    )
+    .unwrap();
+
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
+    let query = SearchQuery::new("abcd")
+        .with_limit(10)
+        .with_strategy(Strategy::Exact);
+    let first = engine.search(query.clone()).unwrap();
+    let second = engine.search(query).unwrap();
+
+    assert_eq!(first[0].file_path, "src/file_69.rs");
+    assert_eq!(first[0].score, 5.0);
+    assert!(
+        first
+            .iter()
+            .all(|result| result.file_path != "src/false_positive.rs"),
+        "full substring verification must reject trigram false positives"
+    );
+    let first_order: Vec<_> = first.iter().map(|result| &result.chunk_id).collect();
+    let second_order: Vec<_> = second.iter().map(|result| &result.chunk_id).collect();
+    assert_eq!(first_order, second_order);
+
+    let filtered = engine
+        .search(
+            SearchQuery::new("abcd")
+                .with_limit(10)
+                .with_file_filter("file_68")
+                .with_strategy(Strategy::Exact),
+        )
+        .unwrap();
+    assert!(!filtered.is_empty());
+    assert!(
+        filtered
+            .iter()
+            .all(|result| result.file_path.contains("file_68"))
+    );
+}
+
+#[test]
+fn exact_search_short_query_keeps_bm25_fallback() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(root.join("lib.rs"), "pub fn xy() -> usize { 2 }\n").unwrap();
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
+
+    let results = engine
+        .search(SearchQuery::new("xy").with_strategy(Strategy::Exact))
+        .unwrap();
+
+    assert!(
+        results
+            .iter()
+            .any(|result| result.content.contains("fn xy"))
+    );
+}
+
+#[test]
+fn exact_search_bm25_fallback_treats_colons_as_literal_text() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("lib.rs"),
+        "pub const MARKER: &str = \"scheme:literalcolonmarker\";\n",
+    )
+    .unwrap();
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
+
+    let results = engine
+        .search(SearchQuery::new("scheme:literalcolonmarker").with_strategy(Strategy::Exact))
+        .unwrap();
+    assert!(
+        results
+            .iter()
+            .any(|result| result.content.contains("scheme:literalcolonmarker"))
+    );
+
+    let missing = engine
+        .search(SearchQuery::new("unknownfield:missingvalue").with_strategy(Strategy::Exact))
+        .expect("literal colons must not be parsed as Tantivy field syntax");
+    assert!(missing.is_empty());
+}
+
+#[test]
+fn exact_search_preserves_lossy_utf8_replacement_matches() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    fs::write(
+        root.join("invalid.rs"),
+        b"pub fn invalid_utf8() { let _ = \"\xff\"; }\n",
+    )
+    .unwrap();
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
+
+    let results = engine
+        .search(SearchQuery::new("\u{FFFD}").with_strategy(Strategy::Exact))
+        .unwrap();
+
+    assert!(
+        results
+            .iter()
+            .any(|result| result.content.contains('\u{FFFD}'))
     );
 }
 
@@ -217,6 +360,37 @@ fn search_with_progress_reports_bm25_phase() {
 
     // Instant strategy should only produce the bm25 phase.
     assert_eq!(phases.len(), 1, "Instant should have exactly one phase");
+}
+
+#[test]
+fn search_with_progress_returns_actual_exact_results() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    common::setup_multi_language_project(root);
+
+    let engine = Engine::init(root, bm25_config(root)).unwrap();
+    let query = SearchQuery::new("add")
+        .with_limit(10)
+        .with_strategy(Strategy::Exact);
+    let expected = engine.search(query.clone()).unwrap();
+
+    let phases = Mutex::new(Vec::new());
+    let results = engine
+        .search_with_progress(query, |phase, partial| {
+            phases
+                .lock()
+                .unwrap()
+                .push((phase.to_string(), partial.len()));
+        })
+        .unwrap();
+
+    let result_ids: Vec<_> = results.iter().map(|result| &result.chunk_id).collect();
+    let expected_ids: Vec<_> = expected.iter().map(|result| &result.chunk_id).collect();
+    assert_eq!(result_ids, expected_ids);
+    let phases = phases.into_inner().unwrap();
+    assert_eq!(phases[0].0, "bm25");
+    assert_eq!(phases[1].0, "exact");
+    assert_eq!(phases[1].1, expected.len());
 }
 
 #[test]

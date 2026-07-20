@@ -422,16 +422,16 @@ fn extract_entity_names_from_content(content: &str, language: Language) -> Vec<S
     for line in content.lines() {
         let trimmed = line.trim();
         for pattern in keyword_patterns {
-            if let Some(rest) = trimmed.strip_prefix("pub ").or(Some(trimmed)) {
-                if let Some(after) = rest.strip_prefix(pattern) {
-                    // Extract the identifier (up to first non-alphanumeric-underscore).
-                    let name: String = after
-                        .chars()
-                        .take_while(|c| c.is_alphanumeric() || *c == '_')
-                        .collect();
-                    if !name.is_empty() {
-                        names.push(name);
-                    }
+            if let Some(rest) = trimmed.strip_prefix("pub ").or(Some(trimmed))
+                && let Some(after) = rest.strip_prefix(pattern)
+            {
+                // Extract the identifier (up to first non-alphanumeric-underscore).
+                let name: String = after
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() {
+                    names.push(name);
                 }
             }
         }

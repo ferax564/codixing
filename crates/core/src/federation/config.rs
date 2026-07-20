@@ -33,8 +33,9 @@ pub struct FederationConfig {
     /// at startup.
     #[serde(default = "default_lazy_load")]
     pub lazy_load: bool,
-    /// Maximum number of engines held in memory simultaneously.
-    /// Beyond this limit the least-recently-used engine is evicted.
+    /// Maximum number of lazy-loaded engines retained in memory. Projects
+    /// beyond this limit are opened read-only for the current fan-out and
+    /// dropped afterward, keeping the resident cache stable.
     #[serde(default = "default_max_resident")]
     pub max_resident: usize,
 }

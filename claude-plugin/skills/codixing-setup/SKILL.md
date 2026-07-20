@@ -30,13 +30,30 @@ The setup workflow needs the `codixing` CLI, so the MCP-only
 
 ### 2. Check for existing index
 
-Look for a `.codixing/` directory in the project root. If it exists, skip to step 4.
+Inspect the layout rather than treating the `.codixing/` directory itself as
+proof that indexing succeeded:
+
+```bash
+codixing doctor . --json
+```
+
+Only skip to step 4 when `index.status` is `ok`. A `missing` status continues
+to step 3. For `partial`, run `codixing doctor .` for recovery guidance, then
+either preserve recoverable artifacts with `codixing repair .` (which syncs by
+default), or run `codixing init .` to rebuild a clean index. Re-run the JSON
+check and do not continue until it reports `ok`.
 
 ### 3. Index the project
 
 ```bash
 codixing init .
 ```
+
+Indexing uses a bounded worker default: `min(available CPUs, 8)` on non-Windows
+hosts and `min(available CPUs, 4)` on Windows. Keep that default initially;
+pass `--threads <N>` only after measuring the repository and storage. Files over
+2 MiB are skipped by default to bound indexing work and memory; use
+`--max-file-bytes 0` only when unlimited file size is intentional.
 
 If the user passed `--embed`:
 ```bash
@@ -47,6 +64,11 @@ If the user selected a model, enable embeddings explicitly:
 ```bash
 codixing init . --embed --model <name>
 ```
+
+For a one-shot validation query on a very large repository, explicitly choose
+`--strategy instant`, or `--strategy exact` for a known identifier or literal.
+Those CLI strategies use the lean lexical read profile and skip graph, vector,
+and reranker loading. `auto` and the other strategies open the full index.
 
 ONNX-based models require `ORT_DYLIB_PATH` to point to the exact shared-library
 file (`libonnxruntime.dylib`, `libonnxruntime.so*`, or `onnxruntime.dll`). Do not

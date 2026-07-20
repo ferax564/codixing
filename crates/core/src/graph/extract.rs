@@ -155,29 +155,29 @@ fn collect_rust_definitions(
 
     // For `impl Trait for Type`, also extract the trait name so that
     // trait methods defined in the impl block can be linked back to the trait.
-    if kind_str == "impl_item" {
-        if let Some(trait_name) = rust_impl_trait_name(node, source) {
-            // Extract each method inside the impl block with a qualified name
-            // "TraitName::method" so the symbol graph can link trait method calls
-            // through the impl to the concrete definition.
-            let mut cursor = node.walk();
-            for child in node.children(&mut cursor) {
-                if child.kind() == "declaration_list" {
-                    let mut inner_cursor = child.walk();
-                    for item in child.children(&mut inner_cursor) {
-                        if item.kind() == "function_item" {
-                            if let Some(name_node) = item.child_by_field_name("name") {
-                                let method_name = node_text(&name_node, source);
-                                // Add a qualified "Trait::method" definition so that
-                                // callers searching for "Trait::method" can find it.
-                                defs.push(DefinitionInfo {
-                                    name: format!("{}::{}", trait_name, method_name),
-                                    kind: SymbolKind::Function,
-                                    file: file_path.to_string(),
-                                    line: item.start_position().row,
-                                });
-                            }
-                        }
+    if kind_str == "impl_item"
+        && let Some(trait_name) = rust_impl_trait_name(node, source)
+    {
+        // Extract each method inside the impl block with a qualified name
+        // "TraitName::method" so the symbol graph can link trait method calls
+        // through the impl to the concrete definition.
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "declaration_list" {
+                let mut inner_cursor = child.walk();
+                for item in child.children(&mut inner_cursor) {
+                    if item.kind() == "function_item"
+                        && let Some(name_node) = item.child_by_field_name("name")
+                    {
+                        let method_name = node_text(&name_node, source);
+                        // Add a qualified "Trait::method" definition so that
+                        // callers searching for "Trait::method" can find it.
+                        defs.push(DefinitionInfo {
+                            name: format!("{}::{}", trait_name, method_name),
+                            kind: SymbolKind::Function,
+                            file: file_path.to_string(),
+                            line: item.start_position().row,
+                        });
                     }
                 }
             }
@@ -210,10 +210,10 @@ fn rust_impl_trait_name(node: &tree_sitter::Node, source: &[u8]) -> Option<Strin
         if !found_for && child.kind() == "type_identifier" {
             let text = node_text(&child, source);
             // Check that the next sibling is "for"
-            if let Some(next) = child.next_sibling() {
-                if next.kind() == "for" || node_text(&next, source) == "for" {
-                    return Some(text);
-                }
+            if let Some(next) = child.next_sibling()
+                && (next.kind() == "for" || node_text(&next, source) == "for")
+            {
+                return Some(text);
             }
         }
     }
@@ -603,25 +603,25 @@ fn collect_typescript_definitions(
                         // Interface method signatures appear as various node types
                         // depending on the tree-sitter-typescript grammar version.
                         // Common types: "method_signature", "property_signature".
-                        if child.kind() == "method_signature" || child.kind() == "method_definition"
+                        if (child.kind() == "method_signature"
+                            || child.kind() == "method_definition")
+                            && let Some(method_name_node) = child.child_by_field_name("name")
                         {
-                            if let Some(method_name_node) = child.child_by_field_name("name") {
-                                let method_name = node_text(&method_name_node, source);
-                                defs.push(DefinitionInfo {
-                                    name: method_name.clone(),
-                                    kind: SymbolKind::Function,
-                                    file: file_path.to_string(),
-                                    line: child.start_position().row,
-                                });
-                                // Also add a qualified "Interface::method" definition
-                                // for precise trait-dispatch linking.
-                                defs.push(DefinitionInfo {
-                                    name: format!("{}::{}", iface_name, method_name),
-                                    kind: SymbolKind::Function,
-                                    file: file_path.to_string(),
-                                    line: child.start_position().row,
-                                });
-                            }
+                            let method_name = node_text(&method_name_node, source);
+                            defs.push(DefinitionInfo {
+                                name: method_name.clone(),
+                                kind: SymbolKind::Function,
+                                file: file_path.to_string(),
+                                line: child.start_position().row,
+                            });
+                            // Also add a qualified "Interface::method" definition
+                            // for precise trait-dispatch linking.
+                            defs.push(DefinitionInfo {
+                                name: format!("{}::{}", iface_name, method_name),
+                                kind: SymbolKind::Function,
+                                file: file_path.to_string(),
+                                line: child.start_position().row,
+                            });
                         }
                     }
                 }
@@ -797,16 +797,16 @@ fn collect_go_definitions(
             // type_declaration contains type_spec children with actual type names
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
-                if child.kind() == "type_spec" {
-                    if let Some(name_node) = child.child_by_field_name("name") {
-                        let sym_kind = go_classify_type_spec(&child);
-                        defs.push(DefinitionInfo {
-                            name: node_text(&name_node, source),
-                            kind: sym_kind,
-                            file: file_path.to_string(),
-                            line: node.start_position().row,
-                        });
-                    }
+                if child.kind() == "type_spec"
+                    && let Some(name_node) = child.child_by_field_name("name")
+                {
+                    let sym_kind = go_classify_type_spec(&child);
+                    defs.push(DefinitionInfo {
+                        name: node_text(&name_node, source),
+                        kind: sym_kind,
+                        file: file_path.to_string(),
+                        line: node.start_position().row,
+                    });
                 }
             }
             // Don't recurse into type_declaration children (already handled)

@@ -67,6 +67,9 @@ static LAST_ACTIVITY: AtomicU64 = AtomicU64::new(0);
 
 /// Idle timeout: daemon exits after 30 minutes with no client connections.
 const IDLE_TIMEOUT_MS: u64 = 30 * 60 * 1000;
+const CHECKPOINT_IDLE: Duration = Duration::from_secs(2);
+const CHECKPOINT_MAX_AGE: Duration = Duration::from_secs(30);
+const CHECKPOINT_MAX_PATHS: usize = 256;
 
 pub(crate) fn touch_activity() {
     let now = SystemTime::now()
@@ -104,7 +107,8 @@ pub(crate) async fn run_daemon(
 
     // Spawn an idle-timeout watchdog: check every 60s and exit if no client
     // activity for IDLE_TIMEOUT_MS (30 minutes).
-    tokio::spawn(async {
+    let engine_for_idle = Arc::clone(&engine);
+    tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
             interval.tick().await;
@@ -114,6 +118,12 @@ pub(crate) async fn run_daemon(
                 .unwrap()
                 .as_millis() as u64;
             if now.saturating_sub(last) > IDLE_TIMEOUT_MS {
+                let mut eng = engine_for_idle
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Err(error) = eng.checkpoint_pending_changes() {
+                    warn!(%error, "daemon: failed to checkpoint pending changes before shutdown");
+                }
                 info!("daemon idle for >30 min — shutting down");
                 std::process::exit(0);
             }
@@ -138,11 +148,35 @@ pub(crate) async fn run_daemon(
             }
         };
 
+        {
+            let mut eng = engine_for_watch.write().expect("engine lock poisoned");
+            if let Err(error) = eng.apply_changes(&[]) {
+                warn!(%error, "daemon: failed to recover pending index changes");
+            }
+        }
+
         info!(root = %config.root.display(), "daemon: file watcher started");
 
+        let mut pending_since = None;
+        let mut pending_paths = 0usize;
+
         loop {
-            let changes = watcher.poll_changes(Duration::from_secs(2));
+            let changes = watcher.poll_changes(CHECKPOINT_IDLE);
             if changes.is_empty() {
+                if pending_since.is_some() {
+                    let mut eng = engine_for_watch.write().expect("engine lock poisoned");
+                    // Always attempt publication after replay so one persistent
+                    // file error cannot strand successful siblings.
+                    match eng.apply_changes(&[]) {
+                        Ok(()) => {
+                            pending_since = None;
+                            pending_paths = 0;
+                        }
+                        Err(error) => {
+                            warn!(%error, "daemon: failed to publish incremental checkpoint");
+                        }
+                    }
+                }
                 continue;
             }
 
@@ -175,11 +209,26 @@ pub(crate) async fn run_daemon(
                 "daemon: file changes detected, updating index"
             );
             let mut eng = engine_for_watch.write().expect("engine lock poisoned");
-            if let Err(e) = eng.apply_changes(&all_changes) {
-                warn!(error = %e, "daemon: apply_changes failed");
+            if pending_since.is_none() {
+                pending_since = Some(std::time::Instant::now());
             }
-            if let Err(e) = eng.save() {
-                warn!(error = %e, "daemon: save after watcher update failed");
+            pending_paths = pending_paths.saturating_add(all_changes.len());
+            if let Err(error) = eng.apply_changes_deferred(&all_changes) {
+                warn!(%error, "daemon: apply_changes_deferred failed");
+            }
+
+            let max_age_reached =
+                pending_since.is_some_and(|started| started.elapsed() >= CHECKPOINT_MAX_AGE);
+            if pending_paths >= CHECKPOINT_MAX_PATHS || max_age_reached {
+                match eng.checkpoint_pending_changes() {
+                    Ok(()) => {
+                        pending_since = None;
+                        pending_paths = 0;
+                    }
+                    Err(error) => {
+                        warn!(%error, "daemon: failed to publish incremental checkpoint");
+                    }
+                }
             }
         }
     });

@@ -1,7 +1,8 @@
 //! Per-language import path → indexed file path resolution.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use crate::language::Language;
 
@@ -9,24 +10,247 @@ use super::extractor::RawImport;
 
 /// Resolves raw import strings to indexed file paths.
 pub struct ImportResolver {
-    indexed_files: HashSet<String>,
+    inner: ImportResolverBase<'static>,
+}
+
+pub(crate) struct BorrowedImportResolver<'a> {
+    inner: ImportResolverBase<'a>,
+}
+
+struct ImportResolverBase<'a> {
+    indexed_files: IndexedFiles<'a>,
+    fallbacks: OnceLock<ResolverFallbackIndex>,
     #[allow(dead_code)]
     root: PathBuf,
+}
+
+pub(crate) type ContainsPath<'a> = dyn Fn(&str) -> bool + Sync + 'a;
+pub(crate) type VisitPaths<'a> = dyn Fn(&mut dyn FnMut(&str) -> bool) + Sync + 'a;
+
+enum IndexedFiles<'a> {
+    Owned(HashSet<String>),
+    Borrowed {
+        contains: &'a ContainsPath<'a>,
+        visit: &'a VisitPaths<'a>,
+    },
+}
+
+impl IndexedFiles<'_> {
+    fn contains(&self, path: &str) -> bool {
+        match self {
+            Self::Owned(files) => files.contains(path),
+            Self::Borrowed { contains, .. } => contains(path),
+        }
+    }
+
+    /// Visit the existing path set without cloning the repository-wide key set.
+    fn visit_all(&self, mut visit_path: impl FnMut(&str)) {
+        match self {
+            Self::Owned(files) => {
+                for path in files {
+                    visit_path(path);
+                }
+            }
+            Self::Borrowed { visit, .. } => {
+                visit(&mut |path| {
+                    visit_path(path);
+                    true
+                });
+            }
+        }
+    }
+}
+
+/// Deterministic fallback resolution for languages whose import syntax names
+/// a package or directory rather than one exact file. Building this once per
+/// resolver turns repeated Go/Swift/MATLAB fallbacks from O(imports * files)
+/// randomized scans into indexed lookups while retaining the borrowed
+/// repository membership view for exact candidates.
+#[derive(Default)]
+struct ResolverFallbackIndex {
+    go_directories: SuffixPathIndex,
+    swift_package_modules: HashMap<String, String>,
+    swift_directories: SuffixPathIndex,
+    matlab_stems: HashMap<String, String>,
+}
+
+#[derive(Default)]
+struct SuffixPathIndex {
+    /// Directory strings are reversed so a suffix query becomes one sorted
+    /// prefix range. One lexicographically smallest file is retained per
+    /// directory, keeping storage O(relevant directories), not O(path suffixes).
+    reversed_directories: Vec<(String, String)>,
+}
+
+impl SuffixPathIndex {
+    fn new(entries: HashMap<String, String>) -> Self {
+        let mut entries: Vec<_> = entries.into_iter().collect();
+        entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        // HashMap's iterator may transfer spare table capacity into the Vec.
+        // The map was already bounded by directory count; trim that allocator
+        // slack as well so a long-lived resolver retains only the sorted rows.
+        entries.shrink_to_fit();
+        Self {
+            reversed_directories: entries,
+        }
+    }
+
+    fn resolve(&self, suffix: &str) -> Option<String> {
+        if suffix.is_empty() {
+            return None;
+        }
+        let reversed_suffix: String = suffix.chars().rev().collect();
+        let start = self
+            .reversed_directories
+            .partition_point(|(directory, _)| directory.as_str() < reversed_suffix.as_str());
+        let mut best: Option<&str> = None;
+        for (directory, path) in &self.reversed_directories[start..] {
+            if !directory.starts_with(&reversed_suffix) {
+                break;
+            }
+            // A raw suffix must end on a path-component boundary: `pkg/sub`
+            // may match `workspace/pkg/sub`, but never `workspace/notpkg/sub`.
+            if directory.len() != reversed_suffix.len()
+                && directory.as_bytes().get(reversed_suffix.len()) != Some(&b'/')
+            {
+                continue;
+            }
+            if best.is_none_or(|current| path.as_str() < current) {
+                best = Some(path);
+            }
+        }
+        best.map(str::to_owned)
+    }
+}
+
+impl ResolverFallbackIndex {
+    fn build(indexed_files: &IndexedFiles<'_>) -> Self {
+        let mut go_directories = HashMap::new();
+        let mut swift_directories = HashMap::new();
+        let mut swift_package_modules = HashMap::new();
+        let mut matlab_stems = HashMap::new();
+
+        indexed_files.visit_all(|path| {
+            if path.ends_with(".go") {
+                insert_owned_lexical_min(
+                    &mut go_directories,
+                    parent_dir(path).chars().rev().collect(),
+                    path,
+                );
+            }
+
+            if path.ends_with(".swift") {
+                let directory = parent_dir(path);
+                insert_owned_lexical_min(
+                    &mut swift_directories,
+                    directory.chars().rev().collect(),
+                    path,
+                );
+                if let Some(module) = path
+                    .strip_prefix("Sources/")
+                    .and_then(|rest| rest.split_once('/').map(|(module, _)| module))
+                    .filter(|module| !module.is_empty())
+                {
+                    insert_lexical_min(&mut swift_package_modules, module, path);
+                }
+            }
+
+            if let Some(file_name) = path.rsplit('/').next()
+                && let Some(stem) = file_name.strip_suffix(".m")
+                && !stem.is_empty()
+            {
+                insert_lexical_min(&mut matlab_stems, stem, path);
+            }
+        });
+
+        Self {
+            go_directories: SuffixPathIndex::new(go_directories),
+            swift_package_modules,
+            swift_directories: SuffixPathIndex::new(swift_directories),
+            matlab_stems,
+        }
+    }
+}
+
+fn insert_owned_lexical_min(map: &mut HashMap<String, String>, key: String, path: &str) {
+    match map.entry(key) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(path.to_string());
+        }
+        std::collections::hash_map::Entry::Occupied(mut entry) => {
+            if path < entry.get().as_str() {
+                *entry.get_mut() = path.to_string();
+            }
+        }
+    }
+}
+
+fn insert_lexical_min(map: &mut HashMap<String, String>, key: &str, path: &str) {
+    match map.entry(key.to_string()) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert(path.to_string());
+        }
+        std::collections::hash_map::Entry::Occupied(mut entry) => {
+            if path < entry.get().as_str() {
+                *entry.get_mut() = path.to_string();
+            }
+        }
+    }
 }
 
 impl ImportResolver {
     /// Create a new resolver with the set of all indexed file paths (relative, forward-slash).
     pub fn new(indexed_files: HashSet<String>, root: PathBuf) -> Self {
+        let indexed_files = IndexedFiles::Owned(indexed_files);
         Self {
-            indexed_files,
-            root,
+            inner: ImportResolverBase {
+                indexed_files,
+                fallbacks: OnceLock::new(),
+                root,
+            },
         }
+    }
+
+    /// Attempt to resolve `raw` (extracted from `source_file`) to an indexed path.
+    pub fn resolve(&self, raw: &RawImport, source_file: &str) -> Option<String> {
+        self.inner.resolve(raw, source_file)
+    }
+}
+
+impl<'a> BorrowedImportResolver<'a> {
+    /// Create a resolver over an existing indexed-file membership lookup.
+    /// Incremental sync uses this view to avoid cloning every repository path
+    /// before resolving imports for a tiny changed-file batch.
+    pub(crate) fn with_lookup(
+        contains: &'a ContainsPath<'a>,
+        visit: &'a VisitPaths<'a>,
+        root: PathBuf,
+    ) -> Self {
+        let indexed_files = IndexedFiles::Borrowed { contains, visit };
+        Self {
+            inner: ImportResolverBase {
+                indexed_files,
+                fallbacks: OnceLock::new(),
+                root,
+            },
+        }
+    }
+
+    pub(crate) fn resolve(&self, raw: &RawImport, source_file: &str) -> Option<String> {
+        self.inner.resolve(raw, source_file)
+    }
+}
+
+impl<'a> ImportResolverBase<'a> {
+    fn fallbacks(&self) -> &ResolverFallbackIndex {
+        self.fallbacks
+            .get_or_init(|| ResolverFallbackIndex::build(&self.indexed_files))
     }
 
     /// Attempt to resolve `raw` (extracted from `source_file`) to an indexed path.
     ///
     /// Returns `Some(path)` when the import maps to a known indexed file, `None` otherwise.
-    pub fn resolve(&self, raw: &RawImport, source_file: &str) -> Option<String> {
+    fn resolve(&self, raw: &RawImport, source_file: &str) -> Option<String> {
         match raw.language {
             Language::Rust => self.resolve_rust(&raw.path, source_file),
             Language::Python => self.resolve_python(&raw.path, source_file),
@@ -78,10 +302,10 @@ impl ImportResolver {
         // `self::` and `super::` are anchored at the importing file's module,
         // not the crate root — resolve them precisely before falling back to
         // the crate-root prefix scan.
-        if import.starts_with("self::") || import.starts_with("super::") {
-            if let Some(resolved) = self.resolve_rust_anchored(import, source_file) {
-                return Some(resolved);
-            }
+        if (import.starts_with("self::") || import.starts_with("super::"))
+            && let Some(resolved) = self.resolve_rust_anchored(import, source_file)
+        {
+            return Some(resolved);
         }
 
         // Strip leading `crate::` or `super::` to get a module path.
@@ -100,10 +324,11 @@ impl ImportResolver {
         // e.g. source "crates/core/src/engine.rs" → crate_root "crates/core/src"
         // so we also try "crates/core/src/graph/extractor.rs" for `crate::graph::extractor`.
         let mut prefixes: Vec<String> = vec!["src".to_string(), "lib".to_string()];
-        if let Some(root) = crate_src_root(source_file) {
-            if root != "src" && root != "lib" {
-                prefixes.push(root);
-            }
+        if let Some(root) = crate_src_root(source_file)
+            && root != "src"
+            && root != "lib"
+        {
+            prefixes.push(root);
         }
         prefixes.push(String::new()); // bare path (no prefix) last
 
@@ -375,17 +600,8 @@ impl ImportResolver {
 
     fn resolve_go(&self, import: &str) -> Option<String> {
         // Go import paths are package paths like "github.com/user/pkg/sub".
-        // Match against any `.go` file whose directory ends with the import path suffix.
-        for file in &self.indexed_files {
-            if !file.ends_with(".go") {
-                continue;
-            }
-            let dir = parent_dir(file);
-            if dir.ends_with(import) || dir == import {
-                return Some(file.clone());
-            }
-        }
-        None
+        // Match a deterministically indexed `.go` package-directory suffix.
+        self.fallbacks().go_directories.resolve(import)
     }
 
     // -------------------------------------------------------------------------
@@ -546,29 +762,12 @@ impl ImportResolver {
         }
 
         // Try Swift Package Manager convention: Sources/ModuleName/
-        for file in &self.indexed_files {
-            if !file.ends_with(".swift") {
-                continue;
-            }
-            // Check if file is under Sources/ModuleName/ directory.
-            let prefix = format!("Sources/{import}/");
-            if file.starts_with(&prefix) {
-                return Some(file.clone());
-            }
+        if let Some(file) = self.fallbacks().swift_package_modules.get(import) {
+            return Some(file.clone());
         }
 
         // Try finding a directory matching the module name with .swift files.
-        for file in &self.indexed_files {
-            if !file.ends_with(".swift") {
-                continue;
-            }
-            let dir = parent_dir(file);
-            if dir == import || dir.ends_with(&format!("/{import}")) {
-                return Some(file.clone());
-            }
-        }
-
-        None
+        self.fallbacks().swift_directories.resolve(import)
     }
 
     // -------------------------------------------------------------------------
@@ -746,15 +945,7 @@ impl ImportResolver {
 
             // Strategy 3: Last-segment fallback (search by function name)
             let last = segments.last().unwrap_or(&"");
-            let suffix = format!("/{last}.m");
-            let root_name = format!("{last}.m");
-            for f in &self.indexed_files {
-                if f.ends_with(&suffix) || f == &root_name {
-                    return Some(f.clone());
-                }
-            }
-
-            return None;
+            return self.fallbacks().matlab_stems.get(*last).cloned();
         }
 
         // Non-dot: plain function name → functionname.m
@@ -887,6 +1078,206 @@ mod tests {
             files.iter().map(|s| s.to_string()).collect(),
             PathBuf::from("/project"),
         )
+    }
+
+    #[test]
+    fn borrowed_fallback_index_scans_repository_once_then_reuses_it() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let files: HashSet<String> = [
+            "services/example.com/team/payments/handler.go",
+            "Sources/Checkout/CheckoutView.swift",
+            "src/parser.rs",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        let contains = |path: &str| files.contains(path);
+        let visits = AtomicUsize::new(0);
+        let visit = |visitor: &mut dyn FnMut(&str) -> bool| {
+            visits.fetch_add(1, Ordering::Relaxed);
+            for path in &files {
+                if !visitor(path) {
+                    break;
+                }
+            }
+        };
+        let resolver =
+            BorrowedImportResolver::with_lookup(&contains, &visit, PathBuf::from("/project"));
+        assert_eq!(
+            visits.load(Ordering::Relaxed),
+            0,
+            "exact-language batches must not scan fallback-language paths"
+        );
+        assert_eq!(
+            resolver.resolve(
+                &RawImport {
+                    path: "crate::parser::Parser".to_string(),
+                    language: Language::Rust,
+                    is_relative: true,
+                },
+                "src/main.rs",
+            ),
+            Some("src/parser.rs".to_string())
+        );
+        assert_eq!(visits.load(Ordering::Relaxed), 0);
+
+        for _ in 0..32 {
+            assert_eq!(
+                resolver.resolve(
+                    &RawImport {
+                        path: "example.com/team/payments".to_string(),
+                        language: Language::Go,
+                        is_relative: false,
+                    },
+                    "services/main.go",
+                ),
+                Some("services/example.com/team/payments/handler.go".to_string())
+            );
+            assert_eq!(
+                resolver.resolve(
+                    &RawImport {
+                        path: "Checkout".to_string(),
+                        language: Language::Swift,
+                        is_relative: false,
+                    },
+                    "Sources/App/App.swift",
+                ),
+                Some("Sources/Checkout/CheckoutView.swift".to_string())
+            );
+        }
+        assert_eq!(
+            visits.load(Ordering::Relaxed),
+            1,
+            "fallback resolution must never rescan repository paths per import"
+        );
+    }
+
+    #[test]
+    fn fallback_indexes_choose_deterministic_component_bounded_paths() {
+        let files = [
+            "z/services/example.com/team/payments/z.go",
+            "a/services/example.com/team/payments/a.go",
+            "00/notexample.com/team/payments/false.go",
+            "Sources/Kit/Z.swift",
+            "Sources/Kit/A.swift",
+            "vendor/Kit/00.swift",
+            "z/SessionState.m",
+            "a/SessionState.m",
+            "src/unrelated.rs",
+        ];
+        let resolver = make_resolver(&files);
+        let reversed = make_resolver(&files.iter().rev().copied().collect::<Vec<_>>());
+
+        let cases = [
+            (
+                RawImport {
+                    path: "example.com/team/payments".to_string(),
+                    language: Language::Go,
+                    is_relative: false,
+                },
+                "src/main.go",
+                "a/services/example.com/team/payments/a.go",
+            ),
+            (
+                RawImport {
+                    path: "Kit".to_string(),
+                    language: Language::Swift,
+                    is_relative: false,
+                },
+                "Sources/App/main.swift",
+                "Sources/Kit/A.swift",
+            ),
+            (
+                RawImport {
+                    path: "aerotool.core.SessionState".to_string(),
+                    language: Language::Matlab,
+                    is_relative: false,
+                },
+                "src/main.m",
+                "a/SessionState.m",
+            ),
+        ];
+
+        for (raw, source, expected) in cases {
+            assert_eq!(resolver.resolve(&raw, source).as_deref(), Some(expected));
+            assert_eq!(reversed.resolve(&raw, source).as_deref(), Some(expected));
+        }
+        assert_eq!(
+            resolver
+                .inner
+                .fallbacks
+                .get()
+                .expect("Go resolution initializes the fallback index")
+                .go_directories
+                .reversed_directories
+                .len(),
+            3,
+            "the fallback index must retain only relevant language directories"
+        );
+        let retained = &resolver
+            .inner
+            .fallbacks
+            .get()
+            .expect("Go resolution initializes the fallback index")
+            .go_directories
+            .reversed_directories;
+        assert!(
+            retained.capacity() <= retained.len().saturating_mul(2).max(1),
+            "deduplicating directories must also release per-file vector capacity"
+        );
+    }
+
+    #[test]
+    fn fallback_index_does_not_retain_one_slot_per_file() {
+        let files: HashSet<String> = (0..4_096)
+            .flat_map(|index| {
+                [
+                    format!("services/example.com/team/payments/file_{index}.go"),
+                    format!("workspace/Kit/file_{index}.swift"),
+                ]
+            })
+            .collect();
+        let resolver = ImportResolver::new(files, PathBuf::from("/project"));
+
+        assert_eq!(
+            resolver.resolve(
+                &RawImport {
+                    path: "example.com/team/payments".to_string(),
+                    language: Language::Go,
+                    is_relative: false,
+                },
+                "services/main.go",
+            ),
+            Some("services/example.com/team/payments/file_0.go".to_string())
+        );
+        assert_eq!(
+            resolver.resolve(
+                &RawImport {
+                    path: "Kit".to_string(),
+                    language: Language::Swift,
+                    is_relative: false,
+                },
+                "workspace/App/main.swift",
+            ),
+            Some("workspace/Kit/file_0.swift".to_string())
+        );
+
+        let fallback = resolver
+            .inner
+            .fallbacks
+            .get()
+            .expect("fallback resolution initializes the shared index");
+        for retained in [
+            &fallback.go_directories.reversed_directories,
+            &fallback.swift_directories.reversed_directories,
+        ] {
+            assert_eq!(retained.len(), 1);
+            assert!(
+                retained.capacity() <= 2,
+                "one package directory must not retain capacity for all 4,096 files"
+            );
+        }
     }
 
     #[test]

@@ -4,6 +4,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::{CodeGraph, ReferenceKind, SymbolNode};
+use crate::compressed_artifact::{
+    ArtifactKind, read_compressed_or_legacy, write_compressed_artifact,
+};
 use crate::error::{CodixingError, Result};
 
 // ---------------------------------------------------------------------------
@@ -17,13 +20,12 @@ pub fn save_graph_binary(graph: &CodeGraph, path: &Path) -> Result<()> {
     let sg = graph.to_serializable();
     let bytes = bitcode::serialize(&sg)
         .map_err(|e| CodixingError::Serialization(format!("failed to serialize graph: {e}")))?;
-    fs::write(path, bytes)?;
-    Ok(())
+    write_compressed_artifact(path, ArtifactKind::SymbolGraph, &bytes)
 }
 
 /// Load a `CodeGraph` from a binary (bitcode) file.
 pub fn load_graph_binary(path: &Path) -> Result<CodeGraph> {
-    let bytes = fs::read(path)?;
+    let bytes = read_compressed_or_legacy(path, ArtifactKind::SymbolGraph)?;
     let sg: SerializableGraph = bitcode::deserialize(&bytes)
         .map_err(|e| CodixingError::Serialization(format!("failed to deserialize graph: {e}")))?;
     Ok(CodeGraph::from_serializable(&sg))
@@ -86,6 +88,10 @@ impl CodeGraph {
         for node in &sg.nodes {
             graph.inner.add_node(node.clone());
         }
+        // `symbol_nodes_by_file` is a derived lookup and is intentionally not
+        // serialized. Rebuild it once while decoding so later changed-file
+        // operations never scan the repository-wide symbol graph.
+        graph.rebuild_symbol_file_index();
         for (src, dst, kind) in &sg.edges {
             let src_idx = NodeIndex::new(*src);
             let dst_idx = NodeIndex::new(*dst);
@@ -146,6 +152,8 @@ mod tests {
         let a = graph.add_symbol("main", "src/main.rs", SymbolKind::Function);
         let b = graph.add_symbol("helper", "src/lib.rs", SymbolKind::Function);
         graph.add_reference(a, b, ReferenceKind::Call);
+        let expected_main = graph.file_semantic_state("src/main.rs");
+        let expected_lib = graph.file_semantic_state("src/lib.rs");
 
         let dir = tempdir().unwrap();
         let path = dir.path().join("graph.bin");
@@ -155,6 +163,23 @@ mod tests {
 
         assert_eq!(loaded.node_count(), 2);
         assert_eq!(loaded.edge_count(), 1);
+        assert_eq!(loaded.file_semantic_state("src/main.rs"), expected_main);
+        assert_eq!(loaded.file_semantic_state("src/lib.rs"), expected_lib);
+
+        let mut loaded = loaded;
+        loaded.remove_file_symbols("src/main.rs");
+        assert_eq!(loaded.node_count(), 1);
+        assert_eq!(loaded.edge_count(), 0);
+        assert!(
+            loaded
+                .file_semantic_state("src/main.rs")
+                .symbol_nodes
+                .is_empty()
+        );
+        assert_eq!(
+            loaded.file_semantic_state("src/lib.rs").symbol_nodes.len(),
+            1
+        );
     }
 
     #[test]
@@ -168,6 +193,27 @@ mod tests {
 
         assert_eq!(loaded.node_count(), 0);
         assert_eq!(loaded.edge_count(), 0);
+    }
+
+    #[test]
+    fn binary_loader_accepts_legacy_unwrapped_graph() {
+        let mut graph = CodeGraph::new();
+        graph.add_symbol("legacy", "src/legacy.rs", SymbolKind::Function);
+        let bytes = bitcode::serialize(&graph.to_serializable()).unwrap();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("graph.bin");
+        fs::write(&path, bytes).unwrap();
+
+        let loaded = load_graph_binary(&path).unwrap();
+
+        assert_eq!(loaded.node_count(), 1);
+        assert_eq!(
+            loaded
+                .file_semantic_state("src/legacy.rs")
+                .symbol_nodes
+                .len(),
+            1
+        );
     }
 
     #[test]

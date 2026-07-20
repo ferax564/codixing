@@ -58,10 +58,10 @@ fn read_logical_line<R: BufRead>(
             return Ok((true, true));
         }
         if newline.is_some() {
-            if let Some(destination) = output.as_deref_mut() {
-                if destination.last() == Some(&b'\r') {
-                    destination.pop();
-                }
+            if let Some(destination) = output.as_deref_mut()
+                && destination.last() == Some(&b'\r')
+            {
+                destination.pop();
             }
             return Ok((true, false));
         }
@@ -75,15 +75,15 @@ impl Engine {
 
     /// Return all files represented in the index with their chunk counts.
     ///
-    /// This is backed by `file_chunk_counts`, which is populated for every
+    /// This is backed by `file_chunk_ids`, which is populated for every
     /// indexed file, including symbol-free docs/configs. If an older or
     /// partially-loaded engine has an empty derived map but populated
     /// `chunk_meta`, rebuild the view from chunk metadata as a fallback.
     pub fn indexed_files(&self) -> Vec<(String, usize)> {
         let mut files: std::collections::BTreeMap<String, usize> = self
-            .file_chunk_counts
+            .file_chunk_ids
             .iter()
-            .map(|(path, count)| (path.clone(), *count))
+            .map(|(path, ids)| (path.clone(), ids.len()))
             .collect();
 
         if files.is_empty() && !self.chunk_meta.is_empty() {
@@ -251,15 +251,15 @@ impl Engine {
     pub fn grep_code_opts(&self, opts: &GrepOptions) -> Result<Vec<GrepMatch>> {
         use regex::RegexBuilder;
 
-        // Guard against pre-v0.33 indexes whose file_chunk_counts / file_trigram
+        // Guard against pre-v0.33 indexes whose file_chunk_ids / file_trigram
         // are empty because they were built before the content-side trigram
         // index existed. Before v0.37 this silently returned "0 matches across
         // 0 files" with no hint — surface it as an actionable error instead.
         //
-        // Require BOTH `file_chunk_counts` empty AND `chunk_meta` empty before
+        // Require BOTH `file_chunk_ids` empty AND `chunk_meta` empty before
         // erroring, so we don't false-positive on valid indexes whose mmap
         // hydration transiently has not populated one of the two maps yet.
-        if self.file_chunk_counts.is_empty() && self.chunk_meta.is_empty() {
+        if self.file_chunk_ids.is_empty() && self.chunk_meta.is_empty() {
             return Err(CodixingError::Index(
                 "grep requires an indexed file set but the index is empty — \
                  either this is a pre-v0.33 index built before the content \
@@ -310,16 +310,16 @@ impl Engine {
                     .map(|v| v.into_iter().collect())
             };
 
-        let mut rel_paths: Vec<String> = self.file_chunk_counts.keys().cloned().collect();
+        let mut rel_paths: Vec<String> = self.file_chunk_ids.keys().cloned().collect();
         rel_paths.sort_unstable();
 
         let candidate_paths: Vec<&String> = rel_paths
             .iter()
             .filter(|p| {
-                if let Some(ref candidates) = candidate_set {
-                    if !candidates.contains(p.as_str()) {
-                        return false;
-                    }
+                if let Some(ref candidates) = candidate_set
+                    && !candidates.contains(p.as_str())
+                {
+                    return false;
                 }
                 if let Some(ref pat) = glob_pat {
                     let filename = std::path::Path::new(p.as_str())
@@ -470,16 +470,16 @@ impl Engine {
         // No trigram pre-filtering — full scan baseline.
         let candidate_set: Option<std::collections::HashSet<&str>> = None;
 
-        let mut rel_paths: Vec<String> = self.file_chunk_counts.keys().cloned().collect();
+        let mut rel_paths: Vec<String> = self.file_chunk_ids.keys().cloned().collect();
         rel_paths.sort_unstable();
 
         let candidate_paths: Vec<&String> = rel_paths
             .iter()
             .filter(|p| {
-                if let Some(ref candidates) = candidate_set {
-                    if !candidates.contains(p.as_str()) {
-                        return false;
-                    }
+                if let Some(ref candidates) = candidate_set
+                    && !candidates.contains(p.as_str())
+                {
+                    return false;
                 }
                 if let Some(ref pat) = glob_pat {
                     let filename = std::path::Path::new(p.as_str())
@@ -560,6 +560,30 @@ mod path_containment_tests {
     use super::*;
     use crate::config::IndexConfig;
     use tempfile::tempdir;
+
+    #[test]
+    fn grep_falls_back_to_full_scan_after_lazy_posting_corruption() {
+        let root = tempdir().unwrap();
+        fs::write(
+            root.path().join("lib.rs"),
+            "pub fn resilient_grep_target() -> usize { 42 }\n",
+        )
+        .unwrap();
+        let mut config = IndexConfig::new(root.path());
+        config.embedding.enabled = false;
+        let engine = Engine::init(root.path(), config).unwrap();
+        let trigram_path = engine.store.file_trigram_path();
+        drop(engine);
+
+        crate::index::trigram::corrupt_file_posting_for_test(&trigram_path, *b"res", 1);
+
+        let reopened = Engine::open(root.path()).unwrap();
+        let matches = reopened
+            .grep_code("resilient_grep_target", true, None, 0, 10)
+            .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].file_path, "lib.rs");
+    }
 
     #[test]
     fn read_file_range_cannot_escape_project_root() {

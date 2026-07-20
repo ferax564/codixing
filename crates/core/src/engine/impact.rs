@@ -154,7 +154,7 @@ impl Engine {
             }
         };
 
-        let all_files: Vec<String> = self.file_chunk_counts.keys().cloned().collect();
+        let all_files: Vec<String> = self.file_chunk_ids.keys().cloned().collect();
         compute_change_impact(graph, file_path, Some(&all_files))
     }
 }

@@ -30,3 +30,43 @@ fn doctor_json_reports_missing_index_without_failure() {
     #[cfg(windows)]
     assert!(daemon_endpoint.ends_with("-minimal"));
 }
+
+#[test]
+fn doctor_json_reports_active_generation_layout() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("lib.rs"),
+        "pub fn doctor_generation_sentinel() -> usize { 1 }\n",
+    )
+    .unwrap();
+
+    let init = Command::new(env!("CARGO_BIN_EXE_codixing"))
+        .args(["init", dir.path().to_str().unwrap()])
+        .output()
+        .expect("failed to initialize doctor fixture");
+    assert!(
+        init.status.success(),
+        "init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_codixing"))
+        .args(["doctor", dir.path().to_str().unwrap(), "--json"])
+        .output()
+        .expect("failed to run codixing doctor");
+    assert!(output.status.success());
+
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["index"]["status"], "ok");
+    assert_eq!(report["index"]["layout"]["kind"], "generational");
+    assert_eq!(report["index"]["layout"]["generation_count"], 1);
+    assert!(
+        report["index"]["layout"]["active_generation"]
+            .as_str()
+            .is_some_and(|name| name.starts_with("gen-"))
+    );
+    assert_eq!(
+        report["index"]["layout"]["abandoned_generations"],
+        serde_json::json!([])
+    );
+}

@@ -920,6 +920,19 @@ impl Embedder {
         }
     }
 
+    /// Embed multiple search queries in one model invocation, applying the
+    /// same model-specific query prefix as [`embed_query`](Self::embed_query).
+    pub fn embed_queries(&self, queries: &[String]) -> Result<Vec<Vec<f32>>> {
+        let texts = match self.query_prefix {
+            Some(prefix) => queries
+                .iter()
+                .map(|query| format!("{prefix}{query}"))
+                .collect(),
+            None => queries.to_vec(),
+        };
+        self.embed(texts)
+    }
+
     /// Embed a single text string (document/passage — no instruction prefix).
     pub fn embed_one(&self, text: &str) -> Result<Vec<f32>> {
         match &self.backend {

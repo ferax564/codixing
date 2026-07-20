@@ -19,7 +19,7 @@
 //! 4. Reads responses until it finds the tool call reply, extracts the text
 //!    body, and returns `Some(text)`.
 //! 5. If no daemon, stale endpoint, or any I/O step fails, returns `None`
-//!    and the caller falls back to its existing `Engine::open()` path.
+//!    and the caller falls back to a direct read-only engine open.
 //!
 //! ## Why blocking std instead of tokio
 //!

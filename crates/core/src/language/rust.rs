@@ -246,15 +246,15 @@ fn extract_type_relations(node: &Node, source: &[u8], kind_str: &str) -> Vec<Typ
                 if child.kind() == "field_declaration_list" {
                     let mut field_cursor = child.walk();
                     for field in child.children(&mut field_cursor) {
-                        if field.kind() == "field_declaration" {
-                            if let Some(type_node) = field.child_by_field_name("type") {
-                                let text = node_text(&type_node, source).to_string();
-                                if !text.is_empty() && text != "self" {
-                                    relations.push(TypeRelation {
-                                        kind: TypeRelationKind::Contains,
-                                        target: text,
-                                    });
-                                }
+                        if field.kind() == "field_declaration"
+                            && let Some(type_node) = field.child_by_field_name("type")
+                        {
+                            let text = node_text(&type_node, source).to_string();
+                            if !text.is_empty() && text != "self" {
+                                relations.push(TypeRelation {
+                                    kind: TypeRelationKind::Contains,
+                                    target: text,
+                                });
                             }
                         }
                     }

@@ -50,11 +50,11 @@ pub(crate) fn call_get_context_for_task(
     let mut assembler = IntelligentContextAssembler::new(token_budget);
     if let Some(graph_stats) = engine.graph_stats() {
         // Only attach graph if it has nodes (i.e. was actually built)
-        if graph_stats.node_count > 0 {
-            if let Some(graph_data) = engine.graph_data() {
-                let graph = codixing_core::CodeGraph::from_flat(graph_data);
-                assembler = assembler.with_graph(&graph);
-            }
+        if graph_stats.node_count > 0
+            && let Some(graph_data) = engine.graph_data()
+        {
+            let graph = codixing_core::CodeGraph::from_flat(graph_data);
+            assembler = assembler.with_graph(&graph);
         }
     }
     let snippets = assembler.assemble(results);

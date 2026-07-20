@@ -21,6 +21,7 @@ pub mod reformulation;
 mod reload;
 mod search;
 pub mod semantic;
+mod semantic_artifacts;
 mod symbol_graph;
 pub mod sync;
 pub(crate) mod synonyms;
@@ -256,7 +257,21 @@ impl GrepOptions {
 // -------------------------------------------------------------------------
 
 /// Return the current HEAD commit hash, or `None` if git is unavailable / not a repo.
+fn has_git_metadata(root: &Path) -> bool {
+    root.ancestors().any(|ancestor| {
+        let metadata = ancestor.join(".git");
+        metadata.is_dir() || metadata.is_file()
+    })
+}
+
 fn git_head_commit(root: &Path) -> Option<String> {
+    // Most generated/archived corpora are not Git repositories. Avoid two
+    // failed process spawns during init (and repeated spawns during sync) when
+    // neither this root nor an ancestor can describe a worktree. `GIT_DIR`
+    // preserves explicit bare/custom layouts.
+    if std::env::var_os("GIT_DIR").is_none() && !has_git_metadata(root) {
+        return None;
+    }
     let out = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(root)
@@ -323,16 +338,69 @@ fn git_diff_since(root: &Path, since_commit: &str) -> Option<(Vec<PathBuf>, Vec<
     Some((modified, deleted))
 }
 
+/// Rebuild the exact per-file chunk postings from the authoritative compact
+/// metadata. The boxed slices keep the resident derived view compact while
+/// allowing incremental removals to touch only a changed file's chunk IDs.
+pub(super) fn collect_file_chunk_ids(
+    chunk_meta: &DashMap<u64, ChunkMeta>,
+) -> HashMap<String, Box<[u64]>> {
+    let mut ids = HashMap::<String, Vec<u64>>::new();
+    for entry in chunk_meta.iter() {
+        ids.entry(entry.value().file_path.clone())
+            .or_default()
+            .push(*entry.key());
+    }
+    ids.into_iter()
+        .map(|(path, mut chunk_ids)| {
+            chunk_ids.sort_unstable();
+            (path, chunk_ids.into_boxed_slice())
+        })
+        .collect()
+}
+
+pub(super) fn load_persisted_file_trigram(
+    store: &IndexStore,
+) -> crate::error::Result<FileTrigramIndex> {
+    let delta = store.load_file_trigram_delta_bytes()?;
+    if delta.is_none() && store.file_trigram_delta_required() {
+        return Err(crate::error::CodixingError::Serialization(
+            "active generation is missing required file_trigram_delta.bin".to_string(),
+        ));
+    }
+    FileTrigramIndex::load_binary_with_delta(&store.file_trigram_path(), delta.as_deref())
+}
+
+/// Controls which read-only search components are resident in memory.
+///
+/// `Lexical` is deliberately private to the engine implementation: callers
+/// opt into it through [`Engine::open_read_only_lexical`], whose search API is
+/// restricted to the two pipelines this profile fully supports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReadOnlyLoadMode {
+    Full,
+    Lexical,
+}
+
+impl ReadOnlyLoadMode {
+    pub(super) fn loads_graph(self) -> bool {
+        matches!(self, Self::Full)
+    }
+
+    pub(super) fn loads_vectors(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
 /// Top-level facade that wires together parsing, chunking, indexing,
 /// and retrieval into a single coherent API.
 pub struct Engine {
     pub(super) config: IndexConfig,
-    pub(super) store: IndexStore,
     pub(super) parser: Parser,
     pub(super) tantivy: TantivyIndex,
     pub(super) symbols: SymbolTable,
-    /// Per-file chunk counts, used for stats.
-    pub(super) file_chunk_counts: HashMap<String, usize>,
+    /// Exact per-file chunk postings. Counts are derived from slice lengths;
+    /// removals use the IDs directly instead of scanning repository metadata.
+    pub(super) file_chunk_ids: HashMap<String, Box<[u64]>>,
     /// Optional fastembed model for vector embeddings.
     pub(super) embedder: Option<Arc<Embedder>>,
     /// Optional usearch HNSW vector index.
@@ -357,9 +425,6 @@ pub struct Engine {
     pub(super) reformulations: std::sync::OnceLock<Option<reformulation::LearnedReformulations>>,
     /// Optional cross-encoder reranker (BGE-Reranker-Base) for the `deep` strategy.
     pub(super) reranker: Option<Arc<Reranker>>,
-    /// Trigram index for sub-millisecond exact substring search (Strategy::Exact).
-    /// Lazy-loaded from disk on first use via OnceLock.
-    pub(super) trigram: std::sync::OnceLock<crate::index::TrigramIndex>,
     /// Session state for tracking agent interactions.
     session: Arc<SessionState>,
     /// Shared session store for multi-agent context sharing.
@@ -368,6 +433,9 @@ pub struct Engine {
     /// All search / read operations work; write operations return
     /// [`CodixingError::ReadOnly`].
     read_only: bool,
+    /// Persisted across read-only reloads so a lexical reader never expands
+    /// into a full graph/vector resident set after an index publication.
+    pub(super) read_only_load_mode: ReadOnlyLoadMode,
     /// File-level trigram index for fast grep pre-filtering.
     /// Lazy-loaded from disk on first use via OnceLock.
     pub(super) file_trigram: std::sync::OnceLock<FileTrigramIndex>,
@@ -375,6 +443,10 @@ pub struct Engine {
     recency_map: std::sync::OnceLock<std::collections::HashMap<String, i64>>,
     /// When this engine was last loaded/reloaded from disk (mtime of `meta.json`).
     last_load_time: Option<std::time::SystemTime>,
+    /// Identity of the vector generation currently attached to this engine.
+    /// Tracked independently from `meta.json` because background/post-hoc
+    /// embedding publishes multiple vector-only checkpoints.
+    last_vector_publication: Option<String>,
     /// Minimum interval between reload checks (default: 30s).
     reload_interval: std::time::Duration,
     /// Last time we checked for staleness.
@@ -389,6 +461,17 @@ pub struct Engine {
     pub(super) concept_reranker: std::sync::OnceLock<Option<Arc<Reranker>>>,
     /// TOML-based output filter pipeline with tee recovery.
     filter_pipeline: FilterPipeline,
+    /// Stable control-directory writer lease. Tantivy locks only one
+    /// generation, so this lock is what serializes writers across checkpoint
+    /// publication and prevents an obsolete generation from being mutated.
+    pub(super) writer_lock: Option<std::fs::File>,
+    /// Changed-file results accumulated by the daemon's deferred hot path.
+    /// Repository-wide sidecars are rebuilt once when the batch checkpoints.
+    pub(in crate::engine) pending_checkpoint: sync::ApplyChangesOutcome,
+    /// Keep the store last so its generation lease is released only after
+    /// Tantivy readers and memory maps have closed. This is required for safe
+    /// cleanup of superseded generations on Windows.
+    pub(super) store: IndexStore,
 }
 
 impl Engine {
@@ -443,36 +526,28 @@ impl Engine {
             .get_or_init(|| recency::build_recency_map(self.store.root(), 180))
     }
 
-    /// Get or lazily load the chunk-level trigram index from disk.
-    pub(super) fn get_trigram(&self) -> &crate::index::TrigramIndex {
-        self.trigram.get_or_init(|| {
-            if self.store.chunk_trigram_path().exists() {
-                match crate::index::TrigramIndex::load_binary(&self.store.chunk_trigram_path()) {
-                    Ok(idx) => idx,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to load chunk trigram; rebuilding");
-                        rebuild_trigram_from_tantivy(&self.tantivy)
-                    }
-                }
-            } else {
-                rebuild_trigram_from_tantivy(&self.tantivy)
-            }
-        })
-    }
-
     /// Get or lazily load the file-level trigram index from disk.
     pub(super) fn get_file_trigram(&self) -> &FileTrigramIndex {
         self.file_trigram.get_or_init(|| {
-            if self.store.file_trigram_path().exists() {
-                match FileTrigramIndex::load_binary(&self.store.file_trigram_path()) {
+            if self.store.file_trigram_path().exists()
+                || self.store.file_trigram_delta_path().exists()
+            {
+                match load_persisted_file_trigram(&self.store) {
                     Ok(idx) => idx,
                     Err(e) => {
-                        tracing::warn!(error = %e, "failed to load file trigram; rebuilding");
-                        build_file_trigram_from_tantivy(&self.tantivy)
+                        tracing::warn!(error = %e, "failed to load file trigram pair; disabling prefilter");
+                        FileTrigramIndex::disabled()
                     }
                 }
             } else {
-                build_file_trigram_from_tantivy(&self.tantivy)
+                if self.store.file_trigram_delta_required() {
+                    tracing::warn!(
+                        "required file trigram pair is missing; disabling prefilter"
+                    );
+                    FileTrigramIndex::disabled()
+                } else {
+                    build_file_trigram_from_tantivy(&self.tantivy)
+                }
             }
         })
     }
@@ -488,16 +563,10 @@ impl Engine {
             if !self.store.concepts_path().exists() {
                 return None;
             }
-            match std::fs::read(self.store.concepts_path()) {
-                Ok(bytes) => match bitcode::deserialize::<concepts::ConceptIndex>(&bytes) {
-                    Ok(idx) => Some(idx),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "failed to deserialize concept index (lazy)");
-                        None
-                    }
-                },
+            match semantic_artifacts::load_concept_index(&self.store.concepts_path()) {
+                Ok(idx) => Some(idx),
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to read concept index (lazy)");
+                    tracing::warn!(error = %e, "failed to load concept index (lazy)");
                     None
                 }
             }
@@ -515,18 +584,10 @@ impl Engine {
             if !self.store.reformulations_path().exists() {
                 return None;
             }
-            match std::fs::read(self.store.reformulations_path()) {
-                Ok(bytes) => {
-                    match bitcode::deserialize::<reformulation::LearnedReformulations>(&bytes) {
-                        Ok(reform) => Some(reform),
-                        Err(e) => {
-                            tracing::warn!(error = %e, "failed to deserialize reformulations (lazy)");
-                            None
-                        }
-                    }
-                }
+            match semantic_artifacts::load_reformulations(&self.store.reformulations_path()) {
+                Ok(reformulations) => Some(reformulations),
                 Err(e) => {
-                    tracing::warn!(error = %e, "failed to read reformulations (lazy)");
+                    tracing::warn!(error = %e, "failed to load reformulations (lazy)");
                     None
                 }
             }
@@ -563,6 +624,29 @@ impl Engine {
         self.get_reformulations().is_some()
     }
 
+    /// Test-only semantic concept lookup used by mutation-freshness regression
+    /// tests without exposing the auxiliary index as public API.
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn __test_concept_symbols(&self, term: &str) -> Vec<String> {
+        self.get_concept_index()
+            .map(|index| {
+                index
+                    .lookup(term)
+                    .into_iter()
+                    .flat_map(|cluster| cluster.symbols.iter().cloned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Test-only learned expansion lookup for mutation-freshness regressions.
+    #[cfg(any(test, feature = "internal-testing"))]
+    pub fn __test_reformulation_expansions(&self, term: &str) -> Vec<String> {
+        self.get_reformulations()
+            .map(|reformulations| reformulations.expand(term))
+            .unwrap_or_default()
+    }
+
     /// Return summary statistics about the current index.
     pub fn stats(&self) -> IndexStats {
         let (graph_node_count, graph_edge_count, symbol_node_count, symbol_edge_count) = self
@@ -574,8 +658,8 @@ impl Engine {
             })
             .unwrap_or((0, 0, 0, 0));
         IndexStats {
-            file_count: self.file_chunk_counts.len(),
-            chunk_count: self.file_chunk_counts.values().sum(),
+            file_count: self.file_chunk_ids.len(),
+            chunk_count: self.file_chunk_ids.values().map(|ids| ids.len()).sum(),
             symbol_count: self.symbols.len(),
             vector_count: self
                 .vector
@@ -640,22 +724,21 @@ impl Engine {
     /// Retrieve chunk content, first checking the in-memory `chunk_meta` map
     /// and falling back to Tantivy stored fields if the content is empty.
     pub fn resolve_chunk_content(&self, chunk_id: u64) -> Option<String> {
-        if let Some(meta) = self.chunk_meta.get(&chunk_id) {
-            if !meta.content.is_empty() {
-                return Some(meta.content.clone());
-            }
+        if let Some(meta) = self.chunk_meta.get(&chunk_id)
+            && !meta.content.is_empty()
+        {
+            return Some(meta.content.clone());
         }
         self.get_chunk_content(chunk_id)
     }
 
-    /// Resolve a set of chunk bodies before mutating Tantivy.
+    /// Resolve a set of chunk bodies from compact metadata or Tantivy.
     ///
     /// BM25-only engines intentionally discard the duplicate bodies held in
-    /// `chunk_meta` after init. Mutation paths still need those bodies to
-    /// remove the old chunk IDs from the trigram index, so hydrate only the
-    /// requested missing values in one indexed lookup. Returning an error for
-    /// a missing body keeps the live indexes unchanged instead of silently
-    /// leaking stale trigram postings.
+    /// `chunk_meta` after init. Embedding maintenance may still need selected
+    /// bodies, so hydrate only the requested missing values in one indexed
+    /// lookup. Returning an error for a missing body keeps maintenance from
+    /// silently producing an incomplete vector update.
     pub(super) fn hydrate_chunk_contents(
         &self,
         chunk_ids: &HashSet<u64>,
@@ -836,12 +919,12 @@ impl Drop for Engine {
         // and persist the vector index. Only explicit shutdown_embeddings()
         // should cancel. The thread holds Arc clones of shared state, so it
         // will complete safely even after Engine is dropped.
-        if let Some(state) = &self.embed_state {
-            if !state.is_ready() {
-                tracing::debug!(
-                    "Engine dropped while background embedding in progress — thread will continue"
-                );
-            }
+        if let Some(state) = &self.embed_state
+            && !state.is_ready()
+        {
+            tracing::debug!(
+                "Engine dropped while background embedding in progress — thread will continue"
+            );
         }
     }
 }
@@ -912,6 +995,22 @@ pub trait Processor {
     }
 
     #[test]
+    fn git_metadata_probe_handles_worktrees_and_nested_roots() {
+        let missing = tempdir().unwrap();
+        fs::create_dir(missing.path().join("nested")).unwrap();
+        assert!(!has_git_metadata(&missing.path().join("nested")));
+
+        let directory = tempdir().unwrap();
+        fs::create_dir(directory.path().join(".git")).unwrap();
+        fs::create_dir(directory.path().join("nested")).unwrap();
+        assert!(has_git_metadata(&directory.path().join("nested")));
+
+        let worktree = tempdir().unwrap();
+        fs::write(worktree.path().join(".git"), "gitdir: elsewhere\n").unwrap();
+        assert!(has_git_metadata(worktree.path()));
+    }
+
+    #[test]
     fn init_indexes_project() {
         let (_dir, engine) = setup_engine_bm25_only();
         let stats = engine.stats();
@@ -929,6 +1028,56 @@ pub trait Processor {
                 .iter()
                 .all(|entry| entry.value().content.is_empty()),
             "returned compact metadata should hydrate content from Tantivy"
+        );
+    }
+
+    #[test]
+    fn fresh_bm25_init_keeps_bodies_only_in_tantivy() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).unwrap();
+        const MARKER: &str = "fresh_bm25_hydration_marker_74219";
+        fs::write(
+            root.join("src/lib.rs"),
+            format!("pub fn fixture() {{ let marker = \"{MARKER}\"; }}\n"),
+        )
+        .unwrap();
+
+        let mut config = IndexConfig::new(root);
+        config.embedding.enabled = false;
+        let engine = Engine::init(root, config).unwrap();
+        assert!(
+            engine
+                .chunk_meta
+                .iter()
+                .all(|entry| entry.value().content.is_empty()),
+            "BM25-only init must not retain bodies already stored in Tantivy"
+        );
+
+        let chunk_ids: Vec<_> = engine
+            .file_chunk_ids
+            .get("src/lib.rs")
+            .expect("fixture file must be indexed")
+            .to_vec();
+        assert!(
+            chunk_ids.iter().any(|chunk_id| {
+                engine
+                    .resolve_chunk_content(*chunk_id)
+                    .is_some_and(|content| content.contains(MARKER))
+            }),
+            "compact resident metadata must hydrate source content from Tantivy"
+        );
+        assert!(
+            engine
+                .search(
+                    SearchQuery::new(MARKER)
+                        .with_limit(5)
+                        .with_strategy(Strategy::Exact),
+                )
+                .unwrap()
+                .iter()
+                .any(|result| result.content.contains(MARKER)),
+            "exact search must still return hydrated source content"
         );
     }
 
@@ -1002,6 +1151,116 @@ pub trait Processor {
         );
 
         drop(dir);
+    }
+
+    #[test]
+    fn lexical_read_profile_matches_full_and_survives_direct_reload() {
+        let (_dir, root) = setup_project();
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+        drop(Engine::init(&root, config).unwrap());
+
+        let full = Engine::open_read_only(&root).unwrap();
+        let mut lexical = Engine::open_read_only_lexical(&root).unwrap();
+
+        assert!(
+            full.graph_stats().is_some(),
+            "full readers retain the graph"
+        );
+        assert!(
+            lexical.graph_stats().is_none(),
+            "lexical readers must not decode the graph"
+        );
+        assert!(lexical.embedder.is_none());
+        assert!(
+            lexical
+                .vector
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_none()
+        );
+        assert!(lexical.reranker.is_none());
+
+        let expected: Vec<_> = [Strategy::Exact, Strategy::Instant]
+            .into_iter()
+            .map(|strategy| {
+                let results = full
+                    .search(
+                        SearchQuery::new("helper")
+                            .with_limit(10)
+                            .with_strategy(strategy),
+                    )
+                    .unwrap();
+                (strategy, serde_json::to_vec(&results).unwrap())
+            })
+            .collect();
+
+        for (strategy, expected_bytes) in &expected {
+            let results = lexical
+                .search(
+                    SearchQuery::new("helper")
+                        .with_limit(10)
+                        .with_strategy(*strategy),
+                )
+                .unwrap();
+            assert_eq!(serde_json::to_vec(&results).unwrap(), *expected_bytes);
+        }
+
+        lexical.reload_from_disk().unwrap();
+        assert!(lexical.graph_stats().is_none());
+        for (strategy, expected_bytes) in &expected {
+            let results = lexical
+                .search(
+                    SearchQuery::new("helper")
+                        .with_limit(10)
+                        .with_strategy(*strategy),
+                )
+                .unwrap();
+            assert_eq!(serde_json::to_vec(&results).unwrap(), *expected_bytes);
+        }
+
+        let error = lexical
+            .search(
+                SearchQuery::new("helper")
+                    .with_limit(10)
+                    .with_strategy(Strategy::Fast),
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("supports only Exact and Instant")
+        );
+
+        let mut progress_callbacks = 0;
+        let error = lexical
+            .search_with_progress(
+                SearchQuery::new("helper")
+                    .with_limit(10)
+                    .with_strategy(Strategy::Fast),
+                |_, _| progress_callbacks += 1,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("supports only Exact and Instant")
+        );
+        assert_eq!(
+            progress_callbacks, 0,
+            "unsupported lexical searches must fail before publishing partial results"
+        );
+
+        let error = lexical.search_usages("helper", 10).unwrap_err();
+        assert!(error.to_string().contains("does not support usage search"));
+
+        let error = lexical
+            .search_multi(
+                &["helper".to_string(), "Processor".to_string()],
+                &SearchQuery::new("helper").with_strategy(Strategy::Exact),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("multi-query"));
     }
 
     #[test]
@@ -1178,6 +1437,80 @@ pub fn unique_new_function() -> bool {
         let text = make_embed_text(&meta, false);
         // Non-contextual mode returns raw content only.
         assert_eq!(text, "fn bar() {}");
+    }
+
+    fn reuse_key_meta() -> ChunkMeta {
+        let content = "fn bar() {}".to_string();
+        ChunkMeta {
+            chunk_id: 42,
+            file_path: "src/lib.rs".to_string(),
+            language: "rust".to_string(),
+            line_start: 0,
+            line_end: 5,
+            signature: String::new(),
+            scope_chain: vec!["Foo".to_string()],
+            entity_names: vec!["bar".to_string()],
+            content_hash: xxhash_rust::xxh3::xxh3_64(content.as_bytes()),
+            content,
+        }
+    }
+
+    #[test]
+    fn contextual_embedding_reuse_key_survives_compact_restore() {
+        let full = reuse_key_meta();
+        let compact = crate::retriever::ChunkMetaCompact::from(&full);
+        let restored = ChunkMeta::from(compact);
+
+        assert!(restored.content.is_empty());
+        assert_eq!(
+            embedding_reuse_key(&full, true),
+            embedding_reuse_key(&restored, true)
+        );
+    }
+
+    #[test]
+    fn contextual_embedding_reuse_key_tracks_every_embed_input() {
+        let original = reuse_key_meta();
+        let original_key = embedding_reuse_key(&original, true);
+
+        let mut changed = original.clone();
+        changed.file_path = "src/moved.rs".to_string();
+        assert_ne!(original_key, embedding_reuse_key(&changed, true));
+
+        let mut changed = original.clone();
+        changed.language = "python".to_string();
+        assert_ne!(original_key, embedding_reuse_key(&changed, true));
+
+        let mut changed = original.clone();
+        changed.scope_chain = vec!["Other".to_string()];
+        assert_ne!(original_key, embedding_reuse_key(&changed, true));
+
+        let mut changed = original.clone();
+        changed.entity_names = vec!["baz".to_string()];
+        assert_ne!(original_key, embedding_reuse_key(&changed, true));
+
+        let mut changed = original.clone();
+        changed.content = "fn bar() { work(); }".to_string();
+        changed.content_hash = xxhash_rust::xxh3::xxh3_64(changed.content.as_bytes());
+        assert_ne!(original_key, embedding_reuse_key(&changed, true));
+    }
+
+    #[test]
+    fn non_contextual_embedding_reuse_key_tracks_only_body() {
+        let original = reuse_key_meta();
+        let original_key = embedding_reuse_key(&original, false);
+
+        let mut metadata_only = original.clone();
+        metadata_only.file_path = "src/moved.rs".to_string();
+        metadata_only.language = "python".to_string();
+        metadata_only.scope_chain = vec!["Other".to_string()];
+        metadata_only.entity_names = vec!["baz".to_string()];
+        assert_eq!(original_key, embedding_reuse_key(&metadata_only, false));
+
+        let mut body_changed = original;
+        body_changed.content = "fn bar() { work(); }".to_string();
+        body_changed.content_hash = xxhash_rust::xxh3::xxh3_64(body_changed.content.as_bytes());
+        assert_ne!(original_key, embedding_reuse_key(&body_changed, false));
     }
 
     #[test]

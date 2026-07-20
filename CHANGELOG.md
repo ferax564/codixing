@@ -8,6 +8,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Large-repository v2 storage and gate** — copy-on-write incremental
+  checkpoints, shared file-level trigram storage (no duplicate chunk trigram),
+  full-fidelity mmap symbols with bounded deltas, compressed semantic artifacts,
+  bounded local personalized PageRank, and a machine-readable
+  `benchmarks/large_repo_gate.py` acceptance harness (PR 10K regression +
+  weekly/manual 100K strict-claim modes) wired into CI. Build provenance is
+  embedded for gate baseline attestation.
+
+- **Crash-safe generational rebuilds** — `codixing init` now constructs a clean
+  sibling generation, validates its metadata and Tantivy index, then atomically
+  swaps a small active-generation manifest. Repeated init no longer appends
+  duplicate or deleted documents. Failed/interrupted builds preserve the prior
+  searchable generation, legacy flat indexes open and migrate automatically,
+  long-lived read-only engines reopen atomically on generation changes, old
+  generations are safely reclaimed, and `codixing doctor` exposes layout,
+  active generation, and abandoned-generation diagnostics. A rebuild may
+  temporarily require free disk space for both the active and new indexes.
+  Explicit read-only opens never rebuild an incompatible index; they now return
+  a clear error directing the caller to run a writable `codixing init`.
+
+- **One shared trigram index for grep and exact search** — fresh indexes no
+  longer build or persist the corpus-scale `chunk_trigram.bin` duplicate.
+  `file_trigram.bin` now holds the union of raw source bytes and any
+  parser-transformed stored chunk text. Exact search streams file candidates
+  in bounded batches, asks Tantivy for every live chunk in those files, then
+  preserves the existing full-substring verification, hit-count ranking,
+  filters, and BM25 fallback. Init, sync, import, reload, and publication
+  validation now maintain only the shared file-level artifact. Existing
+  chunk-trigram files are ignored safely by new binaries and reclaimed by the
+  next full `codixing init`.
+
+- **Bounded, fresh semantic artifacts for huge repositories** — concept and
+  learned-reformulation construction now ranks and caps source vocabulary,
+  per-file co-occurrences, clusters, postings, and embedding comparisons instead
+  of retaining unbounded all-pairs graphs. Versioned v2 persistence interns
+  repeated paths/symbols with deterministic byte output while reading legacy
+  files. Builders stream the symbol table instead of cloning the full corpus and
+  retain only a small ranked vocabulary from each doc comment. Every mutation
+  invalidates the old artifacts before rebuilding, so a failed update degrades
+  to primary search rather than serving stale concepts. On repositories with
+  more than 1,000 files, incremental checkpoints leave concepts/reformulations
+  invalidated (primary BM25/graph search stays correct) and rebuild them on the
+  next full `init` or explicit graph rebuild so one-file edits stay proportional
+  to the change set.
+
 - **External-context import** — `codixing import <source> <path>` ingests project
   context that lives outside the source tree as first-class, searchable
   documents, across four sources:
@@ -45,6 +90,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Concurrent CLI and federated reads no longer contend for the writer lock** —
+  every non-mutating CLI command now opens the index directly in read-only
+  mode instead of paying the writer retry schedule before falling back.
+  Federation members do the same for both eager and lazy loading, so a
+  long-lived cross-repository search process cannot block `sync`, `update`, or
+  another writer. Lazy federations larger than `max_resident` now retain a
+  stable bounded cache and open overflow projects ephemerally, avoiding the
+  previous every-query eviction/reopen cycle while still searching every
+  project. Mutating commands retain explicit writer ownership, with regression
+  coverage for a CLI search beside an active writer, both federation loading
+  modes, and above-cap fan-out.
 - **`mod foo;` declarations now produce dependency-graph edges** — the Rust
   import extractor only handled `use` declarations, so files wired into a
   crate purely via `mod` declarations (every language plugin, MCP tool module,

@@ -3,10 +3,11 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use tantivy::collector::TopDocs;
+use tantivy::merge_policy::{LogMergePolicy, MergePolicy, NoMergePolicy};
 use tantivy::query::{QueryParser, TermSetQuery};
-use tantivy::schema::{Field, Value};
+use tantivy::schema::{Field, IndexRecordOption, Value};
 use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
-use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, Term, doc};
+use tantivy::{DocSet, Index, IndexReader, IndexWriter, ReloadPolicy, TERMINATED, Term, doc};
 
 use crate::chunker::Chunk;
 use crate::config::Bm25Config;
@@ -98,14 +99,14 @@ fn split_camel(word: &str) -> Vec<String> {
         }
 
         // Transition: uppercase -> uppercase -> lowercase (HTTPServer: split before 'S')
-        if prev.is_uppercase() && cur.is_uppercase() {
-            if let Some(&n) = next {
-                if n.is_lowercase() {
-                    parts.push(std::mem::take(&mut current));
-                    current.push(cur);
-                    continue;
-                }
-            }
+        if prev.is_uppercase()
+            && cur.is_uppercase()
+            && let Some(&n) = next
+            && n.is_lowercase()
+        {
+            parts.push(std::mem::take(&mut current));
+            current.push(cur);
+            continue;
         }
 
         current.push(cur);
@@ -271,6 +272,41 @@ pub struct TantivyIndex {
     bm25_config: Bm25Config,
 }
 
+/// Prevent Tantivy from starting merges that can outlive a generation commit.
+///
+/// Codixing publishes immutable index generations, so compaction must complete
+/// before the generation manifest is swapped. [`TantivyIndex::commit`] runs a
+/// tiered policy explicitly and waits for every selected merge.
+fn configure_writer(writer: &IndexWriter) {
+    writer.set_merge_policy(Box::new(NoMergePolicy));
+}
+
+/// Keep tiny checkpoint segments in their own logarithmic levels.
+///
+/// Tantivy's 10,000-document default puts a one-document editor update in the
+/// same level as a large repository's base segments, periodically rewriting the
+/// complete text index. A one-document floor retains bounded tiered compaction
+/// without folding tiny deltas into the bulk level.
+fn checkpoint_merge_policy() -> LogMergePolicy {
+    let mut policy = LogMergePolicy::default();
+    policy.set_min_layer_size(1);
+    policy
+}
+
+/// Compact committed segments synchronously until the tiered policy is stable.
+fn compact_committed_segments(index: &Index, writer: &mut IndexWriter) -> Result<()> {
+    let policy = checkpoint_merge_policy();
+    loop {
+        let candidates = policy.compute_merge_candidates(&index.searchable_segment_metas()?);
+        if candidates.is_empty() {
+            return Ok(());
+        }
+        for candidate in candidates {
+            writer.merge(&candidate.0).wait()?;
+        }
+    }
+}
+
 /// Register the custom `"code"` tokenizer on a [`tantivy::Index`].
 fn register_code_tokenizer(index: &Index) {
     let analyzer = tantivy::tokenizer::TextAnalyzer::builder(CodeTokenizer).build();
@@ -336,6 +372,7 @@ impl TantivyIndex {
         register_code_tokenizer(&index);
         register_code_stemmed_tokenizer(&index);
         let writer = index.writer(50_000_000)?;
+        configure_writer(&writer);
         let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::OnCommitWithDelay)
@@ -374,6 +411,7 @@ impl TantivyIndex {
             register_code_tokenizer(&index);
             register_code_stemmed_tokenizer(&index);
             let writer = index.writer(50_000_000)?;
+            configure_writer(&writer);
             let reader = index
                 .reader_builder()
                 .reload_policy(ReloadPolicy::OnCommitWithDelay)
@@ -436,6 +474,7 @@ impl TantivyIndex {
             };
 
             let writer = index.writer(50_000_000)?;
+            configure_writer(&writer);
             let reader = index
                 .reader_builder()
                 .reload_policy(ReloadPolicy::OnCommitWithDelay)
@@ -608,6 +647,12 @@ impl TantivyIndex {
             writer.commit()?;
             Ok(())
         })?;
+        // Recompute candidates on every retry: a merge may have completed
+        // before a transient Windows filesystem error was reported, and its
+        // former segment IDs must not be submitted again.
+        crate::index::windows_retry::retry_transient_io(|| -> Result<()> {
+            compact_committed_segments(&self.index, &mut writer)
+        })?;
         crate::index::windows_retry::retry_transient_io(|| -> Result<()> {
             self.reader.reload()?;
             Ok(())
@@ -668,10 +713,10 @@ impl TantivyIndex {
         let mut results = Vec::with_capacity(top_docs.len());
         for (score, doc_address) in top_docs {
             let retrieved_doc: tantivy::TantivyDocument = searcher.doc(doc_address)?;
-            if let Some(chunk_id_value) = retrieved_doc.get_first(self.fields.chunk_id) {
-                if let Some(chunk_id_str) = chunk_id_value.as_str() {
-                    results.push((chunk_id_str.to_string(), score));
-                }
+            if let Some(chunk_id_value) = retrieved_doc.get_first(self.fields.chunk_id)
+                && let Some(chunk_id_str) = chunk_id_value.as_str()
+            {
+                results.push((chunk_id_str.to_string(), score));
             }
         }
 
@@ -794,6 +839,59 @@ impl TantivyIndex {
         Ok(self.lookup_chunk_contents(&ids)?.remove(&chunk_id))
     }
 
+    /// Visit every live chunk whose exact file path is in `file_paths`.
+    ///
+    /// Walks the exact-path posting lists directly, so memory stays bounded by
+    /// one hydrated stored document rather than a `TopDocs` heap containing
+    /// every chunk in the selected files.
+    pub(crate) fn visit_chunks_by_file_paths(
+        &self,
+        file_paths: &[String],
+        mut visit: impl FnMut(u64, String) -> Result<()>,
+    ) -> Result<()> {
+        if file_paths.is_empty() {
+            return Ok(());
+        }
+
+        let searcher = self.reader.searcher();
+        let unique_paths: HashSet<&str> = file_paths.iter().map(String::as_str).collect();
+        let terms: Vec<Term> = unique_paths
+            .iter()
+            .map(|path| Term::from_field_text(self.fields.file_path_exact, path))
+            .collect();
+
+        for segment_reader in searcher.segment_readers() {
+            let inverted_index = segment_reader.inverted_index(self.fields.file_path_exact)?;
+            let store_reader = segment_reader.get_store_reader(1)?;
+
+            for term in &terms {
+                let Some(mut postings) =
+                    inverted_index.read_postings(term, IndexRecordOption::Basic)?
+                else {
+                    continue;
+                };
+                let mut doc_id = postings.doc();
+                while doc_id != TERMINATED {
+                    if !segment_reader.is_deleted(doc_id) {
+                        let doc: tantivy::TantivyDocument = store_reader.get(doc_id)?;
+                        if let (Some(chunk_id), Some(content)) = (
+                            doc.get_first(self.fields.chunk_id)
+                                .and_then(|value| value.as_str())
+                                .and_then(|value| value.parse::<u64>().ok()),
+                            doc.get_first(self.fields.content)
+                                .and_then(|value| value.as_str()),
+                        ) {
+                            visit(chunk_id, content.to_string())?;
+                        }
+                    }
+                    doc_id = postings.advance();
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Read all chunk IDs and their content from the index.
     ///
     /// Used during init to batch-embed chunks into a vector index.
@@ -830,8 +928,23 @@ impl TantivyIndex {
     /// Used to rebuild file-level trigram indexes when chunk_meta content is
     /// empty (compact persistence mode).
     pub fn all_file_path_content_pairs(&self) -> Result<Vec<(String, String)>> {
-        let searcher = self.reader.searcher();
         let mut results = Vec::new();
+
+        self.visit_all_file_path_content_pairs(|file_path, content| {
+            results.push((file_path.to_string(), content.to_string()));
+            Ok(())
+        })?;
+
+        Ok(results)
+    }
+
+    /// Visit every live `(file_path, content)` pair without retaining a copy
+    /// of the complete stored corpus.
+    pub(crate) fn visit_all_file_path_content_pairs(
+        &self,
+        mut visit: impl FnMut(&str, &str) -> Result<()>,
+    ) -> Result<()> {
+        let searcher = self.reader.searcher();
 
         for segment_reader in searcher.segment_readers() {
             let store_reader = segment_reader.get_store_reader(1)?;
@@ -843,20 +956,18 @@ impl TantivyIndex {
                 let file_path = doc
                     .get_first(self.fields.file_path)
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                    .unwrap_or("");
                 let content = doc
                     .get_first(self.fields.content)
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                    .unwrap_or("");
                 if !file_path.is_empty() && !content.is_empty() {
-                    results.push((file_path, content));
+                    visit(file_path, content)?;
                 }
             }
         }
 
-        Ok(results)
+        Ok(())
     }
 }
 
@@ -895,6 +1006,27 @@ mod tests {
             signatures: vec!["fn example() -> bool".to_string()],
             entity_names: vec!["example".to_string()],
             doc_comments: String::new(),
+        }
+    }
+
+    fn create_in_ram_single_writer() -> TantivyIndex {
+        let (schema, fields) = build_schema();
+        let index = Index::create_in_ram(schema);
+        register_code_tokenizer(&index);
+        register_code_stemmed_tokenizer(&index);
+        let writer = index.writer_with_num_threads(1, 50_000_000).unwrap();
+        configure_writer(&writer);
+        let reader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            .try_into()
+            .unwrap();
+        TantivyIndex {
+            index,
+            reader,
+            writer: Some(Mutex::new(writer)),
+            fields,
+            bm25_config: Bm25Config::default(),
         }
     }
 
@@ -1013,6 +1145,100 @@ mod tests {
     }
 
     #[test]
+    fn incremental_merge_keeps_bulk_segments_out_of_tiny_delta_level() {
+        let idx = create_in_ram_single_writer();
+
+        // Six bulk commits deliberately stay below the eight-segment merge
+        // threshold. Tantivy's default 10,000-document floor would then put
+        // the two one-document deltas in the same level and merge everything.
+        for batch in 0..6_u64 {
+            for offset in 0..32_u64 {
+                let id = batch * 32 + offset;
+                let file_path = format!("src/bulk_{batch}_{offset}.rs");
+                let content = format!("fn bulk_token_{id}() {{}}");
+                idx.add_chunk(&make_chunk(id, &file_path, &content))
+                    .unwrap();
+            }
+            idx.commit().unwrap();
+        }
+
+        let bulk_segment_ids: HashSet<_> = idx
+            .index
+            .searchable_segment_metas()
+            .unwrap()
+            .into_iter()
+            .map(|segment| segment.id())
+            .collect();
+        assert_eq!(bulk_segment_ids.len(), 6);
+
+        for id in 192..194_u64 {
+            let file_path = format!("src/tiny_{id}.rs");
+            let content = format!("fn tiny_delta_{id}() {{}}");
+            idx.add_chunk(&make_chunk(id, &file_path, &content))
+                .unwrap();
+            idx.commit().unwrap();
+        }
+
+        let after_segment_ids: HashSet<_> = idx
+            .index
+            .searchable_segment_metas()
+            .unwrap()
+            .into_iter()
+            .map(|segment| segment.id())
+            .collect();
+        assert!(bulk_segment_ids.is_subset(&after_segment_ids));
+        assert_eq!(after_segment_ids.len(), 8);
+        assert_eq!(idx.reader.searcher().num_docs(), 194);
+
+        let requested: HashSet<u64> = [192, 193].into_iter().collect();
+        assert_eq!(idx.lookup_chunks_by_ids(&requested).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn commit_finishes_tiered_merge_before_return() {
+        let idx = TantivyIndex::create_in_ram().unwrap();
+        for id in 0..8_u64 {
+            let file_path = format!("src/tier_{id}.rs");
+            let content = format!("fn tiered_token_{id}() {{}}");
+            idx.add_chunk(&make_chunk(id, &file_path, &content))
+                .unwrap();
+            idx.commit().unwrap();
+        }
+
+        let segments = idx.index.searchable_segment_metas().unwrap();
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].max_doc(), 8);
+        assert_eq!(idx.reader.searcher().num_docs(), 8);
+    }
+
+    #[test]
+    fn tiered_merge_is_durable_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tiered_merge_idx");
+
+        {
+            let idx = TantivyIndex::create_in_dir(&path).unwrap();
+            for id in 0..8_u64 {
+                let file_path = format!("src/persisted_tier_{id}.rs");
+                let content = format!("fn persisted_tier_token_{id}() {{}}");
+                idx.add_chunk(&make_chunk(id, &file_path, &content))
+                    .unwrap();
+                idx.commit().unwrap();
+            }
+            let segments = idx.index.searchable_segment_metas().unwrap();
+            assert_eq!(segments.len(), 1);
+            assert_eq!(segments[0].max_doc(), 8);
+        }
+
+        let idx = TantivyIndex::open_read_only(&path).unwrap();
+        let segments = idx.index.searchable_segment_metas().unwrap();
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].max_doc(), 8);
+        let requested: HashSet<u64> = (0..8).collect();
+        assert_eq!(idx.lookup_chunks_by_ids(&requested).unwrap().len(), 8);
+    }
+
+    #[test]
     fn lookup_chunks_by_ids_returns_only_requested_chunks() {
         let idx = TantivyIndex::create_in_ram().unwrap();
         idx.add_chunk(&make_chunk(1, "src/a.rs", "fn requested_a() {}"))
@@ -1068,6 +1294,58 @@ mod tests {
         assert!(idx.lookup_chunks_by_ids(&requested).unwrap().is_empty());
         assert!(idx.lookup_chunk_contents(&requested).unwrap().is_empty());
         assert_eq!(idx.lookup_chunk_content(21).unwrap(), None);
+    }
+
+    #[test]
+    fn visit_chunks_by_file_paths_streams_every_selected_chunk() {
+        let idx = TantivyIndex::create_in_ram().unwrap();
+        idx.add_chunk(&make_chunk(31, "src/a.rs", "fn selected_one() {}"))
+            .unwrap();
+        idx.add_chunk(&make_chunk(32, "src/a.rs", "fn selected_two() {}"))
+            .unwrap();
+        idx.add_chunk(&make_chunk(33, "src/b.rs", "fn unselected() {}"))
+            .unwrap();
+        idx.commit().unwrap();
+
+        let mut found = Vec::new();
+        idx.visit_chunks_by_file_paths(
+            &["src/a.rs".to_string(), "src/a.rs".to_string()],
+            |id, content| {
+                found.push((id, content));
+                Ok(())
+            },
+        )
+        .unwrap();
+        found.sort_unstable_by_key(|(id, _)| *id);
+
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].0, 31);
+        assert_eq!(found[1].0, 32);
+        assert!(found.iter().all(|(_, content)| !content.is_empty()));
+    }
+
+    #[test]
+    fn visit_chunks_by_file_paths_omits_deleted_and_handles_empty_input() {
+        let idx = TantivyIndex::create_in_ram().unwrap();
+        idx.add_chunk(&make_chunk(41, "src/deleted.rs", "fn gone() {}"))
+            .unwrap();
+        idx.commit().unwrap();
+        idx.remove_file("src/deleted.rs").unwrap();
+        idx.commit().unwrap();
+
+        let mut visits = 0;
+        idx.visit_chunks_by_file_paths(&["src/deleted.rs".to_string()], |_, _| {
+            visits += 1;
+            Ok(())
+        })
+        .unwrap();
+        idx.visit_chunks_by_file_paths(&[], |_, _| {
+            visits += 1;
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(visits, 0);
     }
 
     // --- Field-weighted BM25 tests ---

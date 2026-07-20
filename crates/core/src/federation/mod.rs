@@ -11,20 +11,20 @@
 //! disambiguation, and fuses the per-project ranked lists via Reciprocal Rank
 //! Fusion (RRF).
 //!
-//! # Lazy loading & LRU eviction
+//! # Bounded lazy loading
 //!
-//! When `lazy_load` is enabled (the default), engines are opened on first
-//! query.  When the number of resident engines exceeds `max_resident`, the
-//! least-recently-used engine is evicted (its `Option<Engine>` is set back to
-//! `None`).
+//! When `lazy_load` is enabled (the default), up to `max_resident` engines are
+//! opened on first query and retained. Overflow projects are still searched,
+//! but through short-lived read-only engines. Keeping the resident set stable
+//! avoids reopening every project on every fan-out when a federation is larger
+//! than its memory cap.
 
 pub mod config;
 pub mod discover;
 
 use std::collections::HashMap;
-use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use tracing::{info, warn};
 
@@ -88,9 +88,6 @@ pub struct FederatedEngine {
     slots: Vec<ProjectSlot>,
     /// Federation-level configuration.
     config: FederationConfig,
-    /// LRU order: front = least recently used, back = most recently used.
-    /// Values are indices into `slots`.
-    lru_order: Mutex<VecDeque<usize>>,
 }
 
 impl FederatedEngine {
@@ -101,7 +98,6 @@ impl FederatedEngine {
     /// with a warning.
     pub fn new(config: FederationConfig) -> Result<Self> {
         let mut slots = Vec::with_capacity(config.projects.len());
-        let mut lru_order = VecDeque::new();
 
         for entry in &config.projects {
             let root = match entry.root.canonicalize() {
@@ -129,7 +125,7 @@ impl FederatedEngine {
                     );
                     continue;
                 }
-                match Engine::open(&root) {
+                match Engine::open_read_only(&root) {
                     Ok(e) => {
                         info!(project = %name, root = %root.display(), "federation: loaded engine");
                         Some(e)
@@ -148,11 +144,6 @@ impl FederatedEngine {
                 None
             };
 
-            let idx = slots.len();
-            if engine.is_some() {
-                lru_order.push_back(idx);
-            }
-
             slots.push(ProjectSlot {
                 root,
                 name,
@@ -161,16 +152,11 @@ impl FederatedEngine {
             });
         }
 
-        Ok(Self {
-            slots,
-            config,
-            lru_order: Mutex::new(lru_order),
-        })
+        Ok(Self { slots, config })
     }
 
-    /// Ensure the engine at `slot_index` is loaded, performing LRU eviction
-    /// if necessary.  Returns `true` if the engine is available after this
-    /// call.
+    /// Ensure a cache-eligible engine is loaded. Returns `true` if the engine
+    /// is available after this call.
     fn ensure_loaded(&self, slot_index: usize) -> bool {
         let slot = &self.slots[slot_index];
 
@@ -178,8 +164,6 @@ impl FederatedEngine {
         {
             let guard = slot.engine.read().unwrap_or_else(|e| e.into_inner());
             if guard.is_some() {
-                // Touch LRU.
-                self.touch_lru(slot_index);
                 return true;
             }
         }
@@ -194,18 +178,13 @@ impl FederatedEngine {
             return false;
         }
 
-        // Evict if necessary (before acquiring write lock on the target slot,
-        // to avoid potential deadlocks).
-        self.maybe_evict();
-
         let mut guard = slot.engine.write().unwrap_or_else(|e| e.into_inner());
         // Double-check after acquiring the write lock.
         if guard.is_some() {
-            self.touch_lru(slot_index);
             return true;
         }
 
-        match Engine::open(&slot.root) {
+        match Engine::open_read_only(&slot.root) {
             Ok(engine) => {
                 info!(
                     project = %slot.name,
@@ -213,7 +192,6 @@ impl FederatedEngine {
                     "federation: lazy-loaded engine"
                 );
                 *guard = Some(engine);
-                self.touch_lru(slot_index);
                 true
             }
             Err(e) => {
@@ -228,33 +206,59 @@ impl FederatedEngine {
         }
     }
 
-    /// Move `slot_index` to the back of the LRU queue (most recently used).
-    fn touch_lru(&self, slot_index: usize) {
-        let mut lru = self.lru_order.lock().unwrap_or_else(|e| e.into_inner());
-        lru.retain(|&i| i != slot_index);
-        lru.push_back(slot_index);
-    }
+    /// Run an operation against a project engine. In lazy mode the first
+    /// `max_resident` project slots form a stable cache; overflow slots use an
+    /// ephemeral read-only engine so a full federation fan-out cannot churn
+    /// the entire cache on every query.
+    fn with_engine<T>(&self, slot_index: usize, f: impl FnOnce(&Engine) -> T) -> Option<T> {
+        let slot = &self.slots[slot_index];
+        let cache_eligible = !self.config.lazy_load || slot_index < self.config.max_resident.max(1);
 
-    /// If the number of loaded engines exceeds `max_resident`, evict the LRU
-    /// engine.
-    fn maybe_evict(&self) {
-        let mut lru = self.lru_order.lock().unwrap_or_else(|e| e.into_inner());
-        // `max_resident` is clamped to >= 1 at construction. Use a defensive
-        // `cap.max(1)` and break when the deque empties so an out-of-range
-        // value can never spin this loop while holding the LRU mutex.
-        let cap = self.config.max_resident.max(1);
-        while lru.len() >= cap {
-            let Some(victim) = lru.pop_front() else {
-                break;
-            };
-            let slot = &self.slots[victim];
-            let mut guard = slot.engine.write().unwrap_or_else(|e| e.into_inner());
-            if guard.is_some() {
-                info!(
+        if cache_eligible {
+            if !self.ensure_loaded(slot_index) {
+                return None;
+            }
+
+            // Resident readers otherwise pin the generation that was active at
+            // first use forever. The engine performs its own cheap rate limit;
+            // release the write guard before the actual query so concurrent
+            // federation searches still share the resident snapshot.
+            {
+                let mut guard = slot.engine.write().unwrap_or_else(|e| e.into_inner());
+                if let Some(engine) = guard.as_mut()
+                    && let Err(error) = engine.reload_if_stale()
+                {
+                    warn!(
+                        project = %slot.name,
+                        root = %slot.root.display(),
+                        %error,
+                        "federation: failed to refresh resident project; using current snapshot"
+                    );
+                }
+            }
+            let guard = slot.engine.read().unwrap_or_else(|e| e.into_inner());
+            return guard.as_ref().map(f);
+        }
+
+        if !Engine::index_exists(&slot.root) {
+            warn!(
+                project = %slot.name,
+                root = %slot.root.display(),
+                "federation: cannot load overflow project — no .codixing/ index"
+            );
+            return None;
+        }
+
+        match Engine::open_read_only(&slot.root) {
+            Ok(engine) => Some(f(&engine)),
+            Err(e) => {
+                warn!(
                     project = %slot.name,
-                    "federation: evicting engine (LRU)"
+                    root = %slot.root.display(),
+                    error = %e,
+                    "federation: failed to open overflow project"
                 );
-                *guard = None;
+                None
             }
         }
     }
@@ -265,13 +269,10 @@ impl FederatedEngine {
         let mut per_project: Vec<(String, PathBuf, f32, Vec<SearchResult>)> = Vec::new();
 
         for (idx, slot) in self.slots.iter().enumerate() {
-            if !self.ensure_loaded(idx) {
-                continue;
-            }
-
-            let guard = slot.engine.read().unwrap_or_else(|e| e.into_inner());
-            if let Some(engine) = guard.as_ref() {
-                match engine.search(query.clone()) {
+            if let Some(search_result) =
+                self.with_engine(idx, |engine| engine.search(query.clone()))
+            {
+                match search_result {
                     Ok(results) => {
                         per_project.push((
                             slot.name.clone(),
@@ -301,13 +302,9 @@ impl FederatedEngine {
         let mut all_symbols = Vec::new();
 
         for (idx, slot) in self.slots.iter().enumerate() {
-            if !self.ensure_loaded(idx) {
-                continue;
-            }
-
-            let guard = slot.engine.read().unwrap_or_else(|e| e.into_inner());
-            if let Some(engine) = guard.as_ref() {
-                match engine.symbols(name, None) {
+            if let Some(symbol_result) = self.with_engine(idx, |engine| engine.symbols(name, None))
+            {
+                match symbol_result {
                     Ok(symbols) => {
                         for sym in symbols {
                             all_symbols.push((slot.name.clone(), sym));
@@ -438,6 +435,8 @@ fn federate_results(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::IndexConfig;
+    use crate::federation::config::ProjectEntry;
     use crate::retriever::SearchResult;
 
     fn make_result(chunk_id: &str, file_path: &str, score: f32) -> SearchResult {
@@ -579,5 +578,157 @@ mod tests {
         let cfg: FederationConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.projects.len(), 2);
         assert!((cfg.rrf_k - 42.0).abs() < f32::EPSILON);
+    }
+
+    fn assert_federation_member_does_not_hold_writer(lazy_load: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(
+            root.join("federated.rs"),
+            "pub fn federation_read_only_marker() {}\n",
+        )
+        .unwrap();
+
+        let mut index_config = IndexConfig::new(&root);
+        index_config.embedding.enabled = false;
+        drop(Engine::init(&root, index_config).unwrap());
+
+        let federation = FederatedEngine::new(FederationConfig {
+            projects: vec![ProjectEntry {
+                root: root.clone(),
+                weight: 1.0,
+            }],
+            rrf_k: 60.0,
+            lazy_load,
+            max_resident: 1,
+        })
+        .unwrap();
+
+        if lazy_load {
+            let results = federation
+                .search(SearchQuery::new("federation_read_only_marker"))
+                .unwrap();
+            assert!(!results.is_empty());
+        }
+
+        let guard = federation.slots[0]
+            .engine
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        assert!(
+            guard.as_ref().is_some_and(Engine::is_read_only),
+            "federation members must be opened read-only"
+        );
+        drop(guard);
+
+        // A federation reader must not own the Tantivy writer lock. Engine::open
+        // falls back to read-only after its retry loop when another writer owns
+        // the lock, so this assertion detects both eager and lazy regressions.
+        let writer = Engine::open(&root).unwrap();
+        assert!(!writer.is_read_only());
+    }
+
+    #[test]
+    fn eager_federation_member_does_not_hold_writer_lock() {
+        assert_federation_member_does_not_hold_writer(false);
+    }
+
+    #[test]
+    fn lazy_federation_member_does_not_hold_writer_lock() {
+        assert_federation_member_does_not_hold_writer(true);
+    }
+
+    #[test]
+    fn resident_federation_refreshes_after_generation_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let source = root.join("federated.rs");
+        std::fs::write(&source, "pub fn old_federation_generation() {}\n").unwrap();
+
+        let mut index_config = IndexConfig::new(&root);
+        index_config.embedding.enabled = false;
+        drop(Engine::init(&root, index_config.clone()).unwrap());
+
+        let federation = FederatedEngine::new(FederationConfig {
+            projects: vec![ProjectEntry {
+                root: root.clone(),
+                weight: 1.0,
+            }],
+            rrf_k: 60.0,
+            lazy_load: true,
+            max_resident: 1,
+        })
+        .unwrap();
+        assert!(
+            !federation
+                .search(SearchQuery::new("old_federation_generation"))
+                .unwrap()
+                .is_empty()
+        );
+        {
+            let mut guard = federation.slots[0]
+                .engine
+                .write()
+                .unwrap_or_else(|error| error.into_inner());
+            guard
+                .as_mut()
+                .unwrap()
+                .set_reload_interval(std::time::Duration::ZERO);
+        }
+
+        std::fs::write(&source, "pub fn new_federation_generation() {}\n").unwrap();
+        drop(Engine::init(&root, index_config).unwrap());
+
+        let refreshed = federation
+            .search(SearchQuery::new("new_federation_generation"))
+            .unwrap();
+        assert!(!refreshed.is_empty());
+    }
+
+    #[test]
+    fn lazy_federation_keeps_a_stable_resident_set_above_the_cap() {
+        let dirs: Vec<_> = (0..3).map(|_| tempfile::tempdir().unwrap()).collect();
+        let mut projects = Vec::new();
+
+        for (idx, dir) in dirs.iter().enumerate() {
+            let root = dir.path().canonicalize().unwrap();
+            std::fs::write(
+                root.join(format!("project_{idx}.rs")),
+                format!("pub fn federation_cache_marker_{idx}() {{}}\n"),
+            )
+            .unwrap();
+            let mut index_config = IndexConfig::new(&root);
+            index_config.embedding.enabled = false;
+            drop(Engine::init(&root, index_config).unwrap());
+            projects.push(ProjectEntry { root, weight: 1.0 });
+        }
+
+        let federation = FederatedEngine::new(FederationConfig {
+            projects,
+            rrf_k: 60.0,
+            lazy_load: true,
+            max_resident: 1,
+        })
+        .unwrap();
+
+        for _ in 0..2 {
+            let results = federation
+                .search(SearchQuery::new("federation_cache_marker"))
+                .unwrap();
+            assert_eq!(results.len(), 3, "overflow projects must still be searched");
+
+            let resident: Vec<bool> = federation
+                .slots
+                .iter()
+                .map(|slot| {
+                    slot.engine
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .is_some()
+                })
+                .collect();
+            assert_eq!(resident, vec![true, false, false]);
+            assert_eq!(federation.stats().loaded_count, 1);
+        }
     }
 }

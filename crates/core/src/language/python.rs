@@ -221,26 +221,26 @@ fn extract_python_doc_comment(node: &Node, source: &[u8]) -> Option<String> {
 
     // Look for docstring: first statement in the body that is an expression_statement
     // containing a string literal
-    if let Some(target_node) = target {
-        if let Some(body) = target_node.child_by_field_name("body") {
-            let mut cursor = body.walk();
-            // Only check the first statement for a docstring
-            if let Some(child) = body.children(&mut cursor).next() {
-                if child.kind() == "expression_statement" {
-                    let mut inner_cursor = child.walk();
-                    for inner in child.children(&mut inner_cursor) {
-                        if inner.kind() == "string" || inner.kind() == "concatenated_string" {
-                            let text = node_text(&inner, source);
-                            // Strip triple quotes
-                            let stripped = text
-                                .trim_start_matches("\"\"\"")
-                                .trim_start_matches("'''")
-                                .trim_end_matches("\"\"\"")
-                                .trim_end_matches("'''")
-                                .trim();
-                            return Some(stripped.to_string());
-                        }
-                    }
+    if let Some(target_node) = target
+        && let Some(body) = target_node.child_by_field_name("body")
+    {
+        let mut cursor = body.walk();
+        // Only check the first statement for a docstring
+        if let Some(child) = body.children(&mut cursor).next()
+            && child.kind() == "expression_statement"
+        {
+            let mut inner_cursor = child.walk();
+            for inner in child.children(&mut inner_cursor) {
+                if inner.kind() == "string" || inner.kind() == "concatenated_string" {
+                    let text = node_text(&inner, source);
+                    // Strip triple quotes
+                    let stripped = text
+                        .trim_start_matches("\"\"\"")
+                        .trim_start_matches("'''")
+                        .trim_end_matches("\"\"\"")
+                        .trim_end_matches("'''")
+                        .trim();
+                    return Some(stripped.to_string());
                 }
             }
         }

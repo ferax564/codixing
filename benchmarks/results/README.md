@@ -85,6 +85,7 @@ which is what happened during the v0.41 shipped-verification.
 | `competitor_benchmark.md` | 2026-04-28 | fresh |
 | `external_competitor_benchmark.json` | 2026-04-28 | fresh |
 | `external_competitor_benchmark.md` | 2026-04-28 | fresh |
+| `semantic-artifacts-2026-07-19.md` | 2026-07-19 | fresh |
 
 ## Re-running
 

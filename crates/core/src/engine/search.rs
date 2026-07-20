@@ -1,17 +1,98 @@
 use std::sync::Arc;
 
-use tracing::debug;
+use tracing::{debug, warn};
 
-use crate::error::Result;
+use crate::error::{CodixingError, Result};
 use crate::retriever::bm25::BM25Retriever;
 use crate::retriever::hybrid::{HybridRetriever, rrf_fuse};
 use crate::retriever::mmr::mmr_select;
 use crate::retriever::{DocFilter, Retriever, SearchQuery, SearchResult, SourceFilter, Strategy};
 
-use super::Engine;
-use super::pipeline::{SearchContext, SearchPipeline};
+use super::pipeline::{SearchContext, SearchPipeline, defining_candidate_files};
+use super::{Engine, ReadOnlyLoadMode};
+
+/// Quote user text before passing an exact-search fallback through Tantivy's
+/// query parser. Exact queries are literals, so characters such as `:` must
+/// never be interpreted as field syntax.
+fn quote_query_literal(query: &str) -> String {
+    let mut quoted = String::with_capacity(query.len() + 2);
+    quoted.push('"');
+    for character in query.chars() {
+        if matches!(character, '\\' | '"') {
+            quoted.push('\\');
+        }
+        quoted.push(character);
+    }
+    quoted.push('"');
+    quoted
+}
+
+/// Collect a small, stable Explore expansion in ranked-anchor order.
+///
+/// Each direction is overscanned by a fixed amount so covered or shared graph
+/// neighbours do not consume the result slots, while hub traversal remains
+/// independent of repository size.
+fn collect_explore_neighbour_files(
+    graph: &crate::graph::CodeGraph,
+    anchor_files: &[String],
+    anchor_set: &std::collections::HashSet<String>,
+    covered_files: &std::collections::HashSet<String>,
+    limit: usize,
+) -> Vec<String> {
+    const MAX_NEIGHBOR_CANDIDATES: usize = 32;
+
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let mut neighbour_files = Vec::with_capacity(limit);
+    let mut seen_neighbours = std::collections::HashSet::with_capacity(limit);
+    'anchors: for file in anchor_files {
+        let neighbours = graph
+            .bounded_callers(file, MAX_NEIGHBOR_CANDIDATES)
+            .into_iter()
+            .chain(graph.bounded_callees(file, MAX_NEIGHBOR_CANDIDATES).0);
+        for neighbour in neighbours {
+            if anchor_set.contains(&neighbour)
+                || covered_files.contains(&neighbour)
+                || !seen_neighbours.insert(neighbour.clone())
+            {
+                continue;
+            }
+            neighbour_files.push(neighbour);
+            if neighbour_files.len() == limit {
+                break 'anchors;
+            }
+        }
+    }
+    neighbour_files
+}
 
 impl Engine {
+    fn ensure_read_profile_supports(&self, query: &SearchQuery) -> Result<()> {
+        if self.read_only_load_mode != ReadOnlyLoadMode::Lexical {
+            return Ok(());
+        }
+
+        if !matches!(query.strategy, Strategy::Exact | Strategy::Instant) {
+            return Err(CodixingError::Config(format!(
+                "lexical read profile supports only Exact and Instant searches, not {:?}",
+                query.strategy
+            )));
+        }
+        if query
+            .queries
+            .as_ref()
+            .is_some_and(|queries| queries.len() >= 2)
+        {
+            return Err(CodixingError::Config(
+                "lexical read profile does not support multi-query fusion".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Search the index using the strategy specified in `query`.
     ///
     /// - `Instant` → BM25 only
@@ -19,6 +100,8 @@ impl Engine {
     /// - `Thorough` → hybrid + MMR deduplication
     /// - `Exact`   → Trigram index fast-path with BM25 fallback
     pub fn search(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
+        self.ensure_read_profile_supports(&query)?;
+
         // Expand CamelCase/snake_case identifiers in the query for better BM25 matching.
         // Skip expansion for Instant/Exact strategies (exact symbol lookups).
         let query = if query.strategy != Strategy::Instant && query.strategy != Strategy::Exact {
@@ -68,14 +151,14 @@ impl Engine {
         }
 
         // Handle explicit multi-query RRF fusion (queries param from MCP/API).
-        if let Some(ref queries) = query.queries {
-            if queries.len() >= 2 {
-                let mut fused = self.search_multi(queries, &query)?;
-                let ctx = self.search_context(&query_str, strategy);
-                pipeline.run(&mut fused, &ctx)?;
-                apply_doc_filter(&mut fused, doc_filter, &source_filter);
-                return Ok(fused);
-            }
+        if let Some(ref queries) = query.queries
+            && queries.len() >= 2
+        {
+            let mut fused = self.search_multi(queries, &query)?;
+            let ctx = self.search_context(&query_str, strategy);
+            pipeline.run(&mut fused, &ctx)?;
+            apply_doc_filter(&mut fused, doc_filter, &source_filter);
+            return Ok(fused);
         }
 
         let mut results = match strategy {
@@ -162,23 +245,51 @@ impl Engine {
                         return Ok(Vec::new());
                     }
 
-                    let (results_with_meta, embeddings): (Vec<SearchResult>, Vec<Vec<f32>>) =
-                        candidates
-                            .into_iter()
-                            .filter_map(|r| {
-                                let emb_vec = emb_clone.embed_one(&r.content).ok()?;
-                                Some((r, emb_vec))
-                            })
-                            .unzip();
+                    // Embed all MMR candidates in one model invocation. The previous
+                    // per-candidate loop paid the ONNX session overhead up to 30 times
+                    // for a single Thorough query.
+                    let candidate_texts = candidates
+                        .iter()
+                        .map(|result| result.content.clone())
+                        .collect();
+                    let (candidates, embeddings): (Vec<SearchResult>, Vec<Vec<f32>>) =
+                        match emb_clone.embed(candidate_texts) {
+                            Ok(embeddings) if embeddings.len() == candidates.len() => {
+                                (candidates, embeddings)
+                            }
+                            Ok(embeddings) => {
+                                warn!(
+                                    expected = candidates.len(),
+                                    received = embeddings.len(),
+                                    "batched MMR embedding count mismatch; retrying candidates independently"
+                                );
+                                candidates
+                                    .into_iter()
+                                    .filter_map(|result| {
+                                        let embedding =
+                                            emb_clone.embed_one(&result.content).ok()?;
+                                        Some((result, embedding))
+                                    })
+                                    .unzip()
+                            }
+                            Err(error) => {
+                                warn!(%error, "batched MMR embedding failed; retrying candidates independently");
+                                candidates
+                                    .into_iter()
+                                    .filter_map(|result| {
+                                        let embedding =
+                                            emb_clone.embed_one(&result.content).ok()?;
+                                        Some((result, embedding))
+                                    })
+                                    .unzip()
+                            }
+                        };
+                    if candidates.is_empty() {
+                        return Ok(Vec::new());
+                    }
 
                     let query_vec = emb_clone.embed_query(&query_str_owned)?;
-                    mmr_select(
-                        results_with_meta,
-                        &query_vec,
-                        &embeddings,
-                        mmr_lambda,
-                        limit,
-                    )
+                    mmr_select(candidates, &query_vec, &embeddings, mmr_lambda, limit)
                 } else {
                     drop(vec_guard);
                     debug!("no embedder available; falling back to BM25 for Thorough strategy");
@@ -191,8 +302,15 @@ impl Engine {
                 let semantic_results = self.semantic_search(&query.query, query.limit);
                 let mut results: Vec<SearchResult> = Vec::new();
                 for m in semantic_results {
-                    let syms = self.symbols.filter(&m.symbol, Some(&m.file_path));
-                    if let Some(sym) = syms.into_iter().next() {
+                    // Semantic matches already carry an exact symbol name.
+                    // Use the name index, then match its usually tiny bucket,
+                    // instead of scanning the corpus-wide symbol table.
+                    if let Some(sym) = self
+                        .symbols
+                        .lookup(&m.symbol)
+                        .into_iter()
+                        .find(|symbol| symbol.file_path == m.file_path)
+                    {
                         results.push(SearchResult {
                             chunk_id: format!("sem_{}", m.symbol),
                             file_path: m.file_path,
@@ -290,15 +408,20 @@ impl Engine {
         queries: &[String],
         base_query: &SearchQuery,
     ) -> Result<Vec<SearchResult>> {
+        if self.read_only_load_mode == ReadOnlyLoadMode::Lexical {
+            return Err(CodixingError::Config(
+                "lexical read profile does not support multi-query fusion".to_string(),
+            ));
+        }
+
         if queries.is_empty() {
             return Ok(Vec::new());
         }
 
         let candidate_limit = (base_query.limit * 3).max(30);
-        let mut all_results: Vec<Vec<SearchResult>> = Vec::new();
-
-        for q_text in queries {
-            let sub_query = SearchQuery {
+        let sub_queries: Vec<SearchQuery> = queries
+            .iter()
+            .map(|q_text| SearchQuery {
                 query: expand_query(q_text),
                 limit: candidate_limit,
                 file_filter: base_query.file_filter.clone(),
@@ -307,13 +430,13 @@ impl Engine {
                 queries: None,
                 doc_filter: None,
                 source_filter: None,
-            };
-            if let Ok(results) = self.search_first_pass(&sub_query) {
-                if !results.is_empty() {
-                    all_results.push(results);
-                }
-            }
-        }
+            })
+            .collect();
+        let mut all_results: Vec<Vec<SearchResult>> = self
+            .search_first_pass_multi(&sub_queries)?
+            .into_iter()
+            .filter(|results| !results.is_empty())
+            .collect();
 
         if all_results.is_empty() {
             return Ok(Vec::new());
@@ -328,88 +451,115 @@ impl Engine {
         Ok(fused)
     }
 
-    /// Trigram-index fast-path for exact identifier lookups.
+    /// File-trigram fast-path for exact identifier lookups.
     ///
-    /// Phase 1: query the trigram inverted index for sub-millisecond exact
-    ///          substring matching.
+    /// Phase 1: stream candidate files from the file trigram index and hydrate
+    ///          only their chunks from Tantivy.
     /// Phase 2: if trigram yields < 3 results, fall back to BM25 and merge.
     ///
-    /// Results are hydrated from chunk_meta and scored by match count.
+    /// Results are verified against stored chunk content and scored by match count.
     fn search_exact(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
-        let candidate_ids = self.get_trigram().search(&query.query);
-
-        // Verify candidates and count actual substring matches using chunk content.
-        // Hydrate in bounded batches: a common identifier can hit millions of
-        // chunks in a monorepo, and materializing every stored body at once
-        // defeats compact metadata even though the caller only needs top-k.
-        const HYDRATE_BATCH_SIZE: usize = 2_048;
+        const FILE_BATCH_SIZE: usize = 64;
         let retained_limit = query.limit.max(3);
         let mut results: Vec<SearchResult> = Vec::new();
-        for candidate_batch in candidate_ids.chunks(HYDRATE_BATCH_SIZE) {
-            let missing_content_ids: std::collections::HashSet<u64> = candidate_batch
-                .iter()
-                .filter_map(|chunk_id| {
-                    let meta = self.chunk_meta.get(chunk_id)?;
-                    if let Some(ref filter) = query.file_filter {
-                        if !meta.file_path.contains(filter.as_str()) {
-                            return None;
-                        }
-                    }
-                    meta.content.is_empty().then_some(*chunk_id)
-                })
-                .collect();
-            let hydrated_contents = self.tantivy.lookup_chunk_contents(&missing_content_ids)?;
 
-            for &chunk_id in candidate_batch {
-                if let Some(meta) = self.chunk_meta.get(&chunk_id) {
-                    // Apply file filter if set.
-                    if let Some(ref filter) = query.file_filter {
-                        if !meta.file_path.contains(filter.as_str()) {
-                            continue;
+        let mut candidate_files = Vec::with_capacity(FILE_BATCH_SIZE);
+        let flush_candidates =
+            |candidate_files: &mut Vec<String>, results: &mut Vec<SearchResult>| -> Result<()> {
+                self.tantivy
+                    .visit_chunks_by_file_paths(candidate_files, |chunk_id, content| {
+                        let Some(meta) = self.chunk_meta.get(&chunk_id) else {
+                            return Ok(());
+                        };
+                        if let Some(ref filter) = query.file_filter
+                            && !meta.file_path.contains(filter.as_str())
+                        {
+                            return Ok(());
                         }
-                    }
-                    // Get content for verification: from meta if available, else from Tantivy.
-                    let content = if meta.content.is_empty() {
-                        hydrated_contents
-                            .get(&chunk_id)
-                            .cloned()
-                            .unwrap_or_default()
-                    } else {
-                        meta.content.clone()
-                    };
-                    // Verify actual substring match and count occurrences.
-                    let hit_count = content.matches(&query.query).count();
-                    if hit_count == 0 {
-                        continue; // Trigram false positive.
-                    }
-                    results.push(SearchResult {
-                        chunk_id: format!("{chunk_id}"),
-                        file_path: meta.file_path.clone(),
-                        language: meta.language.clone(),
-                        score: hit_count as f32,
-                        line_start: meta.line_start,
-                        line_end: meta.line_end,
-                        signature: meta.signature.clone(),
-                        scope_chain: meta.scope_chain.clone(),
-                        content,
-                    });
+
+                        let hit_count = content.matches(&query.query).count();
+                        if hit_count == 0 {
+                            return Ok(());
+                        }
+                        results.push(SearchResult {
+                            chunk_id: format!("{chunk_id}"),
+                            file_path: meta.file_path.clone(),
+                            language: meta.language.clone(),
+                            score: hit_count as f32,
+                            line_start: meta.line_start,
+                            line_end: meta.line_end,
+                            signature: meta.signature.clone(),
+                            scope_chain: meta.scope_chain.clone(),
+                            content,
+                        });
+
+                        // Keep result bodies bounded even when one selected
+                        // file contains a very large number of matching chunks.
+                        if results.len() > retained_limit.saturating_mul(2) {
+                            results.sort_by(|a, b| {
+                                b.score
+                                    .partial_cmp(&a.score)
+                                    .unwrap_or(std::cmp::Ordering::Equal)
+                                    .then_with(|| a.file_path.cmp(&b.file_path))
+                                    .then_with(|| a.line_start.cmp(&b.line_start))
+                                    .then_with(|| a.chunk_id.cmp(&b.chunk_id))
+                            });
+                            results.truncate(retained_limit);
+                        }
+                        Ok(())
+                    })?;
+                candidate_files.clear();
+                Ok(())
+            };
+
+        // Raw source bytes are indexed before lossy UTF-8 conversion. A query
+        // containing the replacement character can therefore appear in stored
+        // chunk text without appearing in the raw-byte trigram index. Preserve
+        // exact-search semantics by scanning known files for this rare case.
+        if query.query.contains('\u{FFFD}') {
+            for file_path in self.file_chunk_ids.keys() {
+                if let Some(ref filter) = query.file_filter
+                    && !file_path.contains(filter.as_str())
+                {
+                    continue;
+                }
+                candidate_files.push(file_path.clone());
+                if candidate_files.len() == FILE_BATCH_SIZE {
+                    flush_candidates(&mut candidate_files, &mut results)?;
                 }
             }
-
-            // Bound retained result bodies while preserving the globally best
-            // scores seen so far. Keep at least three so BM25 fallback semantics
-            // remain unchanged when a caller requests fewer than three hits.
-            if results.len() > retained_limit.saturating_mul(2) {
-                results.sort_by(|a, b| {
-                    b.score
-                        .partial_cmp(&a.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| a.file_path.cmp(&b.file_path))
-                        .then_with(|| a.line_start.cmp(&b.line_start))
-                        .then_with(|| a.chunk_id.cmp(&b.chunk_id))
-                });
-                results.truncate(retained_limit);
+        } else {
+            let prefiltered = self.get_file_trigram().visit_literal_candidates(
+                query.query.as_bytes(),
+                |file_path| {
+                    if let Some(ref filter) = query.file_filter
+                        && !file_path.contains(filter.as_str())
+                    {
+                        return Ok(());
+                    }
+                    candidate_files.push(file_path.to_string());
+                    if candidate_files.len() == FILE_BATCH_SIZE {
+                        flush_candidates(&mut candidate_files, &mut results)?;
+                    }
+                    Ok(())
+                },
+            )?;
+            if prefiltered.is_none() {
+                for file_path in self.file_chunk_ids.keys() {
+                    if let Some(ref filter) = query.file_filter
+                        && !file_path.contains(filter.as_str())
+                    {
+                        continue;
+                    }
+                    candidate_files.push(file_path.clone());
+                    if candidate_files.len() == FILE_BATCH_SIZE {
+                        flush_candidates(&mut candidate_files, &mut results)?;
+                    }
+                }
             }
+        }
+        if !candidate_files.is_empty() {
+            flush_candidates(&mut candidate_files, &mut results)?;
         }
 
         // Sort by score descending.
@@ -425,6 +575,7 @@ impl Engine {
         // If trigram yields < 3 results, augment with BM25.
         if results.len() < 3 {
             let bm25_query = SearchQuery {
+                query: quote_query_literal(&query.query),
                 strategy: Strategy::Instant,
                 ..query.clone()
             };
@@ -449,11 +600,13 @@ impl Engine {
     ///
     /// Phase names reported:
     /// - `"bm25"` — BM25-only results (always reported first)
+    /// - `"exact"` — trigram-backed exact results (for `Exact` only)
     /// - `"fused"` — hybrid BM25 + vector results (for `Fast`/`Thorough`/`Deep`)
     /// - `"reranked"` — cross-encoder re-ranked results (for `Deep` only)
     ///
-    /// For `Instant` strategy only the `"bm25"` phase fires and the returned
-    /// results are identical to [`search()`](Self::search).
+    /// For `Instant` only the `"bm25"` phase fires. `Exact` reports the BM25
+    /// preview followed by `"exact"`; every returned result set is identical
+    /// to [`search()`](Self::search) for the requested strategy.
     pub fn search_with_progress<F>(
         &self,
         query: SearchQuery,
@@ -462,6 +615,7 @@ impl Engine {
     where
         F: FnMut(&str, &[SearchResult]),
     {
+        self.ensure_read_profile_supports(&query)?;
         let strategy = query.strategy;
 
         // Phase 1: quick BM25-only pass — always runs, gives near-instant
@@ -473,9 +627,17 @@ impl Engine {
         let bm25_results = self.search(bm25_query)?;
         on_progress("bm25", &bm25_results);
 
-        // For Instant/Exact, BM25 is the only phase — return directly.
-        if strategy == Strategy::Instant || strategy == Strategy::Exact {
+        if strategy == Strategy::Instant {
             return Ok(bm25_results);
+        }
+
+        // Exact has its own trigram-backed semantics. Preserve the quick BM25
+        // preview, then return the actual exact result set instead of silently
+        // substituting the preview.
+        if strategy == Strategy::Exact {
+            let exact_results = self.search(query)?;
+            on_progress("exact", &exact_results);
+            return Ok(exact_results);
         }
 
         // Phase 2+: run the full strategy which internally performs BM25 again
@@ -518,38 +680,34 @@ impl Engine {
         // Phase 2 — expand via import graph.
         if let Some(ref graph) = self.graph {
             // Anchor = files in the top-limit initial results.
-            let anchor_files: HashSet<String> = results
-                .iter()
-                .take(query.limit)
-                .map(|r| r.file_path.clone())
-                .collect();
+            let mut anchor_files = Vec::new();
+            let mut anchor_set = HashSet::new();
+            for result in results.iter().take(query.limit) {
+                if anchor_set.insert(result.file_path.clone()) {
+                    anchor_files.push(result.file_path.clone());
+                }
+            }
 
             // Already-covered = all files in the full result set.
             let covered_files: HashSet<String> =
                 results.iter().map(|r| r.file_path.clone()).collect();
 
-            // Collect graph neighbours not already in the anchor set.
-            let mut neighbour_files: HashSet<String> = HashSet::new();
-            for file in &anchor_files {
-                for n in graph.callers(file) {
-                    if !anchor_files.contains(&n) {
-                        neighbour_files.insert(n);
-                    }
-                }
-                for n in graph.callees(file) {
-                    if !anchor_files.contains(&n) {
-                        neighbour_files.insert(n);
-                    }
-                }
-            }
+            // Collect only the small expansion set that can actually be
+            // consumed below. This prevents a dependency hub from allocating
+            // and traversing every neighbour just to discard all but eight.
+            const MAX_EXPANSION: usize = 8;
+            let neighbour_files = collect_explore_neighbour_files(
+                graph,
+                &anchor_files,
+                &anchor_set,
+                &covered_files,
+                MAX_EXPANSION,
+            );
 
             // Phase 3 — for each uncovered neighbour, fetch its best BM25 chunk.
-            // Cap at 8 neighbours to keep latency predictable.
+            // The collection phase above already caps this at eight.
             let mut expansion: Vec<SearchResult> = Vec::new();
-            for neighbour in neighbour_files.iter().take(8) {
-                if covered_files.contains(neighbour) {
-                    continue;
-                }
+            for neighbour in &neighbour_files {
                 let nq = SearchQuery {
                     query: query.query.clone(),
                     limit: 1,
@@ -609,28 +767,7 @@ impl Engine {
     /// Works for all strategies — even `Instant` — since it is pure in-memory
     /// DashMap lookups with no I/O.
     pub(super) fn apply_definition_boost(&self, results: &mut [SearchResult], query: &str) {
-        use std::collections::HashSet;
-
-        // Collect files that define any identifier-like token in the query.
-        let mut defining_files: HashSet<String> = HashSet::new();
-        for term in query.split_whitespace() {
-            // Skip short or punctuation-heavy tokens.
-            if term.len() < 3 || !term.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                continue;
-            }
-            // Exact-name lookup (covers CamelCase identifiers like `IndexConfig`).
-            let exact = self.symbols.lookup(term);
-            if !exact.is_empty() {
-                for sym in exact {
-                    defining_files.insert(sym.file_path);
-                }
-            } else {
-                // Case-insensitive substring fallback (e.g. "indexconfig" → IndexConfig).
-                for sym in self.symbols.filter(term, None) {
-                    defining_files.insert(sym.file_path);
-                }
-            }
-        }
+        let defining_files = defining_candidate_files(&self.symbols, results, query);
 
         if defining_files.is_empty() {
             return;
@@ -755,6 +892,12 @@ impl Engine {
     /// ranked chunks where that identifier appears — including call sites,
     /// imports, and variable usages, not just the definition.
     pub fn search_usages(&self, symbol: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        if self.read_only_load_mode == ReadOnlyLoadMode::Lexical {
+            return Err(CodixingError::Config(
+                "lexical read profile does not support usage search; reopen the full read profile"
+                    .to_string(),
+            ));
+        }
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -778,32 +921,46 @@ impl Engine {
         Ok(results)
     }
 
-    /// First-pass retrieval: BM25+vector hybrid (if available) with graph boost.
-    ///
-    /// This is the shared retrieval core used by `search_deep` (and its
-    /// multi-query variant) to avoid duplicating the BM25/hybrid logic
-    /// and — critically — to avoid recursion through the public `search()`
-    /// method which would trigger query expansion and strategy dispatch again.
-    fn search_first_pass(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
+    /// First-pass retrieval for several reformulations with one batched query
+    /// embedding call. BM25 and graph boosts retain the same per-query
+    /// semantics as independent first-pass retrievals.
+    fn search_first_pass_multi(&self, queries: &[SearchQuery]) -> Result<Vec<Vec<SearchResult>>> {
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let vec_guard = self.vector.read().unwrap_or_else(|e| e.into_inner());
-        let mut candidates =
+        let mut result_lists =
             if let (Some(emb), Some(vec_idx)) = (&self.embedder, vec_guard.as_ref()) {
-                let retriever = HybridRetriever::new(
+                HybridRetriever::new(
                     &self.tantivy,
                     Arc::clone(emb),
                     vec_idx,
                     &self.chunk_meta,
                     self.config.embedding.rrf_k,
-                );
-                retriever.search(query)?
+                )
+                .search_batch(queries)?
             } else {
-                BM25Retriever::new(&self.tantivy).search(query)?
+                queries
+                    .iter()
+                    .map(|query| {
+                        BM25Retriever::new(&self.tantivy)
+                        .search(query)
+                        .unwrap_or_else(|error| {
+                            warn!(query = %query.query, %error, "skipping failed reformulation");
+                            Vec::new()
+                        })
+                    })
+                    .collect()
             };
-        drop(vec_guard); // Release before boost computations
-        self.apply_graph_boost(&mut candidates, self.config.graph.boost_weight);
-        self.apply_definition_boost(&mut candidates, &query.query);
-        self.apply_popularity_boost(&mut candidates);
-        Ok(candidates)
+        drop(vec_guard);
+
+        for (query, candidates) in queries.iter().zip(result_lists.iter_mut()) {
+            self.apply_graph_boost(candidates, self.config.graph.boost_weight);
+            self.apply_definition_boost(candidates, &query.query);
+            self.apply_popularity_boost(candidates);
+        }
+        Ok(result_lists)
     }
 
     /// Two-stage reranked search with multi-query RRF fusion.
@@ -880,10 +1037,11 @@ impl Engine {
         );
 
         let mut candidates = {
-            // Run first-pass for each reformulation, then fuse.
-            let mut all_results: Vec<Vec<SearchResult>> = Vec::new();
-            for q_text in &reformulations {
-                let sub_query = SearchQuery {
+            // Batch all query embeddings, then run the per-query retrieval and
+            // fuse the ranked lists exactly as before.
+            let sub_queries: Vec<SearchQuery> = reformulations
+                .iter()
+                .map(|q_text| SearchQuery {
                     query: expand_query(q_text),
                     limit: candidate_limit,
                     file_filter: query.file_filter.clone(),
@@ -892,13 +1050,13 @@ impl Engine {
                     queries: None,
                     doc_filter: None,
                     source_filter: None,
-                };
-                if let Ok(results) = self.search_first_pass(&sub_query) {
-                    if !results.is_empty() {
-                        all_results.push(results);
-                    }
-                }
-            }
+                })
+                .collect();
+            let mut all_results: Vec<Vec<SearchResult>> = self
+                .search_first_pass_multi(&sub_queries)?
+                .into_iter()
+                .filter(|results| !results.is_empty())
+                .collect();
 
             if all_results.is_empty() {
                 return Ok(Vec::new());
@@ -952,7 +1110,7 @@ impl Engine {
         if let Some(ref graph) = self.graph {
             let mut boosted = false;
             for r in results.iter_mut() {
-                let caller_count = graph.callers(&r.file_path).len();
+                let caller_count = graph.caller_count(&r.file_path);
                 if caller_count > 3 {
                     // Modest logarithmic boost: ln(4)≈1.4 → 7%, ln(10)≈2.3 → 11.5%
                     r.score *= 1.0 + (caller_count as f32).ln() * 0.05;
@@ -1311,12 +1469,12 @@ pub(super) fn apply_header_demotion(results: &mut [SearchResult], changed: &mut 
     for r in results.iter_mut() {
         if is_header(&r.file_path) {
             let basename = r.file_path.rsplit('/').next().unwrap_or(&r.file_path);
-            if let Some((stem, _)) = basename.rsplit_once('.') {
-                if impl_basenames.contains(stem) {
-                    r.score *= HEADER_DEMOTION_EXACT;
-                    *changed = true;
-                    continue;
-                }
+            if let Some((stem, _)) = basename.rsplit_once('.')
+                && impl_basenames.contains(stem)
+            {
+                r.score *= HEADER_DEMOTION_EXACT;
+                *changed = true;
+                continue;
             }
             // Mild demotion: impl files exist but this header has no matching .cc
             r.score *= HEADER_DEMOTION_MILD;
@@ -1555,10 +1713,10 @@ fn generate_reformulations_with_synonyms(
     let mut reformulations = generate_reformulations(query);
 
     // Append synonym-expanded variant if it adds new terms.
-    if let Some(expanded) = expand_synonyms(query) {
-        if expanded != query {
-            reformulations.push(expanded);
-        }
+    if let Some(expanded) = expand_synonyms(query)
+        && expanded != query
+    {
+        reformulations.push(expanded);
     }
 
     // Append top-3 code pattern tokens as a single query string.
@@ -1903,6 +2061,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn explore_neighbours_preserve_anchor_rank_and_skip_covered_slots() {
+        use crate::graph::CodeGraph;
+        use crate::language::Language;
+
+        let mut graph = CodeGraph::new();
+        // Incoming edges are visited newest first. Insert the useful neighbour
+        // before eight covered ones so a pre-filter limit of eight would miss it.
+        graph.add_edge(
+            "src/top_unseen.rs",
+            "src/top.rs",
+            "top",
+            Language::Rust,
+            Language::Rust,
+        );
+        let mut covered_files = std::collections::HashSet::new();
+        for index in 0..8 {
+            let covered = format!("src/covered_{index}.rs");
+            graph.add_edge(
+                &covered,
+                "src/top.rs",
+                "top",
+                Language::Rust,
+                Language::Rust,
+            );
+            covered_files.insert(covered);
+        }
+        graph.add_edge(
+            "src/lower_unseen.rs",
+            "src/lower.rs",
+            "lower",
+            Language::Rust,
+            Language::Rust,
+        );
+
+        let anchor_files = vec!["src/top.rs".to_string(), "src/lower.rs".to_string()];
+        let anchor_set: std::collections::HashSet<String> = anchor_files.iter().cloned().collect();
+        covered_files.extend(anchor_set.iter().cloned());
+
+        let first =
+            collect_explore_neighbour_files(&graph, &anchor_files, &anchor_set, &covered_files, 1);
+        let second =
+            collect_explore_neighbour_files(&graph, &anchor_files, &anchor_set, &covered_files, 1);
+
+        assert_eq!(first, vec!["src/top_unseen.rs"]);
+        assert_eq!(second, first, "collection must be deterministic");
+    }
+
+    #[test]
     fn recency_map_is_only_initialized_for_consuming_pipelines() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -1933,6 +2139,56 @@ mod tests {
 
         let thorough_context = engine.search_context("recency_fixture", Strategy::Thorough);
         assert!(thorough_context.recency_map.is_some());
+    }
+
+    #[test]
+    fn popularity_boost_distinguishes_hubs_above_the_old_sampling_cap() {
+        use crate::graph::CodeGraph;
+        use crate::language::Language;
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn fixture() {}\n").unwrap();
+        let mut config = crate::IndexConfig::new(dir.path());
+        config.embedding.enabled = false;
+        let mut engine = Engine::init(dir.path(), config).unwrap();
+        let mut graph = CodeGraph::new();
+        for index in 0..65 {
+            graph.add_edge(
+                &format!("src/moderate_caller_{index}.rs"),
+                "src/moderate_hub.rs",
+                "moderate",
+                Language::Rust,
+                Language::Rust,
+            );
+        }
+        for index in 0..96 {
+            graph.add_edge(
+                &format!("src/popular_caller_{index}.rs"),
+                "src/popular_hub.rs",
+                "popular",
+                Language::Rust,
+                Language::Rust,
+            );
+        }
+        engine.graph = Some(graph);
+
+        let result = |file_path: &str| SearchResult {
+            chunk_id: file_path.to_string(),
+            file_path: file_path.to_string(),
+            language: "Rust".to_string(),
+            score: 1.0,
+            line_start: 1,
+            line_end: 1,
+            signature: String::new(),
+            scope_chain: Vec::new(),
+            content: String::new(),
+        };
+        let mut results = vec![result("src/moderate_hub.rs"), result("src/popular_hub.rs")];
+
+        engine.apply_popularity_boost(&mut results);
+
+        assert_eq!(results[0].file_path, "src/popular_hub.rs");
+        assert!(results[0].score > results[1].score);
     }
 
     #[test]

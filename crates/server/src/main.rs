@@ -3,6 +3,8 @@ mod error;
 mod routes;
 mod state;
 
+include!(concat!(env!("OUT_DIR"), "/build_provenance.rs"));
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use tracing::info;
@@ -15,6 +17,10 @@ use state::new_state;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if build_provenance::write_if_requested()? {
+        return Ok(());
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),

@@ -293,22 +293,21 @@ fn extract_js_ts(tree: &Tree, source: &[u8], language: Language) -> Vec<RawImpor
                     .child_by_field_name("function")
                     .map(|f| node_text(&f, source))
                     .unwrap_or("");
-                if func_text == "require" {
-                    if let Some(args) = node.child_by_field_name("arguments") {
-                        let mut c = args.walk();
-                        for arg in args.named_children(&mut c) {
-                            if arg.kind() == "string" {
-                                let raw = node_text(&arg, source);
-                                let path = strip_quotes(raw);
-                                if !path.is_empty() {
-                                    let is_relative =
-                                        path.starts_with("./") || path.starts_with("../");
-                                    imports.push(RawImport {
-                                        path: path.to_string(),
-                                        language,
-                                        is_relative,
-                                    });
-                                }
+                if func_text == "require"
+                    && let Some(args) = node.child_by_field_name("arguments")
+                {
+                    let mut c = args.walk();
+                    for arg in args.named_children(&mut c) {
+                        if arg.kind() == "string" {
+                            let raw = node_text(&arg, source);
+                            let path = strip_quotes(raw);
+                            if !path.is_empty() {
+                                let is_relative = path.starts_with("./") || path.starts_with("../");
+                                imports.push(RawImport {
+                                    path: path.to_string(),
+                                    language,
+                                    is_relative,
+                                });
                             }
                         }
                     }
@@ -415,15 +414,15 @@ fn extract_c(tree: &Tree, source: &[u8], language: Language) -> Vec<RawImport> {
 fn parse_c_include(text: &str) -> (String, bool) {
     // Find the include path between quotes or angle brackets.
     let text = text.trim();
-    if let Some(start) = text.find('"') {
-        if let Some(end) = text[start + 1..].find('"') {
-            return (text[start + 1..start + 1 + end].to_string(), true);
-        }
+    if let Some(start) = text.find('"')
+        && let Some(end) = text[start + 1..].find('"')
+    {
+        return (text[start + 1..start + 1 + end].to_string(), true);
     }
-    if let Some(start) = text.find('<') {
-        if let Some(end) = text[start + 1..].find('>') {
-            return (text[start + 1..start + 1 + end].to_string(), false);
-        }
+    if let Some(start) = text.find('<')
+        && let Some(end) = text[start + 1..].find('>')
+    {
+        return (text[start + 1..start + 1 + end].to_string(), false);
     }
     (String::new(), false)
 }
@@ -912,19 +911,19 @@ fn extract_matlab(tree: &Tree, source: &[u8]) -> Vec<RawImport> {
                 // Only capture the outermost field_expression — skip if this
                 // node's parent is also a field_expression (part of a longer
                 // chain that will be captured by the parent).
-                if let Some(parent) = node.parent() {
-                    if parent.kind() == "field_expression" {
-                        return;
-                    }
+                if let Some(parent) = node.parent()
+                    && parent.kind() == "field_expression"
+                {
+                    return;
                 }
-                if let Some(dot_path) = matlab_dot_path(&node, source) {
-                    if seen.insert(dot_path.clone()) {
-                        imports.push(RawImport {
-                            path: dot_path,
-                            language: Language::Matlab,
-                            is_relative: false,
-                        });
-                    }
+                if let Some(dot_path) = matlab_dot_path(&node, source)
+                    && seen.insert(dot_path.clone())
+                {
+                    imports.push(RawImport {
+                        path: dot_path,
+                        language: Language::Matlab,
+                        is_relative: false,
+                    });
                 }
             }
             _ => {}

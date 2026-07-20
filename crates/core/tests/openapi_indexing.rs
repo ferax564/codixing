@@ -99,6 +99,31 @@ fn index_and_search_openapi_endpoint() {
 }
 
 #[test]
+fn exact_search_indexes_synthesized_openapi_text_after_reopen() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::write(root.join("openapi.yaml"), SAMPLE_SPEC).unwrap();
+
+    drop(Engine::init(root, bm25_config(root)).unwrap());
+    let engine = Engine::open(root).unwrap();
+    let synthesized = "Title: Widget Service\nVersion: 1.2.0";
+    let hits = engine
+        .search(
+            SearchQuery::new(synthesized)
+                .with_limit(10)
+                .with_strategy(Strategy::Exact),
+        )
+        .unwrap();
+    let hit = hits
+        .iter()
+        .find(|hit| hit.file_path == "openapi.yaml")
+        .expect("synthesized OpenAPI preamble should be an exact-search candidate");
+
+    assert_eq!(hit.score, 1.0, "result must come from exact verification");
+    assert!(hit.content.contains(synthesized));
+}
+
+#[test]
 fn openapi_operation_id_is_indexed_as_symbol() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();

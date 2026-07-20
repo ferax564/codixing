@@ -303,13 +303,13 @@ impl Engine {
 
         // 3. Iterate over all indexed files.
         //
-        // `file_chunk_counts` is rebuilt from `chunk_meta` on `Engine::open()`.
+        // `file_chunk_ids` is rebuilt from `chunk_meta` on `Engine::open()`.
         // On large indexes (Linux kernel) chunk_meta can be incomplete or the
-        // mmap may not hydrate, leaving `file_chunk_counts` empty even though
+        // mmap may not hydrate, leaving `file_chunk_ids` empty even though
         // the graph is fully populated. Union both sources so audit never
         // reports 0 files on a populated index.
         let mut file_set: std::collections::HashSet<String> =
-            self.file_chunk_counts.keys().cloned().collect();
+            self.file_chunk_ids.keys().cloned().collect();
         if let Some(ref graph) = self.graph {
             for file in graph.file_paths() {
                 file_set.insert(file);
@@ -338,10 +338,10 @@ impl Engine {
 
         for file in &all_files {
             // Apply include/exclude filters.
-            if let Some(ref inc) = options.include_pattern {
-                if !file.contains(inc.as_str()) {
-                    continue;
-                }
+            if let Some(ref inc) = options.include_pattern
+                && !file.contains(inc.as_str())
+            {
+                continue;
             }
             if options
                 .exclude_patterns
@@ -530,7 +530,7 @@ mod tests {
     #[test]
     fn audit_reports_files_even_when_chunk_counts_empty() {
         // Regression: on the Linux kernel, audit was reporting 0 files
-        // despite a populated 84K-node graph, because file_chunk_counts
+        // despite a populated 84K-node graph, because file_chunk_ids
         // rebuilds from chunk_meta and that rebuild can fail on large
         // indexes. The fix unions chunk-count keys with graph file_paths().
         let dir = tempdir().unwrap();
@@ -546,9 +546,9 @@ mod tests {
         config.embedding.enabled = false;
         let mut engine = Engine::init(&root, config).unwrap();
 
-        // Simulate the failure mode: clear file_chunk_counts so audit cannot
+        // Simulate the failure mode: clear file_chunk_ids so audit cannot
         // rely on it. The graph should still enumerate files.
-        engine.file_chunk_counts.clear();
+        engine.file_chunk_ids.clear();
 
         let report = engine.audit_freshness(FreshnessOptions {
             threshold_days: 180,
@@ -560,7 +560,7 @@ mod tests {
         assert!(
             report.files_audited >= 2,
             "audit should count both files via the graph even when \
-             file_chunk_counts is empty, got files_audited={}",
+             file_chunk_ids is empty, got files_audited={}",
             report.files_audited
         );
     }

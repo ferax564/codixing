@@ -66,9 +66,14 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 - `crates/mcp/` — MCP server (`codixing-mcp`) with generated tool definitions and profile-filtered discovery (`tool_defs/*.toml`)
 - `crates/server/` — HTTP API server (`codixing-server`), REST endpoints with SSE streaming for sync
 - `crates/core/src/federation/` — cross-repo federated search (`--federation config.json`)
+- `crates/core/src/persistence/` — immutable generation publication, stable
+  single-writer lease, copy-on-write incremental checkpoints, and durable
+  changed-path recovery journal
 - `crates/lsp/` — LSP server (`codixing-lsp`), hover/go-to-def/refs/symbols/call hierarchy/complexity diagnostics/rename/semantic tokens
 - `claude-plugin/` — Claude Code plugin with 5 skills + MCP server config
-- `.codixing/` — index data (do not edit manually)
+- `.codixing/` — index control files plus atomically activated data generations
+  under `generations/` (do not edit manually). Rebuilds temporarily need space
+  for both the active and new generation; failed rebuilds preserve the active one.
 
 ## Build & Test
 
@@ -206,7 +211,17 @@ The CI workflow (`.github/workflows/ci.yml`) has the following jobs:
 - **audit** — blocking Ubuntu `cargo-audit` run. Its explicit advisory ignores are justified in `audit.toml`; there is no `continue-on-error` escape hatch.
 - **coverage** — blocking Ubuntu coverage generation and `coverage-report` artifact upload. The final Codecov upload alone is configured not to fail CI on a Codecov service error.
 - **release-build** — blocking three-platform matrix on `main` pushes only (never PRs or tag pushes). It has `needs: [test, npm-installer]`, builds the four binaries for Linux x86_64, macOS arm64, and Windows x86_64 (Windows uses `--no-default-features`), and uploads `binaries-<suffix>` artifacts with 14-day retention.
-- **benchmarks** — blocking Ubuntu `cargo bench` job with no `needs` dependency, so it starts in parallel rather than waiting for `test`; uploads `benchmark-results`.
+- **benchmarks** — blocking Ubuntu job with no `needs` dependency. It runs the
+  registered Criterion benches and the machine-readable large-repository gate,
+  then uploads both results as `benchmark-results`. Pull requests and main
+  pushes use the regression-only 10K profile. Weekly and manually selected
+  100K runs use strict-claim mode: they require a trusted `origin/main`
+  baseline revision plus separate commit-bound external-quality JSON for the
+  baseline and candidate (positive task count, dataset digest, MRR, and
+  Recall@10). Baseline and candidate init/sync commands use an explicit fixed
+  eight-worker cap; missing or mismatched worker telemetry, missing quality
+  evidence, or stale evidence fails closed. The published speed scope is the
+  five-operation geometric mean, not a claim that every operation is 2x faster.
 
 The auto-tag workflow waits for the entire CI workflow to conclude successfully, so every blocking job above gates release tagging even though `release-build` itself directly depends only on `test` and `npm-installer`.
 
@@ -297,6 +312,14 @@ The Codixing index lives in `.codixing/`. After significant file changes, sync i
 ./target/release/codixing sync .
 ```
 
+The MCP daemon batches watcher mutations into an unpublished checkpoint and
+publishes after 2 seconds idle, 30 seconds maximum age, or 256 changed paths.
+Do not write generation artifacts in place: fork through `IndexStore`, replace
+mutable sidecars atomically, and make the active-generation manifest the last
+durable write. A no-op sync must not fork or publish. On filesystems without
+hard-link support, incremental fallback copying is capped at 64 MiB; use a full
+`codixing init` rather than duplicating a large index.
+
 To rebuild from scratch (BgeSmallEn is the recommended model — fastest init, good retrieval):
 ```bash
 ORT_DYLIB_PATH=/absolute/path/to/libonnxruntime.so \
@@ -315,7 +338,7 @@ ORT_DYLIB_PATH=/absolute/path/to/libonnxruntime.so \
 | 10K files | Regex (`process_widget_\d+`) | 2.6ms | 1.2ms | ~1× (matches all files) |
 | 20 files | Literal (`process_batch`) | 258µs | 263µs | ~1× (too few files) |
 
-Trigram pre-filtering provides massive speedups for **selective** patterns (identifiers, specific strings) at scale. Patterns that match most files see no benefit — this is expected and correct (the trigram index can't eliminate candidates that genuinely match).
+Trigram pre-filtering provides massive speedups for **selective** patterns (identifiers, specific strings) at scale. Patterns that match most files see no benefit — this is expected and correct (the trigram index can't eliminate candidates that genuinely match). The persisted file-level index is shared by `grep` and `Strategy::Exact`; exact search streams candidate paths in bounded batches and verifies stored Tantivy chunks. Fresh indexes do not write a separate `chunk_trigram.bin`.
 
 ### Release-to-release perf comparison
 

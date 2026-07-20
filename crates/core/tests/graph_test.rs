@@ -574,6 +574,33 @@ pub struct A;
     );
 }
 
+#[test]
+fn rebuild_graph_preserves_symbols_when_indexed_file_becomes_oversized() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let src = root.join("src");
+    fs::create_dir_all(&src).unwrap();
+    let source_path = src.join("api.rs");
+    fs::write(&source_path, "pub fn preserved_api() {}\n").unwrap();
+
+    let mut config = no_embed_config(root);
+    config.max_file_bytes = 128;
+    let mut engine = Engine::init(root, config).unwrap();
+    assert_eq!(engine.symbol_table().lookup("preserved_api").len(), 1);
+
+    fs::write(
+        &source_path,
+        format!("pub fn replacement_api() {{}}\n// {}", "x".repeat(512)),
+    )
+    .unwrap();
+    engine.rebuild_graph_from_disk().unwrap();
+
+    let preserved = engine.symbol_table().lookup("preserved_api");
+    assert_eq!(preserved.len(), 1);
+    assert_eq!(preserved[0].file_path, "src/api.rs");
+    assert!(engine.symbol_table().lookup("replacement_api").is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // sync_with_options_rebuild_graph_flag
 // ---------------------------------------------------------------------------

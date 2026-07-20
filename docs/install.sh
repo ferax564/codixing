@@ -341,7 +341,7 @@ echo "  codixing init .              # Index current directory"
 echo "  codixing search 'query'      # Search your code"
 echo
 echo "MCP integration (minimal context profile):"
-echo "  claude mcp add codixing -- codixing-mcp --root . --profile minimal"
+echo "  claude mcp add codixing -- codixing-mcp --root . --profile minimal --no-daemon-fork"
 echo
 echo "Or use npx without a global install:"
-echo "  npx -y codixing-mcp --root . --profile minimal"
+echo "  npx -y codixing-mcp --root . --profile minimal --no-daemon-fork"

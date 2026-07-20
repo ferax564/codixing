@@ -148,6 +148,14 @@ pub struct IndexConfig {
     #[serde(default = "default_exclude_patterns")]
     pub exclude_patterns: Vec<String>,
 
+    /// Maximum source-file size accepted by the indexer, in bytes.
+    ///
+    /// Generated bundles, minified assets, and vendored single-file outputs can
+    /// otherwise dominate parsing memory on a large repository. Set to `0` to
+    /// disable the guard explicitly.
+    #[serde(default = "default_max_file_bytes")]
+    pub max_file_bytes: u64,
+
     /// Chunking configuration.
     #[serde(default)]
     pub chunk: ChunkConfig,
@@ -388,6 +396,10 @@ fn default_exclude_patterns() -> Vec<String> {
     ]
 }
 
+fn default_max_file_bytes() -> u64 {
+    2 * 1024 * 1024
+}
+
 impl IndexConfig {
     /// Create a new config rooted at `root` with defaults.
     pub fn new(root: impl AsRef<Path>) -> Self {
@@ -396,6 +408,7 @@ impl IndexConfig {
             extra_roots: Vec::new(),
             languages: HashSet::new(),
             exclude_patterns: default_exclude_patterns(),
+            max_file_bytes: default_max_file_bytes(),
             chunk: ChunkConfig::default(),
             embedding: EmbeddingConfig::default(),
             graph: GraphConfig::default(),
@@ -406,6 +419,23 @@ impl IndexConfig {
     /// Returns an iterator over all roots: primary root first, then extra roots.
     pub fn all_roots(&self) -> impl Iterator<Item = &PathBuf> {
         std::iter::once(&self.root).chain(self.extra_roots.iter())
+    }
+
+    /// Whether a path belongs to the configured incremental indexing surface.
+    /// Kept shared with the initial walk so watcher/git/editor updates cannot
+    /// add languages or excluded directories that a rebuild would omit.
+    pub fn is_indexable_path(&self, path: &Path) -> bool {
+        if path.components().any(|component| {
+            let component = component.as_os_str().to_string_lossy();
+            self.exclude_patterns
+                .iter()
+                .any(|excluded| excluded == component.as_ref())
+        }) {
+            return false;
+        }
+        crate::language::detect_language(path).is_some_and(|language| {
+            self.languages.is_empty() || self.languages.contains(&language.name().to_lowercase())
+        })
     }
 
     /// Given an absolute file path, return the normalized relative string path.
@@ -478,10 +508,10 @@ impl IndexConfig {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| extra.to_string_lossy().into_owned());
             let with_slash = format!("{}/", prefix);
-            if let Some(stripped) = rel_path.strip_prefix(&with_slash) {
-                if let Some(candidate) = resolve_within(extra, Path::new(stripped), false) {
-                    return Some(candidate);
-                }
+            if let Some(stripped) = rel_path.strip_prefix(&with_slash)
+                && let Some(candidate) = resolve_within(extra, Path::new(stripped), false)
+            {
+                return Some(candidate);
             }
         }
         None
@@ -638,8 +668,18 @@ mod tests {
         let config = IndexConfig::new(".");
         assert_eq!(config.chunk.max_chars, 1500);
         assert_eq!(config.chunk.min_chars, 200);
+        assert_eq!(config.max_file_bytes, 2 * 1024 * 1024);
         assert!(config.exclude_patterns.contains(&".git".to_string()));
         assert!(config.languages.is_empty());
+    }
+
+    #[test]
+    fn legacy_json_without_file_limit_gets_safe_default() {
+        let mut json = serde_json::to_value(IndexConfig::new("/tmp/project")).unwrap();
+        json.as_object_mut().unwrap().remove("max_file_bytes");
+
+        let parsed: IndexConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.max_file_bytes, 2 * 1024 * 1024);
     }
 
     #[test]

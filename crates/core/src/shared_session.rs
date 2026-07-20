@@ -128,6 +128,19 @@ impl SharedSession {
         Self::new(DEFAULT_MAX_EVENTS, DEFAULT_DECAY_MINUTES)
     }
 
+    /// Replay an existing session log without creating or opening it for writes.
+    ///
+    /// Missing and unreadable logs degrade to an empty in-memory session, just
+    /// like persistence replay does. Subsequent records remain process-local.
+    pub fn from_persistence_read_only(path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref();
+        let mut session = Self::default_new();
+        if path.exists() {
+            session.replay_persisted(path);
+        }
+        session
+    }
+
     /// Create a session store backed by a JSONL append log.
     ///
     /// On open, replays the existing log into the in-memory store, dropping
@@ -842,6 +855,30 @@ mod tests {
             .find(|e| e.file_path == "src/c.rs")
             .expect("c.rs event present");
         assert_eq!(symbol_event.symbol.as_deref(), Some("Engine"));
+    }
+
+    #[test]
+    fn read_only_replay_never_appends_to_persistence_log() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("shared_session.jsonl");
+        {
+            let session =
+                SharedSession::with_persistence(100, 15.0, &path).expect("with_persistence");
+            session.record(make_event(SharedEventType::FileRead, "src/a.rs", "agent-1"));
+        }
+        let original_len = std::fs::metadata(&path).unwrap().len();
+
+        let read_only = SharedSession::from_persistence_read_only(&path);
+        assert_eq!(read_only.event_count(), 1);
+        read_only.record(make_event(
+            SharedEventType::FileWrite,
+            "src/read_only.rs",
+            "agent-2",
+        ));
+        assert_eq!(read_only.event_count(), 2);
+        drop(read_only);
+
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), original_len);
     }
 
     #[test]

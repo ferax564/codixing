@@ -51,6 +51,26 @@ Or for OpenAI Codex CLI: `codex mcp add codixing -- npx -y codixing-mcp --root .
 For large repositories, run `codixing init .` before starting the MCP client. When
 using Codex configuration, set `startup_timeout_sec = 120` so the first `npx`
 download or index load is not cut off by the default startup timeout.
+Codixing skips individual source files over 2 MiB by default so generated or
+minified bundles cannot dominate parsing memory; override this with
+`--max-file-bytes N` (or `0` for no limit).
+Indexing uses at most `min(available CPUs, 8)` workers by default on
+non-Windows platforms and `min(available CPUs, 4)` on Windows; `--threads N`
+is an explicit tuning override. For one-shot searches on a large index,
+`--strategy instant` and `--strategy exact` use a lean lexical read profile
+that skips graph, vector, and reranker loading. `auto` and the other strategies
+retain the full read profile because they may need those artifacts.
+Auxiliary
+concept and learned-vocabulary artifacts are evidence-ranked and bounded: at
+most 32 vocabulary terms are paired per file, 12 expansions are retained per
+term, and concept clusters retain at most 32 symbols / 16 files. Their v2 files
+intern repeated paths and names, and every sync invalidates them before a bounded
+rebuild so large-repo searches never use stale semantic mappings.
+Once initialized, MCP watcher updates stay proportional to the edited files:
+changes accumulate in an unpublished copy-on-write generation and publish after
+2 seconds idle, 30 seconds maximum, or 256 paths. Existing readers keep their
+complete old snapshot, interrupted batches replay automatically, and a true
+no-op sync does not create another generation.
 
 ---
 
@@ -125,6 +145,16 @@ codixing search "authentication handler"
 ```
 
 That's it. Your agent now uses ranked search instead of grep.
+
+`codixing init` is safe to rerun. It builds a complete index generation beside
+the active one, validates it, and atomically switches readers only when the new
+generation is ready. An interrupted, failed, or out-of-space rebuild leaves the
+previous index searchable; a successful switch removes the superseded data.
+Long-lived read-only engines detect the generation switch and reopen the whole
+new snapshot without observing a mixture of old and new artifacts.
+Plan for temporary free space approximately equal to one additional index while
+a rebuild is running. `codixing doctor` reports the active generation and any
+abandoned staging generations that could not yet be reclaimed.
 
 ### CLI commands
 
@@ -335,7 +365,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Agent context pack** — `codixing agent-context-pack` and MCP `agent_context_pack` compile a versioned JSON pack with repo orientation, must-read evidence handles, related symbols, likely tests, docs, risks, and recommended next tools
 - **External-context import** — `codixing import <github|adr|jira|linear> <path>` and the MCP `import_external` tool ingest GitHub issues/PRs (from `gh issue list --json …` or the REST API), architecture decision records, and Jira/Linear issue exports (CSV or JSON, auto-detected) as first-class searchable documents. Imported context is chunked like docs, linked to the code symbols it mentions (doc→code graph edges, so `callers`/`impact` surface the tickets discussing a file), and tagged so `codixing search --source github` (or `--source jira` / `linear` / `adr` / `external`) scopes results. Fully local — no SaaS connector or API key. Re-importing a source replaces it; imports survive `sync` (a full `init` rebuilds from disk, so re-run imports after)
 - **Query-personalized PageRank** — Query-time graph boost seeds PageRank from query-relevant nodes for context-aware ranking
-- **Learned query reformulation** — Project-specific vocabulary expansion learns from codebase patterns
+- **Learned query reformulation** — Project-specific vocabulary expansion learns from codebase patterns with deterministic evidence-ranked caps (32 terms/file, 12 expansions/term), compact string-interned persistence, and sync-safe freshness
 - **CLI + MCP** — Full CLI surface for direct use (run `codixing --help`) plus a profile-gated MCP catalog for editor integration (search, graph traversal, file operations, code review, git analysis, session memory, federation discovery)
 - **File freshness audit** — `audit_freshness` tool identifies stale and orphaned files across releases
 - **Preflight gates** — Plugin enforces existence scanning before proposing new features
@@ -347,18 +377,19 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Health diagnostics** — `codixing doctor` reports binary/version, index metadata health, git staleness, daemon endpoint status, ONNX runtime configuration, and index disk usage in human or JSON form
 - **Daemon mode** — Engine stays in memory, auto-starts on first connection, Unix socket (macOS/Linux) or named pipe (Windows) IPC, file watcher for live index updates, 30-min idle timeout
 - **Field-weighted BM25** — Configurable per-field boosting (entity_names 3×, signature 2×, scope_chain 1.5×, content 1×)
-- **Search pipeline** — Composable search stages (definition boost, test demotion, path match, graph boost, recency boost, graph semantic propagation via GraphPropagationStage, file-level dedup via FileDedupStage, truncation) with seven strategies, including trigram exact-match and embedding-free semantic matching
+- **Search pipeline** — Composable search stages (definition boost, test demotion, path match, graph boost, recency boost, graph semantic propagation via GraphPropagationStage, file-level dedup via FileDedupStage, truncation) with seven strategies, including file-trigram exact-match and embedding-free semantic matching
 - **Multi-query RRF fusion** — Auto-generates query reformulations for natural-language queries (3+ words) and fuses results via Reciprocal Rank Fusion; also available via explicit `queries` parameter on `code_search`
 - **Git recency signal** — Mildly boosts recently modified files (+10% linear decay over 180 days) via lazy-loaded git log timestamps
 - **Overlapping chunks** — Bridge chunks at AST-aware chunk boundaries capture cross-function context; configurable `overlap_ratio` (default 0.0)
 - **File path boosting** — Detects explicit file paths and backtick code references in queries and boosts matching results (2.5×)
-- **Kernel-scale performance** — Tested on the Linux kernel (63K C/H files, 30M+ lines, 84K-node graph): 1.57s cold-start search, 0.79s warm via the MCP daemon. Mmap symbol table AND trigram index (zero-deserialization), compact chunk metadata (11× smaller), lazy trigram loading
+- **Kernel-scale performance** — Tested on the Linux kernel (63K C/H files, 30M+ lines, 84K-node graph): 1.57s cold-start search, 0.79s warm via the MCP daemon. Mmap symbols, compact chunk metadata (11× smaller), and one lazy file-level trigram artifact serve both grep and exact search. Exact lookup streams candidate paths in bounded batches and hydrates only selected Tantivy chunks; fresh indexes no longer persist a duplicate chunk-level trigram corpus
 - **Trigram pre-filtering** — File-level trigram inverted index (Russ Cox/trigrep technique) skips files before disk I/O; **110× faster** literal grep at 1K files, **52× faster** at 10K files; persistent bitcode storage, regex HIR walking with OR-branch support, parallel rayon verification
 - **LSP rename + semantic tokens** — Cross-file rename refactoring with conflict detection; semantic highlighting for Rust, Python, TypeScript, Go
 - **Optional RustQueue embedding primitives** — Feature-gated, file-grouped job and bounded-channel worker implementation for embedding experiments; the supported CLI durability path is `codixing embed` with generation checkpoints
 - **Streaming embeddings** — Fixed-window batch processing (256 chunks) with progress reporting; incremental vector reuse via content hashing
-- **Federation auto-discovery** — Auto-detects Cargo, npm, pnpm, Go workspaces, git submodules, and nested projects
-- **Read-only concurrent access** — Multiple instances share the same index; periodic reload detects writer updates automatically
+- **Federation auto-discovery** — Auto-detects Cargo, npm, pnpm, Go workspaces, git submodules, and nested projects; lazy federation keeps a bounded stable resident set and searches overflow projects through short-lived read-only engines instead of churning the whole cache
+- **Read-only concurrent access** — CLI analysis/search commands and federated project members open the index without probing or owning the Tantivy writer lock, so reads start immediately alongside sync/indexing; explicit `--strategy instant` and `--strategy exact` additionally skip graph, vector, and reranker loading for lean one-shot large-index reads; periodic reload detects writer updates automatically
+- **Changed-file checkpoints** — Incremental updates hard-link immutable artifacts into an unpublished generation, retain a mmap-backed symbol overlay and tombstoned file-trigram updates while edits arrive, then atomically publish once per 2 s idle / 30 s maximum / 256-path batch. A durable path journal recovers interrupted work; unsupported hard-link filesystems fail before copying more than 64 MiB instead of silently duplicating a multi-GB index
 - **Incremental embedding** — `sync` skips re-embedding unchanged chunks (content hash comparison)
 - **Cosmetic-edit embedding reuse** — `sync` computes a deterministic per-file *signature fingerprint* (symbol signatures, imports, exports) from the AST; when a file's content changed but its fingerprint did not (a comment/whitespace/internal-logic edit), it refreshes BM25/symbols but reuses the cached embedding vectors instead of recomputing them. Conservative: any file without a stable fingerprint re-embeds
 - **Progress notifications** — Long-running MCP tools emit `notifications/progress` with streaming partial results so agents see live status

@@ -1,5 +1,7 @@
 mod daemon_proxy;
 
+include!(concat!(env!("OUT_DIR"), "/build_provenance.rs"));
+
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -81,15 +83,22 @@ enum Command {
 
         /// Cap the number of parallel worker threads used for indexing.
         ///
-        /// Default: `num_cpus` on Unix/macOS, `min(num_cpus, 4)` on Windows
-        /// (works around issue #107: NTFS races on `.term` file creation
-        /// when more than ~4 Rayon workers feed Tantivy concurrently).
+        /// Default: `min(num_cpus, 8)` on non-Windows platforms and
+        /// `min(num_cpus, 4)` on Windows (works around issue #107: NTFS races
+        /// on `.term` file creation when more than ~4 Rayon workers feed
+        /// Tantivy concurrently).
         ///
         /// Override only if you know what you're doing — values above the
         /// platform default reintroduce the Windows race; values below
         /// trade indexing speed for safety.
         #[arg(long, value_name = "N")]
         threads: Option<usize>,
+
+        /// Skip individual source files larger than this many bytes.
+        /// Generated/minified bundles can otherwise dominate big-repo memory.
+        /// Set to 0 for no limit.
+        #[arg(long, value_name = "BYTES", default_value_t = 2_097_152)]
+        max_file_bytes: u64,
     },
 
     /// Search the code index.
@@ -207,21 +216,24 @@ enum Command {
         action: HookAction,
     },
 
-    /// Self-heal a partially deleted `.codixing/` index.
+    /// Repair recoverable `.codixing/` metadata and expired vector crash debris.
     ///
     /// When the directory exists but `config.json` or `meta.json` are missing
     /// (e.g. an interrupted upgrade or a stray cleanup), every command fails
     /// with a confusing "I/O error: No such file or directory". `repair`
     /// rebuilds the missing metadata files in place using safe defaults and
-    /// preserves the existing tantivy/, vectors/, graph/, and symbol blobs.
-    /// Run `codixing sync` afterwards to refresh the entry counts.
+    /// preserves published tantivy/, vectors/, graph/, and symbol blobs. It
+    /// also reclaims unpublished vector generations older than 24 hours after
+    /// proving that no writer, rebuild, or vector publication is active.
+    /// Run `codixing sync` afterwards to refresh the entry counts when metadata
+    /// files were recreated.
     Repair {
         /// Project root containing the `.codixing/` directory.
         #[arg(default_value = ".")]
         path: PathBuf,
 
-        /// Skip the post-repair `sync` step. Use when you only want to write
-        /// the missing metadata files without touching the rest of the index.
+        /// Skip the post-repair `sync` step. Expired unpublished vector cleanup
+        /// still runs because it does not change searchable index contents.
         #[arg(long)]
         no_sync: bool,
     },
@@ -456,9 +468,9 @@ enum Command {
 
         /// Cap the number of parallel worker threads used during sync.
         ///
-        /// Default: `num_cpus` on Unix/macOS, `min(num_cpus, 4)` on Windows
-        /// (mirrors `init --threads`; same Windows NTFS race rationale,
-        /// see issue #107).
+        /// Default: `min(num_cpus, 8)` on non-Windows platforms and
+        /// `min(num_cpus, 4)` on Windows (mirrors `init --threads`; same
+        /// Windows NTFS race rationale, see issue #107).
         #[arg(long, value_name = "N")]
         threads: Option<usize>,
     },
@@ -898,6 +910,10 @@ enum StrategyArg {
 }
 
 impl StrategyArg {
+    fn uses_lexical_read_profile(&self) -> bool {
+        matches!(self, Self::Exact | Self::Instant)
+    }
+
     /// Resolve this argument to a concrete [`Strategy`], using auto-detection when `Auto`.
     fn resolve(self, engine: &Engine, query: &str) -> Strategy {
         match self {
@@ -917,6 +933,10 @@ impl StrategyArg {
 const WINDOWS_CLI_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 fn main() -> Result<()> {
+    if build_provenance::write_if_requested()? {
+        return Ok(());
+    }
+
     #[cfg(windows)]
     {
         let handle = std::thread::Builder::new()
@@ -963,6 +983,7 @@ async fn async_main() -> Result<()> {
             defer_embeddings,
             wait,
             threads,
+            max_file_bytes,
         } => cmd_init(
             path,
             also,
@@ -973,6 +994,7 @@ async fn async_main() -> Result<()> {
             defer_embeddings,
             wait,
             threads,
+            max_file_bytes,
         ),
         Command::Search {
             query,
@@ -1161,20 +1183,39 @@ async fn async_main() -> Result<()> {
 /// the pool to 4 workers on Windows eliminates the race in the reporter's
 /// repro (22-core box, fails at 8+ workers, succeeds at 4).
 ///
-/// On Unix/macOS, no race exists — the cap is `num_cpus` (Rayon's own
-/// default), and `--threads` only narrows it.
+/// On non-Windows platforms, cap the default at 8 workers. Large-repository
+/// indexing keeps parser, chunk, graph, and Tantivy staging state live per
+/// worker; in the same-machine 100K benchmark, 8 workers reduced peak RSS and
+/// writer contention while improving throughput. `--threads` remains an
+/// explicit override for workloads that benefit from a different trade-off.
 ///
-/// `build_global` is one-shot; if another caller has already initialized
-/// the pool (e.g. tests sharing a process), the second call returns an
-/// error which we silently ignore.
-fn configure_thread_pool(threads: Option<usize>) {
+/// `build_global` is one-shot. Default-mode callers may share a process in
+/// tests, so a pre-existing pool remains non-fatal there. An explicit
+/// `--threads` request fails closed if its pool cannot be installed; benchmark
+/// evidence must never report the requested count as effective after an error.
+fn configure_thread_pool(threads: Option<usize>) -> Result<()> {
+    configure_thread_pool_with(threads, |n| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build_global()
+            .map_err(|error| error.to_string())
+    })
+}
+
+fn configure_thread_pool_with<F>(threads: Option<usize>, build: F) -> Result<()>
+where
+    F: FnOnce(usize) -> std::result::Result<(), String>,
+{
     let n = threads.unwrap_or_else(default_thread_cap);
-    if let Err(e) = rayon::ThreadPoolBuilder::new()
-        .num_threads(n)
-        .build_global()
-    {
-        tracing::debug!("rayon global pool already initialized: {e}");
+    if let Err(error) = build(n) {
+        if threads.is_some() {
+            anyhow::bail!(
+                "failed to configure the explicitly requested {n}-worker Rayon pool: {error}"
+            );
+        }
+        tracing::debug!("Rayon global pool already initialized or unavailable: {error}");
     }
+    Ok(())
 }
 
 /// Default Rayon thread count for indexing when `--threads` is unset.
@@ -1182,11 +1223,30 @@ fn default_thread_cap() -> usize {
     let cpus = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
+    default_thread_cap_for(cpus)
+}
+
+fn default_thread_cap_for(cpus: usize) -> usize {
+    let cpus = cpus.max(1);
     if cfg!(target_os = "windows") {
         cpus.min(4)
     } else {
-        cpus
+        cpus.min(8)
     }
+}
+
+/// Open an index for a command that cannot mutate index state.
+///
+/// Read commands must never probe the Tantivy writer lock first: doing so
+/// adds the writer retry backoff to every concurrent CLI invocation and can
+/// make a healthy read take more than a second while `sync` is running.
+fn open_read_engine(root: &Path) -> Result<Engine> {
+    Engine::open_read_only(root).with_context(|| {
+        format!(
+            "no index found at {} — run `codixing init` first",
+            root.display()
+        )
+    })
 }
 
 /// Check if an error indicates write-lock contention and print a helpful message.
@@ -1260,14 +1320,16 @@ fn cmd_init(
     defer_embeddings: bool,
     wait: bool,
     threads: Option<usize>,
+    max_file_bytes: u64,
 ) -> Result<()> {
-    configure_thread_pool(threads);
+    configure_thread_pool(threads)?;
 
     let root = path
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
 
     let mut config = IndexConfig::new(&root);
+    config.max_file_bytes = max_file_bytes;
 
     // Resolve and register extra roots.
     for extra in also {
@@ -1299,6 +1361,12 @@ fn cmd_init(
         eprintln!(
             "note: --reranker and --defer-embeddings are no-ops without --embed. \
              Pass --embed to build vector embeddings."
+        );
+    }
+
+    if codixing_core::persistence::IndexStore::audit_layout(&root).is_complete() {
+        eprintln!(
+            "Rebuilding into a new generation; the current index stays searchable until validation succeeds. Temporary disk usage may approach twice the current index size."
         );
     }
 
@@ -1422,20 +1490,22 @@ fn cmd_search(
             && doc_filter.is_none()
             && source_filter.is_none()
             && matches!(strategy, StrategyArg::Auto);
-        if can_use_daemon {
-            if let Some(text) = daemon_proxy::try_search(&root, &query, limit) {
-                print!("{text}");
-                return Ok(());
-            }
+        if can_use_daemon && let Some(text) = daemon_proxy::try_search(&root, &query, limit) {
+            print!("{text}");
+            return Ok(());
         }
     }
 
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = if strategy.uses_lexical_read_profile() {
+        Engine::open_read_only_lexical(&root).with_context(|| {
+            format!(
+                "no index found at {} — run `codixing init` first",
+                root.display()
+            )
+        })?
+    } else {
+        open_read_engine(&root)?
+    };
 
     let resolved_strategy = strategy.resolve(&engine, &query);
     let mut sq = SearchQuery::new(&query)
@@ -1586,8 +1656,11 @@ fn cmd_grep(args: GrepArgs) -> Result<()> {
     // an exact total when --count / --files-with-matches has no explicit
     // limit. Proxying those modes would make the answer depend on whether a
     // warm daemon happened to be running.
-    if !args.json && args.file.is_none() && !args.count && !args.files_with_matches {
-        if let Some(text) = daemon_proxy::try_grep(
+    if !args.json
+        && args.file.is_none()
+        && !args.count
+        && !args.files_with_matches
+        && let Some(text) = daemon_proxy::try_grep(
             &root,
             &args.pattern,
             args.literal,
@@ -1599,21 +1672,16 @@ fn cmd_grep(args: GrepArgs) -> Result<()> {
             args.count,
             args.files_with_matches,
             effective_limit,
-        ) {
-            print!("{text}");
-            if !text.ends_with('\n') {
-                println!();
-            }
-            return Ok(());
+        )
+    {
+        print!("{text}");
+        if !text.ends_with('\n') {
+            println!();
         }
+        return Ok(());
     }
 
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let opts = GrepOptions {
         pattern: args.pattern.clone(),
@@ -1686,19 +1754,15 @@ fn cmd_symbols(filter: String, file: Option<String>, count: bool) -> Result<()> 
 
     // Fast path: proxy through the daemon if one is running.
     // Skip daemon proxy for --count: we need the raw symbol list to count accurately.
-    if !filter.is_empty() && !count {
-        if let Some(text) = daemon_proxy::try_symbols(&root, &filter, file.as_deref()) {
-            print!("{text}");
-            return Ok(());
-        }
+    if !filter.is_empty()
+        && !count
+        && let Some(text) = daemon_proxy::try_symbols(&root, &filter, file.as_deref())
+    {
+        print!("{text}");
+        return Ok(());
     }
 
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let symbols = engine
         .symbols(&filter, file.as_deref())
@@ -1789,19 +1853,13 @@ fn cmd_graph(
         && obsidian.is_none()
         && !communities
         && surprises.is_none()
+        && let Some(text) = daemon_proxy::try_repo_map(&root, Some(token_budget))
     {
-        if let Some(text) = daemon_proxy::try_repo_map(&root, Some(token_budget)) {
-            print!("{text}");
-            return Ok(());
-        }
+        print!("{text}");
+        return Ok(());
     }
 
-    let mut engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let mut engine = open_read_engine(&root)?;
 
     if map {
         let opts = RepoMapOptions {
@@ -1989,12 +2047,7 @@ fn cmd_graph(
 
 fn cmd_path(from: String, to: String) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     match engine.shortest_path(&from, &to) {
         Some(path) => {
@@ -2014,22 +2067,17 @@ fn cmd_callers(file: String, depth: usize) -> Result<()> {
     // Fast path: proxy through the daemon when asking for direct callers only
     // (depth <= 1). Transitive callers require multi-hop graph traversal that
     // the daemon's `file_callers` tool doesn't expose, so those fall through.
-    if depth <= 1 {
-        if let Some(text) = daemon_proxy::try_callers(&root, &file) {
-            return emit_daemon_file_list(
-                text,
-                &format!("No callers found for \"{file}\"."),
-                "caller(s) found",
-            );
-        }
+    if depth <= 1
+        && let Some(text) = daemon_proxy::try_callers(&root, &file)
+    {
+        return emit_daemon_file_list(
+            text,
+            &format!("No callers found for \"{file}\"."),
+            "caller(s) found",
+        );
     }
 
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let callers = if depth <= 1 {
         engine.callers(&file)
@@ -2086,22 +2134,17 @@ fn cmd_callees(file: String, depth: usize) -> Result<()> {
     // Fast path: proxy through the daemon when asking for direct callees only
     // (depth <= 1). Transitive callees require multi-hop traversal not exposed
     // by the `file_callees` tool, so those fall through to in-process.
-    if depth <= 1 {
-        if let Some(text) = daemon_proxy::try_callees(&root, &file) {
-            return emit_daemon_file_list(
-                text,
-                &format!("No dependencies found for \"{file}\""),
-                "dependency/dependencies found",
-            );
-        }
+    if depth <= 1
+        && let Some(text) = daemon_proxy::try_callees(&root, &file)
+    {
+        return emit_daemon_file_list(
+            text,
+            &format!("No dependencies found for \"{file}\""),
+            "dependency/dependencies found",
+        );
     }
 
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let callees = if depth <= 1 {
         engine.callees(&file)
@@ -2118,12 +2161,7 @@ fn cmd_callees(file: String, depth: usize) -> Result<()> {
 
 fn cmd_dependencies(file: String, depth: usize) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let deps = engine.dependencies(&file, depth);
     print_file_list(
@@ -2144,12 +2182,7 @@ fn cmd_cross_imports(
     use codixing_core::graph::EdgeKind;
 
     let root = std::env::current_dir().context("cannot determine current directory")?;
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let kinds: Vec<EdgeKind> = if include_calls {
         vec![EdgeKind::Resolved, EdgeKind::External, EdgeKind::Calls]
@@ -2241,12 +2274,7 @@ fn cmd_usages(
         }
     }
 
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     if complete {
         use codixing_core::ReferenceOptions;
@@ -2366,9 +2394,6 @@ fn cmd_update(path: PathBuf, dry_run: bool, file: Option<String>) -> Result<()> 
         engine
             .reindex_file(&abs)
             .map_err(|e| handle_engine_err(e, || format!("failed to reindex {rel}")))?;
-        engine.save().map_err(|e| {
-            handle_engine_err(e, || "failed to save index after --file update".into())
-        })?;
         eprintln!("reindexed {} in {:.2}s", rel, start.elapsed().as_secs_f64());
         return Ok(());
     }
@@ -2463,46 +2488,23 @@ fn cmd_update(path: PathBuf, dry_run: bool, file: Option<String>) -> Result<()> 
     })?;
 
     let start = Instant::now();
-    let mut updated = 0usize;
-    let mut removed = 0usize;
-
-    for rel_path in &to_reindex {
-        let abs = root.join(rel_path);
-        match engine.reindex_file(&abs) {
-            Ok(()) => updated += 1,
-            Err(e) => {
-                let anyhow_err = anyhow::anyhow!("{e}");
-                if check_write_lock_error(&anyhow_err) {
-                    std::process::exit(1);
-                }
-                eprintln!("  warning: skipped {} — {e}", rel_path.display());
-            }
-        }
-    }
-
-    for rel_path in &to_remove {
-        match engine.remove_file(rel_path) {
-            Ok(()) => removed += 1,
-            Err(e) => {
-                let anyhow_err = anyhow::anyhow!("{e}");
-                if check_write_lock_error(&anyhow_err) {
-                    std::process::exit(1);
-                }
-                eprintln!("  warning: remove failed {} — {e}", rel_path.display());
-            }
-        }
-    }
-
-    match engine.save() {
-        Ok(()) => {}
-        Err(e) => {
-            let anyhow_err = anyhow::anyhow!("{e}");
-            if check_write_lock_error(&anyhow_err) {
-                std::process::exit(1);
-            }
-            return Err(anyhow_err).context("failed to save index after update");
-        }
-    }
+    use codixing_core::watcher::{ChangeKind, FileChange};
+    let mut changes = Vec::with_capacity(to_reindex.len() + to_remove.len());
+    changes.extend(to_reindex.iter().map(|path| FileChange {
+        path: root.join(path),
+        kind: ChangeKind::Modified,
+    }));
+    changes.extend(to_remove.iter().map(|path| FileChange {
+        path: root.join(path),
+        kind: ChangeKind::Removed,
+    }));
+    engine.apply_changes(&changes).map_err(|error| {
+        handle_engine_err(error, || {
+            "failed to update changed files as one batch".into()
+        })
+    })?;
+    let updated = to_reindex.len();
+    let removed = to_remove.len();
 
     eprintln!(
         "\nUpdated {updated} file(s), removed {removed} file(s) in {:.2}s",
@@ -2518,7 +2520,7 @@ fn cmd_sync(
     rebuild_graph: bool,
     threads: Option<usize>,
 ) -> Result<()> {
-    configure_thread_pool(threads);
+    configure_thread_pool(threads)?;
 
     let root = path
         .canonicalize()
@@ -2722,8 +2724,7 @@ fn cmd_bench_embed(path: PathBuf, force: bool, json: bool) -> Result<()> {
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
 
-    let engine =
-        Engine::open(&root).with_context(|| "no index found — run `codixing init` first")?;
+    let engine = open_read_engine(&root)?;
 
     let pending = if force {
         // Re-embed all chunks, whether or not they already have vectors.
@@ -3081,12 +3082,7 @@ fn cmd_audit(
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
 
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let options = FreshnessOptions {
         threshold_days,
@@ -3184,19 +3180,12 @@ fn cmd_impact(file: String, json: bool) -> Result<()> {
     // Fast path: proxy through the daemon (plain output only — JSON mode
     // needs the structured ChangeImpact type, which the MCP text body
     // loses).
-    if !json {
-        if let Some(text) = daemon_proxy::try_impact(&root, &file) {
-            print!("{text}");
-            return Ok(());
-        }
+    if !json && let Some(text) = daemon_proxy::try_impact(&root, &file) {
+        print!("{text}");
+        return Ok(());
     }
 
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let impact = engine.change_impact(&file);
 
@@ -3241,12 +3230,7 @@ fn cmd_impact(file: String, json: bool) -> Result<()> {
 
 fn cmd_api(file: String, json: bool) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let symbols = engine.api_surface(&file);
 
@@ -3282,12 +3266,7 @@ fn cmd_api(file: String, json: bool) -> Result<()> {
 
 fn cmd_types(symbol: String, json: bool) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let symbols = engine
         .symbols(&symbol, None)
@@ -3336,12 +3315,7 @@ fn cmd_types(symbol: String, json: bool) -> Result<()> {
 
 fn cmd_examples(symbol: String, limit: usize, json: bool) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let examples = engine.find_usage_examples(&symbol, limit);
 
@@ -3387,12 +3361,7 @@ fn cmd_context(
     json: bool,
 ) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let ctx =
         engine.assemble_context_for_location_with_mode(&file, line, token_budget, budget_mode);
@@ -3491,12 +3460,7 @@ fn cmd_agent_context_pack(
     risk_level: Option<String>,
 ) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
-    let engine = Engine::open(&root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })?;
+    let engine = open_read_engine(&root)?;
 
     let pack = engine.agent_context_pack(
         &task,
@@ -3588,6 +3552,13 @@ fn cmd_doctor(path: PathBuf, json: bool) -> Result<()> {
         "index": {
             "status": status,
             "dir_exists": audit.dir_exists,
+            "layout": {
+                "kind": audit.layout_kind,
+                "active_generation": audit.active_generation,
+                "generation_count": audit.generation_count,
+                "abandoned_generations": paths_to_strings(&audit.abandoned_generations),
+                "error": audit.layout_error,
+            },
             "essential_missing": paths_to_strings(&audit.essentials_missing),
             "essential_present": paths_to_strings(&audit.essentials_present),
             "optional_artifacts": paths_to_strings(&audit.optional_present),
@@ -3613,6 +3584,14 @@ fn cmd_doctor(path: PathBuf, json: bool) -> Result<()> {
     println!("Binary: codixing {}", env!("CARGO_PKG_VERSION"));
     println!("Root: {}", report["root"].as_str().unwrap_or(""));
     println!("Index: {status}");
+    let layout_kind = report["index"]["layout"]["kind"]
+        .as_str()
+        .unwrap_or("unknown");
+    if let Some(active) = report["index"]["layout"]["active_generation"].as_str() {
+        println!("Index layout: {layout_kind} ({active})");
+    } else {
+        println!("Index layout: {layout_kind}");
+    }
     println!("Index disk: {}", format_bytes(disk_bytes));
     println!("Git staleness: {stale_status}");
     if let Some(head) = report["index"]["staleness"]["git_head"].as_str() {
@@ -3644,15 +3623,15 @@ fn cmd_doctor(path: PathBuf, json: bool) -> Result<()> {
         }
     );
 
-    if let Some(meta) = report["index"]["meta"].as_object() {
-        if meta.get("error").is_none() {
-            println!(
-                "Indexed files: {} | chunks: {} | symbols: {}",
-                meta["file_count"].as_u64().unwrap_or(0),
-                meta["chunk_count"].as_u64().unwrap_or(0),
-                meta["symbol_count"].as_u64().unwrap_or(0)
-            );
-        }
+    if let Some(meta) = report["index"]["meta"].as_object()
+        && meta.get("error").is_none()
+    {
+        println!(
+            "Indexed files: {} | chunks: {} | symbols: {}",
+            meta["file_count"].as_u64().unwrap_or(0),
+            meta["chunk_count"].as_u64().unwrap_or(0),
+            meta["symbol_count"].as_u64().unwrap_or(0)
+        );
     }
 
     if !audit.essentials_missing.is_empty() {
@@ -3785,29 +3764,46 @@ fn cmd_repair(path: PathBuf, no_sync: bool) -> Result<()> {
         println!("Found existing `.codixing/` directory (meta.json missing or unreadable).");
     }
 
-    if audit.essentials_missing.is_empty() {
-        println!("All essential metadata files are present — nothing to repair.");
+    let metadata_complete = audit.essentials_missing.is_empty();
+    if metadata_complete {
+        println!("All essential metadata files are present.");
         for p in &audit.essentials_present {
             println!("  ok: {}", p.display());
         }
-        return Ok(());
-    }
-
-    println!("Missing essential files:");
-    for p in &audit.essentials_missing {
-        println!("  missing: {}", p.display());
-    }
-    if !audit.optional_present.is_empty() {
-        println!("Preserved artifacts:");
-        for p in &audit.optional_present {
-            println!("  keep: {}", p.display());
+    } else {
+        println!("Missing essential files:");
+        for p in &audit.essentials_missing {
+            println!("  missing: {}", p.display());
+        }
+        if !audit.optional_present.is_empty() {
+            println!("Preserved artifacts:");
+            for p in &audit.optional_present {
+                println!("  keep: {}", p.display());
+            }
         }
     }
 
     let report = IndexStore::repair(&root)?;
-    println!("\nRepaired:");
-    for p in &report.created {
-        println!("  created: {}", p.display());
+    if !report.created.is_empty() {
+        println!("\nRepaired metadata:");
+        for p in &report.created {
+            println!("  created: {}", p.display());
+        }
+    }
+    if !report.removed_vector_artifacts.is_empty() {
+        println!("\nReclaimed expired unpublished vector artifacts:");
+        for p in &report.removed_vector_artifacts {
+            println!("  removed: {}", p.display());
+        }
+    }
+
+    if report.created.is_empty() {
+        if report.removed_vector_artifacts.is_empty() {
+            println!("No recoverable metadata or expired vector crash debris found.");
+        } else {
+            println!("Repair complete. Published index contents were unchanged.");
+        }
+        return Ok(());
     }
 
     if no_sync {
@@ -3940,6 +3936,16 @@ mod tests {
     }
 
     #[test]
+    fn init_max_file_bytes_flag_parses() {
+        let cli = Cli::try_parse_from(["codixing", "init", ".", "--max-file-bytes", "0"])
+            .expect("clap parse");
+        match cli.command {
+            Command::Init { max_file_bytes, .. } => assert_eq!(max_file_bytes, 0),
+            _ => panic!("expected Init variant"),
+        }
+    }
+
+    #[test]
     fn init_threads_flag_optional() {
         let cli = Cli::try_parse_from(["codixing", "init", "."]).expect("clap parse");
         match cli.command {
@@ -3959,11 +3965,55 @@ mod tests {
     }
 
     #[test]
-    fn default_thread_cap_caps_on_windows() {
+    fn default_thread_cap_is_bounded() {
         let n = default_thread_cap();
         assert!(n >= 1, "thread cap must be ≥ 1, got {n}");
         if cfg!(target_os = "windows") {
             assert!(n <= 4, "Windows cap must be ≤ 4 (issue #107), got {n}");
+            assert_eq!(default_thread_cap_for(usize::MAX), 4);
+        } else {
+            assert!(n <= 8, "non-Windows cap must be ≤ 8, got {n}");
+            assert_eq!(default_thread_cap_for(usize::MAX), 8);
+        }
+        assert_eq!(default_thread_cap_for(0), 1);
+        assert_eq!(default_thread_cap_for(1), 1);
+    }
+
+    #[test]
+    fn explicit_thread_pool_setup_failure_is_fatal() {
+        let error = configure_thread_pool_with(Some(8), |workers| {
+            assert_eq!(workers, 8);
+            Err("simulated pool setup failure".to_string())
+        })
+        .expect_err("an explicit worker request must fail closed");
+
+        let message = error.to_string();
+        assert!(message.contains("explicitly requested 8-worker"));
+        assert!(message.contains("simulated pool setup failure"));
+    }
+
+    #[test]
+    fn default_thread_pool_setup_failure_remains_non_fatal() {
+        configure_thread_pool_with(None, |_workers| {
+            Err("simulated shared-process pool".to_string())
+        })
+        .expect("tests may share an already initialized global pool");
+    }
+
+    #[test]
+    fn only_explicit_lexical_strategies_use_the_lean_read_profile() {
+        assert!(StrategyArg::Exact.uses_lexical_read_profile());
+        assert!(StrategyArg::Instant.uses_lexical_read_profile());
+
+        for strategy in [
+            StrategyArg::Auto,
+            StrategyArg::Fast,
+            StrategyArg::Thorough,
+            StrategyArg::Explore,
+            StrategyArg::Deep,
+            StrategyArg::Semantic,
+        ] {
+            assert!(!strategy.uses_lexical_read_profile(), "{strategy:?}");
         }
     }
 }

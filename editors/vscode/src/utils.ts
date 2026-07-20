@@ -11,6 +11,93 @@ export function getWorkspaceRoot(): string | null {
     return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null;
 }
 
+export type IndexState = 'missing' | 'incomplete' | 'ready';
+
+function isRealDirectory(target: string): boolean {
+    try {
+        const stat = fs.lstatSync(target);
+        return stat.isDirectory() && !stat.isSymbolicLink();
+    } catch {
+        return false;
+    }
+}
+
+function isFile(target: string): boolean {
+    try {
+        return fs.statSync(target).isFile();
+    } catch {
+        return false;
+    }
+}
+
+function isRealFile(target: string): boolean {
+    try {
+        const stat = fs.lstatSync(target);
+        return stat.isFile() && !stat.isSymbolicLink();
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Classify the repository's index without starting a long-lived process.
+ *
+ * Both compatible legacy indexes and atomically published generations need
+ * real config.json and meta.json files plus a real Tantivy directory with its
+ * committed meta.json. Other sidecars are intentionally outside this cheap
+ * structural check. A control directory by itself, including one containing
+ * only an unpublished generation, is incomplete rather than ready.
+ */
+export function getIndexState(root: string): IndexState {
+    const controlDir = path.join(root, '.codixing');
+    if (!fs.existsSync(controlDir)) {
+        return 'missing';
+    }
+    if (!isRealDirectory(controlDir)) {
+        return 'incomplete';
+    }
+
+    let indexDir = controlDir;
+    const manifestPath = path.join(controlDir, 'active-generation.json');
+    if (fs.existsSync(manifestPath)) {
+        if (!isFile(manifestPath)) {
+            return 'incomplete';
+        }
+        try {
+            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as {
+                layout_version?: unknown;
+                active?: unknown;
+            };
+            if (
+                manifest.layout_version !== 1 ||
+                typeof manifest.active !== 'string' ||
+                manifest.active.length > 128 ||
+                !/^gen-[A-Za-z0-9-]+$/.test(manifest.active)
+            ) {
+                return 'incomplete';
+            }
+            indexDir = path.join(
+                controlDir,
+                'generations',
+                manifest.active,
+            );
+            if (!isRealDirectory(indexDir)) {
+                return 'incomplete';
+            }
+        } catch {
+            return 'incomplete';
+        }
+    }
+
+    const tantivyDir = path.join(indexDir, 'tantivy');
+    return isRealFile(path.join(indexDir, 'config.json')) &&
+        isRealFile(path.join(indexDir, 'meta.json')) &&
+        isRealDirectory(tantivyDir) &&
+        isRealFile(path.join(tantivyDir, 'meta.json'))
+        ? 'ready'
+        : 'incomplete';
+}
+
 /**
  * Find a Codixing binary by checking, in order:
  *   1. The relevant VS Code setting (binaryPath / mcpBinaryPath / lspBinaryPath)

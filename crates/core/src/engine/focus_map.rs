@@ -159,19 +159,19 @@ fn classify_relationship(
 ) -> String {
     // Check if any seed directly imports this file.
     for &seed in seeds {
-        if let Some(deps) = direct_deps.get(seed) {
-            if deps.iter().any(|d| d == file) {
-                return format!("direct dependency of {seed}");
-            }
+        if let Some(deps) = direct_deps.get(seed)
+            && deps.iter().any(|d| d == file)
+        {
+            return format!("direct dependency of {seed}");
         }
     }
 
     // Check if this file directly imports any seed.
     for &seed in seeds {
-        if let Some(callers) = direct_callers.get(seed) {
-            if callers.iter().any(|c| c == file) {
-                return format!("directly imports {seed}");
-            }
+        if let Some(callers) = direct_callers.get(seed)
+            && callers.iter().any(|c| c == file)
+        {
+            return format!("directly imports {seed}");
         }
     }
 

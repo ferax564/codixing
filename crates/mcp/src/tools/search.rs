@@ -108,14 +108,14 @@ fn build_search_query(parsed: &SearchArgs, args: &Value) -> SearchQuery {
     }
 
     // Scope to imported external context when requested.
-    if let Some(source) = args.get("source").and_then(|v| v.as_str()) {
-        if !source.is_empty() {
-            let filter = match source.to_ascii_lowercase().as_str() {
-                "external" | "all" | "any" => codixing_core::SourceFilter::ExternalOnly,
-                other => codixing_core::SourceFilter::Named(other.to_string()),
-            };
-            query = query.with_source_filter(filter);
-        }
+    if let Some(source) = args.get("source").and_then(|v| v.as_str())
+        && !source.is_empty()
+    {
+        let filter = match source.to_ascii_lowercase().as_str() {
+            "external" | "all" | "any" => codixing_core::SourceFilter::ExternalOnly,
+            other => codixing_core::SourceFilter::Named(other.to_string()),
+        };
+        query = query.with_source_filter(filter);
     }
 
     // Extract optional multi-query reformulations for RRF fusion.
@@ -357,10 +357,8 @@ pub(crate) fn call_code_search(
         parsed.effective_strategy,
         Strategy::Deep | Strategy::Thorough | Strategy::Explore
     );
-    if report_progress {
-        if let Some(p) = progress {
-            p.report(0, "Searching...");
-        }
+    if report_progress && let Some(p) = progress {
+        p.report(0, "Searching...");
     }
 
     let search_result = run_search(engine, query, parsed.fetch_limit, report_progress, progress);
@@ -374,10 +372,8 @@ pub(crate) fn call_code_search(
             ("No results found.".to_string(), false)
         }
         Ok(mut results) => {
-            if report_progress {
-                if let Some(p) = progress {
-                    p.report(80, "Post-processing results...");
-                }
+            if report_progress && let Some(p) = progress {
+                p.report(80, "Post-processing results...");
             }
 
             let agent_id = engine.session().session_id().to_string();
@@ -405,10 +401,8 @@ pub(crate) fn call_code_search(
                 results = apply_kind_filter(engine, results, kind, &parsed.query_str, parsed.limit);
             }
 
-            if report_progress {
-                if let Some(p) = progress {
-                    p.report(90, "Formatting results...");
-                }
+            if report_progress && let Some(p) = progress {
+                p.report(90, "Formatting results...");
             }
 
             let out = format_search_output(
@@ -462,10 +456,10 @@ pub(crate) fn call_find_symbol(engine: &Engine, args: &Value) -> (String, bool) 
                     "  {:?} `{}` \u{2014} {} (lines {}-{})\n",
                     sym.kind, sym.name, sym.file_path, sym.line_start, sym.line_end
                 ));
-                if let Some(sig) = &sym.signature {
-                    if !sig.is_empty() {
-                        out.push_str(&format!("    {sig}\n"));
-                    }
+                if let Some(sig) = &sym.signature
+                    && !sig.is_empty()
+                {
+                    out.push_str(&format!("    {sig}\n"));
                 }
             }
             (out, false)
@@ -658,10 +652,10 @@ pub(crate) fn call_stitch_context(engine: &Engine, args: &Value) -> (String, boo
         for cap in call_pattern.captures_iter(&r.content) {
             if let Some(name) = cap.get(1) {
                 let n = name.as_str().to_string();
-                if let std::collections::hash_map::Entry::Vacant(e) = callee_sources.entry(n) {
-                    if let Ok(Some(src)) = engine.read_symbol_source(e.key(), None) {
-                        e.insert(src);
-                    }
+                if let std::collections::hash_map::Entry::Vacant(e) = callee_sources.entry(n)
+                    && let Ok(Some(src)) = engine.read_symbol_source(e.key(), None)
+                {
+                    e.insert(src);
                 }
             }
         }
