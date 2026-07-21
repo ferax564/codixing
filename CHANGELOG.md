@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.47.1] - 2026-07-21
+
+### Fixed
+
+- **Natural-language `codixing ask` punctuation** — task descriptions that use
+  query-parser syntax such as `release:` retry with punctuation-normalized
+  terms instead of failing with an unknown-field error.
+- **Protected GitHub Pages release deployment** — the release workflow now
+  dispatches Pages from allowed `main` while the Pages job checks out and
+  verifies the exact immutable release tag.
+
+### Changed
+
+- Updated the website and CLI reference for `ask`, definition-first `goto`,
+  compact/full impact, hard-budget repository maps, `doctor --fix-path`,
+  `symbols --defs-only`, and `bench-tokens`.
+- Updated the locked Rust dependency set to the fully tested versions from
+  Dependabot PR #140.
+
 ## [0.47.0] - 2026-07-20
 
 ### Added

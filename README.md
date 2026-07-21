@@ -218,7 +218,7 @@ codixing api src/engine.rs       # Public API surface
 codixing types Engine            # Type relationships
 codixing examples add_chunk      # Usage examples from tests + callers
 codixing context src/engine.rs   # Cross-file context assembly
-codixing ask "task"              # Recommended agent entrypoint (context pack)
+codixing ask "task: inspect auth" # Recommended agent entrypoint; punctuation-safe
 codixing agent-context-pack "task" # Stable JSON context pack for agents
 codixing symbols Widget --defs-only  # Definitions only (no Import rows)
 codixing search IndexStore --strategy goto  # Definition-first symbol jump

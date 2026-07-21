@@ -439,7 +439,7 @@ jobs:
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
           manifest=$(mktemp)
           ready=false
-          for attempt in {1..12}; do
+          for _ in {1..12}; do
             if curl --fail --silent --show-error --location \
               "$base/SHA256SUMS" --output "$manifest"; then
               ready=true
@@ -514,7 +514,7 @@ jobs:
           fi
 
           PUBLISHED_VERSION=""
-          for attempt in {1..12}; do
+          for _ in {1..12}; do
             PUBLISHED_VERSION=$(npm view "$PACKAGE_NAME@$EXPECTED_VERSION" version 2>/dev/null || true)
             if [ "$PUBLISHED_VERSION" = "$EXPECTED_VERSION" ]; then
               break
@@ -536,11 +536,10 @@ jobs:
       actions: write
       contents: read
     steps:
-      - name: Dispatch Pages at the released tag
+      - name: Dispatch Pages from protected main at the released tag
         id: dispatch
         shell: bash
         env:
-          COMMIT: ${{ needs.release.outputs.commit }}
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.release.outputs.tag }}
         run: |
@@ -548,22 +547,24 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --workflow pages.yml \
             --event workflow_dispatch \
-            --commit "$COMMIT" \
-            --limit 1 \
-            --json databaseId \
-            --jq '.[0].databaseId // empty')
-          gh workflow run --repo "$GITHUB_REPOSITORY" pages.yml --ref "$TAG" -f "tag=$TAG"
+            --branch main \
+            --limit 20 \
+            --json databaseId,displayTitle \
+            --jq ".[] | select(.displayTitle == \"Deploy website $TAG\") | .databaseId" \
+            | head -n 1)
+          gh workflow run --repo "$GITHUB_REPOSITORY" pages.yml --ref main -f "tag=$TAG"
 
           RUN_ID=""
-          for attempt in {1..12}; do
+          for _ in {1..12}; do
             RUN_ID=$(gh run list \
               --repo "$GITHUB_REPOSITORY" \
               --workflow pages.yml \
               --event workflow_dispatch \
-              --commit "$COMMIT" \
-              --limit 1 \
-              --json databaseId \
-              --jq '.[0].databaseId // empty')
+              --branch main \
+              --limit 20 \
+              --json databaseId,displayTitle \
+              --jq ".[] | select(.displayTitle == \"Deploy website $TAG\") | .databaseId" \
+              | head -n 1)
             if [ -n "$RUN_ID" ] && [ "$RUN_ID" != "$PREVIOUS_RUN" ]; then
               break
             fi
