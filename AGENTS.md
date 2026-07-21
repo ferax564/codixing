@@ -234,6 +234,12 @@ The auto-tag workflow waits for the entire CI workflow to conclude successfully,
 
 **CI → release coupling invariant:** `release.yml` resolves a successful `ci.yml` run for the exact tagged commit and downloads `binaries-linux-x86_64`, `binaries-macos-aarch64`, `binaries-windows-x86_64`, and `vsix-package` with `gh run download`. If the CI filename, artifact names, or release-build/VSIX publication behavior changes, update `release.yml` in the same change.
 
+**Release → Pages invariant:** `release.yml` dispatches `pages.yml` from
+protected `main` and passes the immutable release tag as an input. `pages.yml`
+checks out that tag and verifies the checkout commit before deployment. Do not
+dispatch the workflow at the tag ref unless the `github-pages` environment is
+also configured to allow release tags.
+
 ### CI checklist before merging
 
 Before merging any PR:

@@ -1,4 +1,5 @@
 name: Deploy website
+run-name: Deploy website${{ inputs.tag && format(' {0}', inputs.tag) || '' }}
 
 on:
   push:
@@ -39,6 +40,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # The workflow itself runs from protected main so the github-pages
+          # environment accepts it; strict release dispatches still build the
+          # exact immutable tag supplied by release.yml.
+          ref: ${{ inputs.tag || github.sha }}
 
       - name: Resolve and verify published installer assets
         id: release_assets
@@ -135,15 +140,15 @@ jobs:
 
       - name: Setup Pages
         if: steps.release_assets.outputs.ready == 'true'
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Upload artifact
         if: steps.release_assets.outputs.ready == 'true'
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: docs/
 
       - name: Deploy to GitHub Pages
         if: steps.release_assets.outputs.ready == 'true'
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

@@ -9,7 +9,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::engine::examples::UsageExample;
-use crate::error::Result;
+use crate::error::{CodixingError, Result};
 use crate::retriever::{DocFilter, SearchQuery, SearchResult, Strategy};
 
 use super::Engine;
@@ -415,6 +415,38 @@ fn enforce_agent_pack_budget(pack: &mut AgentContextPack) {
 }
 
 impl Engine {
+    fn search_agent_task(
+        &self,
+        task: &str,
+        limit: usize,
+        strategy: Strategy,
+        doc_filter: DocFilter,
+    ) -> Result<Vec<SearchResult>> {
+        let query = |text: &str| {
+            SearchQuery::new(text)
+                .with_limit(limit)
+                .with_strategy(strategy)
+                .with_doc_filter(doc_filter)
+        };
+
+        match self.search(query(task)) {
+            Err(CodixingError::QueryParse(_)) => {
+                let normalized = task
+                    .chars()
+                    .map(|character| {
+                        if character.is_alphanumeric() || character == '_' {
+                            character
+                        } else {
+                            ' '
+                        }
+                    })
+                    .collect::<String>();
+                self.search(query(&normalized))
+            }
+            result => result,
+        }
+    }
+
     /// Build a stable JSON context pack for AI agents from a task description.
     ///
     /// The returned pack contains ranked file orientation, evidence handles,
@@ -437,12 +469,7 @@ impl Engine {
             _ => self.detect_strategy(task),
         };
 
-        let results = self.search(
-            SearchQuery::new(task)
-                .with_limit(limit)
-                .with_strategy(strategy)
-                .with_doc_filter(DocFilter::CodeOnly),
-        )?;
+        let results = self.search_agent_task(task, limit, strategy, DocFilter::CodeOnly)?;
 
         let mut selected = Vec::new();
         let mut seen_locations = HashSet::new();
@@ -589,12 +616,7 @@ impl Engine {
         }
 
         let docs = self
-            .search(
-                SearchQuery::new(task)
-                    .with_limit(4)
-                    .with_strategy(Strategy::Instant)
-                    .with_doc_filter(DocFilter::DocsOnly),
-            )
+            .search_agent_task(task, 4, Strategy::Instant, DocFilter::DocsOnly)
             .unwrap_or_default();
         let docs_and_conventions = docs
             .iter()
@@ -1367,6 +1389,25 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .starts_with('E')
+        );
+
+        let punctuation_pack = engine
+            .agent_context_pack(
+                "greeting: include name",
+                AgentContextMode::Locate,
+                3000,
+                &[],
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(punctuation_pack.task_summary, "greeting: include name");
+        assert!(
+            punctuation_pack
+                .must_read
+                .iter()
+                .any(|entry| entry.path == "src/greeting.rs"),
+            "punctuation-normalized task should still retrieve code: {punctuation_pack:#?}"
         );
     }
 }

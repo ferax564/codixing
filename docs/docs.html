@@ -454,7 +454,7 @@
         <a href="#cli-graph">graph</a>
         <a href="#cli-callers">callers / callees</a>
         <a href="#cli-usages">usages</a>
-        <a href="#cli-agent-context-pack">agent-context-pack</a>
+        <a href="#cli-agent-context-pack">ask / context pack</a>
         <a href="#cli-sync">sync / git-sync</a>
         <a href="#cli-analysis">analysis workflow</a>
       </div>
@@ -769,19 +769,20 @@ handler.rs → db/user.rs → models.rs</span></code></pre>
 ► tests/retrieval_test.rs:22   [call]</span></code></pre>
       </section>
 
-      <!-- CLI: agent-context-pack -->
+      <!-- CLI: ask / agent-context-pack -->
       <section class="doc-section" id="cli-agent-context-pack">
-        <h2>CLI — <code>agent-context-pack</code></h2>
-        <p>Compile a stable JSON context pack for an AI agent task. The pack includes repo orientation, must-read evidence handles, related symbols, likely tests, docs, risks, and recommended next tools.</p>
+        <h2>CLI — <code>ask</code> / <code>agent-context-pack</code></h2>
+        <p><code>ask</code> is the recommended agent entry point. It compiles a stable JSON context pack with repo orientation, must-read evidence handles, related symbols, likely tests, docs, risks, and recommended next tools. Task text is treated as natural language, including punctuation such as colons.</p>
 
         <div class="pre-label">usage</div>
-        <pre><code>codixing agent-context-pack &lt;TASK&gt; [--mode edit] [--changed-file &lt;PATH&gt;]</code></pre>
+        <pre><code>codixing ask &lt;TASK&gt; [--mode edit] [--changed-file &lt;PATH&gt;]
+codixing agent-context-pack &lt;TASK&gt; [--mode edit] [--changed-file &lt;PATH&gt;]</code></pre>
 
         <table class="doc-table">
           <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
           <tbody>
-            <tr><td>--mode &lt;M&gt;</td><td>understand</td><td>One of: <code>locate</code>, <code>understand</code>, <code>edit</code>, <code>review</code>, <code>test</code>, <code>migrate</code>, <code>incident</code></td></tr>
-            <tr><td>--token-budget &lt;N&gt;</td><td>6000</td><td>Approximate maximum tokens for the JSON payload</td></tr>
+            <tr><td>--mode &lt;M&gt;</td><td>auto / understand</td><td><code>ask</code> selects <code>locate</code> for short tasks and <code>understand</code> otherwise. Explicit modes: <code>locate</code>, <code>understand</code>, <code>edit</code>, <code>review</code>, <code>test</code>, <code>migrate</code>, <code>incident</code></td></tr>
+            <tr><td>--token-budget &lt;N&gt;</td><td>4000 / 6000</td><td>Approximate maximum tokens for <code>ask</code> / <code>agent-context-pack</code></td></tr>
             <tr><td>--changed-file &lt;PATH&gt;</td><td>—</td><td>Repeatable task-local file anchor pinned into the pack</td></tr>
             <tr><td>--branch &lt;NAME&gt;</td><td>—</td><td>Optional branch/worktree label copied into the schema</td></tr>
             <tr><td>--risk-level &lt;LEVEL&gt;</td><td>—</td><td>Optional caller risk label such as <code>low</code>, <code>medium</code>, or <code>high</code></td></tr>
@@ -789,10 +790,10 @@ handler.rs → db/user.rs → models.rs</span></code></pre>
         </table>
 
         <div class="pre-label">example</div>
-        <pre><code>codixing agent-context-pack "add branch-aware artifact cache" \
+        <pre><code>codixing ask "release: verify assets and website" \
   --mode edit \
   --changed-file crates/core/src/catalog.rs \
-  --token-budget 6000</code></pre>
+  --token-budget 4000</code></pre>
       </section>
 
       <!-- CLI: sync -->
@@ -823,15 +824,21 @@ Sync complete in 0.12s</span></code></pre>
       <!-- Analysis workflow -->
       <section class="doc-section" id="cli-analysis">
         <h2>CLI — repository analysis workflow</h2>
-        <p>Compose the supported commands below to index a repository, inspect its architecture, generate a self-contained graph dashboard, and check the blast radius of a file.</p>
+        <p>Compose the supported commands below to orient an agent, jump to definitions, inspect architecture within a hard token budget, and choose compact or complete blast-radius output.</p>
 
         <div class="pre-label">usage</div>
         <pre><code>git clone --depth=1 https://github.com/owner/repo.git
 cd repo
 codixing init .
-codixing graph . --map --token-budget 8000
+codixing ask "change the release: keep every channel green" --mode edit
+codixing search IndexStore --strategy goto
+codixing symbols IndexStore --defs-only
+codixing graph . --map --token-budget 1500
 codixing graph . --html graph.html
-codixing impact --json src/path/to/file.rs
+codixing impact src/path/to/file.rs
+codixing impact src/path/to/file.rs --full
+codixing doctor --fix-path
+codixing bench-tokens .
 
 <span class="tok-out"># Optional local graph/API server
 </span>codixing serve . --port 8080</code></pre>
@@ -878,6 +885,11 @@ codixing impact --json src/path/to/file.rs
             <div class="s-name">exact</div>
             <div class="s-desc">Trigram substring lookup with deterministic bounded ranking.</div>
             <div class="s-meta">best for exact identifiers and literals</div>
+          </div>
+          <div class="strategy-card">
+            <div class="s-name">goto</div>
+            <div class="s-desc">Symbol-table-first lookup that ranks primary definitions ahead of imports, tests, and usages.</div>
+            <div class="s-meta">best for structs, classes, functions, and traits</div>
           </div>
           <div class="strategy-card">
             <div class="s-name">semantic</div>

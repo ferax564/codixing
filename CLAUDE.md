@@ -29,6 +29,12 @@ codixing api src/engine/mod.rs      # public API surface
 codixing types Engine               # type relationships
 codixing examples add_chunk         # usage examples from tests + callers
 codixing context src/engine/mod.rs  # cross-file context assembly
+codixing agent-context-pack "task"  # stable JSON context pack for agents
+codixing ask "task"                 # recommended agent entrypoint (context pack)
+codixing symbols Widget --defs-only # definitions only (no Import rows)
+codixing impact path --full         # full blast radius (default is compact)
+codixing doctor --fix-path          # PATH binary version gate
+codixing bench-tokens               # token-savings harness vs grep+read
 ```
 
 The MCP server is also available when connected to an editor, but the CLI is preferred — it's simpler, works for subagents, and dogfoods the search quality directly.
@@ -50,7 +56,10 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 - **Type relationships for a symbol** → `codixing types <name>`
 - **Usage examples for a symbol** → `codixing examples <name>` (tests + callers + doc blocks)
 - **Cross-file context for understanding** → `codixing context <file> --line N`
-- **Architecture overview** → `codixing graph --map`
+- **Task-local agent context pack** → `codixing ask "<task>"` or `agent-context-pack "<task>" --mode edit`
+- **Finding a definition** → `codixing search Name --strategy goto` or `symbols Name --defs-only`
+- **Architecture overview** → `codixing graph --map --token-budget 1500`
+- **Token-savings proof** → `codixing bench-tokens`
 - **Test coverage discovery** → `codixing search "test <name>"`
 - **Index freshness / stale files** → `codixing audit`
 - **Incremental re-index after changes** → `codixing sync`
@@ -224,6 +233,12 @@ The CI workflow (`.github/workflows/ci.yml`) has the following jobs:
 The auto-tag workflow waits for the entire CI workflow to conclude successfully, so every blocking job above gates release tagging even though `release-build` itself directly depends only on `test` and `npm-installer`.
 
 **CI → release coupling invariant:** `release.yml` resolves a successful `ci.yml` run for the exact tagged commit and downloads `binaries-linux-x86_64`, `binaries-macos-aarch64`, `binaries-windows-x86_64`, and `vsix-package` with `gh run download`. If the CI filename, artifact names, or release-build/VSIX publication behavior changes, update `release.yml` in the same change.
+
+**Release → Pages invariant:** `release.yml` dispatches `pages.yml` from
+protected `main` and passes the immutable release tag as an input. `pages.yml`
+checks out that tag and verifies the checkout commit before deployment. Do not
+dispatch the workflow at the tag ref unless the `github-pages` environment is
+also configured to allow release tags.
 
 ### CI checklist before merging
 
