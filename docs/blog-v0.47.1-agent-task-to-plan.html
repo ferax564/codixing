@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>From a task sentence to an edit plan with codixing ask</title>
+  <meta name="description" content="A practical walkthrough of Codixing's ask workflow: turn a natural-language task into ranked evidence, likely tests, risks, and a bounded plan for the next repository tools." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <style>
+    :root {
+      --bg: #000000;
+      --bg-1: #0a0a0f;
+      --bg-2: #0d1117;
+      --border: rgba(48, 54, 61, 0.8);
+      --cyan: #00d4aa;
+      --purple: #8b5cf6;
+      --text: #f0f6fc;
+      --text-muted: #8b949e;
+      --text-dim: #484f58;
+      --yellow: #e3b341;
+      --radius: 12px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: "Inter", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.8;
+    }
+    ::selection { background: rgba(0, 212, 170, 0.2); }
+
+    nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-inner {
+      max-width: 800px; margin: 0 auto; padding: 16px 24px;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .nav-inner a { color: var(--text-muted); text-decoration: none; font-size: 0.9rem; }
+    .nav-inner a:hover { color: var(--cyan); }
+
+    article { max-width: 800px; margin: 0 auto; padding: 120px 24px 80px; }
+    .blog-meta { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 16px; }
+    article h1 {
+      font-size: clamp(2rem, 4vw, 2.8rem);
+      font-weight: 700; letter-spacing: -0.03em; line-height: 1.2;
+      margin-bottom: 24px;
+    }
+    .subtitle {
+      font-size: 1.15rem; color: var(--text-muted); line-height: 1.7;
+      margin-bottom: 44px; max-width: 65ch;
+    }
+    article h2 {
+      font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em;
+      margin-top: 56px; margin-bottom: 16px; color: var(--cyan);
+    }
+    article h3 { font-size: 1.15rem; font-weight: 600; margin-top: 36px; margin-bottom: 12px; }
+    article p { margin-bottom: 20px; color: var(--text); font-size: 1.02rem; }
+    article strong { color: var(--cyan); font-weight: 600; }
+    article code {
+      font-family: "JetBrains Mono", monospace; font-size: 0.88em;
+      background: var(--bg-2); padding: 2px 6px; border-radius: 4px; color: var(--cyan);
+    }
+    article a { color: var(--cyan); text-decoration: underline; text-underline-offset: 2px; }
+    article a:hover { color: var(--text); }
+    article ul, article ol { margin-bottom: 22px; padding-left: 24px; }
+    article li { margin-bottom: 10px; color: var(--text); }
+
+    pre {
+      background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 20px 24px; overflow-x: auto; font-family: "JetBrains Mono", monospace;
+      font-size: 0.83rem; line-height: 1.7; margin: 20px 0 28px; color: var(--text-muted);
+    }
+    pre .cmd { color: var(--text); }
+    pre .val { color: var(--cyan); }
+    pre .key { color: var(--purple); }
+    pre .str { color: var(--yellow); }
+
+    .callout {
+      background: var(--bg-1); border-left: 3px solid var(--cyan);
+      padding: 20px 24px; border-radius: 0 var(--radius) var(--radius) 0; margin: 28px 0;
+    }
+    .callout p { margin-bottom: 0; color: var(--text-muted); }
+    .callout strong { color: var(--text); }
+
+    .stat-grid {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin: 32px 0;
+    }
+    .stat-card {
+      background: var(--bg-1); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 20px; text-align: center;
+    }
+    .stat-card .stat-val { font-size: 1.55rem; font-weight: 700; color: var(--cyan); }
+    .stat-card .stat-label { font-size: 0.8rem; color: var(--text-muted); margin-top: 4px; }
+
+    .workflow-table {
+      width: 100%; border-collapse: collapse; margin: 24px 0 32px; font-size: 0.92rem;
+    }
+    .workflow-table th {
+      text-align: left; padding: 10px 14px; background: var(--bg-2);
+      border: 1px solid var(--border); font-weight: 600; font-size: 0.8rem;
+      text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted);
+    }
+    .workflow-table td { padding: 12px 14px; border: 1px solid var(--border); color: var(--text); }
+    .workflow-table td:first-child {
+      font-family: "JetBrains Mono", monospace; color: var(--cyan); font-size: 0.86rem;
+      white-space: nowrap;
+    }
+
+    footer {
+      max-width: 800px; margin: 0 auto; padding: 40px 24px;
+      border-top: 1px solid var(--border);
+      color: var(--text-dim); font-size: 0.85rem;
+      display: flex; justify-content: space-between;
+    }
+    footer a { color: var(--text-muted); text-decoration: none; }
+
+    @media (max-width: 600px) {
+      article { padding-left: 16px; padding-right: 16px; }
+      article h1 { font-size: 2rem; }
+      .nav-inner { padding-left: 16px; padding-right: 16px; }
+      .stat-grid { grid-template-columns: repeat(2, 1fr); }
+      .workflow-table { display: block; overflow-x: auto; font-size: 0.84rem; }
+      .workflow-table th, .workflow-table td { padding: 9px 10px; }
+      footer { flex-direction: column; gap: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <a href="/index.html" style="font-weight:600;color:var(--text)">Codixing</a>
+      <div style="display:flex;gap:20px">
+        <a href="/blog.html">Blog</a>
+        <a href="/docs.html">Docs</a>
+        <a href="https://github.com/ferax564/codixing">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <article>
+    <a href="/blog.html" style="color:var(--text-muted);font-size:0.85rem;text-decoration:none;display:inline-block;margin-bottom:20px;">&larr; All Posts</a>
+    <div class="blog-meta">July 21, 2026 &bull; Feature walkthrough</div>
+
+    <h1>From a task sentence to an edit plan with <code>codixing ask</code></h1>
+
+    <p class="subtitle">
+      An agent rarely starts with a symbol name. It starts with a sentence: “release: verify assets and website.” Here is how Codixing v0.47.1 turns that sentence into ranked evidence, likely tests, explicit risks, and a bounded path to the next tool call.
+    </p>
+
+    <div class="stat-grid">
+      <div class="stat-card">
+        <div class="stat-val">1</div>
+        <div class="stat-label">entry command</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">7</div>
+        <div class="stat-label">task modes</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">4K</div>
+        <div class="stat-label">default ask budget</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">45.7%</div>
+        <div class="stat-label">tokens saved in measured workflow</div>
+      </div>
+    </div>
+
+    <h2>Start with the task you actually have</h2>
+
+    <p>Suppose the job is to make a release trustworthy. You know the outcome, but you do not yet know which workflow, script, test, or documentation page is authoritative. Start with the task as written:</p>
+
+    <pre><span class="cmd">codixing ask "release: verify assets and website" \
+  --mode edit \
+  --token-budget 4000</span></pre>
+
+    <p>The colon is intentional. Task text is natural language, not a promise that the caller understands the underlying search grammar. v0.47.1 first tries the original query, then safely retries parser-significant punctuation as literal term boundaries if necessary. The pack keeps the original sentence as its <code>task_summary</code>.</p>
+
+    <div class="callout">
+      <p><strong>The boundary matters:</strong> agents should describe intent in task language. Codixing is responsible for translating that intent into retrieval without making punctuation an accidental API.</p>
+    </div>
+
+    <h2>Read the plan before opening files</h2>
+
+    <p><code>ask</code> returns a stable JSON context pack. The first useful distinction is between orientation and evidence: orientation explains where the task lives; evidence gives exact ranges that can be opened next.</p>
+
+    <pre>{
+  <span class="key">"task_summary"</span>: <span class="str">"release: verify assets and website"</span>,
+  <span class="key">"mode"</span>: <span class="str">"edit"</span>,
+  <span class="key">"repo_orientation"</span>: [
+    {
+      <span class="key">"path"</span>: <span class="str">"scripts/release_order.py"</span>,
+      <span class="key">"why"</span>: <span class="str">"Contains evidence handle E1"</span>
+    }
+  ],
+  <span class="key">"must_read"</span>: [
+    {
+      <span class="key">"id"</span>: <span class="str">"E1"</span>,
+      <span class="key">"path"</span>: <span class="str">"scripts/release_order.py"</span>,
+      <span class="key">"range"</span>: <span class="str">"L46-L94"</span>
+    }
+  ],
+  <span class="key">"likely_tests"</span>: [
+    { <span class="key">"path"</span>: <span class="str">"scripts/test_release_order.py"</span> }
+  ],
+  <span class="key">"recommended_next_tools"</span>: [
+    <span class="str">"read_file(E1)"</span>,
+    <span class="str">"find_symbol(&lt;symbol&gt;)"</span>
+  ]
+}</pre>
+
+    <p>The response also carries related symbols, documentation, risks, changed-file anchors, and an estimated token total. The schema is deliberately predictable so an agent can route on fields instead of scraping an essay.</p>
+
+    <h2>Follow evidence, then widen deliberately</h2>
+
+    <p>The pack is not meant to dump the repository. It is a compact first pass. Follow the strongest evidence, jump to definitions when a symbol appears, and inspect blast radius before editing:</p>
+
+    <pre><span class="cmd">codixing context scripts/release_order.py --line 46 --token-budget 1000
+codixing search IndexStore --strategy goto
+codixing symbols IndexStore --defs-only
+codixing impact .github/workflows/release.yml</span></pre>
+
+    <p>Only widen when the compact answer proves insufficient. Both of the expensive views make that choice explicit:</p>
+
+    <pre><span class="cmd">codixing impact .github/workflows/release.yml --full
+codixing graph . --map --token-budget 1500</span></pre>
+
+    <table class="workflow-table">
+      <thead>
+        <tr>
+          <th>Stage</th>
+          <th>Command</th>
+          <th>Decision it supports</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>orient</td>
+          <td><code>ask</code></td>
+          <td>Where does this task live, what evidence matters, and what should run next?</td>
+        </tr>
+        <tr>
+          <td>define</td>
+          <td><code>search --strategy goto</code></td>
+          <td>Which primary definition should the agent inspect before usages and tests?</td>
+        </tr>
+        <tr>
+          <td>trace</td>
+          <td><code>impact</code></td>
+          <td>What can break, and which tests are closest to the change?</td>
+        </tr>
+        <tr>
+          <td>widen</td>
+          <td><code>impact --full</code></td>
+          <td>Is the complete transitive blast radius necessary for this decision?</td>
+        </tr>
+        <tr>
+          <td>map</td>
+          <td><code>graph --map</code></td>
+          <td>How does the subsystem fit into the repository under a hard output budget?</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>Choose a mode that matches the work</h2>
+
+    <p>For quick calls, <code>ask</code> can select a locate or understand shape automatically. An explicit mode makes the intent durable when the work is more specific:</p>
+
+    <ul>
+      <li><strong>locate</strong> for finding the implementation or owner of a behavior.</li>
+      <li><strong>understand</strong> for assembling cross-file context before deciding what to change.</li>
+      <li><strong>edit</strong> for implementation work with changed-file anchors and likely tests.</li>
+      <li><strong>review</strong> for dependency-aware inspection of an existing change.</li>
+      <li><strong>test</strong> for mapping behavior to the most relevant coverage.</li>
+      <li><strong>migrate</strong> for changes that cross APIs, types, or file boundaries.</li>
+      <li><strong>incident</strong> for fast operational orientation and risk discovery.</li>
+    </ul>
+
+    <h2>What the measured workflow saved</h2>
+
+    <p>On this repository, the built-in <code>bench-tokens</code> harness measured a definition-and-blast-radius workflow at about 4,315 estimated tokens with Codixing versus 7,942 for its naive text-search-and-file-reading comparison. That is 3,627 fewer tokens, or 45.7%, for this specific workflow.</p>
+
+    <p>The important qualifier is “this workflow.” The harness is reproducible evidence, not a claim that every task saves the same percentage. Run it on the repository you care about:</p>
+
+    <pre><span class="cmd">codixing bench-tokens .</span></pre>
+
+    <h2>Install and try the walkthrough</h2>
+
+    <pre><span class="cmd">curl --proto '=https' --proto-redir '=https' -fsSLo \
+  /tmp/codixing-install.sh https://codixing.com/install.sh &amp;&amp;
+sh /tmp/codixing-install.sh
+
+codixing init .
+codixing ask "task: inspect authentication"</span></pre>
+
+    <p>Codixing v0.47.1 is available from <a href="https://github.com/ferax564/codixing/releases/tag/v0.47.1">GitHub Releases</a> and as <code>codixing-mcp@0.47.1</code> on npm. The full command reference is in the <a href="/docs.html#cli-agent-context-pack">ask documentation</a>.</p>
+
+    <p>The workflow is intentionally simple: state the task, inspect the plan, follow evidence, and widen only when the next decision requires it.</p>
+  </article>
+
+  <footer>
+    <span>Open source &bull; Apache-2.0</span>
+    <a href="https://github.com/ferax564/codixing">GitHub</a>
+  </footer>
+</body>
+</html>
