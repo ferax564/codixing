@@ -1210,7 +1210,7 @@ fn finish_source_candidates(
 /// When `config.extra_roots` is non-empty, all extra roots are also walked.
 /// Returned paths are absolute; callers use `config.normalize_path()` to
 /// produce the final relative (possibly-prefixed) string key.
-pub(super) fn walk_source_files(root: &Path, config: &IndexConfig) -> Result<Vec<PathBuf>> {
+pub(crate) fn walk_source_files(root: &Path, config: &IndexConfig) -> Result<Vec<PathBuf>> {
     use ignore::WalkBuilder;
 
     let mut files = Vec::new();

@@ -3,7 +3,9 @@
 //! This module handles all JSON-RPC 2.0 message processing: reading requests,
 //! dispatching to the correct handler, and writing responses.
 
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -143,11 +145,114 @@ fn is_dangerous_write_tool(name: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Shared engine lifecycle (Ready / Building / Failed)
+// ---------------------------------------------------------------------------
+
+/// Lifecycle of the MCP engine. Auto-init of a missing index runs in a
+/// background thread so `initialize` / `tools/list` are not blocked.
+pub(crate) enum EngineSlot {
+    /// Fully published index, ready for tool calls.
+    /// Boxed so the Ready arm does not inflate Building/Failed variants.
+    Ready(Box<Engine>),
+    /// `Engine::init` is still running; the index is not searchable yet.
+    Building {
+        root: PathBuf,
+        started_at: Instant,
+        progress: String,
+    },
+    /// Background init failed; surface the error on tools/call.
+    Failed(String),
+}
+
+impl std::fmt::Debug for EngineSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ready(_) => f.write_str("Ready(..)"),
+            Self::Building {
+                root,
+                started_at,
+                progress,
+            } => f
+                .debug_struct("Building")
+                .field("root", root)
+                .field("elapsed_secs", &started_at.elapsed().as_secs())
+                .field("progress", progress)
+                .finish(),
+            Self::Failed(msg) => f.debug_tuple("Failed").field(msg).finish(),
+        }
+    }
+}
+
+/// Shared handle passed through the JSON-RPC loop and daemon connections.
+pub(crate) type SharedEngine = Arc<RwLock<EngineSlot>>;
+
+impl EngineSlot {
+    /// Wrap an already-open engine as a ready shared handle.
+    pub(crate) fn ready(engine: Engine) -> SharedEngine {
+        Arc::new(RwLock::new(Self::Ready(Box::new(engine))))
+    }
+
+    /// Message for tools/call when the engine is not ready.
+    ///
+    /// Building returns `isError=false` so agents retry; Failed returns
+    /// `isError=true`. Ready returns `None`.
+    pub(crate) fn tool_unavailable_message(&self) -> Option<(String, bool)> {
+        match self {
+            Self::Ready(_) => None,
+            Self::Building {
+                root,
+                started_at,
+                progress,
+            } => {
+                let secs = started_at.elapsed().as_secs();
+                Some((
+                    format!(
+                        "Codixing index is still building for {} (elapsed {secs}s). {progress}.                          The index is not searchable yet — please retry this tool call shortly.",
+                        root.display()
+                    ),
+                    false,
+                ))
+            }
+            Self::Failed(msg) => Some((
+                format!(
+                    "Codixing index build failed: {msg}.                      Fix the underlying issue, delete .codixing/ if needed, and restart the MCP server."
+                ),
+                true,
+            )),
+        }
+    }
+}
+
+/// Run `f` against a ready engine under a write lock, if available.
+pub(crate) fn with_ready_engine_mut<R>(
+    engine: &SharedEngine,
+    f: impl FnOnce(&mut Engine) -> R,
+) -> Option<R> {
+    let mut guard = engine.write().unwrap_or_else(|e| e.into_inner());
+    match &mut *guard {
+        EngineSlot::Ready(eng) => Some(f(eng.as_mut())),
+        _ => None,
+    }
+}
+
+/// Run `f` against a ready engine under a read lock, if available.
+pub(crate) fn with_ready_engine_ref<R>(
+    engine: &SharedEngine,
+    f: impl FnOnce(&Engine) -> R,
+) -> Option<R> {
+    let guard = engine.read().unwrap_or_else(|e| e.into_inner());
+    match &*guard {
+        EngineSlot::Ready(eng) => Some(f(eng.as_ref())),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Core JSON-RPC message loop (generic over any AsyncRead + AsyncWrite)
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn run_jsonrpc_loop<R, W>(
-    engine: Arc<RwLock<Engine>>,
+    engine: SharedEngine,
     mut reader: R,
     mut writer: BufWriter<W>,
     federation: Option<Arc<FederatedEngine>>,
@@ -367,7 +472,7 @@ where
 // ---------------------------------------------------------------------------
 
 struct DispatchContext<'a, W> {
-    engine: &'a Arc<RwLock<Engine>>,
+    engine: &'a SharedEngine,
     federation: &'a Option<Arc<FederatedEngine>>,
     writer: &'a mut BufWriter<W>,
     profile: &'a mut McpProfile,
@@ -430,7 +535,7 @@ fn handle_tools_list(id: Value, has_federation: bool, profile: McpProfile) -> Va
 }
 
 async fn handle_tools_call<W>(
-    engine: &Arc<RwLock<Engine>>,
+    engine: &SharedEngine,
     id: Value,
     params: Option<Value>,
     federation: &Option<Arc<FederatedEngine>>,
@@ -490,6 +595,15 @@ where
         );
     }
 
+    // Fast path: refuse tool work while the index is still building (or failed).
+    // initialize / tools/list do not reach here; profile management is handled above.
+    {
+        let guard = engine.read().unwrap_or_else(|e| e.into_inner());
+        if let Some((msg, is_err)) = guard.tool_unavailable_message() {
+            return build_tool_response(id, tool_name, Ok((msg, is_err)));
+        }
+    }
+
     let engine_arc = Arc::clone(engine);
     let tool_name_clone = tool_name.clone();
     let read_only = tools::is_read_only_tool(&tool_name);
@@ -508,29 +622,39 @@ where
     let call_result = tokio::task::spawn_blocking(move || {
         let progress_ref = reporter_for_blocking.as_ref();
         if read_only {
-            let engine = match engine_arc.read() {
+            let guard = match engine_arc.read() {
                 Ok(e) => e,
                 Err(e) => return (format!("Engine lock poisoned: {e}"), true),
             };
-            tools::dispatch_tool_ref_with_progress(
-                &engine,
-                &tool_name_clone,
-                &args,
-                fed_clone.as_deref(),
-                progress_ref,
-            )
+            match &*guard {
+                EngineSlot::Ready(eng) => tools::dispatch_tool_ref_with_progress(
+                    eng.as_ref(),
+                    &tool_name_clone,
+                    &args,
+                    fed_clone.as_deref(),
+                    progress_ref,
+                ),
+                other => other
+                    .tool_unavailable_message()
+                    .unwrap_or_else(|| ("Engine is not ready".to_string(), true)),
+            }
         } else {
-            let mut engine = match engine_arc.write() {
+            let mut guard = match engine_arc.write() {
                 Ok(e) => e,
                 Err(e) => return (format!("Engine lock poisoned: {e}"), true),
             };
-            tools::dispatch_tool_with_progress(
-                &mut engine,
-                &tool_name_clone,
-                &args,
-                fed_clone.as_deref(),
-                progress_ref,
-            )
+            match &mut *guard {
+                EngineSlot::Ready(eng) => tools::dispatch_tool_with_progress(
+                    eng.as_mut(),
+                    &tool_name_clone,
+                    &args,
+                    fed_clone.as_deref(),
+                    progress_ref,
+                ),
+                other => other
+                    .tool_unavailable_message()
+                    .unwrap_or_else(|| ("Engine is not ready".to_string(), true)),
+            }
         }
     });
 
@@ -553,7 +677,7 @@ where
 /// `editor`/`dangerous`, the write tools need a real writer. Returns a note
 /// for the profile-switch response when the engine state is worth mentioning.
 pub(crate) fn upgrade_engine_for_profile(
-    engine: &Arc<RwLock<Engine>>,
+    engine: &SharedEngine,
     next: McpProfile,
 ) -> Option<String> {
     if next.is_read_only_profile() {
@@ -561,20 +685,39 @@ pub(crate) fn upgrade_engine_for_profile(
     }
     let root = {
         let guard = engine.read().unwrap_or_else(|e| e.into_inner());
-        if !guard.is_read_only() {
-            return None;
+        match &*guard {
+            EngineSlot::Ready(eng) if eng.is_read_only() => eng.root().to_path_buf(),
+            EngineSlot::Ready(_) => return None,
+            EngineSlot::Building { .. } => {
+                return Some(
+                    "Index is still building; write-lock upgrade will be available after init completes."
+                        .to_string(),
+                );
+            }
+            EngineSlot::Failed(msg) => {
+                return Some(format!("Index build failed — cannot upgrade engine: {msg}"));
+            }
         }
-        guard.root().to_path_buf()
     };
     match Engine::open(&root) {
         Ok(writer) if !writer.is_read_only() => {
-            *engine.write().unwrap_or_else(|e| e.into_inner()) = writer;
-            info!("engine upgraded to read-write for profile switch");
-            Some("Engine upgraded to read-write; mutation tools are fully functional.".to_string())
+            let mut guard = engine.write().unwrap_or_else(|e| e.into_inner());
+            match &mut *guard {
+                EngineSlot::Ready(slot) => {
+                    **slot = writer;
+                    info!("engine upgraded to read-write for profile switch");
+                    Some(
+                        "Engine upgraded to read-write; mutation tools are fully functional."
+                            .to_string(),
+                    )
+                }
+                _ => Some(
+                    "Engine state changed during upgrade; writer was not installed.".to_string(),
+                ),
+            }
         }
         Ok(_) => Some(
-            "Engine remains read-only — another process holds the write lock; \
-             mutation tools will return errors until it exits."
+            "Engine remains read-only — another process holds the write lock;              mutation tools will return errors until it exits."
                 .to_string(),
         ),
         Err(err) => Some(format!("Engine remains read-only — reopen failed: {err}")),
@@ -587,7 +730,7 @@ async fn handle_profile_management_tool<W>(
     args: &Value,
     profile: &mut McpProfile,
     profile_ceiling: McpProfile,
-    engine: &Arc<RwLock<Engine>>,
+    engine: &SharedEngine,
     writer: &mut BufWriter<W>,
 ) -> Value
 where
@@ -987,14 +1130,17 @@ mod tests {
 
         let ro = Engine::open_read_only(dir.path()).unwrap();
         assert!(ro.is_read_only());
-        let engine = Arc::new(RwLock::new(ro));
+        let engine = EngineSlot::ready(ro);
 
         upgrade_engine_for_profile(&engine, McpProfile::Editor);
 
-        assert!(
-            !engine.read().unwrap().is_read_only(),
-            "switching to a write-capable profile must acquire the writer when the lock is free"
-        );
+        match &*engine.read().unwrap() {
+            EngineSlot::Ready(eng) => assert!(
+                !eng.is_read_only(),
+                "switching to a write-capable profile must acquire the writer when the lock is free"
+            ),
+            other => panic!("expected Ready engine, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1003,14 +1149,17 @@ mod tests {
         drop(make_test_engine(dir.path()));
 
         let ro = Engine::open_read_only(dir.path()).unwrap();
-        let engine = Arc::new(RwLock::new(ro));
+        let engine = EngineSlot::ready(ro);
 
         upgrade_engine_for_profile(&engine, McpProfile::Minimal);
 
-        assert!(
-            engine.read().unwrap().is_read_only(),
-            "read-only target profiles must not grab the writer lock"
-        );
+        match &*engine.read().unwrap() {
+            EngineSlot::Ready(eng) => assert!(
+                eng.is_read_only(),
+                "read-only target profiles must not grab the writer lock"
+            ),
+            other => panic!("expected Ready engine, got {other:?}"),
+        }
     }
 
     /// Send JSON-RPC request lines into the loop and collect all response lines.
@@ -1039,7 +1188,7 @@ mod tests {
             input.push(b'\n');
         }
 
-        let engine = Arc::new(RwLock::new(engine));
+        let engine = EngineSlot::ready(engine);
 
         // Use a duplex channel as the transport.
         let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
@@ -1397,7 +1546,7 @@ mod tests {
     #[tokio::test]
     async fn malformed_json_returns_parse_error_and_null_id() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = Arc::new(RwLock::new(make_test_engine(dir.path())));
+        let engine = EngineSlot::ready(make_test_engine(dir.path()));
         let (client_stream, server_stream) = tokio::io::duplex(4096);
         let (server_read, server_write) = tokio::io::split(server_stream);
         let (mut client_read, mut client_write) = tokio::io::split(client_stream);
@@ -1656,8 +1805,7 @@ mod tests {
     #[tokio::test]
     async fn daemon_socket_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = make_test_engine(dir.path());
-        let engine = Arc::new(RwLock::new(engine));
+        let engine = EngineSlot::ready(make_test_engine(dir.path()));
 
         let socket_path = dir.path().join("test_daemon.sock");
         let listener = match UnixListener::bind(&socket_path) {
@@ -1742,7 +1890,7 @@ mod tests {
             input.push(b'\n');
         }
 
-        let engine = Arc::new(RwLock::new(engine));
+        let engine = EngineSlot::ready(engine);
 
         let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
         let (server_read, server_write) = tokio::io::split(server_stream);
@@ -1900,6 +2048,157 @@ mod tests {
             responses.len(),
             2,
             "expected 2 responses (init + tool call)"
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_and_tools_list_work_while_engine_building() {
+        let engine = Arc::new(RwLock::new(EngineSlot::Building {
+            root: PathBuf::from("/tmp/codixing-building-test"),
+            started_at: Instant::now(),
+            progress: "Running automatic BM25-only init".to_string(),
+        }));
+
+        let mut input = Vec::new();
+        for req in [
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": { "capabilities": {} }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list"
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "code_search",
+                    "arguments": { "query": "hello" }
+                }
+            }),
+        ] {
+            serde_json::to_writer(&mut input, &req).unwrap();
+            input.push(b'\n');
+        }
+
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+        let (server_read, server_write) = tokio::io::split(server_stream);
+        let (mut client_read, mut client_write) = tokio::io::split(client_stream);
+
+        tokio::spawn(async move {
+            client_write.write_all(&input).await.unwrap();
+            client_write.shutdown().await.unwrap();
+        });
+
+        let loop_handle = tokio::spawn(async move {
+            run_jsonrpc_loop(
+                engine,
+                BufReader::new(server_read),
+                BufWriter::new(server_write),
+                None,
+                McpProfile::Minimal,
+                McpProfile::Reviewer,
+            )
+            .await
+            .unwrap();
+        });
+
+        let mut output = Vec::new();
+        client_read.read_to_end(&mut output).await.unwrap();
+        loop_handle.await.unwrap();
+
+        let responses: Vec<Value> = output
+            .split(|&b| b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).expect("response should be valid JSON"))
+            .collect();
+
+        assert_eq!(responses.len(), 3);
+        assert_eq!(responses[0]["result"]["serverInfo"]["name"], "codixing");
+        assert!(
+            responses[1]["result"]["tools"]
+                .as_array()
+                .map(|tools| !tools.is_empty())
+                .unwrap_or(false),
+            "tools/list must work while Building"
+        );
+        assert_eq!(
+            responses[2]["result"]["isError"], false,
+            "Building tools/call should be non-error so agents retry"
+        );
+        let text = responses[2]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            text.contains("still building") || text.contains("retry"),
+            "tools/call while Building must tell the agent to retry: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tools_call_while_engine_failed_surfaces_error() {
+        let engine = Arc::new(RwLock::new(EngineSlot::Failed(
+            "disk full during init".to_string(),
+        )));
+
+        let mut input = Vec::new();
+        let req = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "code_search",
+                "arguments": { "query": "hello" }
+            }
+        });
+        serde_json::to_writer(&mut input, &req).unwrap();
+        input.push(b'\n');
+
+        let (client_stream, server_stream) = tokio::io::duplex(64 * 1024);
+        let (server_read, server_write) = tokio::io::split(server_stream);
+        let (mut client_read, mut client_write) = tokio::io::split(client_stream);
+
+        tokio::spawn(async move {
+            client_write.write_all(&input).await.unwrap();
+            client_write.shutdown().await.unwrap();
+        });
+
+        let loop_handle = tokio::spawn(async move {
+            run_jsonrpc_loop(
+                engine,
+                BufReader::new(server_read),
+                BufWriter::new(server_write),
+                None,
+                McpProfile::Minimal,
+                McpProfile::Reviewer,
+            )
+            .await
+            .unwrap();
+        });
+
+        let mut output = Vec::new();
+        client_read.read_to_end(&mut output).await.unwrap();
+        loop_handle.await.unwrap();
+
+        let responses: Vec<Value> = output
+            .split(|&b| b == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).expect("response should be valid JSON"))
+            .collect();
+
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0]["result"]["isError"], true);
+        let text = responses[0]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            text.contains("build failed") && text.contains("disk full"),
+            "Failed state must surface the init error: {text}"
         );
     }
 }

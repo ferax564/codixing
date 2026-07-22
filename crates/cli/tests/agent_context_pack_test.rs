@@ -59,3 +59,44 @@ fn agent_context_pack_cli_emits_stable_json() {
         "changed file should be pinned into must_read: {pack:#?}"
     );
 }
+
+#[test]
+fn ask_infers_edit_mode_and_finds_definition() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/greeting.rs"),
+        "pub fn greeting(name: &str) -> String {\n    format!(\"hello {name}\")\n}\n",
+    )
+    .unwrap();
+    no_embed_index(root);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_codixing"))
+        .args([
+            "ask",
+            "change greeting output format",
+            "--token-budget",
+            "2000",
+        ])
+        .current_dir(root)
+        .output()
+        .expect("failed to run codixing ask");
+    assert!(
+        output.status.success(),
+        "ask failed\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let pack: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("CLI output should be JSON");
+    assert_eq!(pack["mode"], "edit");
+    assert!(
+        pack["must_read"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["path"] == "src/greeting.rs"),
+        "definition should appear in must_read: {pack:#?}"
+    );
+}

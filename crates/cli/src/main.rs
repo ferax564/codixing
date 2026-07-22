@@ -13,7 +13,8 @@ use tracing_subscriber::EnvFilter;
 use codixing_core::{
     AgentContextMode, EmbedTimingStats, EmbeddingModel, Engine, FederatedEngine, FederationConfig,
     FreshnessOptions, FreshnessTier, GrepOptions, HtmlExportOptions, IndexConfig, RepoMapOptions,
-    SearchQuery, Strategy, discover_projects, to_federation_config,
+    SearchQuery, Strategy, available_disk_space, discover_projects, inventory_source_tree,
+    to_federation_config,
 };
 
 #[derive(Parser)]
@@ -99,6 +100,18 @@ enum Command {
         /// Set to 0 for no limit.
         #[arg(long, value_name = "BYTES", default_value_t = 2_097_152)]
         max_file_bytes: u64,
+
+        /// Inventory what would be indexed without writing an index.
+        ///
+        /// Walks the same source surface as a real init (ignore rules, language
+        /// filters, excludes) and prints file/byte counts, top languages, and a
+        /// rough BM25 disk estimate. Exits 0 without creating `.codixing/`.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Emit structured JSON (primarily useful with `--dry-run`).
+        #[arg(long)]
+        json: bool,
     },
 
     /// Search the code index.
@@ -256,6 +269,15 @@ enum Command {
         /// version, and print install instructions when it is stale/missing.
         #[arg(long)]
         fix_path: bool,
+
+        /// Optionally query GitHub for a newer published release (network).
+        #[arg(long)]
+        check_update: bool,
+
+        /// When the index is partial/missing, run the same repairs as
+        /// `codixing repair` (metadata heal + expired vector debris cleanup).
+        #[arg(long)]
+        fix: bool,
     },
 
     /// Find the shortest path between two files in the dependency graph.
@@ -838,6 +860,18 @@ impl From<AgentContextModeArg> for AgentContextMode {
     }
 }
 
+fn agent_mode_arg_from_core(mode: AgentContextMode) -> AgentContextModeArg {
+    match mode {
+        AgentContextMode::Locate => AgentContextModeArg::Locate,
+        AgentContextMode::Understand => AgentContextModeArg::Understand,
+        AgentContextMode::Edit => AgentContextModeArg::Edit,
+        AgentContextMode::Review => AgentContextModeArg::Review,
+        AgentContextMode::Test => AgentContextModeArg::Test,
+        AgentContextMode::Migrate => AgentContextModeArg::Migrate,
+        AgentContextMode::Incident => AgentContextModeArg::Incident,
+    }
+}
+
 /// Subcommands for the `codixing filter` command.
 #[derive(Subcommand)]
 enum FilterAction {
@@ -1044,6 +1078,8 @@ async fn async_main() -> Result<()> {
             wait,
             threads,
             max_file_bytes,
+            dry_run,
+            json,
         } => cmd_init(
             path,
             also,
@@ -1055,6 +1091,8 @@ async fn async_main() -> Result<()> {
             wait,
             threads,
             max_file_bytes,
+            dry_run,
+            json,
         ),
         Command::Search {
             query,
@@ -1128,7 +1166,9 @@ async fn async_main() -> Result<()> {
             path,
             json,
             fix_path,
-        } => cmd_doctor(path, json, fix_path),
+            check_update,
+            fix,
+        } => cmd_doctor(path, json, fix_path, check_update, fix),
         Command::Path { from, to } => cmd_path(from, to),
         Command::Callers { file, depth } => cmd_callers(file, depth),
         Command::Callees { file, depth } => cmd_callees(file, depth),
@@ -1245,12 +1285,7 @@ async fn async_main() -> Result<()> {
             risk_level,
         } => {
             let mode = mode.unwrap_or_else(|| {
-                // Short tasks → locate; longer phrasing → understand.
-                if task.split_whitespace().count() <= 6 {
-                    AgentContextModeArg::Locate
-                } else {
-                    AgentContextModeArg::Understand
-                }
+                agent_mode_arg_from_core(AgentContextMode::infer_from_task(&task))
             });
             cmd_agent_context_pack(
                 task,
@@ -1412,8 +1447,13 @@ fn cmd_init(
     wait: bool,
     threads: Option<usize>,
     max_file_bytes: u64,
+    dry_run: bool,
+    json: bool,
 ) -> Result<()> {
-    configure_thread_pool(threads)?;
+    // Dry-run only walks; skip Rayon pool setup for a fast inventory path.
+    if !dry_run {
+        configure_thread_pool(threads)?;
+    }
 
     let root = path
         .canonicalize()
@@ -1432,6 +1472,10 @@ fn cmd_init(
 
     for lang in &languages {
         config.languages.insert(lang.to_lowercase());
+    }
+
+    if dry_run {
+        return cmd_init_dry_run(&root, &config, json);
     }
 
     // v0.33: BM25+graph is the default. Embeddings only fire with --embed.
@@ -1508,6 +1552,91 @@ fn cmd_init(
         elapsed.as_secs_f64(),
     );
 
+    Ok(())
+}
+
+fn cmd_init_dry_run(root: &Path, config: &IndexConfig, json: bool) -> Result<()> {
+    let inventory = inventory_source_tree(root, config)
+        .with_context(|| format!("failed to inventory {}", root.display()))?;
+    let free_bytes = available_disk_space(root);
+    // BM25+graph indexes typically land around 1–2× source bytes on disk
+    // (chunks, symbols, graph, sidecars). Embeddings add substantially more.
+    let estimate_low = inventory.total_bytes;
+    let estimate_high = inventory.total_bytes.saturating_mul(2);
+
+    if json {
+        let report = serde_json::json!({
+            "dry_run": true,
+            "root": inventory.root,
+            "extra_roots": inventory.extra_roots,
+            "file_count": inventory.file_count,
+            "total_bytes": inventory.total_bytes,
+            "by_language": inventory.by_language,
+            "by_extension": inventory.by_extension,
+            "estimated_index_bytes": {
+                "low": estimate_low,
+                "high": estimate_high,
+                "note": "BM25+graph roughly 1–2× source bytes; --embed needs additional vector storage",
+            },
+            "available_disk_bytes": free_bytes,
+        });
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("Init dry-run inventory for {}", inventory.root.display());
+    if !inventory.extra_roots.is_empty() {
+        println!("Extra roots:");
+        for extra in &inventory.extra_roots {
+            println!("  + {}", extra.display());
+        }
+    }
+    println!(
+        "Indexable files: {} ({})",
+        inventory.file_count,
+        format_bytes(inventory.total_bytes)
+    );
+    if !inventory.by_language.is_empty() {
+        println!("Top languages:");
+        for bucket in inventory.by_language.iter().take(10) {
+            println!(
+                "  {:>6}  {:<16}  {}",
+                bucket.file_count,
+                bucket.name,
+                format_bytes(bucket.total_bytes)
+            );
+        }
+    }
+    if !inventory.by_extension.is_empty() {
+        println!("Top extensions:");
+        for bucket in inventory.by_extension.iter().take(10) {
+            println!(
+                "  {:>6}  .{:<15}  {}",
+                bucket.file_count,
+                bucket.name,
+                format_bytes(bucket.total_bytes)
+            );
+        }
+    }
+    println!(
+        "Estimated BM25 index disk: {} – {} (about 1–2× source bytes)",
+        format_bytes(estimate_low),
+        format_bytes(estimate_high)
+    );
+    match free_bytes {
+        Some(free) => {
+            println!("Free disk space: {}", format_bytes(free));
+            if free < estimate_high {
+                println!(
+                    "warning: free space ({}) is below the high estimate ({}); init may fail mid-build",
+                    format_bytes(free),
+                    format_bytes(estimate_high)
+                );
+            }
+        }
+        None => println!("Free disk space: (unavailable)"),
+    }
+    println!("No index written (dry-run).");
     Ok(())
 }
 
@@ -3552,7 +3681,13 @@ fn cmd_agent_context_pack(
     Ok(())
 }
 
-fn cmd_doctor(path: PathBuf, json: bool, fix_path: bool) -> Result<()> {
+fn cmd_doctor(
+    path: PathBuf,
+    json: bool,
+    fix_path: bool,
+    check_update: bool,
+    fix: bool,
+) -> Result<()> {
     use codixing_core::persistence::IndexStore;
 
     let root = path
@@ -3561,14 +3696,26 @@ fn cmd_doctor(path: PathBuf, json: bool, fix_path: bool) -> Result<()> {
     let codixing_dir = root.join(".codixing");
     let audit = IndexStore::audit_layout(&root);
     let disk_bytes = directory_size(&codixing_dir);
+    let free_disk = filesystem_space(&root);
     let daemon = daemon_health(&root);
     let onnx = onnx_health();
     let git_head = current_git_head(&root);
     let path_check = path_binary_health();
+    let writer_lock = IndexStore::writer_lock_status(&root);
+    let update_check = if check_update {
+        check_latest_release(env!("CARGO_PKG_VERSION"))
+    } else {
+        serde_json::json!({
+            "checked": false,
+            "status": "skipped",
+            "detail": "pass --check-update to query GitHub for newer releases",
+        })
+    };
 
     let mut meta_json = serde_json::Value::Null;
     let mut config_json = serde_json::Value::Null;
     let mut indexed_commit = None;
+    let mut embedding_enabled = false;
     let status = if !audit.dir_exists {
         "missing"
     } else if !audit.essentials_missing.is_empty() {
@@ -3595,6 +3742,7 @@ fn cmd_doctor(path: PathBuf, json: bool, fix_path: bool) -> Result<()> {
 
                 match store.load_config() {
                     Ok(config) => {
+                        embedding_enabled = config.embedding.enabled;
                         config_json = serde_json::json!({
                             "embedding_enabled": config.embedding.enabled,
                             "embedding_model": config.embedding.model,
@@ -3622,6 +3770,63 @@ fn cmd_doctor(path: PathBuf, json: bool, fix_path: bool) -> Result<()> {
         (None, None) => "unknown",
     };
 
+    let mut recommendations: Vec<String> = Vec::new();
+    if matches!(status, "missing") {
+        recommendations.push(
+            "No index yet. Run `codixing init .` (or `codixing init --dry-run .` for estimates)."
+                .to_string(),
+        );
+    }
+    if matches!(status, "partial") {
+        recommendations.push(
+            "Index is partial. Run `codixing doctor --fix .` or `codixing repair .` then re-init if essentials stay missing."
+                .to_string(),
+        );
+    }
+    if writer_lock.held {
+        let who = match (writer_lock.pid, writer_lock.exe.as_deref()) {
+            (Some(pid), Some(exe)) => format!("pid {pid} ({exe})"),
+            (Some(pid), None) => format!("pid {pid}"),
+            _ => "another process".to_string(),
+        };
+        recommendations.push(format!(
+            "Writer lock is held by {who}. Stop that process (often codixing-mcp) or wait, then retry sync."
+        ));
+    }
+    if let Some(free) = free_disk
+        .as_ref()
+        .and_then(|d| d.get("free_bytes").and_then(|v| v.as_u64()))
+        && disk_bytes > 0
+        && free < disk_bytes.saturating_mul(2)
+    {
+        recommendations.push(format!(
+            "Low free disk ({} free vs {} index). Generational rebuilds need ~2× index disk.",
+            format_bytes(free),
+            format_bytes(disk_bytes)
+        ));
+    }
+    if onnx
+        .get("status")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s != "configured" && s != "not_needed_bm25")
+    {
+        if let Some(rec) = onnx.get("recommendation").and_then(|v| v.as_str()) {
+            recommendations.push(rec.to_string());
+        }
+    } else if !embedding_enabled {
+        recommendations.push(
+            "Semantic search is intentionally BM25-only (embedding disabled). Enable with `codixing init --embed` and set ORT_DYLIB_PATH for hybrid search."
+                .to_string(),
+        );
+    }
+    if update_check.get("status").and_then(|v| v.as_str()) == Some("update_available")
+        && let Some(latest) = update_check.get("latest_version").and_then(|v| v.as_str())
+    {
+        recommendations.push(format!(
+            "Newer release v{latest} is available. Upgrade: curl -fsSL https://codixing.com/install.sh | bash  (or CODIXING_VERSION={latest})"
+        ));
+    }
+
     let report = serde_json::json!({
         "binary": {
             "name": "codixing",
@@ -3629,6 +3834,7 @@ fn cmd_doctor(path: PathBuf, json: bool, fix_path: bool) -> Result<()> {
             "path": std::env::current_exe().ok().map(|p| p.display().to_string()),
         },
         "path_binary": path_check,
+        "update": update_check,
         "root": root,
         "index": {
             "status": status,
@@ -3652,9 +3858,19 @@ fn cmd_doctor(path: PathBuf, json: bool, fix_path: bool) -> Result<()> {
                 "indexed_commit": indexed_commit,
             },
         },
+        "disk": free_disk,
+        "writer_lock": writer_lock,
         "onnx": onnx,
         "daemon": daemon,
+        "recommendations": recommendations,
     });
+
+    if fix && matches!(status, "partial" | "missing") {
+        // repair requires an existing .codixing dir; for missing, print guidance.
+        if audit.dir_exists {
+            cmd_repair(root.clone(), true)?;
+        }
+    }
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -3674,6 +3890,13 @@ fn cmd_doctor(path: PathBuf, json: bool, fix_path: bool) -> Result<()> {
         println!("Index layout: {layout_kind}");
     }
     println!("Index disk: {}", format_bytes(disk_bytes));
+    if let Some(free) = report["disk"]["free_bytes"].as_u64() {
+        println!(
+            "Filesystem free: {} (of {})",
+            format_bytes(free),
+            format_bytes(report["disk"]["total_bytes"].as_u64().unwrap_or(0))
+        );
+    }
     println!("Git staleness: {stale_status}");
     if let Some(head) = report["index"]["staleness"]["git_head"].as_str() {
         println!("Git HEAD: {head}");
@@ -3692,17 +3915,33 @@ fn cmd_doctor(path: PathBuf, json: bool, fix_path: bool) -> Result<()> {
             "not present"
         }
     );
-    println!(
-        "ONNX runtime: {}",
-        if report["onnx"]["ort_dylib_exists"]
-            .as_bool()
-            .unwrap_or(false)
-        {
-            "configured"
-        } else {
-            "not configured"
+    let onnx_status = report["onnx"]["status"].as_str().unwrap_or("unknown");
+    println!("ONNX runtime: {onnx_status}");
+    if let Some(rec) = report["onnx"]["recommendation"].as_str()
+        && onnx_status != "configured"
+        && onnx_status != "not_needed_bm25"
+    {
+        println!("  {rec}");
+    }
+    if writer_lock.held {
+        println!(
+            "Writer lock: HELD — {}{}",
+            writer_lock
+                .pid
+                .map(|p| format!("pid {p}"))
+                .unwrap_or_else(|| "unknown pid".into()),
+            writer_lock
+                .exe
+                .as_deref()
+                .map(|e| format!(" ({e})"))
+                .unwrap_or_default()
+        );
+        if writer_lock.pid_alive == Some(false) {
+            println!("  Warning: recorded pid does not appear alive (stale identity)");
         }
-    );
+    } else {
+        println!("Writer lock: free");
+    }
 
     if let Some(meta) = report["index"]["meta"].as_object()
         && meta.get("error").is_none()
@@ -3774,6 +4013,34 @@ fn cmd_doctor(path: PathBuf, json: bool, fix_path: bool) -> Result<()> {
             if fix_path {
                 print_path_fix_instructions();
             }
+        }
+    }
+
+    match report["update"]["status"].as_str() {
+        Some("update_available") => {
+            println!(
+                "Update: NEWER release available (v{} → v{})",
+                this_version,
+                report["update"]["latest_version"].as_str().unwrap_or("?")
+            );
+            println!("  Upgrade: curl -fsSL https://codixing.com/install.sh | bash");
+        }
+        Some("current") => {
+            println!("Update: binary matches latest published release");
+        }
+        Some("skipped") => {}
+        Some(other) => {
+            if let Some(detail) = report["update"]["detail"].as_str() {
+                println!("Update check ({other}): {detail}");
+            }
+        }
+        None => {}
+    }
+
+    if !recommendations.is_empty() {
+        println!("Recommendations:");
+        for rec in &recommendations {
+            println!("  - {rec}");
         }
     }
 
@@ -4146,19 +4413,146 @@ fn current_git_head(root: &Path) -> Option<String> {
     (!head.is_empty()).then_some(head)
 }
 
+fn onnx_runtime_hint() -> String {
+    #[cfg(target_os = "macos")]
+    let lib = "libonnxruntime.dylib";
+    #[cfg(target_os = "linux")]
+    let lib = "libonnxruntime.so";
+    #[cfg(target_os = "windows")]
+    let lib = "onnxruntime.dll";
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    let lib = "libonnxruntime (platform shared library)";
+    format!(
+        "Semantic/hybrid search needs ORT_DYLIB_PATH pointing at the absolute {lib} file (not a directory). Example: export ORT_DYLIB_PATH=/path/to/{lib}. Then re-init with `codixing init . --embed` or run `codixing embed`. BM25-only search works without ONNX."
+    )
+}
+
 fn onnx_health() -> serde_json::Value {
     let ort_dylib_path = std::env::var("ORT_DYLIB_PATH").ok();
-    let ort_dylib_exists = ort_dylib_path
-        .as_deref()
-        .map(|p| Path::new(p).is_file())
-        .unwrap_or(false);
+    let (status, recommendation) = match ort_dylib_path.as_deref() {
+        None => ("missing_path", Some(onnx_runtime_hint())),
+        Some(path) if Path::new(path).is_file() => ("configured", None),
+        Some(path) if Path::new(path).is_dir() => (
+            "path_is_directory",
+            Some(format!(
+                "ORT_DYLIB_PATH is a directory ({path}); set it to the exact shared-library file. {}",
+                onnx_runtime_hint()
+            )),
+        ),
+        Some(path) => (
+            "path_not_file",
+            Some(format!(
+                "ORT_DYLIB_PATH={path} does not exist. {}",
+                onnx_runtime_hint()
+            )),
+        ),
+    };
+    let ort_dylib_exists = status == "configured";
 
     serde_json::json!({
+        "status": status,
         "ort_dylib_path": ort_dylib_path,
         "ort_dylib_exists": ort_dylib_exists,
         "ld_library_path_set": std::env::var_os("LD_LIBRARY_PATH").is_some(),
         "dyld_library_path_set": std::env::var_os("DYLD_LIBRARY_PATH").is_some(),
+        "recommendation": recommendation,
     })
+}
+
+fn filesystem_space(path: &Path) -> Option<serde_json::Value> {
+    // Shared with `init --dry-run` via codixing-core (fs4 / platform statvfs).
+    let space = codixing_core::probe_disk_space(path)?;
+    Some(serde_json::json!({
+        "free_bytes": space.available_bytes,
+        "total_bytes": space.total_bytes,
+        "source": "fs4",
+    }))
+}
+
+fn check_latest_release(current: &str) -> serde_json::Value {
+    // Short network probe; doctor must stay usable offline.
+    let client = match std::process::Command::new("curl")
+        .args([
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--max-time",
+            "3",
+            "-H",
+            "Accept: application/vnd.github+json",
+            "-H",
+            "User-Agent: codixing-doctor",
+            "https://api.github.com/repos/ferax564/codixing/releases/latest",
+        ])
+        .output()
+    {
+        Ok(out) if out.status.success() => out.stdout,
+        Ok(out) => {
+            return serde_json::json!({
+                "checked": true,
+                "status": "error",
+                "detail": format!(
+                    "GitHub release probe failed: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+            });
+        }
+        Err(err) => {
+            return serde_json::json!({
+                "checked": true,
+                "status": "error",
+                "detail": format!("curl unavailable for update check: {err}"),
+            });
+        }
+    };
+
+    let parsed: serde_json::Value = match serde_json::from_slice(&client) {
+        Ok(v) => v,
+        Err(err) => {
+            return serde_json::json!({
+                "checked": true,
+                "status": "error",
+                "detail": format!("invalid GitHub JSON: {err}"),
+            });
+        }
+    };
+    let tag = parsed
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim_start_matches('v')
+        .to_string();
+    if tag.is_empty() {
+        return serde_json::json!({
+            "checked": true,
+            "status": "error",
+            "detail": "latest release tag missing",
+        });
+    }
+    let status = match compare_semver(current, &tag) {
+        Some(ordering) if ordering.is_lt() => "update_available",
+        Some(ordering) if ordering.is_eq() => "current",
+        Some(ordering) if ordering.is_gt() => "ahead_of_latest",
+        _ => "unknown",
+    };
+    serde_json::json!({
+        "checked": true,
+        "status": status,
+        "current_version": current,
+        "latest_version": tag,
+        "html_url": parsed.get("html_url"),
+    })
+}
+
+fn compare_semver(a: &str, b: &str) -> Option<std::cmp::Ordering> {
+    let parse = |s: &str| -> Option<(u64, u64, u64)> {
+        let mut parts = s.trim().trim_start_matches('v').split('.');
+        let major = parts.next()?.parse().ok()?;
+        let minor = parts.next()?.parse().ok()?;
+        let patch = parts.next()?.parse().ok()?;
+        Some((major, minor, patch))
+    };
+    Some(parse(a)?.cmp(&parse(b)?))
 }
 
 #[cfg(unix)]
@@ -4397,6 +4791,19 @@ mod tests {
         let cli = Cli::try_parse_from(["codixing", "init", "."]).expect("clap parse");
         match cli.command {
             Command::Init { threads, .. } => assert_eq!(threads, None),
+            _ => panic!("expected Init variant"),
+        }
+    }
+
+    #[test]
+    fn init_dry_run_and_json_flags_parse() {
+        let cli = Cli::try_parse_from(["codixing", "init", ".", "--dry-run", "--json"])
+            .expect("clap parse");
+        match cli.command {
+            Command::Init { dry_run, json, .. } => {
+                assert!(dry_run);
+                assert!(json);
+            }
             _ => panic!("expected Init variant"),
         }
     }

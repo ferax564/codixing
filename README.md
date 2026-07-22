@@ -14,9 +14,11 @@ curl --proto '=https' --proto-redir '=https' -fsSLo /tmp/codixing-install.sh htt
 sh /tmp/codixing-install.sh
 ```
 
-Installs the `codixing`, `codixing-mcp`, `codixing-lsp`, and
-`codixing-server` suite on Linux x86_64 or Apple Silicon macOS. It uses
-`/usr/local/bin` when writable and otherwise falls back to
+Installs `codixing` and `codixing-mcp` by default (lean install) on
+Linux x86_64 or Apple Silicon macOS. Set `CODIXING_COMPONENTS=all` for the full
+suite (`codixing-lsp` + `codixing-server` too), or list names explicitly
+(`CODIXING_COMPONENTS=codixing,codixing-mcp,codixing-lsp,codixing-server`).
+It uses `/usr/local/bin` when writable and otherwise falls back to
 `$HOME/.local/bin`. Set `CODIXING_INSTALL_DIR` for another destination or
 `CODIXING_VERSION=X.Y.Z` to pin a release. Windows x86_64 binaries are on the
 [releases page](https://github.com/ferax564/codixing/releases), and the MCP
@@ -222,6 +224,8 @@ codixing ask "task: inspect auth" # Recommended agent entrypoint; punctuation-sa
 codixing agent-context-pack "task" # Stable JSON context pack for agents
 codixing symbols Widget --defs-only  # Definitions only (no Import rows)
 codixing search IndexStore --strategy goto  # Definition-first symbol jump
+codixing init --dry-run .         # Inventory + disk estimate before writing an index
+codixing doctor --check-update    # Free space, lock owner, ONNX hints, optional release check
 codixing doctor --fix-path       # PATH binary version gate + install hints
 codixing bench-tokens            # Prove token savings vs grep+read
 codixing init .                  # Index a project
@@ -367,7 +371,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Type-aware search** — `codixing types` shows type relationships: implements, extends, returns, contains
 - **Usage example mining** — `codixing examples` finds real usage from tests, callers, and doc blocks
 - **Cross-file context assembly** — `codixing context` follows import chains and callees to assemble understanding context
-- **Agent context pack** — `codixing ask` / `agent-context-pack` and MCP `agent_context_pack` compile a versioned JSON pack with repo orientation, must-read evidence handles, related symbols, likely tests, docs, risks, and recommended next tools
+- **Agent context pack** — `codixing ask` / `agent-context-pack` and MCP `agent_context_pack` compile a versioned JSON pack with repo orientation, must-read evidence handles, related symbols, likely tests, docs, risks, and recommended next tools; `ask` infers workflow mode from the task and pins symbol definitions ahead of tests/usages
 - **Definition-first search** — identifier queries auto-select `goto` when a primary definition is indexed; chunk-level definition boost ranks `struct Foo` above tests/usages of `Foo`
 - **Compact impact + hard-budget maps** — `impact` defaults to top-N blast radius; repo maps never overshoot `--token-budget` and accept focus seeds
 - **Token-savings harness** — `codixing bench-tokens` measures Codixing vs naive grep+read token cost for release claims
@@ -382,7 +386,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Model2Vec with code-aware preprocessing** — Static embeddings via `potion-base-8M` (no ONNX needed, instant init). CamelCase/snake_case splitting before tokenization reduces subword fragments by 50-70%, achieving MRR 1.000 on concept queries
 - **Jina Code Int8** — `jina-embeddings-v2-base-code` int8-quantized for ARM64 (768 dims, 8ms/query, nDCG@10 0.949). Set `JINA_CODE_INT8_ONNX` env var to the model path
 - **Embedding speed measurement** — New `bench-embed` CLI subcommand for profiling embedding performance across custom models
-- **Health diagnostics** — `codixing doctor` reports binary/version, PATH binary drift (`--fix-path`), index metadata health, git staleness, daemon endpoint status, ONNX runtime configuration, and index disk usage in human or JSON form
+- **Health diagnostics** — `codixing doctor` reports binary/version, PATH binary drift (`--fix-path`), free disk, writer-lock owner, ONNX/semantic recommendations (`--check-update` for newer releases), index metadata health, git staleness, daemon endpoint status, and index disk usage in human or JSON form; `init --dry-run` inventories files before indexing
 - **Daemon mode** — Engine stays in memory, auto-starts on first connection, Unix socket (macOS/Linux) or named pipe (Windows) IPC, file watcher for live index updates, 30-min idle timeout
 - **Field-weighted BM25** — Configurable per-field boosting (entity_names 3×, signature 2×, scope_chain 1.5×, content 1×)
 - **Search pipeline** — Composable search stages (definition boost, test demotion, path match, graph boost, recency boost, graph semantic propagation via GraphPropagationStage, file-level dedup via FileDedupStage, truncation) with seven strategies, including file-trigram exact-match and embedding-free semantic matching

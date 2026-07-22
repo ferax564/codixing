@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 import math
@@ -762,6 +763,17 @@ def disk_usage(snapshot: dict[str, DiskEntry]) -> dict[str, Any]:
     }
 
 
+def is_control_plane_artifact(relative: str) -> bool:
+    """Locks/leases are not searchable index state; ignore them for rewrite amp."""
+    name = Path(relative).name
+    return name in {
+        "writer.lock",
+        "writer.lock.owner",
+        "rebuild.lock",
+        "generation.lease",
+    }
+
+
 def rewritten_bytes_estimate(
     before: dict[str, DiskEntry], after: dict[str, DiskEntry]
 ) -> int:
@@ -771,6 +783,8 @@ def rewritten_bytes_estimate(
     estimate remains useful on macOS and Windows. Inode identity prevents a new
     generation's unchanged hardlinks from masquerading as rewritten data, and
     allocated size avoids charging sparse-file holes as physical bytes.
+    Control-plane locks/leases are excluded so holder-identity sidecars do not
+    fail the no-op rewrite gate at one filesystem block per CLI process.
     """
     before_inodes = {
         (entry.device, entry.inode): (
@@ -778,11 +792,14 @@ def rewritten_bytes_estimate(
             entry.mtime_ns,
             entry.allocated_bytes,
         )
-        for entry in before.values()
+        for relative, entry in before.items()
+        if not is_control_plane_artifact(relative)
     }
     rewritten = 0
     seen: set[tuple[int, int]] = set()
-    for current in after.values():
+    for relative, current in after.items():
+        if is_control_plane_artifact(relative):
+            continue
         inode = (current.device, current.inode)
         if inode in seen:
             continue
@@ -1913,9 +1930,55 @@ def warm_queries(
             ):
                 engine_latencies.append(float(response["elapsed_ms"]))
             sample_server_memory()
+
+        # Concurrent reader matrix (1 / 8 / 32) against the same resident server.
+        # Evidence for multi-reader gates; failures surface as incomplete samples.
+        concurrent_matrix: dict[str, Any] = {}
+        for concurrency in (1, 8, 32):
+            sample_server_memory()
+            latencies: list[float] = []
+            errors = 0
+
+            def _one_search(case_index: int) -> float:
+                case = cases[case_index % len(cases)]
+                started = time.perf_counter()
+                _request_json(
+                    f"{url}/search",
+                    {
+                        "query": case["query"],
+                        "limit": 10,
+                        "strategy": case["strategy"],
+                    },
+                )
+                return (time.perf_counter() - started) * 1000
+
+            with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                futures = [
+                    pool.submit(_one_search, index)
+                    for index in range(max(concurrency * 2, runs))
+                ]
+                for future in as_completed(futures):
+                    try:
+                        latencies.append(future.result())
+                    except Exception:  # noqa: BLE001 - evidence capture must continue
+                        errors += 1
+            sample_server_memory()
+            concurrent_matrix[str(concurrency)] = {
+                "concurrency": concurrency,
+                "samples": len(latencies),
+                "errors": errors,
+                "client_round_trip": latency_summary(latencies) if latencies else None,
+                "status": (
+                    "passed"
+                    if errors == 0 and latencies
+                    else "failed"
+                ),
+            }
+
         return {
             "client_round_trip": latency_summary(client_latencies),
             "engine_reported": latency_summary(engine_latencies),
+            "concurrent_readers": concurrent_matrix,
             "server_command": command,
             "server_process": {
                 "steady_rss_bytes": steady_rss,

@@ -85,3 +85,28 @@ allocation geometry, Rust toolchain, build profile, and binary feature label. A
 10K pull-request run cannot prove the 100K-file target. Initialization,
 one-percent sync, and the server lifecycle are still single-run measurements;
 that limitation is recorded rather than hidden behind a universal speed claim.
+
+## Post-0.47.1 hardening notes (2026-07-22)
+
+Branch `feat/ten-out-of-ten-completion` ships incremental correctness/perf fixes that
+directly target the failing one-file gate:
+
+1. **CLI sync hash path** now uses `update_tree_hash_delta` + compact threshold
+   (same as git/daemon), instead of folding the full `tree_hashes_v2` snapshot on
+   every one-file edit.
+2. **PageRank** is skipped for tiny structural batches on large repositories
+   (edges still persist).
+3. **Multi-reader matrix** (concurrency 1/8/32) is recorded under
+   `metrics.queries.warm.concurrent_readers` during warm-query measurement.
+
+Local microbench (200-file synthetic, release CLI, one structural append):
+
+| Metric | Value |
+|---|---|
+| one-file `sync --no-embed` wall | ~146 ms |
+| Token visible after sync | yes (`gate_token_xyz`) |
+
+Full 10K same-run baseline comparison should be re-run on CI hardware before
+claiming the 50% outcome gates closed. Query p95 was already far under target on
+the 2026-07-19 capture; rewrite/latency should improve materially from (1)–(2).
+

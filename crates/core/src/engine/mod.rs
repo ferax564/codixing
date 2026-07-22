@@ -14,6 +14,7 @@ pub mod impact;
 mod import;
 pub(crate) mod indexing;
 mod init;
+pub mod inventory;
 mod orphans;
 pub(crate) mod pipeline;
 pub mod recency;
@@ -33,6 +34,10 @@ pub use embed_stats::EmbedTimingStats;
 pub use focus_map::{FocusMapEntry, FocusMapOptions};
 pub use impact::{ChangeImpact, ImpactDetail, compute_change_impact, format_change_impact};
 pub use import::ImportStats;
+pub use inventory::{
+    DiskSpace, InventoryBucket, SourceInventory, available_disk_space, inventory_source_tree,
+    probe_disk_space,
+};
 pub use symbol_graph::{ReferenceOptions, SymbolReference};
 
 use std::collections::{HashMap, HashSet};

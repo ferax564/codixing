@@ -28,17 +28,20 @@ mod protocol;
 mod tools;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use tokio::io::{BufReader, BufWriter};
-use tracing::info;
+use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use codixing_core::{
     EmbeddingConfig, Engine, FederatedEngine, FederationConfig, IndexConfig, SessionState,
 };
+
+use jsonrpc::{EngineSlot, SharedEngine};
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -150,11 +153,7 @@ async fn main() -> Result<()> {
 
     if args.daemon {
         // ── Daemon mode ───────────────────────────────────────────────────
-        let mut engine = load_engine(&root, profile).await?;
-        if args.no_session {
-            engine.set_session(Arc::new(SessionState::new(false)));
-        }
-        let engine = Arc::new(RwLock::new(engine));
+        let engine = load_engine(&root, profile, args.no_session)?;
 
         #[cfg(unix)]
         {
@@ -306,11 +305,7 @@ async fn main() -> Result<()> {
 
         // No daemon available — run directly on stdin/stdout.
         {
-            let mut engine = load_engine(&root, profile).await?;
-            if args.no_session {
-                engine.set_session(Arc::new(SessionState::new(false)));
-            }
-            let engine = Arc::new(RwLock::new(engine));
+            let engine = load_engine(&root, profile, args.no_session)?;
             info!("Codixing MCP server ready — listening on stdin");
             let stdin = tokio::io::stdin();
             let stdout = tokio::io::stdout();
@@ -361,65 +356,129 @@ fn default_socket_path(
 // Engine loader (shared by daemon + direct modes)
 // ---------------------------------------------------------------------------
 
-async fn load_engine(root: &Path, profile: jsonrpc::McpProfile) -> Result<Engine> {
+fn load_engine(
+    root: &Path,
+    profile: jsonrpc::McpProfile,
+    no_session: bool,
+) -> Result<SharedEngine> {
     if Engine::index_exists(root) {
         // Read-only profiles expose no mutating tools — open without the
         // writer so the Tantivy write lock stays free for CLI syncs running
         // alongside. An allowed set_mcp_profile upgrade re-acquires the writer.
-        if profile.is_read_only_profile() {
+        let mut engine = if profile.is_read_only_profile() {
             info!(
                 root = %root.display(),
                 profile = profile.as_str(),
                 "opening existing Codixing index read-only (read-only profile)"
             );
-            return Engine::open_read_only(root).with_context(|| {
+            Engine::open_read_only(root).with_context(|| {
                 format!(
-                    "failed to open index at {} — index may be corrupt; \
-                     delete .codixing/ and restart to rebuild",
+                    "failed to open index at {} — index may be corrupt; delete .codixing/ and restart to rebuild",
                     root.display()
                 )
-            });
+            })?
+        } else {
+            info!(root = %root.display(), "opening existing Codixing index");
+            let engine = Engine::open(root).with_context(|| {
+                format!(
+                    "failed to open index at {} — index may be corrupt; delete .codixing/ and restart to rebuild",
+                    root.display()
+                )
+            })?;
+            if engine.is_read_only() {
+                tracing::warn!(
+                    "engine opened in read-only mode — another instance holds the write lock;                      search tools work, write tools (edit_file, write_file, etc.) will return errors"
+                );
+            }
+            engine
+        };
+        if no_session {
+            engine.set_session(Arc::new(SessionState::new(false)));
         }
-        info!(root = %root.display(), "opening existing Codixing index");
-        let engine = Engine::open(root).with_context(|| {
-            format!(
-                "failed to open index at {} — index may be corrupt; \
-                 delete .codixing/ and restart to rebuild",
-                root.display()
-            )
-        })?;
-        if engine.is_read_only() {
-            tracing::warn!(
-                "engine opened in read-only mode — another instance holds the write lock; \
-                 search tools work, write tools (edit_file, write_file, etc.) will return errors"
-            );
-        }
-        Ok(engine)
+        Ok(EngineSlot::ready(engine))
     } else {
+        // Non-blocking: spawn Engine::init on a background thread so MCP
+        // initialize / tools/list can respond immediately. Full Engine::init
+        // still publishes atomically — nothing half-built is searchable.
         info!(
             root = %root.display(),
-            "no .codixing/ index found — running automatic BM25-only init"
+            "no .codixing/ index found — starting background BM25-only init"
         );
-        let mut config = IndexConfig::new(root);
-        config.embedding = EmbeddingConfig {
-            enabled: false,
-            ..EmbeddingConfig::default()
-        };
-        let engine = Engine::init(root, config).with_context(|| {
-            format!(
-                "auto-init failed at {} — ensure the directory exists and contains source files",
-                root.display()
-            )
-        })?;
-        if profile.is_read_only_profile() {
-            // Init needed the writer; hand the index back read-only so the
-            // server matches its profile and frees the write lock.
-            drop(engine);
-            return Engine::open_read_only(root)
-                .with_context(|| format!("failed to reopen fresh index at {}", root.display()));
-        }
-        Ok(engine)
+        start_background_init(root, profile, no_session)
     }
+}
+
+fn start_background_init(
+    root: &Path,
+    profile: jsonrpc::McpProfile,
+    no_session: bool,
+) -> Result<SharedEngine> {
+    use std::sync::RwLock;
+
+    let holder: SharedEngine = Arc::new(RwLock::new(EngineSlot::Building {
+        root: root.to_path_buf(),
+        started_at: Instant::now(),
+        progress: "Running automatic BM25-only init".to_string(),
+    }));
+    let holder_bg = Arc::clone(&holder);
+    let root = root.to_path_buf();
+    let read_only = profile.is_read_only_profile();
+
+    std::thread::Builder::new()
+        .name("codixing-mcp-init".into())
+        .spawn(move || {
+            let mut config = IndexConfig::new(&root);
+            config.embedding = EmbeddingConfig {
+                enabled: false,
+                ..EmbeddingConfig::default()
+            };
+
+            let result = (|| -> Result<Engine> {
+                let engine = Engine::init(&root, config).with_context(|| {
+                    format!(
+                        "auto-init failed at {} — ensure the directory exists and contains source files",
+                        root.display()
+                    )
+                })?;
+                if read_only {
+                    // Init needed the writer; hand the index back read-only so
+                    // the server matches its profile and frees the write lock.
+                    drop(engine);
+                    Engine::open_read_only(&root).with_context(|| {
+                        format!("failed to reopen fresh index at {}", root.display())
+                    })
+                } else {
+                    Ok(engine)
+                }
+            })();
+
+            match result {
+                Ok(mut engine) => {
+                    if no_session {
+                        engine.set_session(Arc::new(SessionState::new(false)));
+                    }
+                    info!(
+                        root = %root.display(),
+                        "background auto-init complete — index ready"
+                    );
+                    *holder_bg.write().unwrap_or_else(|e| e.into_inner()) =
+                        EngineSlot::Ready(Box::new(engine));
+                }
+                Err(err) => {
+                    let msg = format!("{err:#}");
+                    error!(
+                        root = %root.display(),
+                        error = %msg,
+                        "background auto-init failed"
+                    );
+                    *holder_bg.write().unwrap_or_else(|e| e.into_inner()) =
+                        EngineSlot::Failed(msg);
+                }
+            }
+        })
+        .context("failed to spawn background index init thread")?;
+
+    Ok(holder)
 }
 
 #[cfg(test)]
@@ -480,18 +539,21 @@ mod load_engine_tests {
         drop(Engine::init(dir, config).expect("engine init should succeed"));
     }
 
-    #[tokio::test]
-    async fn read_only_profile_opens_engine_without_writer_lock() {
+    #[test]
+    fn read_only_profile_opens_engine_without_writer_lock() {
         let dir = tempfile::tempdir().unwrap();
         make_index(dir.path());
 
-        let engine = load_engine(dir.path(), jsonrpc::McpProfile::Reviewer)
-            .await
-            .unwrap();
-        assert!(
-            engine.is_read_only(),
-            "reviewer profile must open the engine read-only"
-        );
+        let holder = load_engine(dir.path(), jsonrpc::McpProfile::Reviewer, false).unwrap();
+        let guard = holder.read().unwrap();
+        match &*guard {
+            EngineSlot::Ready(engine) => assert!(
+                engine.is_read_only(),
+                "reviewer profile must open the engine read-only"
+            ),
+            other => panic!("expected Ready engine, got {other:?}"),
+        }
+        drop(guard);
 
         // The writer lock must remain free so a CLI sync can run alongside.
         let writer = Engine::open(dir.path()).unwrap();
@@ -501,8 +563,8 @@ mod load_engine_tests {
         );
     }
 
-    #[tokio::test]
-    async fn write_profile_keeps_writer_engine() {
+    #[test]
+    fn write_profile_keeps_writer_engine() {
         let dir = tempfile::tempdir().unwrap();
         make_index(dir.path());
 
@@ -510,19 +572,71 @@ mod load_engine_tests {
         // writer lease is busy. Parallel MCP tests can still race cleanup of a
         // just-dropped init engine on macOS CI, so retry the load a few times
         // before declaring the profile contract broken.
-        let mut engine = None;
+        let mut engine_holder = None;
         for attempt in 0..8 {
-            let loaded = load_engine(dir.path(), jsonrpc::McpProfile::Editor)
-                .await
-                .unwrap();
-            if !loaded.is_read_only() {
-                engine = Some(loaded);
+            let loaded = load_engine(dir.path(), jsonrpc::McpProfile::Editor, false).unwrap();
+            let is_writer = matches!(
+                &*loaded.read().unwrap(),
+                EngineSlot::Ready(eng) if !eng.is_read_only()
+            );
+            if is_writer {
+                engine_holder = Some(loaded);
                 break;
             }
             drop(loaded);
-            tokio::time::sleep(std::time::Duration::from_millis(25 * (attempt + 1))).await;
+            std::thread::sleep(std::time::Duration::from_millis(25 * (attempt + 1)));
         }
-        let engine = engine.expect("editor profile should acquire the writer");
-        assert!(!engine.is_read_only(), "editor profile keeps the writer");
+        let holder = engine_holder.expect("editor profile should acquire the writer");
+        match &*holder.read().unwrap() {
+            EngineSlot::Ready(engine) => {
+                assert!(!engine.is_read_only(), "editor profile keeps the writer")
+            }
+            other => panic!("expected Ready engine, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_index_starts_background_init_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "pub fn hello() -> &'static str { \"world\" }\n",
+        )
+        .unwrap();
+
+        let start = Instant::now();
+        let holder = load_engine(dir.path(), jsonrpc::McpProfile::Minimal, false).unwrap();
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "load_engine must not block on Engine::init when no index exists"
+        );
+
+        // Immediately after return we should be Building (or already Ready on a
+        // tiny tree if init finished before we checked).
+        match &*holder.read().unwrap() {
+            EngineSlot::Building { .. } | EngineSlot::Ready(_) => {}
+            EngineSlot::Failed(msg) => panic!("unexpected Failed right after spawn: {msg}"),
+        }
+
+        // Wait for background init to publish a ready index.
+        // Drop the read guard before sleeping so the init thread can take the write lock.
+        let deadline = Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let state = {
+                let guard = holder.read().unwrap();
+                match &*guard {
+                    EngineSlot::Ready(_) => Some(true),
+                    EngineSlot::Failed(msg) => panic!("background init failed: {msg}"),
+                    EngineSlot::Building { .. } => None,
+                }
+            };
+            if state == Some(true) {
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!("background init did not complete within 30s");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 }

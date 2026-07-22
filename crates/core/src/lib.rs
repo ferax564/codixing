@@ -59,10 +59,11 @@ pub use engine::freshness::{
 };
 pub use engine::sync::SyncOptions;
 pub use engine::{
-    ChangeImpact, ConflictKind, EmbedTimingStats, Engine, FocusMapEntry, FocusMapOptions,
-    GitSyncStats, GrepMatch, GrepOptions, ImpactDetail, ImportStats, IndexStats, ReferenceOptions,
-    RenameConflict, RenameValidation, StaleReport, SymbolReference, SyncStats,
-    format_change_impact,
+    ChangeImpact, ConflictKind, DiskSpace, EmbedTimingStats, Engine, FocusMapEntry,
+    FocusMapOptions, GitSyncStats, GrepMatch, GrepOptions, ImpactDetail, ImportStats, IndexStats,
+    InventoryBucket, ReferenceOptions, RenameConflict, RenameValidation, SourceInventory,
+    StaleReport, SymbolReference, SyncStats, available_disk_space, format_change_impact,
+    inventory_source_tree, probe_disk_space,
 };
 pub use error::{CodixingError, Result};
 pub use external::{ExternalDocument, parse_source};

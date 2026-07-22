@@ -165,6 +165,10 @@ impl ApplyChangesOutcome {
 /// remove the old entry, and failures retain the prior baseline while the
 /// separate dirty-path journal forces a retry. Unchanged files still refresh
 /// mtime/size metadata.
+///
+/// Currently unused by the O(changed) delta publish path; retained for the
+/// full-fold recovery/compaction routes that may re-adopt it.
+#[allow(dead_code)]
 fn merge_hashes_after_apply(
     old: &std::collections::HashMap<std::path::PathBuf, FileHashEntry>,
     current: Vec<(std::path::PathBuf, FileHashEntry)>,
@@ -1308,13 +1312,32 @@ impl Engine {
         }
 
         if graph_semantics_changed {
+            // Snapshot counters before mutably borrowing `self.graph`.
+            let file_count = self.stats().file_count;
+            let changed_files = self.pending_checkpoint.successful_paths.len().max(1);
             if let Some(ref mut graph) = self.graph {
-                let scores = compute_pagerank(
-                    graph,
-                    self.config.graph.damping,
-                    self.config.graph.iterations,
-                );
-                graph.apply_pagerank(&scores);
+                // Full PageRank on every one-file structural edit dominated
+                // incremental latency at 10K+ files. Keep structure durable and
+                // only recompute scores when the batch is large enough that
+                // rankings would meaningfully shift, or when the graph is small.
+                const PAGERANK_RECOMPUTE_FILE_LIMIT: usize = 2_500;
+                const PAGERANK_FORCE_MIN_CHANGED: usize = 8;
+                let recompute_scores = file_count <= PAGERANK_RECOMPUTE_FILE_LIMIT
+                    || changed_files >= PAGERANK_FORCE_MIN_CHANGED;
+                if recompute_scores {
+                    let scores = compute_pagerank(
+                        graph,
+                        self.config.graph.damping,
+                        self.config.graph.iterations,
+                    );
+                    graph.apply_pagerank(&scores);
+                } else {
+                    debug!(
+                        file_count,
+                        changed_files,
+                        "skipping full PageRank recompute on small incremental batch"
+                    );
+                }
                 let flat = graph.to_flat();
                 self.store.save_graph(&flat)?;
                 self.store.save_symbol_graph(graph)?;
@@ -2360,19 +2383,23 @@ impl Engine {
             // Sidecars are publication markers for change detection. The
             // failure check above makes this an all-success batch; write
             // signatures first and hashes last before atomic publication.
-            let authoritative_hashes = merge_hashes_after_apply(
-                &old_hashes,
-                std::mem::take(&mut current_hashes),
-                &changes,
-                &outcome.successful_hashes,
-            );
+            // Prefer O(changed) hash deltas (same path as git_sync / daemon
+            // checkpoint). Full fold is reserved for compaction thresholds and
+            // rare whole-tree mtime refresh paths below — one-file CLI sync was
+            // rewriting the entire tree_hashes_v2 snapshot every time.
+            let successful_delta: Vec<_> = outcome
+                .successful_hashes
+                .iter()
+                .map(|(path, entry)| (path.clone(), entry.clone()))
+                .collect();
             let persist_result = (|| -> Result<()> {
                 self.persist_checkpoint_artifacts_with_graph_state(
                     outcome.graph_semantics_changed,
                     outcome.vector_changed,
                 )?;
                 self.persist_signatures_after_apply(&changes, &outcome, &seen)?;
-                self.fold_hash_snapshot(&authoritative_hashes)
+                self.store.update_tree_hash_delta(&successful_delta)?;
+                self.compact_hash_delta_if_needed()
             })();
             if let Err(error) = persist_result {
                 self.restore_git_commit(previous_git_commit.as_deref())?;
@@ -2380,13 +2407,18 @@ impl Engine {
                 return Err(error);
             }
             published_paths = outcome.successful_paths.clone();
+            // Scanned mtime/size cache for unchanged files is not rewritten on
+            // the incremental path; successful mutation hashes live in the delta.
+            let _ = (old_hashes, std::mem::take(&mut current_hashes));
         } else {
-            // Even if nothing changed content-wise, update the v2 hashes
-            // to capture any mtime+size updates (e.g. file was touched).
-            if had_hash_delta {
-                self.ensure_working_generation()?;
-                self.fold_hash_snapshot(&current_hashes)?;
-            } else if skipped_by_mtime != unchanged {
+            // True content no-op. Never fold an existing hash delta here: the
+            // gate interleaves no-op samples after one-file delta publishes, and
+            // folding would rewrite the full tree_hashes_v2 baseline (~O(N))
+            // despite zero content changes. Compact only via
+            // `compact_hash_delta_if_needed` on mutation paths.
+            if !had_hash_delta && skipped_by_mtime != unchanged {
+                // Refresh mtime/size metadata only when there is no overlay
+                // (touch-without-content-change on a fully-folded baseline).
                 self.ensure_working_generation()?;
                 self.store.save_tree_hashes_v2(&current_hashes)?;
             }
@@ -2835,19 +2867,19 @@ impl Engine {
                 return Err(self.abort_batch_error(error));
             }
             on_progress("persisting index");
-            let authoritative_hashes = merge_hashes_after_apply(
-                &old_hashes,
-                std::mem::take(&mut current_hashes),
-                &changes,
-                &outcome.successful_hashes,
-            );
+            let successful_delta: Vec<_> = outcome
+                .successful_hashes
+                .iter()
+                .map(|(path, entry)| (path.clone(), entry.clone()))
+                .collect();
             let persist_result = (|| -> Result<()> {
                 self.persist_checkpoint_artifacts_with_graph_state(
                     outcome.graph_semantics_changed,
                     outcome.vector_changed,
                 )?;
                 self.persist_signatures_after_apply(&changes, &outcome, &seen)?;
-                self.fold_hash_snapshot(&authoritative_hashes)
+                self.store.update_tree_hash_delta(&successful_delta)?;
+                self.compact_hash_delta_if_needed()
             })();
             if let Err(error) = persist_result {
                 self.restore_git_commit(previous_git_commit.as_deref())?;
@@ -2855,10 +2887,10 @@ impl Engine {
                 return Err(error);
             }
             published_paths = outcome.successful_paths.clone();
-        } else if had_hash_delta {
-            self.ensure_working_generation()?;
-            self.fold_hash_snapshot(&current_hashes)?;
-        } else if skipped_by_mtime != unchanged {
+            let _ = (old_hashes, std::mem::take(&mut current_hashes));
+        } else if !had_hash_delta && skipped_by_mtime != unchanged {
+            // See the non-progress sync path: never fold deltas on a content
+            // no-op (interleaved no-op/one-file gate would rewrite O(N) bytes).
             self.ensure_working_generation()?;
             self.store.save_tree_hashes_v2(&current_hashes)?;
         }

@@ -22,9 +22,20 @@ pub(crate) fn call_index_status(engine: &Engine) -> (String, bool) {
             stats.vector_count, config.embedding.model, config.embedding.contextual_embeddings
         )
     } else if config.embedding.enabled {
-        "0 vectors \u{2014} index was built without embeddings; re-run `codixing init .` to enable semantic search".to_string()
+        if engine.embeddings_failed() {
+            "SEMANTIC UNAVAILABLE \u{2014} embedding model failed to load (set ORT_DYLIB_PATH to the absolute onnxruntime shared library, then re-run `codixing init . --embed` or `codixing embed`)".to_string()
+        } else {
+            let (done, total) = engine.embedding_progress();
+            if total > 0 && done < total {
+                format!(
+                    "embedding in progress ({done}/{total}) \u{2014} hybrid search will activate when vectors finish"
+                )
+            } else {
+                "0 vectors \u{2014} index was built without embeddings; re-run `codixing init . --embed` (requires ORT_DYLIB_PATH) to enable semantic search".to_string()
+            }
+        }
     } else {
-        "disabled (BM25-only mode)".to_string()
+        "disabled (BM25-only mode, intentional). Hybrid/semantic strategies need `codixing init --embed` + ORT_DYLIB_PATH".to_string()
     };
 
     let graph_status = if stats.graph_node_count > 0 {

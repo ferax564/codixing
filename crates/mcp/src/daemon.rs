@@ -5,8 +5,8 @@
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -14,9 +14,11 @@ use tokio::io::{AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{info, warn};
 
-use codixing_core::{Engine, FederatedEngine};
+use codixing_core::FederatedEngine;
 
-use crate::jsonrpc::{McpProfile, run_jsonrpc_loop};
+use crate::jsonrpc::{
+    McpProfile, SharedEngine, run_jsonrpc_loop, with_ready_engine_mut, with_ready_engine_ref,
+};
 
 // ---------------------------------------------------------------------------
 // Idle timeout watchdog
@@ -44,7 +46,7 @@ pub(crate) fn touch_activity() {
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn run_daemon(
-    engine: Arc<RwLock<Engine>>,
+    engine: SharedEngine,
     socket_path: &Path,
     federation: Option<Arc<FederatedEngine>>,
     profile: McpProfile,
@@ -92,10 +94,9 @@ pub(crate) async fn run_daemon(
                 .unwrap()
                 .as_millis() as u64;
             if now.saturating_sub(last) > IDLE_TIMEOUT_MS {
-                let mut engine = engine_for_idle
-                    .write()
-                    .unwrap_or_else(|error| error.into_inner());
-                if let Err(error) = engine.checkpoint_pending_changes() {
+                if let Some(Err(error)) = with_ready_engine_mut(&engine_for_idle, |engine| {
+                    engine.checkpoint_pending_changes()
+                }) {
                     warn!(%error, "daemon: final idle checkpoint failed; recovery journal retained");
                 }
                 info!("daemon idle for >30 min — shutting down");
@@ -117,11 +118,24 @@ pub(crate) async fn run_daemon(
     //    (which block search queries).
     let engine_for_watch = Arc::clone(&engine);
     tokio::task::spawn_blocking(move || {
-        let config = engine_for_watch
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .config()
-            .clone();
+        // Wait for background auto-init to finish before watching files.
+        let config = loop {
+            match with_ready_engine_ref(&engine_for_watch, |eng| eng.config().clone()) {
+                Some(config) => break config,
+                None => {
+                    // Failed init — no point watching.
+                    let failed = matches!(
+                        &*engine_for_watch.read().unwrap_or_else(|e| e.into_inner()),
+                        crate::jsonrpc::EngineSlot::Failed(_)
+                    );
+                    if failed {
+                        warn!("daemon: index init failed — file watcher not started");
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        };
 
         let watcher = match codixing_core::watcher::FileWatcher::new(&config.root, &config) {
             Ok(w) => w,
@@ -134,11 +148,10 @@ pub(crate) async fn run_daemon(
         // Register the watcher first so edits made during recovery are queued
         // and drained by the normal settlement loop instead of falling into a
         // startup blind spot.
+        if let Some(Err(error)) =
+            with_ready_engine_mut(&engine_for_watch, |eng| eng.apply_changes(&[]))
         {
-            let mut eng = engine_for_watch.write().unwrap_or_else(|e| e.into_inner());
-            if let Err(error) = eng.apply_changes(&[]) {
-                warn!(%error, "daemon: failed to recover pending index changes");
-            }
+            warn!(%error, "daemon: failed to recover pending index changes");
         }
 
         info!(root = %config.root.display(), "daemon: file watcher started");
@@ -150,21 +163,19 @@ pub(crate) async fn run_daemon(
             let changes = watcher.poll_changes(Duration::from_secs(2));
             if changes.is_empty() {
                 if pending_since.is_some_and(|started| started.elapsed() >= CHECKPOINT_IDLE) {
-                    let mut eng = engine_for_watch
-                        .write()
-                        .unwrap_or_else(|error| error.into_inner());
                     // `apply_changes` always attempts publication even when a
                     // retried path fails, so successful siblings cannot remain
                     // stranded behind one persistent error.
-                    match eng.apply_changes(&[]) {
-                        Ok(()) => {
+                    match with_ready_engine_mut(&engine_for_watch, |eng| eng.apply_changes(&[])) {
+                        Some(Ok(())) => {
                             pending_since = None;
                             pending_paths = 0;
                             info!("daemon: idle index checkpoint published");
                         }
-                        Err(error) => {
+                        Some(Err(error)) => {
                             warn!(%error, "daemon: idle index checkpoint failed; will retry");
                         }
+                        None => {}
                     }
                 }
                 continue;
@@ -202,27 +213,32 @@ pub(crate) async fn run_daemon(
                 "daemon: file changes detected, updating index"
             );
             let changed_path_count = all_changes.len();
-            let mut eng = engine_for_watch.write().unwrap_or_else(|e| e.into_inner());
-            let apply_result = eng.apply_changes_deferred(&all_changes);
             pending_since.get_or_insert_with(std::time::Instant::now);
             pending_paths = pending_paths.saturating_add(changed_path_count);
-            if let Err(error) = apply_result {
-                warn!(%error, "daemon: deferred apply failed; journal retained for retry");
-            }
 
             let checkpoint_due = pending_paths >= CHECKPOINT_MAX_PATHS
                 || pending_since.is_some_and(|started| started.elapsed() >= CHECKPOINT_MAX_AGE);
-            if checkpoint_due {
-                match eng.checkpoint_pending_changes() {
-                    Ok(()) => {
-                        pending_since = None;
-                        pending_paths = 0;
-                        info!("daemon: bounded index checkpoint published");
-                    }
-                    Err(error) => {
-                        warn!(%error, "daemon: bounded index checkpoint failed; will retry");
-                    }
+
+            let publish_ok = with_ready_engine_mut(&engine_for_watch, |eng| {
+                if let Err(error) = eng.apply_changes_deferred(&all_changes) {
+                    warn!(%error, "daemon: deferred apply failed; journal retained for retry");
                 }
+                if checkpoint_due {
+                    match eng.checkpoint_pending_changes() {
+                        Ok(()) => true,
+                        Err(error) => {
+                            warn!(%error, "daemon: bounded index checkpoint failed; will retry");
+                            false
+                        }
+                    }
+                } else {
+                    false
+                }
+            });
+            if publish_ok == Some(true) {
+                pending_since = None;
+                pending_paths = 0;
+                info!("daemon: bounded index checkpoint published");
             }
         }
     });
@@ -258,7 +274,7 @@ fn restrict_socket_permissions(socket_path: &Path) -> Result<()> {
 /// Handle one client connection: run a JSON-RPC loop over the socket stream.
 pub(crate) async fn handle_socket_connection(
     stream: UnixStream,
-    engine: Arc<RwLock<Engine>>,
+    engine: SharedEngine,
     federation: Option<Arc<FederatedEngine>>,
     profile: McpProfile,
     profile_ceiling: McpProfile,
