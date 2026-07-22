@@ -763,6 +763,17 @@ def disk_usage(snapshot: dict[str, DiskEntry]) -> dict[str, Any]:
     }
 
 
+def is_control_plane_artifact(relative: str) -> bool:
+    """Locks/leases are not searchable index state; ignore them for rewrite amp."""
+    name = Path(relative).name
+    return name in {
+        "writer.lock",
+        "writer.lock.owner",
+        "rebuild.lock",
+        "generation.lease",
+    }
+
+
 def rewritten_bytes_estimate(
     before: dict[str, DiskEntry], after: dict[str, DiskEntry]
 ) -> int:
@@ -772,6 +783,8 @@ def rewritten_bytes_estimate(
     estimate remains useful on macOS and Windows. Inode identity prevents a new
     generation's unchanged hardlinks from masquerading as rewritten data, and
     allocated size avoids charging sparse-file holes as physical bytes.
+    Control-plane locks/leases are excluded so holder-identity sidecars do not
+    fail the no-op rewrite gate at one filesystem block per CLI process.
     """
     before_inodes = {
         (entry.device, entry.inode): (
@@ -779,11 +792,14 @@ def rewritten_bytes_estimate(
             entry.mtime_ns,
             entry.allocated_bytes,
         )
-        for entry in before.values()
+        for relative, entry in before.items()
+        if not is_control_plane_artifact(relative)
     }
     rewritten = 0
     seen: set[tuple[int, int]] = set()
-    for current in after.values():
+    for relative, current in after.items():
+        if is_control_plane_artifact(relative):
+            continue
         inode = (current.device, current.inode)
         if inode in seen:
             continue
