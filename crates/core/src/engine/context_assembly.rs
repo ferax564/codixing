@@ -78,6 +78,148 @@ impl AgentContextMode {
             Self::Incident => "incident",
         }
     }
+
+    /// Infer a workflow mode from natural-language task text.
+    ///
+    /// Keyword cues beat word-count heuristics so short edit/debug prompts
+    /// (`fix crash in sync`, `add dry-run flag`) land on the right pack shape.
+    /// When no cue matches, short tasks default to [`Self::Locate`] and longer
+    /// phrasing to [`Self::Understand`].
+    pub fn infer_from_task(task: &str) -> Self {
+        let lower = task.to_ascii_lowercase();
+        let tokens: Vec<&str> = lower
+            .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+            .filter(|t| !t.is_empty())
+            .collect();
+        let has = |words: &[&str]| {
+            words.iter().any(|word| {
+                if word.contains(' ') {
+                    lower.contains(word)
+                } else {
+                    tokens.iter().any(|token| token == word)
+                }
+            })
+        };
+
+        if has(&[
+            "incident",
+            "outage",
+            "prod",
+            "production",
+            "oncall",
+            "on-call",
+            "sev",
+            "p0",
+            "p1",
+            "regression in prod",
+        ]) {
+            return Self::Incident;
+        }
+        if has(&[
+            "migrate",
+            "migration",
+            "upgrade",
+            "rename across",
+            "rollout",
+            "deprecate",
+        ]) {
+            return Self::Migrate;
+        }
+        if has(&[
+            "review",
+            "pr",
+            "pull request",
+            "diff",
+            "lgtm",
+            "code review",
+        ]) {
+            return Self::Review;
+        }
+        if has(&[
+            "test",
+            "tests",
+            "unittest",
+            "unit test",
+            "coverage",
+            "assert",
+            "pytest",
+            "cargo test",
+        ]) {
+            return Self::Test;
+        }
+        if has(&[
+            "fix",
+            "bug",
+            "debug",
+            "crash",
+            "error",
+            "failing",
+            "broken",
+            "investigate",
+            "root cause",
+            "why is",
+            "stack trace",
+            "panic",
+        ]) {
+            // Debugging is closer to incident/edit workflows than pure locate.
+            return Self::Incident;
+        }
+        if has(&[
+            "edit",
+            "change",
+            "add",
+            "implement",
+            "update",
+            "modify",
+            "refactor",
+            "wire",
+            "introduce",
+            "create",
+            "write",
+            "patch",
+            "remove",
+            "delete",
+            "rename",
+        ]) {
+            return Self::Edit;
+        }
+        if has(&[
+            "how does",
+            "how do",
+            "explain",
+            "understand",
+            "walk through",
+            "what is",
+            "what does",
+            "overview",
+            "architecture",
+            "why does",
+            "choose",
+            "chosen",
+            "selects",
+            "selection",
+            "modes",
+            "mode",
+        ]) {
+            return Self::Understand;
+        }
+        if has(&[
+            "find",
+            "where is",
+            "locate",
+            "search for",
+            "look for",
+            "which file",
+        ]) {
+            return Self::Locate;
+        }
+
+        if tokens.len() <= 6 {
+            Self::Locate
+        } else {
+            Self::Understand
+        }
+    }
 }
 
 impl FromStr for AgentContextMode {
@@ -389,6 +531,56 @@ fn search_limit_for_mode(mode: AgentContextMode, token_budget: usize) -> usize {
     mode_limit.min((token_budget / 300).clamp(4, 16))
 }
 
+/// Extract identifier-like tokens from a task for symbol-table boosting.
+fn task_identifier_candidates(task: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for raw in task.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':')) {
+        let token = raw.trim_matches(':');
+        if token.len() < 3 {
+            continue;
+        }
+        // Prefer CamelCase / snake_case / path-like identifiers over prose words.
+        let looks_ident = token.contains('_')
+            || token.contains(':')
+            || token.chars().any(|c| c.is_ascii_uppercase())
+            || token.chars().any(|c| c.is_ascii_digit());
+        if !looks_ident && token.len() < 8 {
+            continue;
+        }
+        let key = token.to_ascii_lowercase();
+        if seen.insert(key) {
+            out.push(token.to_string());
+        }
+        if out.len() >= 8 {
+            break;
+        }
+    }
+    out
+}
+
+fn is_definition_entity(kind: &crate::language::EntityKind) -> bool {
+    use crate::language::EntityKind;
+    !matches!(kind, EntityKind::Import)
+}
+
+fn demote_test_path_score(path: &str, score: f32) -> f32 {
+    if path.contains("/test")
+        || path.contains("/tests/")
+        || path.contains("__tests__")
+        || path.ends_with("_test.rs")
+        || path.ends_with("_test.go")
+        || path.ends_with(".test.ts")
+        || path.ends_with(".test.tsx")
+        || path.ends_with(".spec.ts")
+        || path.ends_with(".spec.tsx")
+    {
+        score * 0.55
+    } else {
+        score
+    }
+}
+
 fn update_pack_token_estimate(pack: &mut AgentContextPack) {
     pack.total_estimated_tokens = 0;
     pack.total_estimated_tokens = serde_json::to_string(pack)
@@ -464,12 +656,81 @@ impl Engine {
     ) -> Result<AgentContextPack> {
         let token_budget = token_budget.max(256);
         let limit = search_limit_for_mode(mode, token_budget);
+        let identifiers = task_identifier_candidates(task);
+        // Prefer definition-first goto when the task names concrete identifiers.
         let strategy = match mode {
-            AgentContextMode::Locate => Strategy::Instant,
+            AgentContextMode::Locate if identifiers.is_empty() => Strategy::Instant,
+            AgentContextMode::Locate => Strategy::Goto,
+            AgentContextMode::Understand | AgentContextMode::Edit | AgentContextMode::Incident
+                if !identifiers.is_empty() =>
+            {
+                Strategy::Goto
+            }
             _ => self.detect_strategy(task),
         };
 
-        let results = self.search_agent_task(task, limit, strategy, DocFilter::CodeOnly)?;
+        let mut results = self.search_agent_task(task, limit, strategy, DocFilter::CodeOnly)?;
+        // Definition boost: pin symbol-table hits for identifier tokens ahead of
+        // BM25 chunks (which often surface tests/usages before the defining span).
+        let mut definition_hits = Vec::new();
+        for ident in &identifiers {
+            let mut symbols = self.symbols.filter(ident, None);
+            let ident_lower = ident.to_ascii_lowercase();
+            symbols.retain(|s| {
+                if !is_definition_entity(&s.kind) {
+                    return false;
+                }
+                let name_lower = s.name.to_ascii_lowercase();
+                name_lower == ident_lower || name_lower.contains(&ident_lower)
+            });
+            symbols.sort_by(|a, b| {
+                let a_exact = a.name.eq_ignore_ascii_case(ident) as i32;
+                let b_exact = b.name.eq_ignore_ascii_case(ident) as i32;
+                b_exact
+                    .cmp(&a_exact)
+                    .then_with(|| a.line_start.cmp(&b.line_start))
+            });
+            for symbol in symbols.into_iter().take(3) {
+                let content = self
+                    .read_file_range(
+                        &symbol.file_path,
+                        Some(symbol.line_start as u64),
+                        Some(symbol.line_end as u64),
+                    )?
+                    .unwrap_or_default();
+                let score = if symbol.name.eq_ignore_ascii_case(ident) {
+                    50_000.0
+                } else {
+                    25_000.0
+                };
+                definition_hits.push(SearchResult {
+                    chunk_id: format!(
+                        "agent-def:{}:{}:{}",
+                        symbol.file_path, symbol.name, symbol.line_start
+                    ),
+                    file_path: symbol.file_path.clone(),
+                    language: symbol.language.name().to_string(),
+                    score: demote_test_path_score(&symbol.file_path, score),
+                    line_start: symbol.line_start as u64,
+                    line_end: (symbol.line_end as u64).saturating_add(1),
+                    signature: symbol.signature.clone().unwrap_or_default(),
+                    scope_chain: symbol.scope.clone(),
+                    content,
+                });
+            }
+        }
+        if !definition_hits.is_empty() {
+            definition_hits.extend(results);
+            results = definition_hits;
+        }
+        for result in &mut results {
+            result.score = demote_test_path_score(&result.file_path, result.score);
+        }
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let mut selected = Vec::new();
         let mut seen_locations = HashSet::new();
@@ -1319,6 +1580,78 @@ mod tests {
         assert!(
             span < 400,
             "primary chunk should have been sliced down (span={span})"
+        );
+    }
+
+    #[test]
+    fn agent_context_mode_infers_from_task_cues() {
+        assert_eq!(
+            AgentContextMode::infer_from_task("how does agent context pack choose modes"),
+            AgentContextMode::Understand
+        );
+        assert_eq!(
+            AgentContextMode::infer_from_task("add dry-run flag to init"),
+            AgentContextMode::Edit
+        );
+        assert_eq!(
+            AgentContextMode::infer_from_task("fix crash in sync"),
+            AgentContextMode::Incident
+        );
+        assert_eq!(
+            AgentContextMode::infer_from_task("review this PR"),
+            AgentContextMode::Review
+        );
+        assert_eq!(
+            AgentContextMode::infer_from_task("AgentContextMode"),
+            AgentContextMode::Locate
+        );
+    }
+
+    #[test]
+    fn agent_context_pack_prefers_symbol_definitions() {
+        use crate::{Engine, IndexConfig};
+        use std::fs;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("tests")).unwrap();
+        fs::write(
+            root.join("src/mode.rs"),
+            "pub enum AgentContextMode {\n    Locate,\n    Understand,\n}\n\nimpl AgentContextMode {\n    pub fn infer_from_task(task: &str) -> Self {\n        let _ = task;\n        Self::Locate\n    }\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("tests/mode_test.rs"),
+            "#[test]\nfn agent_context_mode_works() {\n    let _ = crate::mode::AgentContextMode::Locate;\n}\n",
+        )
+        .unwrap();
+
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+        let engine = Engine::init(&root, config).unwrap();
+        let pack = engine
+            .agent_context_pack(
+                "how does AgentContextMode choose modes",
+                AgentContextMode::Understand,
+                2500,
+                &[],
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(
+            pack.must_read
+                .iter()
+                .any(|entry| entry.path == "src/mode.rs"),
+            "definition file should rank in must_read: {pack:#?}"
+        );
+        assert!(
+            pack.must_read
+                .first()
+                .is_some_and(|entry| entry.path == "src/mode.rs"),
+            "definition should outrank tests: {pack:#?}"
         );
     }
 

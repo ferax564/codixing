@@ -14,6 +14,70 @@ use crate::graph::GraphData;
 /// Process-global counter making atomic-write temp filenames unique across threads.
 static ATOMIC_WRITE_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Snapshot of the repository-wide writer lease for doctor and lock UX.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriterLockStatus {
+    pub path: String,
+    pub held: bool,
+    pub pid: Option<u32>,
+    pub exe: Option<String>,
+    pub pid_alive: Option<bool>,
+    pub detail: Option<String>,
+}
+
+fn write_writer_lock_identity(lock: &fs::File) {
+    use std::io::{Seek, SeekFrom};
+    let pid = std::process::id();
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let body = format!("{pid}\n{exe}\n");
+    // Best-effort identity only — exclusive lock is the real ownership signal.
+    let _ = (|| -> std::io::Result<()> {
+        let mut file = lock.try_clone()?;
+        file.set_len(0)?;
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(body.as_bytes())?;
+        file.sync_data()?;
+        Ok(())
+    })();
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        // signal 0 checks existence without delivering a signal.
+        let rc = unsafe { libc::kill(pid as i32, 0) };
+        if rc == 0 {
+            return true;
+        }
+        // EPERM means the process exists but we cannot signal it.
+        let err = std::io::Error::last_os_error();
+        err.raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output();
+        match output {
+            Ok(out) => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                text.contains(&pid.to_string())
+            }
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
 /// Process-global counter making generation names unique when multiple rebuilds
 /// start within the same clock tick.
 static GENERATION_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -927,6 +991,7 @@ impl IndexStore {
             .truncate(false)
             .open(control_dir.join(WRITER_LOCK_FILE))?;
         if FileExt::try_lock_exclusive(&lock)? {
+            write_writer_lock_identity(&lock);
             Ok(Some(lock))
         } else {
             Ok(None)
@@ -946,7 +1011,78 @@ impl IndexStore {
             .truncate(false)
             .open(control_dir.join(WRITER_LOCK_FILE))?;
         FileExt::lock_exclusive(&lock)?;
+        write_writer_lock_identity(&lock);
         Ok(lock)
+    }
+
+    /// Best-effort identity of the process holding `writer.lock`.
+    ///
+    /// The OS exclusive lock is authoritative; the file body is advisory so
+    /// doctor and lock-error messages can name the holder without racing the
+    /// lock itself.
+    pub fn writer_lock_status(root: &Path) -> WriterLockStatus {
+        let path = root.join(CODEFORGE_DIR).join(WRITER_LOCK_FILE);
+        if !path.exists() {
+            return WriterLockStatus {
+                path: path.display().to_string(),
+                held: false,
+                pid: None,
+                exe: None,
+                pid_alive: None,
+                detail: Some("lock file not present".to_string()),
+            };
+        }
+
+        let held = match fs::OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(file) => match FileExt::try_lock_exclusive(&file) {
+                Ok(true) => {
+                    // We briefly acquired the lock — nobody else holds it.
+                    let _ = FileExt::unlock(&file);
+                    false
+                }
+                Ok(false) => true,
+                Err(error) => {
+                    return WriterLockStatus {
+                        path: path.display().to_string(),
+                        held: true,
+                        pid: None,
+                        exe: None,
+                        pid_alive: None,
+                        detail: Some(format!("lock probe failed: {error}")),
+                    };
+                }
+            },
+            Err(error) => {
+                return WriterLockStatus {
+                    path: path.display().to_string(),
+                    held: true,
+                    pid: None,
+                    exe: None,
+                    pid_alive: None,
+                    detail: Some(format!("cannot open lock file: {error}")),
+                };
+            }
+        };
+
+        let body = fs::read_to_string(&path).unwrap_or_default();
+        let mut lines = body.lines();
+        let pid = lines
+            .next()
+            .and_then(|line| line.trim().parse::<u32>().ok());
+        let exe = lines
+            .next()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let pid_alive = pid.map(process_is_alive);
+        WriterLockStatus {
+            path: path.display().to_string(),
+            held,
+            pid,
+            exe,
+            pid_alive,
+            detail: None,
+        }
     }
 
     /// Fork the currently loaded snapshot into an unpublished working

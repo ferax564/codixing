@@ -20,12 +20,27 @@ MOCK_BIN="$TMP/mock-bin"
 INSTALL_DIR="$TMP/install dir"
 mkdir -p "$FIXTURES" "$MOCK_BIN" "$INSTALL_DIR"
 
-SUFFIX=linux-x86_64
-BINARIES=(codixing codixing-mcp codixing-lsp codixing-server)
+# Match the installer's platform detection so fixtures work on macOS CI hosts
+# as well as Ubuntu.
+OS=$(uname -s)
+ARCH=$(uname -m)
+case "${OS}-${ARCH}" in
+  Linux-x86_64)  SUFFIX=linux-x86_64 ;;
+  Darwin-arm64)  SUFFIX=macos-aarch64 ;;
+  *)
+    echo "unsupported test platform: ${OS}-${ARCH}" >&2
+    exit 1
+    ;;
+esac
+# Release always publishes all four; default install selects a lean subset.
+ALL_BINARIES=(codixing codixing-mcp codixing-lsp codixing-server)
+DEFAULT_BINARIES=(codixing codixing-mcp)
+# Track which suite is currently expected on disk for hash/assert helpers.
+ACTIVE_BINARIES=("${DEFAULT_BINARIES[@]}")
 
 rebuild_manifest() {
   : > "$FIXTURES/SHA256SUMS"
-  for bin in "${BINARIES[@]}"; do
+  for bin in "${ALL_BINARIES[@]}"; do
     asset="${bin}-${SUFFIX}"
     printf '%s  %s\n' "$(sha256sum "$FIXTURES/$asset" | awk '{print $1}')" "$asset" \
       >> "$FIXTURES/SHA256SUMS"
@@ -35,7 +50,7 @@ rebuild_manifest() {
 make_assets() {
   mode=$1
   label=$2
-  for bin in "${BINARIES[@]}"; do
+  for bin in "${ALL_BINARIES[@]}"; do
     asset="${bin}-${SUFFIX}"
     if [[ "$mode" == smoke-fail && "$bin" == codixing ]]; then
       printf '%s\n' \
@@ -59,22 +74,56 @@ make_assets() {
   rebuild_manifest
 }
 
-declare -A before
+# Hash snapshots as "name=hash" lines so bash 3.2 (macOS) works without
+# associative arrays. CI uses modern bash; this path stays portable.
+BEFORE_HASHES=""
 record_installed_hashes() {
-  for bin in "${BINARIES[@]}"; do
-    before[$bin]=$(sha256sum "$INSTALL_DIR/$bin" | awk '{print $1}')
+  BEFORE_HASHES=""
+  local bin hash
+  for bin in "${ACTIVE_BINARIES[@]}"; do
+    hash=$(sha256sum "$INSTALL_DIR/$bin" | awk '{print $1}')
+    BEFORE_HASHES="${BEFORE_HASHES}${bin}=${hash}"$'
+'
+  done
+}
+
+lookup_before_hash() {
+  local bin=$1
+  printf '%s' "$BEFORE_HASHES" | while IFS= read -r line; do
+    case "$line" in
+      "${bin}="*) printf '%s
+' "${line#*=}"; return 0 ;;
+    esac
   done
 }
 
 assert_install_unchanged() {
-  for bin in "${BINARIES[@]}"; do
+  local bin after expected
+  for bin in "${ACTIVE_BINARIES[@]}"; do
     after=$(sha256sum "$INSTALL_DIR/$bin" | awk '{print $1}')
-    [[ "$after" == "${before[$bin]}" ]]
+    expected=$(lookup_before_hash "$bin")
+    [[ -n "$expected" && "$after" == "$expected" ]]
   done
   for entry in "$INSTALL_DIR"/.codixing-stage.* "$INSTALL_DIR"/.codixing-backup.*; do
     [[ ! -e "$entry" ]]
   done
   [[ ! -e "$INSTALL_DIR/.codixing-install.lock" ]]
+}
+
+assert_only_selected_installed() {
+  local -a selected=("$@")
+  for bin in "${selected[@]}"; do
+    [[ -x "$INSTALL_DIR/$bin" ]]
+  done
+  for bin in "${ALL_BINARIES[@]}"; do
+    local wanted=0
+    for s in "${selected[@]}"; do
+      [[ "$s" == "$bin" ]] && wanted=1 && break
+    done
+    if [[ "$wanted" -eq 0 ]]; then
+      [[ ! -e "$INSTALL_DIR/$bin" ]]
+    fi
+  done
 }
 
 make_assets normal 9.9.9
@@ -157,13 +206,23 @@ export CODIXING_TEST_FIXTURES="$FIXTURES"
 export CODIXING_INSTALL_DIR="$INSTALL_DIR"
 export CODIXING_VERSION=9.9.9
 export PATH="$MOCK_BIN:$PATH"
+# Default lean install (CLI + MCP only).
+unset CODIXING_COMPONENTS || true
 
+# --- Default 2-binary lean install ------------------------------------------
 sh "$ROOT/docs/install.sh" >/dev/null
-for bin in "${BINARIES[@]}"; do
-  [[ -x "$INSTALL_DIR/$bin" ]]
-done
+ACTIVE_BINARIES=("${DEFAULT_BINARIES[@]}")
+assert_only_selected_installed "${DEFAULT_BINARIES[@]}"
 "$INSTALL_DIR/codixing" --version | grep -q 'codixing 9.9.9'
 "$INSTALL_DIR/codixing-mcp" --version | grep -q 'codixing-mcp 9.9.9'
+
+# Unknown CODIXING_COMPONENTS must fail closed without touching the suite.
+record_installed_hashes
+if CODIXING_COMPONENTS=codixing,not-a-binary sh "$ROOT/docs/install.sh" >/dev/null 2>&1; then
+  echo "expected unknown component to fail" >&2
+  exit 1
+fi
+assert_install_unchanged
 
 # Hold the first installer deterministically inside its checksum download. A
 # concurrent installer must fail before downloading or touching the published
@@ -266,10 +325,10 @@ if sh "$ROOT/docs/install.sh" >/dev/null 2>&1; then
 fi
 assert_install_unchanged
 
-# A failure partway through the four renames restores every previous binary,
+# A failure partway through the lean renames restores every previous binary,
 # including those already published earlier in the transaction.
 make_assets normal publication-candidate
-if CODIXING_TEST_FAIL_PUBLISH=codixing-lsp \
+if CODIXING_TEST_FAIL_PUBLISH=codixing-mcp \
     sh "$ROOT/docs/install.sh" >/dev/null 2>&1; then
   echo "expected publication failure to fail" >&2
   exit 1
@@ -280,12 +339,12 @@ assert_install_unchanged
 # or first-time installation.
 EMPTY_INSTALL_DIR="$TMP/empty-install"
 mkdir -p "$EMPTY_INSTALL_DIR"
-if CODIXING_INSTALL_DIR="$EMPTY_INSTALL_DIR" CODIXING_TEST_FAIL_PUBLISH=codixing-lsp \
+if CODIXING_INSTALL_DIR="$EMPTY_INSTALL_DIR" CODIXING_TEST_FAIL_PUBLISH=codixing-mcp \
     sh "$ROOT/docs/install.sh" >/dev/null 2>&1; then
   echo "expected first-install publication failure to fail" >&2
   exit 1
 fi
-for bin in "${BINARIES[@]}"; do
+for bin in "${DEFAULT_BINARIES[@]}"; do
   [[ ! -e "$EMPTY_INSTALL_DIR/$bin" ]]
 done
 for entry in "$EMPTY_INSTALL_DIR"/.codixing-stage.* "$EMPTY_INSTALL_DIR"/.codixing-backup.*; do
@@ -300,5 +359,45 @@ if sh "$ROOT/docs/install.sh" >/dev/null 2>&1; then
   exit 1
 fi
 assert_install_unchanged
+
+# --- Full four-binary suite (CODIXING_COMPONENTS=all) ------------------------
+make_assets normal all-suite
+export CODIXING_COMPONENTS=all
+sh "$ROOT/docs/install.sh" >/dev/null
+ACTIVE_BINARIES=("${ALL_BINARIES[@]}")
+assert_only_selected_installed "${ALL_BINARIES[@]}"
+"$INSTALL_DIR/codixing" --version | grep -q 'codixing 9.9.9'
+"$INSTALL_DIR/codixing-mcp" --version | grep -q 'codixing-mcp 9.9.9'
+
+# Publication failure mid-suite with all four restores previous binaries.
+record_installed_hashes
+make_assets normal all-publication-candidate
+if CODIXING_TEST_FAIL_PUBLISH=codixing-lsp \
+    sh "$ROOT/docs/install.sh" >/dev/null 2>&1; then
+  echo "expected full-suite publication failure to fail" >&2
+  exit 1
+fi
+assert_install_unchanged
+
+# Explicit component list matches `all` for the four known names.
+export CODIXING_COMPONENTS=codixing,codixing-mcp,codixing-lsp,codixing-server
+make_assets normal explicit-all
+sh "$ROOT/docs/install.sh" >/dev/null
+assert_only_selected_installed "${ALL_BINARIES[@]}"
+
+# Single-component install (CLI only) still version-checks codixing alone.
+SINGLE_DIR="$TMP/single-install"
+mkdir -p "$SINGLE_DIR"
+make_assets normal single-cli
+if ! CODIXING_INSTALL_DIR="$SINGLE_DIR" CODIXING_COMPONENTS=codixing \
+    sh "$ROOT/docs/install.sh" >/dev/null 2>&1; then
+  echo "expected single-component install to succeed" >&2
+  exit 1
+fi
+[[ -x "$SINGLE_DIR/codixing" ]]
+[[ ! -e "$SINGLE_DIR/codixing-mcp" ]]
+[[ ! -e "$SINGLE_DIR/codixing-lsp" ]]
+[[ ! -e "$SINGLE_DIR/codixing-server" ]]
+"$SINGLE_DIR/codixing" --version | grep -q 'codixing 9.9.9'
 
 echo "shell installer tests passed"

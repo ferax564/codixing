@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.48.0] - 2026-07-22
+
+### Added
+
+- **`codixing init --dry-run`** — inventory indexable files/bytes/languages and
+  free disk before writing an index (`--json` supported).
+- **Lean shell install default** — `docs/install.sh` installs `codixing` +
+  `codixing-mcp` only; set `CODIXING_COMPONENTS=all` for LSP/server too.
+- **MCP non-blocking auto-init** — missing-index servers accept
+  `initialize`/`tools/list` while BM25 init runs in the background; tool calls
+  return a retryable "building" message until ready.
+- **Doctor diagnostics** — free filesystem space, writer-lock owner (pid/exe),
+  ONNX/semantic recommendations, optional `--check-update`, and `--fix` repair
+  shortcut.
+- **`ask` mode inference + definition boost** — keyword-aware mode selection and
+  symbol-table definition pinning so conceptual queries surface defining spans
+  ahead of tests/usages.
+- **Large-repo gate multi-reader matrix** — records concurrent 1/8/32 reader
+  client latencies against the resident server during warm-query measurement.
+
+### Changed
+
+- **Faster CI feedback** — cancel superseded runs via workflow concurrency, and
+  drop the redundant debug `cargo build` step before `cargo test` (tests already
+  compile the workspace).
+
+### Fixed
+
+- **CLI one-file sync rewrite amp** — filesystem sync now publishes successful
+  file hashes as a delta (matching git/daemon paths) instead of folding the full
+  `tree_hashes_v2` snapshot on every one-file edit.
+- **Large-repo incremental PageRank cost** — skip full-graph PageRank recompute
+  on tiny structural batches when the repository is large; edge structure still
+  persists.
+
 ## [0.47.1] - 2026-07-21
 
 ### Fixed

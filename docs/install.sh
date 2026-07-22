@@ -3,7 +3,8 @@ set -eu
 
 REPO="ferax564/codixing"
 VERSION="${CODIXING_VERSION-latest}"
-BINARIES="codixing codixing-mcp codixing-lsp codixing-server"
+# Full release suite. Default installs are lean (CLI + MCP only).
+ALL_BINARIES="codixing codixing-mcp codixing-lsp codixing-server"
 MAX_MANIFEST_BYTES=1048576
 MAX_BINARY_BYTES=268435456
 
@@ -47,17 +48,86 @@ binary_version() {
   printf '%s\n' "$detected"
 }
 
+is_known_component() {
+  case "$1" in
+    codixing|codixing-mcp|codixing-lsp|codixing-server) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+component_selected() {
+  case " ${BINARIES} " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Resolve CODIXING_COMPONENTS into a space-separated BINARIES list.
+# Default: codixing,codixing-mcp (lean install — 50% fewer binaries).
+# CODIXING_COMPONENTS=all installs the full four-binary suite.
+# Explicit lists: CODIXING_COMPONENTS=codixing,codixing-mcp,codixing-lsp,codixing-server
+resolve_components() {
+  raw=$1
+  case "$raw" in
+    all|ALL)
+      printf '%s\n' "$ALL_BINARIES"
+      return 0
+      ;;
+  esac
+
+  # Accept comma- and/or whitespace-separated names.
+  normalized=$(printf '%s' "$raw" | tr ',\t' '  ')
+  selected=""
+  for token in $normalized; do
+    [ -n "$token" ] || continue
+    is_known_component "$token" \
+      || fail "unknown CODIXING_COMPONENTS entry '${token}' (valid: codixing, codixing-mcp, codixing-lsp, codixing-server, or all)"
+    case " ${selected} " in
+      *" ${token} "*) continue ;;
+    esac
+    if [ -z "$selected" ]; then
+      selected=$token
+    else
+      selected="${selected} ${token}"
+    fi
+  done
+  [ -n "$selected" ] || fail "CODIXING_COMPONENTS resolved to an empty set"
+  printf '%s\n' "$selected"
+}
+
+BINARIES=$(resolve_components "${CODIXING_COMPONENTS:-codixing,codixing-mcp}")
+COMPONENTS_LABEL=$(printf '%s' "$BINARIES" | tr ' ' ',')
+
+# Only the CLI and MCP executables expose a side-effect-free --version command.
+# Verify whichever of those are in the selected component set (not both unless
+# both were selected). LSP/server probes are unsafe and are never executed.
 verify_versioned_binaries() {
   directory=$1
-  cli_version=$(binary_version "${directory%/}/codixing") \
-    || fail "codixing did not report a valid version"
-  mcp_version=$(binary_version "${directory%/}/codixing-mcp") \
-    || fail "codixing-mcp did not report a valid version"
-  [ "$cli_version" = "$mcp_version" ] \
-    || fail "release suite version mismatch: codixing ${cli_version}, codixing-mcp ${mcp_version}"
-  if [ "$VERSION" != latest ]; then
-    [ "$cli_version" = "$VERSION" ] \
-      || fail "release suite reports ${cli_version}, expected ${VERSION}"
+  suite_version=""
+  checked=0
+
+  if component_selected codixing; then
+    cli_version=$(binary_version "${directory%/}/codixing") \
+      || fail "codixing did not report a valid version"
+    suite_version=$cli_version
+    checked=1
+  fi
+
+  if component_selected codixing-mcp; then
+    mcp_version=$(binary_version "${directory%/}/codixing-mcp") \
+      || fail "codixing-mcp did not report a valid version"
+    if [ "$checked" -eq 1 ]; then
+      [ "$suite_version" = "$mcp_version" ] \
+        || fail "release suite version mismatch: codixing ${suite_version}, codixing-mcp ${mcp_version}"
+    else
+      suite_version=$mcp_version
+      checked=1
+    fi
+  fi
+
+  if [ "$checked" -eq 1 ] && [ "$VERSION" != latest ]; then
+    [ "$suite_version" = "$VERSION" ] \
+      || fail "release suite reports ${suite_version}, expected ${VERSION}"
   fi
 }
 
@@ -232,7 +302,7 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# Publishing four executables requires a process-wide transaction, not just
+# Publishing the selected suite requires a process-wide transaction, not just
 # per-file atomic renames. Hold an empty same-directory lock for the complete
 # download, verification, publication, and rollback lifecycle. Temporarily
 # ignore termination signals across mkdir + ownership bookkeeping so cleanup
@@ -253,11 +323,12 @@ trap 'exit 143' TERM
 WORK_DIR=$(mktemp -d "${TMP_ROOT%/}/codixing-install.XXXXXX") \
   || fail "could not create a temporary directory"
 
-echo "Installing Codixing ${VERSION_LABEL} for ${OS}/${ARCH}..."
+echo "Installing Codixing ${VERSION_LABEL} for ${OS}/${ARCH} (components: ${COMPONENTS_LABEL})..."
 download "${BASE_URL}/SHA256SUMS" "$WORK_DIR/SHA256SUMS" "$MAX_MANIFEST_BYTES"
 
-# Download and authenticate the complete suite before replacing any installed
-# executable. A truncated or mismatched asset leaves the existing install alone.
+# Download and authenticate the selected components before replacing any
+# installed executable. A truncated or mismatched asset leaves the existing
+# install alone.
 for bin in $BINARIES; do
   asset="${bin}-${SUFFIX}"
   echo "  Downloading ${bin}..."
@@ -277,7 +348,8 @@ for bin in $BINARIES; do
 done
 
 # Stage inside the destination directory so every publication rename stays on
-# one filesystem. Preflight the complete suite before touching an installation.
+# one filesystem. Preflight the complete selected suite before touching an
+# installation.
 STAGE_DIR=$(mktemp -d "${INSTALL_DIR%/}/.codixing-stage.XXXXXX") \
   || fail "cannot create a staging directory in ${INSTALL_DIR}"
 for bin in $BINARIES; do
@@ -293,12 +365,9 @@ for bin in $BINARIES; do
   fi
 done
 
-# Only the CLI and MCP executables expose a side-effect-free --version command.
-# The LSP binary speaks its protocol on stdin and the HTTP server starts a
-# service, so executing either as an installer probe would be unsafe.
 verify_versioned_binaries "$STAGE_DIR"
 
-# Publish all four binaries as one transaction. Existing files remain in the
+# Publish selected binaries as one transaction. Existing files remain in the
 # same-directory backup until the installed suite passes its smoke checks.
 BACKUP_DIR=$(mktemp -d "${INSTALL_DIR%/}/.codixing-backup.XXXXXX") \
   || fail "cannot create a rollback directory in ${INSTALL_DIR}"
@@ -327,7 +396,7 @@ rmdir "$STAGE_DIR" || fail "could not remove installation staging directory"
 STAGE_DIR=""
 
 echo
-echo "Codixing installed to ${INSTALL_DIR}/"
+echo "Codixing installed to ${INSTALL_DIR}/ (components: ${COMPONENTS_LABEL})"
 case ":${PATH:-}:" in
   *:"${INSTALL_DIR}":*) ;;
   *)
@@ -340,8 +409,16 @@ echo "Quick start:"
 echo "  codixing init .              # Index current directory"
 echo "  codixing search 'query'      # Search your code"
 echo
-echo "MCP integration (minimal context profile):"
-echo "  claude mcp add codixing -- codixing-mcp --root . --profile minimal --no-daemon-fork"
+if component_selected codixing-mcp; then
+  echo "MCP integration (minimal context profile):"
+  echo "  claude mcp add codixing -- codixing-mcp --root . --profile minimal --no-daemon-fork"
+  echo
+  echo "Or use npx without a global install:"
+  echo "  npx -y codixing-mcp --root . --profile minimal --no-daemon-fork"
+else
+  echo "Tip: install MCP with CODIXING_COMPONENTS=codixing,codixing-mcp (or all),"
+  echo "  or use npx -y codixing-mcp --root . --profile minimal --no-daemon-fork"
+fi
 echo
-echo "Or use npx without a global install:"
-echo "  npx -y codixing-mcp --root . --profile minimal --no-daemon-fork"
+echo "Optional full suite (adds LSP + HTTP server):"
+echo "  CODIXING_COMPONENTS=all sh install.sh"

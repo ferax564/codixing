@@ -69,4 +69,43 @@ fn doctor_json_reports_active_generation_layout() {
         report["index"]["layout"]["abandoned_generations"],
         serde_json::json!([])
     );
+    assert!(
+        report["disk"]["free_bytes"].as_u64().unwrap_or(0) > 0,
+        "doctor should report free disk bytes: {report:#?}"
+    );
+    assert_eq!(report["writer_lock"]["held"], false);
+    assert!(
+        report["onnx"]["status"].as_str().is_some(),
+        "onnx.status required: {report:#?}"
+    );
+    assert!(
+        report["recommendations"].as_array().is_some(),
+        "recommendations array required: {report:#?}"
+    );
+}
+
+#[test]
+fn doctor_check_update_reports_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_codixing"))
+        .args([
+            "doctor",
+            dir.path().to_str().unwrap(),
+            "--json",
+            "--check-update",
+        ])
+        .output()
+        .expect("failed to run codixing doctor --check-update");
+    assert!(
+        output.status.success(),
+        "doctor --check-update should succeed offline-or-online: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("doctor output should be JSON");
+    assert_eq!(report["update"]["checked"], true);
+    assert!(
+        report["update"]["status"].as_str().is_some(),
+        "update.status required: {report:#?}"
+    );
 }

@@ -34,6 +34,8 @@ codixing ask "task"                 # recommended agent entrypoint (context pack
 codixing symbols Widget --defs-only # definitions only (no Import rows)
 codixing impact path --full         # full blast radius (default is compact)
 codixing doctor --fix-path          # PATH binary version gate
+codixing doctor --check-update       # free space, lock owner, ONNX hints, optional release check
+codixing init --dry-run .            # inventory + disk estimate before writing an index
 codixing bench-tokens               # token-savings harness vs grep+read
 ```
 
