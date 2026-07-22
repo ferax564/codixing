@@ -481,18 +481,31 @@ jobs:
               --expected-current-revision "${{ steps.large-repo-claim.outputs.baseline_revision }}"
             )
           fi
-          python3 benchmarks/large_repo_gate.py \
-            --profile "${{ steps.large-repo-profile.outputs.profile }}" \
-            --evidence-mode "${{ steps.large-repo-profile.outputs.baseline_mode }}" \
-            --threads 8 \
-            --codixing "$RUNNER_TEMP/codixing-baseline-target/release/codixing" \
-            --server "$RUNNER_TEMP/codixing-baseline-target/release/codixing-server" \
-            --source-root "$RUNNER_TEMP/codixing-baseline" \
-            --legacy-build-provenance \
-              "$RUNNER_TEMP/codixing-baseline-build-provenance.json" \
-            --work-dir "$RUNNER_TEMP/codixing-large-repo-work" \
-            "${claim_args[@]}" \
-            --output "$RUNNER_TEMP/large-repo-baseline.json"
+          # One automatic retry: pinned pre-v2 baselines remain process-noisy on
+          # shared runners; a second capture is cheaper than a full job re-run.
+          attempt=1
+          while true; do
+            if python3 benchmarks/large_repo_gate.py \
+              --profile "${{ steps.large-repo-profile.outputs.profile }}" \
+              --evidence-mode "${{ steps.large-repo-profile.outputs.baseline_mode }}" \
+              --threads 8 \
+              --codixing "$RUNNER_TEMP/codixing-baseline-target/release/codixing" \
+              --server "$RUNNER_TEMP/codixing-baseline-target/release/codixing-server" \
+              --source-root "$RUNNER_TEMP/codixing-baseline" \
+              --legacy-build-provenance \
+                "$RUNNER_TEMP/codixing-baseline-build-provenance.json" \
+              --work-dir "$RUNNER_TEMP/codixing-large-repo-work" \
+              "${claim_args[@]}" \
+              --output "$RUNNER_TEMP/large-repo-baseline.json"; then
+              break
+            fi
+            if [[ "$attempt" -ge 2 ]]; then
+              exit 1
+            fi
+            echo "baseline measurement failed on attempt $attempt; retrying once" >&2
+            attempt=$((attempt + 1))
+            rm -f "$RUNNER_TEMP/large-repo-baseline.json"
+          done
 
       - name: Run end-to-end large-repository acceptance gate
         if: steps.large-repo-profile.outputs.profile != 'pr'

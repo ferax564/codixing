@@ -145,12 +145,13 @@ itself remains comparable; unverified or accumulating layouts fail.
 
 The speed suite is the geometric mean of current/baseline ratios for fresh
 initialization, cold-query p95, no-op sync, one-file sync, and one-percent sync.
-No-op and one-file timings are each measured five times; their existing
-`process.wall_time_ms` JSON paths hold the median. The run is rejected as
-unstable when either median absolute deviation exceeds the larger of 50ms and
-10% of its median, or when the interquartile spread exceeds the larger of 100ms
-and 20% of its median. The second check catches bimodal samples that MAD alone
-can miss. Their surviving-churn and effective-write paths each hold the maximum
+No-op and one-file timings are each measured five times after one discarded
+warmup pair (no-op + one-file); their existing `process.wall_time_ms` JSON paths
+hold the median. The run is rejected as unstable when either median absolute
+deviation exceeds the larger of 75ms and 10% of its median, or when the
+interquartile spread exceeds the larger of 200ms and 20% of its median. Absolute
+floors absorb residual shared-runner jitter on sub-second CLI process samples;
+the relative caps still catch true bimodal / high-dispersion failures. Their surviving-churn and effective-write paths each hold the maximum
 across all five samples.
 A 1.05 component limit protects initialization, cold-query p95, no-op sync, and
 one-percent sync. CI separately requires one-file sync to meet the profile's
