@@ -59,13 +59,23 @@ class LargeRepoGateTests(unittest.TestCase):
     def test_sync_measurement_gate_rejects_unstable_mad_and_bimodal_iqr(self):
         unstable = gate.sync_latency_summary([100.0, 200.0, 300.0, 400.0, 500.0])
         self.assertEqual(unstable["mad_ms"], 100.0)
-        self.assertEqual(unstable["jitter_limit_ms"], 50.0)
+        self.assertEqual(unstable["jitter_limit_ms"], gate.SYNC_MAD_ABSOLUTE_FLOOR_MS)
         self.assertFalse(unstable["stable"])
 
         bimodal = gate.sync_latency_summary([100.0, 100.0, 100.0, 10_000.0, 10_000.0])
         self.assertEqual(bimodal["mad_ms"], 0.0)
         self.assertEqual(bimodal["iqr_ms"], 9_900.0)
         self.assertFalse(bimodal["stable"])
+
+        # Observed main-CI flake: MAD under the relative cap but IQR slightly
+        # above the old 100ms absolute floor on a ~650ms one-file baseline.
+        gha_noisy = gate.sync_latency_summary(
+            [780.86, 816.30, 617.59, 649.92, 589.76]
+        )
+        self.assertTrue(gha_noisy["stable"])
+        self.assertGreaterEqual(
+            gha_noisy["iqr_limit_ms"], gate.SYNC_IQR_ABSOLUTE_FLOOR_MS
+        )
 
         measurement = gate.sync_measurement_gate(
             {
