@@ -36,7 +36,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **CLI one-file sync rewrite amp** — filesystem sync now publishes successful
   file hashes as a delta (matching git/daemon paths) instead of folding the full
-  `tree_hashes_v2` snapshot on every one-file edit.
+  `tree_hashes_v2` snapshot on every one-file edit. Content no-op syncs no longer
+  fold an existing hash delta either (that previously rewrote O(N) bytes after
+  interleaved one-file publishes).
 - **Large-repo incremental PageRank cost** — skip full-graph PageRank recompute
   on tiny structural batches when the repository is large; edge structure still
   persists.

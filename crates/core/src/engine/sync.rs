@@ -2411,12 +2411,14 @@ impl Engine {
             // the incremental path; successful mutation hashes live in the delta.
             let _ = (old_hashes, std::mem::take(&mut current_hashes));
         } else {
-            // Even if nothing changed content-wise, update the v2 hashes
-            // to capture any mtime+size updates (e.g. file was touched).
-            if had_hash_delta {
-                self.ensure_working_generation()?;
-                self.fold_hash_snapshot(&current_hashes)?;
-            } else if skipped_by_mtime != unchanged {
+            // True content no-op. Never fold an existing hash delta here: the
+            // gate interleaves no-op samples after one-file delta publishes, and
+            // folding would rewrite the full tree_hashes_v2 baseline (~O(N))
+            // despite zero content changes. Compact only via
+            // `compact_hash_delta_if_needed` on mutation paths.
+            if !had_hash_delta && skipped_by_mtime != unchanged {
+                // Refresh mtime/size metadata only when there is no overlay
+                // (touch-without-content-change on a fully-folded baseline).
                 self.ensure_working_generation()?;
                 self.store.save_tree_hashes_v2(&current_hashes)?;
             }
@@ -2886,10 +2888,9 @@ impl Engine {
             }
             published_paths = outcome.successful_paths.clone();
             let _ = (old_hashes, std::mem::take(&mut current_hashes));
-        } else if had_hash_delta {
-            self.ensure_working_generation()?;
-            self.fold_hash_snapshot(&current_hashes)?;
-        } else if skipped_by_mtime != unchanged {
+        } else if !had_hash_delta && skipped_by_mtime != unchanged {
+            // See the non-progress sync path: never fold deltas on a content
+            // no-op (interleaved no-op/one-file gate would rewrite O(N) bytes).
             self.ensure_working_generation()?;
             self.store.save_tree_hashes_v2(&current_hashes)?;
         }
