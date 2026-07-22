@@ -99,7 +99,7 @@ regex-syntax = "0.8"
 glob = "0.3"
 
 # TOML parsing (federation workspace discovery)
-toml = "0.8"
+toml = "1.1"
 
 # Optional PDF text extraction (enable with --features pdf).
 # Pure-Rust backend — no C dependencies. Default build excludes it to
