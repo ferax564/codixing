@@ -301,17 +301,33 @@ jobs:
           cp "$STAGED_RELEASE_DIR/$asset" "$destination"
           SH
 
+          # Lean default (CLI + MCP) matches install.sh; full suite is opt-in.
           PATH="$TRANSPORT_DIR:$PATH" \
           STAGED_RELEASE_DIR="$STAGED_RELEASE_DIR" \
           CODIXING_VERSION="${TAG#v}" \
           CODIXING_INSTALL_DIR="$INSTALL_DIR" \
             sh docs/install.sh >/dev/null
 
-          for bin in codixing codixing-mcp codixing-lsp codixing-server; do
+          for bin in codixing codixing-mcp; do
             cmp "release-assets/${bin}-linux-x86_64" "$INSTALL_DIR/$bin"
             test -x "$INSTALL_DIR/$bin"
           done
-          rm -rf "$TRANSPORT_DIR" "$INSTALL_DIR"
+          for bin in codixing-lsp codixing-server; do
+            test ! -e "$INSTALL_DIR/$bin"
+          done
+
+          FULL_INSTALL_DIR=$(mktemp -d)
+          PATH="$TRANSPORT_DIR:$PATH" \
+          STAGED_RELEASE_DIR="$STAGED_RELEASE_DIR" \
+          CODIXING_VERSION="${TAG#v}" \
+          CODIXING_INSTALL_DIR="$FULL_INSTALL_DIR" \
+          CODIXING_COMPONENTS=all \
+            sh docs/install.sh >/dev/null
+          for bin in codixing codixing-mcp codixing-lsp codixing-server; do
+            cmp "release-assets/${bin}-linux-x86_64" "$FULL_INSTALL_DIR/$bin"
+            test -x "$FULL_INSTALL_DIR/$bin"
+          done
+          rm -rf "$TRANSPORT_DIR" "$INSTALL_DIR" "$FULL_INSTALL_DIR"
 
       - name: Preflight npm publication before making GitHub public
         shell: bash
