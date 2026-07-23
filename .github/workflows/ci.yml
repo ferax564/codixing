@@ -210,7 +210,7 @@ jobs:
       - name: Generate coverage
         run: cargo llvm-cov --workspace --lcov --output-path lcov.info
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: lcov.info
@@ -288,7 +288,7 @@ jobs:
           done
 
       - name: Upload binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: binaries-${{ matrix.artifact_suffix }}
           path: staging/*
@@ -577,7 +577,7 @@ jobs:
 
       - name: Upload benchmark results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: benchmark-results
           path: |

@@ -182,7 +182,7 @@ jobs:
 
       - name: Upload VSIX artifact
         if: inputs.upload_artifact || github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: vsix-package
           path: editors/vscode/codixing.vsix
