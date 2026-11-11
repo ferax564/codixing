@@ -68,6 +68,87 @@ fn collect_explore_neighbour_files(
     neighbour_files
 }
 
+/// Queries with at least this many content terms are re-ranked by coverage.
+const MIN_COVERAGE_TERMS: usize = 3;
+/// Candidate pool retrieved for a coverage re-rank.
+const COVERAGE_POOL: usize = 300;
+/// Candidates kept after the coverage re-rank for the boost pipeline.
+const COVERAGE_KEEP: usize = 30;
+
+/// Content terms of a query for coverage scoring: lower-cased, without
+/// function words, each reduced to a crude stem so `selects` matches `select`
+/// and `handlers` matches `handler`.
+fn coverage_terms(query: &str) -> Vec<String> {
+    const FUNCTION_WORDS: &[&str] = &[
+        "a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "does", "for", "from", "how",
+        "in", "into", "is", "it", "its", "of", "on", "or", "over", "that", "the", "this", "to",
+        "what", "when", "where", "which", "why", "with",
+    ];
+    let mut terms: Vec<String> = Vec::new();
+    for raw in query.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+        let lower = raw.to_ascii_lowercase();
+        if lower.len() < 2 || FUNCTION_WORDS.contains(&lower.as_str()) {
+            continue;
+        }
+        let stem = crude_stem(&lower).to_string();
+        if !terms.contains(&stem) {
+            terms.push(stem);
+        }
+    }
+    terms
+}
+
+/// Strip a common English inflection from words long enough to survive it.
+fn crude_stem(word: &str) -> &str {
+    if word.len() < 5 || !word.is_ascii() {
+        return word;
+    }
+    for suffix in ["ing", "ed", "es", "s"] {
+        if let Some(stem) = word.strip_suffix(suffix)
+            && stem.len() >= 3
+        {
+            return stem;
+        }
+    }
+    word
+}
+
+/// Re-rank a BM25 candidate pool by how many distinct query terms each
+/// chunk covers, counting its path and signature as well as its content.
+///
+/// The score is scaled by the square of the covered fraction, so coverage
+/// dominates and BM25 orders chunks of equal coverage. A path counts because
+/// on a large repository the directory layout carries much of the meaning:
+/// "x86 page fault handler" is spelled out by `arch/x86/mm/fault.c`.
+fn rerank_by_term_coverage(results: &mut [SearchResult], terms: &[String]) {
+    if terms.is_empty() {
+        return;
+    }
+    for result in results.iter_mut() {
+        let mut haystack = String::with_capacity(
+            result.content.len() + result.file_path.len() + result.signature.len() + 2,
+        );
+        haystack.push_str(&result.file_path);
+        haystack.push('\n');
+        haystack.push_str(&result.signature);
+        haystack.push('\n');
+        haystack.push_str(&result.content);
+        haystack.make_ascii_lowercase();
+
+        let covered = terms
+            .iter()
+            .filter(|t| haystack.contains(t.as_str()))
+            .count();
+        let fraction = covered as f32 / terms.len() as f32;
+        result.score *= (fraction * fraction).max(0.01);
+    }
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
 impl Engine {
     fn ensure_read_profile_supports(&self, query: &SearchQuery) -> Result<()> {
         if !self.read_only_load_mode.supports_search() {
@@ -206,7 +287,26 @@ impl Engine {
         let mut results = match strategy {
             Strategy::Instant => {
                 let retriever = BM25Retriever::new(&self.tantivy);
-                retriever.search(&query)?
+                let terms = coverage_terms(&query.query);
+                if terms.len() >= MIN_COVERAGE_TERMS {
+                    // Multi-word query: BM25 with OR semantics favours a chunk
+                    // that repeats one common word over a chunk that mentions
+                    // most of what was asked. Take a wider pool and prefer
+                    // chunks covering more distinct query terms.
+                    let pool = SearchQuery {
+                        limit: query.limit.max(COVERAGE_POOL),
+                        ..query.clone()
+                    };
+                    let mut results = retriever.search(&pool)?;
+                    rerank_by_term_coverage(&mut results, &terms);
+                    // Hand the pipeline more than it returns: its path and
+                    // definition boosts regularly lift the right chunk from
+                    // just outside the first page.
+                    results.truncate(query.limit.max(COVERAGE_KEEP));
+                    results
+                } else {
+                    retriever.search(&query)?
+                }
             }
             Strategy::Fast => {
                 // Multi-query RRF fusion for 3+ word natural language queries.
@@ -2249,6 +2349,68 @@ fn expand_query(query: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn coverage_candidate(path: &str, score: f32, content: &str) -> SearchResult {
+        SearchResult {
+            chunk_id: path.to_string(),
+            file_path: path.to_string(),
+            language: "C".to_string(),
+            score,
+            line_start: 0,
+            line_end: 10,
+            signature: String::new(),
+            scope_chain: Vec::new(),
+            content: content.to_string(),
+        }
+    }
+
+    #[test]
+    fn coverage_terms_drop_function_words_and_stem() {
+        assert_eq!(
+            coverage_terms("how does the scheduler pick the next task"),
+            vec!["scheduler", "pick", "next", "task"]
+        );
+        // Inflections collapse so `selects` covers `select_bad_process`.
+        assert_eq!(
+            coverage_terms("killer selects victims"),
+            vec!["killer", "select", "victim"]
+        );
+        // Short words are left alone.
+        assert_eq!(coverage_terms("bus pass"), vec!["bus", "pass"]);
+    }
+
+    #[test]
+    fn coverage_rerank_prefers_chunks_that_mention_more_of_the_query() {
+        let terms = coverage_terms("x86 page fault handler");
+        let mut results = vec![
+            // Highest BM25 score, but only repeats one term.
+            coverage_candidate(
+                "drivers/misc/pager.c",
+                30.0,
+                "page page page page page page page",
+            ),
+            // Covers every term: two through its path, two in the content.
+            coverage_candidate(
+                "arch/x86/mm/fault.c",
+                12.0,
+                "static void handle_page_fault(struct pt_regs *regs) { /* handler */ }",
+            ),
+            coverage_candidate("lib/fault-inject.c", 20.0, "fault injection page"),
+        ];
+
+        rerank_by_term_coverage(&mut results, &terms);
+
+        assert_eq!(
+            results[0].file_path,
+            "arch/x86/mm/fault.c",
+            "full coverage must beat a higher raw score: {:?}",
+            results
+                .iter()
+                .map(|r| (&r.file_path, r.score))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(results[2].file_path, "drivers/misc/pager.c");
+    }
 
     #[test]
     fn explore_neighbours_preserve_anchor_rank_and_skip_covered_slots() {

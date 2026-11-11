@@ -207,10 +207,11 @@ impl Engine {
             Some(s) => s,
             None => return Ok(None),
         };
+        // `line_end` is exclusive; the range read is inclusive.
         self.read_file_range(
             &sym.file_path,
             Some(sym.line_start as u64),
-            Some(sym.line_end as u64),
+            Some(sym.line_end.saturating_sub(1).max(sym.line_start) as u64),
         )
     }
 

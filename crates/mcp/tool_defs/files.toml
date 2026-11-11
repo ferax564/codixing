@@ -12,11 +12,11 @@ required = true
 
 [tools.params.line_start]
 type = "integer"
-description = "First line to read, 0-indexed inclusive (default: 0 = beginning of file)"
+description = "First line to read, 1-based inclusive, as printed by the other tools (default: beginning of file)"
 
 [tools.params.line_end]
 type = "integer"
-description = "Last line to read, 0-indexed inclusive (default: end of file)"
+description = "Last line to read, 1-based inclusive (default: end of file)"
 
 [tools.params.token_budget]
 type = "integer"
@@ -24,55 +24,55 @@ description = "Maximum tokens to return; content is truncated with a notice if e
 
 [[tools]]
 name = "grep_code"
-description = "Fast regex or literal text search across all source files in the indexed project. Unlike code_search (which uses BM25/vector retrieval on pre-indexed chunks), grep_code scans file content directly \u2014 ideal for finding exact identifiers, string literals, TODO/FIXME comments, error codes, or any pattern requiring verbatim matching. Returns file path, line number, the matching line, and optional surrounding context."
+description = "Regex or literal text scan over the indexed files (trigram-accelerated), one `path:line:col:text` row per match with 1-based lines. Unlike code_search (ranked chunks), this returns every matching line: use it for exact identifiers, string literals, TODOs and error codes."
 handler = "files::call_grep_code"
 calling_convention = "engine_args"
 read_only = true
 
 [tools.params.pattern]
 type = "string"
-description = "Search pattern. Interpreted as a regular expression (RE2 syntax, e.g. 'fn\\\\s+search', 'TODO|FIXME'). Set literal=true for exact string matching."
+description = "Regular expression (Rust regex syntax: 'fn\\\\s+search', 'TODO|FIXME'); set literal=true for a plain string."
 required = true
 
 [tools.params.literal]
 type = "boolean"
-description = "When true, treat pattern as a plain string (regex metacharacters are escaped). Default: false."
+description = "Treat pattern as a plain string. Default: false."
 
 [tools.params.file_glob]
 type = "string"
-description = "Glob pattern to restrict which files are searched (e.g. '*.rs', 'src/**/*.py', 'crates/core/**'). Omit to search all indexed files."
+description = "Restrict to files matching a glob ('*.rs', 'src/**/*.py')."
 
 [tools.params.context_lines]
 type = "integer"
-description = "Lines of surrounding context to include before and after each match (default: 0, max: 5). Symmetric shorthand — use before_context / after_context for asymmetric context."
+description = "Context lines before and after each match (default 0, max 5)."
 
 [tools.params.before_context]
 type = "integer"
-description = "Lines of context to include before each match (default: 0, max: 5). Overrides context_lines for the before side."
+description = "Context lines before each match (max 5); overrides context_lines."
 
 [tools.params.after_context]
 type = "integer"
-description = "Lines of context to include after each match (default: 0, max: 5). Overrides context_lines for the after side."
+description = "Context lines after each match (max 5); overrides context_lines."
 
 [tools.params.case_insensitive]
 type = "boolean"
-description = "When true, match is case-insensitive (ASCII). Default: false."
+description = "Case-insensitive match (ASCII). Default: false."
 
 [tools.params.invert]
 type = "boolean"
-description = "When true, emit lines that do NOT match the pattern. Disables the trigram pre-filter — every indexed file is scanned. Default: false."
+description = "Emit lines that do NOT match (scans every file). Default: false."
 
 [tools.params.count_only]
 type = "boolean"
-description = "When true, return only a count summary instead of per-match output. Default: false."
+description = "Return only the match and file counts. Default: false."
 
 [tools.params.files_with_matches]
 type = "boolean"
-description = "When true, return only the set of file paths containing at least one match, one per line. Default: false."
+description = "Return only the paths of files with a match. Default: false."
 
 [tools.params.limit]
 type = "integer"
-description = "Maximum matches to return (default: 50)."
+description = "Maximum matches (default: 50)."
 
 [[tools]]
 name = "write_file"

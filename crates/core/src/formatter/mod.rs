@@ -26,16 +26,7 @@ pub fn format_context(results: &[SearchResult], token_budget: Option<usize>) -> 
     let merged = merge_into_bands(results, BAND_GAP_LINES);
     let results: &[SearchResult] = &merged;
 
-    let bpe = match cl100k_base() {
-        Ok(b) => Some(b),
-        Err(e) => {
-            warn!(
-                error = %e,
-                "failed to load cl100k tokenizer; using conservative byte budget"
-            );
-            None
-        }
-    };
+    let bpe = shared_bpe();
 
     let mut output = String::new();
     let mut token_count = 0usize;
@@ -116,17 +107,11 @@ pub fn format_context(results: &[SearchResult], token_budget: Option<usize>) -> 
 /// conservative one-byte-per-token ceiling rather than returning unbounded
 /// output.
 pub fn truncate_to_token_budget(text: &str, token_budget: usize, marker: &str) -> String {
-    match cl100k_base() {
-        Ok(bpe) => truncate_with_counter(text, token_budget, marker, &|value| {
+    match shared_bpe() {
+        Some(bpe) => truncate_with_counter(text, token_budget, marker, &|value| {
             bpe.encode_with_special_tokens(value).len()
         }),
-        Err(e) => {
-            warn!(
-                error = %e,
-                "failed to load cl100k tokenizer; using conservative byte budget"
-            );
-            truncate_to_byte_budget(text, token_budget, marker)
-        }
+        None => truncate_to_byte_budget(text, token_budget, marker),
     }
 }
 
@@ -552,16 +537,32 @@ fn merge_into_bands(results: &[SearchResult], gap_lines: usize) -> Vec<SearchRes
 /// cl100k token represents at least one byte, this is a conservative ceiling
 /// for callers that must never treat an oversized response as within budget.
 pub fn count_tokens(text: &str) -> usize {
-    match cl100k_base() {
-        Ok(bpe) => bpe.encode_with_special_tokens(text).len(),
+    match shared_bpe() {
+        Some(bpe) => bpe.encode_with_special_tokens(text).len(),
+        None => text.len(),
+    }
+}
+
+/// The process-wide cl100k tokenizer, built on first use.
+///
+/// `cl100k_base()` reconstructs the whole BPE vocabulary on every call (on
+/// the order of 100 ms). Counting tokens in a loop — trimming a repository
+/// map to its budget, or checking each daemon response against the output
+/// envelope — therefore spent most of its time rebuilding the tokenizer.
+/// Returns `None` (after one warning) when the tokenizer cannot be loaded.
+pub(crate) fn shared_bpe() -> Option<&'static tiktoken_rs::CoreBPE> {
+    static BPE: std::sync::OnceLock<Option<tiktoken_rs::CoreBPE>> = std::sync::OnceLock::new();
+    BPE.get_or_init(|| match cl100k_base() {
+        Ok(bpe) => Some(bpe),
         Err(e) => {
             warn!(
                 error = %e,
-                "failed to load cl100k tokenizer; using conservative byte count"
+                "failed to load cl100k tokenizer; using conservative byte budget"
             );
-            text.len()
+            None
         }
-    }
+    })
+    .as_ref()
 }
 
 /// Format a single [`SearchResult`] as a markdown code block with metadata.

@@ -34,6 +34,75 @@ task-level work:
 Most of the fixes are small and local. The ten changes in
 [Priorities](#priorities) are ordered by expected effect per unit of work.
 
+## Resolution status (2026-11-11)
+
+The findings below were addressed on the same branch. Numbers are from the
+same machine and corpora as the review; "before" is v0.48.0 as reviewed.
+
+Retrieval (MRR, `search` / `ask`):
+
+| Corpus | Query type | Before | After |
+|---|---|---|---|
+| Codixing | identifier | 0.89 / 0.81 | 1.00 / 1.00 |
+| Codixing | natural language | 0.52 / 0.16 | 0.72 / 0.79 |
+| Django | identifier | 0.95 / 0.82 | 0.95 / 0.95 |
+| Django | natural language | 0.42 / 0.07 | 0.55 / 0.53 |
+| Linux | identifier | 0.67 / not run | 0.92 / 0.92 |
+| Linux | natural language | 0.16 / not run | 0.31 / 0.27 |
+
+Median `ask` output: 1,178–2,248 tokens before, 267–955 after.
+
+Linux 6.6, one-shot CLI command with no daemon:
+
+| Command | Before | After |
+|---|---:|---:|
+| `grep --count` | 4.8 s | 0.11 s |
+| `symbols` | 4.7 s | 0.10 s |
+| `usages` | 4.5 s | 0.18 s |
+| `search` | 4.7 s | 1.3 s |
+| `ask` | 19.5 s | 1.6 s |
+| `impact` | 7.4 s | 1.8 s |
+| `context` | 130–168 s | 1.7 s |
+| `graph --map` | 15 s | 1.4 s |
+| `sync` with no changes | 5.5 s | 2.6 s |
+| `symbols task_struct` output | 126,278 tokens | 1,149 tokens |
+
+With the daemon warm (started automatically on indexes of 20,000+ files):
+`search` 10 ms, `ask` about 100–130 ms, `symbols` 73 ms, `usages` 75 ms,
+`graph --map` 76 ms, `impact` 351 ms.
+
+| Finding | Status |
+|---|---|
+| A1 `ask` ranks worse than `search` | Fixed |
+| A2 `impl` blocks ahead of the type | Fixed |
+| A3 C/C++ references indexed as definitions | Fixed |
+| A4 smaller `--limit` changes the first result | Fixed (a smaller limit returns a prefix of the default list) |
+| A5 `usages` misses call sites | Fixed (matches `rg -w` on every indexed file) |
+| A6 natural-language search at kernel scale | Improved by term-coverage re-ranking; Linux MRR is still 0.31 |
+| B1 `ask` pack size | Fixed (compact text default, compact JSON, no import rows) |
+| B2 unbounded outputs | Fixed for `symbols`, `audit`, `context` |
+| B3 logs on stdout | Fixed |
+| B4 format differs through the daemon | Fixed for `search`, `symbols`, `usages`, `ask`, `impact`; `grep` no longer uses the daemon |
+| B5 two line-number conventions | Fixed (1-based everywhere, including `context --line` and MCP `read_file`) |
+| B6 token estimates undercount | Improved: 3.2 bytes per token, tokenizer built once per process. `context` on C still ran 13% over a strict 1,500 budget |
+| B7 panic when piped to `head` | Fixed |
+| B8 default `search` output | Fixed (line-numbered snippet on the definition or best-matching lines, no scores) |
+| B9 MCP surface | Fixed (`minimal` lists 13 tools at 2.7K tokens and can call every read-only tool) |
+| C1 full index reopen per CLI call | Fixed for `grep`, `symbols`, `usages`; `search` and `ask` still load chunk metadata (about 1.3 s, 800 MB) |
+| C2 daemon cannot bind on long paths | Fixed |
+| C3 commands that bypass the daemon | `ask` and both `impact` modes are proxied, the daemon auto-starts on large indexes. `context`, `--count` and `--json` still run in-process |
+| C4 test map rebuilt per file | Fixed |
+| C5 post-edit hook cost | Edits are coalesced into one update. The 4.7 s persist phase of a one-file sync on Linux was not investigated |
+| C6 indexing memory | Not addressed (`init --dry-run` still reports disk only) |
+| D1 `bench-tokens` | Exact token counts and answer checks added. It is still one workflow; a CI gate on real repositories is not wired up |
+| D2 guidance and hooks | Updated |
+| E smaller issues | Fixed, except brace globs, which now produce a hint |
+
+Still open and worth doing next: `audit` on Linux did not finish within 150 s;
+`kmalloc` is not found because the C parser does not resolve functions behind
+attribute macros; chunk metadata should become a memory-mapped columnar
+artifact so `search` and `ask` open as fast as `grep`.
+
 ## Method
 
 | Item | Value |

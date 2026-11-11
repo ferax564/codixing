@@ -36,7 +36,8 @@ codixing impact path --full         # full blast radius (default is compact)
 codixing doctor --fix-path          # PATH binary version gate
 codixing doctor --check-update       # free space, lock owner, ONNX hints, optional release check
 codixing init --dry-run .            # inventory + disk estimate before writing an index
-codixing bench-tokens               # token-savings harness vs grep+read
+codixing bench-tokens               # token savings vs grep+read (exact counts, answer-checked)
+codixing daemon start .             # keep the index warm (automatic on 20K+ file indexes)
 ```
 
 The MCP server is also available when connected to an editor, but the CLI is preferred — it's simpler, works for subagents, and dogfoods the search quality directly.
@@ -299,6 +300,11 @@ When adding a new crate that depends on `codixing-core`, ALWAYS:
 The `.mcp.json` configures the Codixing MCP server for Claude Code. **Recommended for editor stdio:**
 
 - `--no-daemon-fork` — prevents stale daemon socket issues that silently kill the MCP connection
+
+`minimal` lists 13 tools (search, grep, symbols, usages, impact, context pack, repo map and the
+meta tools) but can *call* every read-only tool, so nothing has to be promoted to `reviewer`
+just to use `file_callers` or `read_file`. Line arguments (`read_file`, `assemble_location_context`)
+are 1-based, like every line number the tools print.
 
 Servers on read-only profiles (`minimal`/`reviewer`; `minimal` is the default) open the
 engine read-only and do NOT hold the Tantivy write lock — `codixing sync .`

@@ -256,7 +256,11 @@ def extract_codixing_symbol_files(output: str, query: dict[str, Any], top_k: int
         if not stripped or stripped.startswith("KIND") or stripped.startswith("---"):
             continue
 
-        match = re.search(r"(\S+\.\w+)\s+L(\d+)(?:-L?(\d+))?", line)
+        match = (
+            # Current: `Kind name  path:start-end`; earlier: `KIND NAME FILE Lstart-Lend`.
+            re.search(r"(\S+\.\w+):(\d+)-(\d+)\s*$", line)
+            or re.search(r"(\S+\.\w+)\s+L(\d+)(?:-L?(\d+))?", line)
+        )
         if not match:
             continue
 
@@ -300,10 +304,15 @@ def extract_codixing_usage_files(output: str, top_k: int) -> list[str]:
             continue
         if "usage location(s) found" in line:
             continue
+        # Current: `path:line:kind: source`; earlier: `path [Lstart-Lend] score preview`.
+        row = re.match(r"(\S+?):\d+:[a-z_]+: ", line)
         bracket_idx = line.find(" [L")
-        if bracket_idx < 0:
+        if row:
+            path = normalize_path(row.group(1))
+        elif bracket_idx >= 0:
+            path = normalize_path(line[:bracket_idx])
+        else:
             continue
-        path = normalize_path(line[:bracket_idx])
         if path and path not in seen:
             seen.add(path)
             files.append(path)

@@ -68,6 +68,12 @@ pub(crate) async fn run_daemon(
         }
     }
 
+    codixing_core::process::prepare_daemon_socket_dir(socket_path).with_context(|| {
+        format!(
+            "failed to prepare daemon socket directory for {}",
+            socket_path.display()
+        )
+    })?;
     let listener = UnixListener::bind(socket_path)
         .with_context(|| format!("failed to bind daemon socket at {}", socket_path.display()))?;
     restrict_socket_permissions(socket_path)?;

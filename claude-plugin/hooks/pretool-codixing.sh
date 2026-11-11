@@ -132,7 +132,8 @@ fi
 
 if [ "$INDEXED" = true ]; then
   # Build a helpful redirect message based on the pattern
-  SUGGESTION="codixing search \"$PATTERN\""
+  # A text pattern is best served by an exact scan; `search` is for concepts.
+  SUGGESTION="codixing grep \"$PATTERN\"   (exact text)  OR  codixing search \"$PATTERN\"   (by concept)"
 
   # If pattern looks like a symbol definition search, suggest symbols
   if echo "$PATTERN" | grep -qE '^(fn |struct |class |def |impl |trait |enum |type )'; then
@@ -151,10 +152,12 @@ CODIXING DOGFOODING: Use the codixing CLI instead of Grep for code/doc/config se
 Suggested command:
   $SUGGESTION
 
-All available commands:
-  codixing search "<query>"      — semantic search (code, docs, config)
-  codixing symbols <name>        — find symbol definitions
-  codixing usages <symbol>       — find call sites and imports
+All available commands (line numbers are 1-based in all of them):
+  codixing grep "<pattern>"      — exact text/regex scan, path:line:col:text
+  codixing search "<query>"      — ranked search by concept (code, docs, config)
+  codixing symbols <name>        — definitions, exact match first
+  codixing usages <symbol>       — every reference, path:line:kind (exact)
+  codixing ask "<task>"          — task-level context pack in one call
   codixing callers <file>        — who imports this file
   codixing callees <file>        — what this file imports
   codixing graph --map           — architecture overview

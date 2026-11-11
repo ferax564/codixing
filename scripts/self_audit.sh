@@ -82,13 +82,13 @@ SEARCH_OUT=$("$CODIXING" search "trigram index" 2>&1) || {
   echo "$SEARCH_OUT"
   exit 1
 }
-# Result lines look like `1. path/to/file.rs [L97-L130] (Rust) score=186.252`.
+# Result lines look like `1. path/to/file.rs:97-130  fn signature(...)`.
 # Matching the query word alone is not enough — the CLI echoes the query in
 # its "No results for …" message, which would make an empty result pass.
 if echo "$SEARCH_OUT" | grep -q "No results for"; then
   echo "FAIL: search for 'trigram index' returned no results"
   FAILURES=$((FAILURES + 1))
-elif ! echo "$SEARCH_OUT" | grep -qE '^\s*[0-9]+\. .*trigram.*score='; then
+elif ! echo "$SEARCH_OUT" | grep -qE '^\s*[0-9]+\. [^ ]*trigram[^ ]*:[0-9]+-[0-9]+'; then
   echo "FAIL: no search hit for 'trigram index' is trigram-related:"
   echo "$SEARCH_OUT" | head -5
   FAILURES=$((FAILURES + 1))

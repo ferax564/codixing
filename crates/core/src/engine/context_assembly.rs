@@ -484,9 +484,14 @@ pub struct ContextSnippet {
     pub relevance: f32,
 }
 
-/// Simple token count estimator (~4 chars per token for code).
+/// Cheap token count estimate: about 3.2 bytes per token.
+///
+/// Budgets are ceilings, so the estimate errs high. Measured against cl100k,
+/// four bytes per token undercounts real code by 5–60% (Rust ≈ 3.8 bytes per
+/// token, JSON ≈ 3.6, C with tabs and macros ≈ 3.2), which let "strict"
+/// output overshoot its budget.
 pub fn estimate_token_count(text: &str) -> usize {
-    text.len().div_ceil(4)
+    (text.len() * 5).div_ceil(16)
 }
 
 /// In-place shrink the primary chunk to a line window centered on `focus_line`
@@ -1444,7 +1449,12 @@ impl Engine {
 
         let (line_start, line_end, signature, content) = if let Some(sym) = overlapping {
             let sym_content = self
-                .read_file_range(file, Some(sym.line_start as u64), Some(sym.line_end as u64))
+                .read_file_range(
+                    file,
+                    Some(sym.line_start as u64),
+                    // `line_end` is exclusive; the range read is inclusive.
+                    Some(sym.line_end.saturating_sub(1).max(sym.line_start) as u64),
+                )
                 .ok()
                 .flatten()
                 .unwrap_or(content);
@@ -1791,19 +1801,18 @@ mod tests {
     #[test]
     fn estimate_tokens_basic() {
         assert_eq!(estimate_token_count(""), 0);
-        assert_eq!(estimate_token_count("hello world"), 3); // (11+3)/4 = 3
-        assert_eq!(estimate_token_count("fn main() {}"), 3); // 12/4 = 3
+        assert_eq!(estimate_token_count("hello world"), 4); // ceil(11 / 3.2)
+        assert_eq!(estimate_token_count("fn main() {}"), 4); // ceil(12 / 3.2)
     }
 
     #[test]
     fn estimate_tokens_empty_is_zero() {
-        // (0 + 3) / 4 = 0 in integer division
         assert_eq!(estimate_token_count(""), 0);
     }
 
     #[test]
     fn estimate_tokens_short_string() {
-        // "ab" -> (2+3)/4 = 1
+        // "ab" -> ceil(2 / 3.2) = 1
         assert_eq!(estimate_token_count("ab"), 1);
     }
 

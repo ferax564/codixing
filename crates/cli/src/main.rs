@@ -29,6 +29,26 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum DaemonAction {
+    /// Start the daemon in the background (no-op if one is running).
+    Start {
+        /// Project root (defaults to current directory).
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Wait until the daemon accepts connections (up to this many seconds).
+        #[arg(long, value_name = "SECONDS", default_value_t = 0)]
+        wait: u64,
+    },
+    /// Report whether a daemon is running and where it listens.
+    Status {
+        /// Project root (defaults to current directory).
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// Initialize a new code index for the current (or specified) directory.
     Init {
@@ -288,6 +308,19 @@ enum Command {
         /// `codixing repair` (metadata heal + expired vector debris cleanup).
         #[arg(long)]
         fix: bool,
+    },
+
+    /// Manage the background daemon that keeps the index in memory.
+    ///
+    /// With a daemon running, `search`, `ask`, `symbols`, `usages`, `impact`,
+    /// `callers`, `callees` and `graph --map` are answered over its socket in
+    /// milliseconds instead of reopening the index. On large indexes
+    /// (20,000+ files) the CLI starts one automatically; set
+    /// `CODIXING_NO_AUTO_DAEMON=1` to opt out. The daemon is read-only,
+    /// follows index updates, and exits after 30 idle minutes.
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
     },
 
     /// Find the shortest path between two files in the dependency graph.
@@ -808,8 +841,10 @@ enum Command {
 
     /// Measure token savings of Codixing workflows vs naive grep+read baselines.
     ///
-    /// Prints a JSON report with per-task token estimates (chars/4) and the
-    /// percentage saved by Codixing paths. Intended for release claims and CI.
+    /// Prints a JSON report with exact per-step token counts (cl100k), whether
+    /// each step's output contains the expected answer, and the percentage
+    /// saved by Codixing paths. Exits non-zero when a Codixing step misses the
+    /// answer. Intended for release claims and CI.
     #[command(name = "bench-tokens")]
     BenchTokens {
         /// Project root (defaults to current directory).
@@ -1207,6 +1242,7 @@ async fn async_main() -> Result<()> {
             check_update,
             fix,
         } => cmd_doctor(path, json, fix_path, check_update, fix),
+        Command::Daemon { action } => cmd_daemon(action),
         Command::Path { from, to } => cmd_path(from, to),
         Command::Callers { file, depth } => cmd_callers(file, depth),
         Command::Callees { file, depth } => cmd_callees(file, depth),
@@ -1855,6 +1891,9 @@ fn cmd_search(
         "{}",
         codixing_core::formatter::compact::search_results(&results, &query)
     );
+    // This command paid a cold index open; on a large index make sure the
+    // next one does not.
+    daemon_proxy::autostart_daemon_if_large(&root, engine.stats().file_count);
 
     Ok(())
 }
@@ -1898,36 +1937,9 @@ fn cmd_grep(args: GrepArgs) -> Result<()> {
         (None, None) => None,
     };
 
-    // Fast path: daemon proxy. Aggregate modes deliberately stay in-process:
-    // MCP caps result-producing calls at 100 entries, while the CLI promises
-    // an exact total when --count / --files-with-matches has no explicit
-    // limit. Proxying those modes would make the answer depend on whether a
-    // warm daemon happened to be running.
-    if !args.json
-        && args.file.is_none()
-        && !args.count
-        && !args.files_with_matches
-        && let Some(text) = daemon_proxy::try_grep(
-            &root,
-            &args.pattern,
-            args.literal,
-            args.case_insensitive,
-            args.invert,
-            effective_glob.as_deref(),
-            before_context,
-            after_context,
-            args.count,
-            args.files_with_matches,
-            effective_limit,
-        )
-    {
-        print!("{text}");
-        if !text.ends_with('\n') {
-            println!();
-        }
-        return Ok(());
-    }
-
+    // No daemon proxy: the grep-only engine below opens in milliseconds even
+    // on a kernel-sized index, and printing in-process keeps the output format
+    // identical whether or not a daemon happens to be running.
     // A text scan needs the file list and the trigram index, nothing else.
     let engine = Engine::open_read_only_files(&root)
         .map(std::mem::ManuallyDrop::new)
@@ -2015,6 +2027,11 @@ fn cmd_grep(args: GrepArgs) -> Result<()> {
         if !args.literal && args.pattern.contains("\\|") {
             eprintln!(
                 "Hint: this is Rust regex syntax, where `\\|` is a literal pipe. Use `a|b` for alternation."
+            );
+        }
+        if args.glob.as_deref().is_some_and(|glob| glob.contains('{')) {
+            eprintln!(
+                "Hint: --glob does not expand braces (`{{a,b}}`); run one grep per directory or use a broader glob."
             );
         }
     } else if args.limit.is_none() && matches.len() >= effective_limit {
@@ -3760,6 +3777,28 @@ fn cmd_agent_context_pack(
     json: bool,
 ) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
+
+    // Fast path: a running daemon builds the pack with the same core code.
+    // Very large budgets stay in-process (the tool caps its response size).
+    if token_budget <= 9000
+        && let Some(text) = daemon_proxy::try_ask(
+            &root,
+            &task,
+            mode.as_str(),
+            token_budget,
+            &changed_files,
+            branch.as_deref(),
+            risk_level.as_deref(),
+            json,
+        )
+    {
+        print!("{text}");
+        if !text.ends_with('\n') {
+            println!();
+        }
+        return Ok(());
+    }
+
     let engine = open_read_engine(&root)?;
 
     let pack = engine.agent_context_pack(
@@ -3776,7 +3815,71 @@ fn cmd_agent_context_pack(
     } else {
         print!("{}", pack.render_text());
     }
+    daemon_proxy::autostart_daemon_if_large(&root, engine.stats().file_count);
     Ok(())
+}
+
+fn cmd_daemon(action: DaemonAction) -> Result<()> {
+    let resolve = |path: PathBuf| -> Result<PathBuf> {
+        path.canonicalize()
+            .with_context(|| format!("path not found: {}", path.display()))
+    };
+    match action {
+        DaemonAction::Status { path } => {
+            let root = resolve(path)?;
+            let endpoint = daemon_proxy::default_daemon_endpoint(&root);
+            if daemon_proxy::daemon_is_alive(&root) {
+                println!("running  {}", endpoint_display(&endpoint));
+            } else {
+                println!("stopped  {}", endpoint_display(&endpoint));
+            }
+            Ok(())
+        }
+        DaemonAction::Start { path, wait } => {
+            let root = resolve(path)?;
+            let endpoint = daemon_proxy::default_daemon_endpoint(&root);
+            if daemon_proxy::daemon_is_alive(&root) {
+                println!("already running  {}", endpoint_display(&endpoint));
+                return Ok(());
+            }
+            if !root.join(".codixing").is_dir() {
+                anyhow::bail!(
+                    "no index found at {} — run `codixing init` first",
+                    root.display()
+                );
+            }
+            daemon_proxy::spawn_daemon(&root).map_err(|e| anyhow::anyhow!("{e}"))?;
+            if wait == 0 {
+                println!(
+                    "starting  {} (ready once the index is loaded)",
+                    endpoint_display(&endpoint)
+                );
+                return Ok(());
+            }
+            let deadline = Instant::now() + std::time::Duration::from_secs(wait);
+            while Instant::now() < deadline {
+                if daemon_proxy::daemon_is_alive(&root) {
+                    println!("running  {}", endpoint_display(&endpoint));
+                    return Ok(());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            anyhow::bail!(
+                "daemon did not accept connections within {wait}s at {}",
+                endpoint_display(&endpoint)
+            )
+        }
+    }
+}
+
+#[cfg(unix)]
+fn endpoint_display(endpoint: &Path) -> String {
+    endpoint.display().to_string()
+}
+
+#[cfg(windows)]
+fn endpoint_display(endpoint: &str) -> String {
+    endpoint.to_string()
 }
 
 fn cmd_doctor(
@@ -4261,87 +4364,97 @@ fn print_path_fix_instructions() {
 
 /// Token-savings harness: Codixing workflows vs naive grep+read baselines.
 fn cmd_bench_tokens(path: PathBuf, output: Option<PathBuf>) -> Result<()> {
-    use std::time::Instant;
-
     let root = path
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
 
-    // Pick a representative symbol/file from the index when possible.
+    // Pick a representative definition from the index.
     let engine = open_read_engine(&root)?;
-    let (symbol, file) = pick_bench_targets(&engine);
+    let target = pick_bench_target(&engine);
+    let BenchTarget { symbol, file, line } = &target;
 
     let codixing_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("codixing"));
+    let cx = codixing_bin.display();
 
-    // Task 1: locate definition + usages + impact via Codixing
-    let cx_cmds = [
-        format!("{} symbols {symbol} --defs-only", codixing_bin.display()),
-        format!("{} usages {symbol}", codixing_bin.display()),
-        format!("{} impact {file}", codixing_bin.display()),
-        format!(
-            "{} context {file} --line 0 --token-budget 1000",
-            codixing_bin.display()
+    // What a correct answer must contain: the definition's file and line.
+    let definition = format!("{file}:{line}");
+
+    // Workflow: locate a definition, its usages and its blast radius.
+    // Each step records whether its output actually contains the answer;
+    // saving tokens on a wrong answer is not a saving.
+    let cx_steps: Vec<(String, Option<&str>)> = vec![
+        (format!("{cx} symbols {symbol}"), Some(definition.as_str())),
+        (format!("{cx} usages {symbol}"), Some(definition.as_str())),
+        (format!("{cx} impact {file}"), None),
+        (
+            format!("{cx} context {file} --line {line} --token-budget 1000"),
+            Some(symbol.as_str()),
         ),
-        format!(
-            "{} ask \"where is {symbol} defined and what depends on it\" --token-budget 2500",
-            codixing_bin.display()
+        (
+            format!(
+                "{cx} ask \"where is {symbol} defined and what depends on it\" --token-budget 2500"
+            ),
+            Some(file.as_str()),
         ),
     ];
-    let naive_cmds = [
-        format!(
-            "grep -rn \"{symbol}\" --include='*.rs' --include='*.py' --include='*.ts' --include='*.go' . | head -120"
+    // Baseline: grep for the name, then read around the definition.
+    let read_from = line.saturating_sub(20).max(1);
+    let naive_steps: Vec<(String, Option<&str>)> = vec![
+        (
+            format!(
+                "grep -rn \"{symbol}\" --include='*.rs' --include='*.py' --include='*.ts' --include='*.go' --include='*.c' --include='*.h' --include='*.java' . | head -120"
+            ),
+            Some(definition.as_str()),
         ),
-        format!("sed -n '1,250p' {file}"),
-        format!("sed -n '250,500p' {file}"),
+        (
+            format!("sed -n '{read_from},{}p' {file}", read_from + 250),
+            Some(symbol.as_str()),
+        ),
     ];
 
-    let mut cx_total_toks = 0usize;
-    let mut cx_total_ms = 0u128;
-    let mut cx_results = Vec::new();
-    for cmd in &cx_cmds {
-        let (ms, bytes, toks, rc) = run_shell_measure(cmd, &root);
-        cx_total_toks += toks;
-        cx_total_ms += ms;
-        cx_results.push(serde_json::json!({
-            "cmd": cmd,
-            "ms": ms,
-            "bytes": bytes,
-            "toks": toks,
-            "rc": rc,
-        }));
-    }
+    let run_steps = |steps: &[(String, Option<&str>)]| {
+        let mut total_toks = 0usize;
+        let mut total_ms = 0u128;
+        let mut answered = 0usize;
+        let mut checked = 0usize;
+        let mut results = Vec::new();
+        for (cmd, expect) in steps {
+            let run = run_shell_measure(cmd, &root);
+            total_toks += run.toks;
+            total_ms += run.ms;
+            let found = expect.map(|needle| run.output.contains(needle));
+            if let Some(found) = found {
+                checked += 1;
+                answered += usize::from(found);
+            }
+            results.push(serde_json::json!({
+                "cmd": cmd,
+                "ms": run.ms,
+                "bytes": run.bytes,
+                "toks": run.toks,
+                "rc": run.rc,
+                "expects": expect,
+                "answer_found": found,
+            }));
+        }
+        (total_toks, total_ms, answered, checked, results)
+    };
 
-    let mut naive_total_toks = 0usize;
-    let mut naive_total_ms = 0u128;
-    let mut naive_results = Vec::new();
-    for cmd in &naive_cmds {
-        let (ms, bytes, toks, rc) = run_shell_measure(cmd, &root);
-        naive_total_toks += toks;
-        naive_total_ms += ms;
-        naive_results.push(serde_json::json!({
-            "cmd": cmd,
-            "ms": ms,
-            "bytes": bytes,
-            "toks": toks,
-            "rc": rc,
-        }));
-    }
+    let (cx_total_toks, cx_total_ms, cx_answered, cx_checked, cx_results) = run_steps(&cx_steps);
+    let (naive_total_toks, naive_total_ms, naive_answered, naive_checked, naive_results) =
+        run_steps(&naive_steps);
 
     // Map / impact size gates
-    let (map_ms, map_bytes, map_toks, _) = run_shell_measure(
-        &format!("{} graph --map --token-budget 1500", codixing_bin.display()),
-        &root,
-    );
-    let (imp_ms, imp_bytes, imp_toks, _) =
-        run_shell_measure(&format!("{} impact {file}", codixing_bin.display()), &root);
-    let (imp_full_ms, imp_full_bytes, imp_full_toks, _) = run_shell_measure(
-        &format!("{} impact {file} --full", codixing_bin.display()),
-        &root,
-    );
-    let (search_ms, search_bytes, search_toks, _) = run_shell_measure(
-        &format!("{} search \"{symbol}\" --limit 5", codixing_bin.display()),
-        &root,
-    );
+    let map = run_shell_measure(&format!("{cx} graph --map --token-budget 1500"), &root);
+    let impact = run_shell_measure(&format!("{cx} impact {file}"), &root);
+    let impact_full = run_shell_measure(&format!("{cx} impact {file} --full"), &root);
+    let search = run_shell_measure(&format!("{cx} search \"{symbol}\" --limit 5"), &root);
+    // The first hit of an identifier search must be the definition's file.
+    let search_top_is_definition = search
+        .output
+        .lines()
+        .next()
+        .is_some_and(|first| first.contains(&format!(" {file}:")));
 
     let saved = naive_total_toks.saturating_sub(cx_total_toks);
     let pct = if naive_total_toks == 0 {
@@ -4351,42 +4464,46 @@ fn cmd_bench_tokens(path: PathBuf, output: Option<PathBuf>) -> Result<()> {
     };
 
     let report = serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "binary_version": env!("CARGO_PKG_VERSION"),
         "root": root.display().to_string(),
-        "targets": { "symbol": symbol, "file": file },
+        "tokenizer": "cl100k_base",
+        "targets": { "symbol": symbol, "file": file, "line": line },
         "workflow": {
             "name": "locate_definition_and_blast_radius",
             "codixing": {
                 "total_toks": cx_total_toks,
                 "total_ms": cx_total_ms,
+                "answers_found": cx_answered,
+                "answers_checked": cx_checked,
                 "steps": cx_results,
             },
             "naive": {
                 "total_toks": naive_total_toks,
                 "total_ms": naive_total_ms,
+                "answers_found": naive_answered,
+                "answers_checked": naive_checked,
                 "steps": naive_results,
             },
             "tokens_saved": saved,
             "percent_saved": pct,
         },
         "gates": {
-            "graph_map_1500": { "ms": map_ms, "bytes": map_bytes, "toks": map_toks, "budget": 1500 },
-            "impact_compact": { "ms": imp_ms, "bytes": imp_bytes, "toks": imp_toks },
-            "impact_full": { "ms": imp_full_ms, "bytes": imp_full_bytes, "toks": imp_full_toks },
-            "search_symbol": { "ms": search_ms, "bytes": search_bytes, "toks": search_toks },
+            "graph_map_1500": { "ms": map.ms, "bytes": map.bytes, "toks": map.toks, "budget": 1500 },
+            "impact_compact": { "ms": impact.ms, "bytes": impact.bytes, "toks": impact.toks },
+            "impact_full": { "ms": impact_full.ms, "bytes": impact_full.bytes, "toks": impact_full.toks },
+            "search_symbol": {
+                "ms": search.ms,
+                "bytes": search.bytes,
+                "toks": search.toks,
+                "top_hit_is_definition": search_top_is_definition,
+            },
         },
-        "timestamp_unix": Instant::now().elapsed().as_secs(), // placeholder; overwritten below
-    });
-
-    // Prefer wall-clock timestamp when available.
-    let mut report = report;
-    report["timestamp_unix"] = serde_json::json!(
-        std::time::SystemTime::now()
+        "timestamp_unix": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
-            .unwrap_or(0)
-    );
+            .unwrap_or(0),
+    });
 
     let pretty = serde_json::to_string_pretty(&report)?;
     if let Some(path) = output {
@@ -4398,61 +4515,127 @@ fn cmd_bench_tokens(path: PathBuf, output: Option<PathBuf>) -> Result<()> {
     println!("# Codixing bench-tokens");
     println!("Version: {}", env!("CARGO_PKG_VERSION"));
     println!("Root: {}", root.display());
-    println!("Targets: symbol={symbol} file={file}");
+    println!("Target: {symbol} at {definition}");
+    println!("Tokens: cl100k_base");
     println!();
     println!("## Workflow: locate definition + blast radius");
-    println!("  Codixing: ~{cx_total_toks} toks in {cx_total_ms} ms");
-    println!("  Naive:    ~{naive_total_toks} toks in {naive_total_ms} ms");
-    println!("  Saved:    ~{saved} toks ({pct:.1}%)");
+    println!(
+        "  Codixing: {cx_total_toks} toks in {cx_total_ms} ms, answer present in {cx_answered}/{cx_checked} steps"
+    );
+    println!(
+        "  Naive:    {naive_total_toks} toks in {naive_total_ms} ms, answer present in {naive_answered}/{naive_checked} steps"
+    );
+    println!("  Saved:    {saved} toks ({pct:.1}%)");
     println!();
     println!("## Gates");
-    println!("  graph --map --token-budget 1500 → ~{map_toks} toks (budget 1500)");
-    println!("  impact compact → ~{imp_toks} toks");
-    println!("  impact --full  → ~{imp_full_toks} toks");
-    println!("  search {symbol} → ~{search_toks} toks");
+    println!(
+        "  graph --map --token-budget 1500 → {} toks (budget 1500)",
+        map.toks
+    );
+    println!("  impact compact → {} toks", impact.toks);
+    println!("  impact --full  → {} toks", impact_full.toks);
+    println!(
+        "  search {symbol} → {} toks, top hit is the definition: {search_top_is_definition}",
+        search.toks
+    );
     println!();
     println!("{pretty}");
+
+    // A saving only counts when every Codixing step found the answer.
+    if cx_answered < cx_checked {
+        anyhow::bail!(
+            "{} of {cx_checked} Codixing steps did not contain the expected answer",
+            cx_checked - cx_answered
+        );
+    }
 
     Ok(())
 }
 
-fn pick_bench_targets(engine: &Engine) -> (String, String) {
-    // Prefer a well-known struct if present, else first public struct/fn.
-    for candidate in ["IndexStore", "Engine", "SearchQuery", "CodeGraph"] {
-        let syms = engine.symbols(candidate, None).unwrap_or_default();
-        if let Some(s) = syms
-            .iter()
-            .find(|s| !matches!(s.kind, codixing_core::EntityKind::Import))
-        {
-            return (s.name.clone(), s.file_path.clone());
-        }
-    }
-    let all = engine.symbols("", None).unwrap_or_default();
-    if let Some(s) = all
-        .iter()
-        .find(|s| !matches!(s.kind, codixing_core::EntityKind::Import))
-    {
-        return (s.name.clone(), s.file_path.clone());
-    }
-    ("main".into(), "src/main.rs".into())
+/// The definition `bench-tokens` measures against.
+struct BenchTarget {
+    symbol: String,
+    file: String,
+    /// 1-based line of the definition.
+    line: usize,
 }
 
-fn run_shell_measure(cmd: &str, root: &Path) -> (u128, usize, usize, i32) {
+fn pick_bench_target(engine: &Engine) -> BenchTarget {
+    let from = |s: &codixing_core::Symbol| BenchTarget {
+        symbol: s.name.clone(),
+        file: s.file_path.clone(),
+        line: s.display_lines().0,
+    };
+    let is_type_or_fn = |s: &&codixing_core::Symbol| codixing_core::definition_tier(&s.kind) >= 2;
+
+    // Prefer a well-known type if present, else the first definition by name.
+    for candidate in ["IndexStore", "Engine", "SearchQuery", "CodeGraph"] {
+        let mut syms = engine.symbols(candidate, None).unwrap_or_default();
+        codixing_core::sort_for_lookup(&mut syms, candidate);
+        if let Some(s) = syms
+            .iter()
+            .filter(is_type_or_fn)
+            .find(|s| s.name == candidate)
+        {
+            return from(s);
+        }
+    }
+    let mut all = engine.symbols("", None).unwrap_or_default();
+    all.retain(|s| {
+        codixing_core::definition_tier(&s.kind) == 3
+            && !codixing_core::is_test_like_path(&s.file_path)
+            && s.name.len() >= 6
+    });
+    all.sort_by(|a, b| a.name.cmp(&b.name).then(a.file_path.cmp(&b.file_path)));
+    if let Some(s) = all.first() {
+        return from(s);
+    }
+    BenchTarget {
+        symbol: "main".into(),
+        file: "src/main.rs".into(),
+        line: 1,
+    }
+}
+
+/// Outcome of one measured shell command.
+struct ShellRun {
+    ms: u128,
+    bytes: usize,
+    /// Exact cl100k token count of stdout + stderr.
+    toks: usize,
+    rc: i32,
+    output: String,
+}
+
+fn run_shell_measure(cmd: &str, root: &Path) -> ShellRun {
     let start = std::time::Instant::now();
     let output = std::process::Command::new("sh")
         .arg("-c")
         .arg(cmd)
         .current_dir(root)
+        // Measure this binary, not whatever daemon happens to be running.
+        .env("CODIXING_NO_AUTO_DAEMON", "1")
         .output();
     let ms = start.elapsed().as_millis();
     match output {
         Ok(out) => {
-            let bytes = out.stdout.len() + out.stderr.len();
-            let toks = bytes.div_ceil(4).max(1);
-            let rc = out.status.code().unwrap_or(1);
-            (ms, bytes, toks, rc)
+            let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+            text.push_str(&String::from_utf8_lossy(&out.stderr));
+            ShellRun {
+                ms,
+                bytes: text.len(),
+                toks: codixing_core::formatter::count_tokens(&text).max(1),
+                rc: out.status.code().unwrap_or(1),
+                output: text,
+            }
         }
-        Err(_) => (ms, 0, 1, 1),
+        Err(_) => ShellRun {
+            ms,
+            bytes: 0,
+            toks: 1,
+            rc: 1,
+            output: String::new(),
+        },
     }
 }
 

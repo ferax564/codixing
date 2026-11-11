@@ -196,12 +196,12 @@ fn is_testish_path(path: &str) -> bool {
 
 /// Approximate token count using tiktoken cl100k_base.
 fn count_tokens(text: &str) -> usize {
-    // Use tiktoken-rs for accurate cl100k counting.
-    if let Ok(bpe) = tiktoken_rs::cl100k_base() {
-        bpe.encode_with_special_tokens(text).len()
-    } else {
+    // Accurate cl100k counting through the shared tokenizer; rebuilding it
+    // per call made budget trimming the slowest part of a repository map.
+    match crate::formatter::shared_bpe() {
+        Some(bpe) => bpe.encode_with_special_tokens(text).len(),
         // Fallback: ~4 chars per token.
-        text.len().div_ceil(4)
+        None => text.len().div_ceil(4),
     }
 }
 

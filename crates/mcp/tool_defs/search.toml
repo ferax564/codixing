@@ -1,53 +1,53 @@
 [[tools]]
 name = "code_search"
-description = "Search for relevant code chunks across the indexed codebase. Uses BM25, vector, or hybrid retrieval depending on the strategy. Returns formatted source excerpts with file paths and line numbers. Use when you're starting from a natural-language concept (\u201cwhere is rate limiting?\u201d) rather than a known symbol name \u2014 prefer `find_symbol` for exact identifiers and `grep_code` for literal strings."
+description = "Ranked search over indexed code chunks (BM25, plus vectors when embeddings exist). Returns source excerpts with paths and 1-based line ranges. Use when you start from a concept (\u201cwhere is rate limiting?\u201d) rather than a name \u2014 prefer `find_symbol` for identifiers and `grep_code` for literal strings."
 handler = "search::call_code_search"
 calling_convention = "engine_args_progress"
 read_only = true
 
 [tools.params.query]
 type = "string"
-description = "Natural language or code search query (e.g. 'PageRank computation', 'fn search'). Must be non-blank and at most 1024 characters."
+description = "Natural-language or code query (max 1024 characters)."
 required = true
 
 [tools.params.strategy]
 type = "string"
-description = "Retrieval strategy. Omit to auto-detect from query: single identifiers with a known definition use 'goto', other identifiers use 'exact'/'instant', multi-word uses 'fast'/'thorough'. Explicit options: 'instant'=BM25 only (fastest), 'fast'=hybrid BM25+vector, 'thorough'=hybrid+MMR deduplication, 'explore'=BM25 + graph expansion, 'deep'=hybrid + reranker, 'exact'=trigram substring lookup, 'goto'=symbol-table definition-first lookup, 'semantic'=embedding-free behavioral signatures."
+description = "Retrieval strategy. Omit to auto-detect from the query (recommended). instant=BM25, fast=hybrid BM25+vector, thorough=hybrid+MMR, explore=BM25+graph expansion, deep=hybrid+reranker, exact=substring lookup, goto=definition lookup, semantic=behavioral signatures."
 enum = ["instant", "fast", "thorough", "explore", "deep", "exact", "goto", "semantic"]
 
 [tools.params.limit]
 type = "integer"
-description = "Maximum number of results to return (default: 10, hard max: 100; 20 or fewer recommended)"
+description = "Maximum results (default: 10, hard max: 100)."
 
 [tools.params.token_budget]
 type = "integer"
-description = "Maximum tokens in the final tool response (default: 4000, hard max: 12000). Includes warnings, metadata, and truncation marker."
+description = "Maximum tokens in the response (default: 4000, hard max: 12000)."
 
 [tools.params.check_staleness]
 type = "boolean"
-description = "If true, scan the repository for files changed since indexing and include a stale-index warning. Default: false because this can be expensive on huge repositories."
+description = "Also scan for files changed since indexing and warn if the index is stale (slow on huge repositories). Default: false."
 
 [tools.params.file_filter]
 type = "string"
-description = "Optional substring to restrict results to files whose path contains this string (e.g. 'engine', 'src/graph')"
+description = "Only results whose path contains this substring (e.g. 'src/graph')."
 
 [tools.params.kind]
 type = "string"
-description = "Filter results by symbol kind (e.g. 'function' for fn/def/func, 'struct' for structs/data classes, 'trait' for traits/protocols)"
+description = "Only results of this symbol kind."
 enum = ["function", "struct", "enum", "trait", "class", "method", "interface", "type", "const", "impl"]
 
 [tools.params.queries]
 type = "array"
 items_type = "string"
-description = "Optional list of query reformulations for multi-query RRF fusion. When provided, each query is searched independently and results are fused. Overrides auto-reformulation."
+description = "Query reformulations to fuse (RRF); overrides auto-reformulation."
 
 [tools.params.source]
 type = "string"
-description = "Restrict results to imported external context (see import_external). Use 'external' for any import, or a specific source namespace: 'github', 'adr', 'jira', 'linear'."
+description = "Restrict to imported external context: 'external', or a namespace such as 'github', 'adr', 'jira', 'linear'."
 
 [tools.params.compact]
 type = "boolean"
-description = "If true, return one line per hit (path:start-end, signature, a 3-line query-focused snippet) instead of full code blocks. Cheapest way to locate code; read the range afterwards."
+description = "If true, one line per hit (path:start-end, signature, 3-line snippet) instead of full code blocks: the cheapest way to locate code."
 
 [[tools]]
 name = "find_symbol"
@@ -58,20 +58,20 @@ read_only = true
 
 [tools.params.name]
 type = "string"
-description = "Symbol name to search for (case-insensitive substring match, e.g. 'Engine', 'compute_pagerank')"
+description = "Symbol name or part of it (e.g. 'Engine', 'compute_pagerank')."
 required = true
 
 [tools.params.file]
 type = "string"
-description = "Optional file path substring to restrict results to a specific file (e.g. 'engine.rs')"
+description = "Only symbols in files whose path contains this substring."
 
 [tools.params.limit]
 type = "integer"
-description = "Maximum rows (default: 50, hard max: 100). The response states how many more matched."
+description = "Maximum rows (default: 50, hard max: 100)."
 
 [tools.params.include_imports]
 type = "boolean"
-description = "Also list import/use rows (default: false; they name a symbol without defining it)."
+description = "Also list import/use rows. Default: false."
 
 [[tools]]
 name = "search_usages"
@@ -82,12 +82,12 @@ read_only = true
 
 [tools.params.symbol]
 type = "string"
-description = "The symbol name to find usages of (e.g. 'compute_pagerank', 'BM25Retriever', 'IndexConfig')"
+description = "Symbol name (e.g. 'compute_pagerank', 'IndexConfig')."
 required = true
 
 [tools.params.limit]
 type = "integer"
-description = "Maximum usage locations per response page (default: 20, hard max: 100)."
+description = "Maximum rows per response (default: 20, hard max: 100)."
 
 [tools.params.complete]
 type = "boolean"
@@ -95,7 +95,7 @@ description = "If true, returns the full reference set (up to 100000) ordered by
 
 [tools.params.offset]
 type = "integer"
-description = "Zero-based page offset for `complete=true` (default: 0, hard max: 100000). Set it to the prior response's next_offset until has_more=false. Ignored in ranked mode."
+description = "Page offset for complete=true (default: 0); pass the previous next_offset."
 
 [[tools]]
 name = "read_symbol"

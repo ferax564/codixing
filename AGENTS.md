@@ -36,7 +36,8 @@ codixing impact path --full         # full blast radius (default is compact)
 codixing doctor --fix-path          # PATH binary version gate
 codixing doctor --check-update       # free space, lock owner, ONNX hints, optional release check
 codixing init --dry-run .            # inventory + disk estimate before writing an index
-codixing bench-tokens               # token-savings harness vs grep+read
+codixing bench-tokens               # token savings vs grep+read (exact counts, answer-checked)
+codixing daemon start .             # keep the index warm (automatic on 20K+ file indexes)
 ```
 
 The MCP server is also available when connected to an editor, but the CLI is preferred — it's simpler, works for subagents, and dogfoods the search quality directly.

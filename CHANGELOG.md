@@ -47,6 +47,28 @@ size, and cold-start cost on very large repositories. Measured on Linux 6.6
   by a running daemon.
 - CLI diagnostics go to stderr without colour codes when stderr is not a
   terminal; third-party crates log errors only.
+- **MCP `minimal` can call every read-only tool** and now also lists
+  `grep_code`, `search_usages` and `change_impact` (13 tools, about 2.7K schema
+  tokens against 8.6K for `reviewer`). Mutating tools stay blocked.
+- **MCP `read_file` line ranges are 1-based inclusive** (they were 0-based),
+  so a range printed by any other tool reads exactly those lines.
+- **`bench-tokens` reports exact cl100k token counts and checks answers**: each
+  step records whether its output contains the definition, and the command
+  fails when a Codixing step misses it. Report `schema_version` is now 2.
+
+### Added
+
+- **`codixing daemon start|status`** and automatic background start of a
+  read-only daemon on indexes of 20,000+ files (`CODIXING_NO_AUTO_DAEMON=1`
+  opts out). `ask` joins the commands served by the daemon; output is
+  identical to the in-process path.
+- **Term-coverage re-ranking for multi-word queries.** BM25-only searches with
+  three or more content terms take a 300-chunk pool and prefer chunks whose
+  content, path and signature cover more distinct query terms. Natural-language
+  MRR on the review's query sets: this repository 0.51 → 0.72, Django 0.42 →
+  0.55, Linux 0.20 → 0.31.
+- `code_search` accepts `compact=true` (one line per hit) and `find_symbol`
+  accepts `limit` and `include_imports`.
 
 ### Fixed
 
@@ -76,6 +98,15 @@ size, and cold-start cost on very large repositories. Measured on Linux 6.6
 - `grep` no longer truncates silently at 50 matches (it says so on stderr),
   clips very long lines around the match, makes `--file` match that exact path
   when present, and hints at `a|b` when a pattern uses `\|`.
+- **The daemon could not start under a long repository path** (Unix socket
+  paths are limited to about 100 bytes) and clients silently fell back to cold
+  starts. The socket now moves to a private per-user runtime directory when
+  `.codixing/` is too deep.
+- **The post-edit hook started one indexing process per edit.** Edits are
+  queued and a single background runner drains them (one `sync` for several
+  files).
+- Strict token budgets overshot on dense code: the cheap estimate assumed four
+  bytes per token; it now assumes 3.2.
 
 ### Performance
 
@@ -90,6 +121,11 @@ size, and cold-start cost on very large repositories. Measured on Linux 6.6
 - **Test mapping is no longer quadratic** and per-file symbol lookups use the
   file postings instead of scanning every symbol: `ask` 19.5 s → 1.4 s,
   `context` 130 s → 1.6 s, `impact` 7.4 s → 1.8 s, `graph --map` 15 s → 1.8 s.
+- **The cl100k tokenizer is built once per process** instead of on every
+  count; trimming a repository map and checking daemon responses against the
+  output envelope no longer rebuild it each time.
+- With a warm daemon on the same index: `search` 10 ms, `ask` 98 ms, `symbols`
+  73 ms, `usages` 75 ms, `graph --map` 76 ms, `impact` 351 ms.
 
 ## [0.48.0] - 2026-07-22
 

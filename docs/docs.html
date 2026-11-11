@@ -832,7 +832,9 @@ cd repo
 codixing init .
 codixing ask "change the release: keep every channel green" --mode edit
 codixing search IndexStore --strategy goto
-codixing symbols IndexStore --defs-only
+codixing symbols IndexStore
+codixing usages IndexStore
+codixing daemon start .
 codixing graph . --map --token-budget 1500
 codixing graph . --html graph.html
 codixing impact src/path/to/file.rs
@@ -1098,8 +1100,8 @@ codixing bench-tokens .
             <div class="pre-label">parameters</div>
             <pre><code>{
   <span class="tok-key">"file"</span>:         <span class="tok-str">"src/engine.rs"</span>,
-  <span class="tok-key">"line_start"</span>:   <span class="tok-num">80</span>,   <span class="tok-comment">// 0-indexed, optional</span>
-  <span class="tok-key">"line_end"</span>:     <span class="tok-num">140</span>,  <span class="tok-comment">// 0-indexed, optional</span>
+  <span class="tok-key">"line_start"</span>:   <span class="tok-num">80</span>,   <span class="tok-comment">// 1-based inclusive, optional</span>
+  <span class="tok-key">"line_end"</span>:     <span class="tok-num">140</span>,  <span class="tok-comment">// 1-based inclusive, optional</span>
   <span class="tok-key">"token_budget"</span>: <span class="tok-num">4000</span>
 }</code></pre>
           </div>
