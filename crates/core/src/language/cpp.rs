@@ -124,6 +124,12 @@ fn collect_entities(
     }
 }
 
+/// True when a struct/enum/class specifier carries a body, i.e. it defines
+/// the type rather than merely naming it.
+fn has_body(node: &Node) -> bool {
+    node.child_by_field_name("body").is_some()
+}
+
 fn match_entity_kind(kind: &str, node: &Node, source: &[u8]) -> Option<EntityKind> {
     match kind {
         "function_definition" => Some(EntityKind::Function),
@@ -131,6 +137,11 @@ fn match_entity_kind(kind: &str, node: &Node, source: &[u8]) -> Option<EntityKin
             if let Some(parent) = node.parent()
                 && parent.kind() == "type_definition"
             {
+                return None;
+            }
+            // A specifier without a body (`struct foo *p;`, `struct foo;`) is a
+            // reference or forward declaration, not a definition.
+            if !has_body(node) {
                 return None;
             }
             Some(EntityKind::Class)
@@ -141,12 +152,22 @@ fn match_entity_kind(kind: &str, node: &Node, source: &[u8]) -> Option<EntityKin
             {
                 return None;
             }
+            // A specifier without a body (`struct foo *p;`, `struct foo;`) is a
+            // reference or forward declaration, not a definition.
+            if !has_body(node) {
+                return None;
+            }
             Some(EntityKind::Struct)
         }
         "enum_specifier" => {
             if let Some(parent) = node.parent()
                 && parent.kind() == "type_definition"
             {
+                return None;
+            }
+            // A specifier without a body (`struct foo *p;`, `struct foo;`) is a
+            // reference or forward declaration, not a definition.
+            if !has_body(node) {
                 return None;
             }
             Some(EntityKind::Enum)

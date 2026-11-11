@@ -292,14 +292,26 @@ pub fn try_search(root: &Path, query: &str, limit: usize) -> Option<String> {
         json!({
             "query": query,
             "limit": limit,
+            // Same one-line-per-hit rendering as the in-process path.
+            "compact": true,
         }),
     )
 }
 
 /// Proxy `codixing symbols <name>` through the daemon's `find_symbol` tool.
-pub fn try_symbols(root: &Path, name: &str, file_filter: Option<&str>) -> Option<String> {
+pub fn try_symbols(
+    root: &Path,
+    name: &str,
+    file_filter: Option<&str>,
+    include_imports: bool,
+    limit: usize,
+) -> Option<String> {
     let mut args = serde_json::Map::new();
     args.insert("name".into(), json!(name));
+    args.insert("include_imports".into(), json!(include_imports));
+    args.insert("limit".into(), json!(limit));
+    // Bare listing, exactly as the in-process command prints it.
+    args.insert("cli".into(), json!(true));
     if let Some(f) = file_filter {
         args.insert("file".into(), json!(f));
     }
@@ -307,13 +319,18 @@ pub fn try_symbols(root: &Path, name: &str, file_filter: Option<&str>) -> Option
 }
 
 /// Proxy `codixing usages <symbol>` through the daemon's `search_usages` tool.
-pub fn try_usages(root: &Path, symbol: &str) -> Option<String> {
-    try_tools_call(root, "search_usages", json!({ "symbol": symbol }))
+pub fn try_usages(root: &Path, symbol: &str, limit: usize) -> Option<String> {
+    try_tools_call(
+        root,
+        "search_usages",
+        // Bare listing, exactly as the in-process command prints it.
+        json!({ "symbol": symbol, "limit": limit, "cli": true }),
+    )
 }
 
 /// Proxy `codixing impact <file>` through the daemon's `change_impact` tool.
-pub fn try_impact(root: &Path, file: &str) -> Option<String> {
-    try_tools_call(root, "change_impact", json!({ "file": file }))
+pub fn try_impact(root: &Path, file: &str, full: bool) -> Option<String> {
+    try_tools_call(root, "change_impact", json!({ "file": file, "full": full }))
 }
 
 /// Proxy `codixing graph --map` through the daemon's `get_repo_map` tool.

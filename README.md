@@ -205,8 +205,8 @@ The most common commands (run `codixing --help` for the full list):
 ```bash
 codixing search "query"          # Ranked code search
 codixing grep "pattern"          # Literal/regex text scan (path:line:col:text)
-codixing symbols Widget          # Find symbol definitions
-codixing usages add_chunk        # Find call sites and imports
+codixing symbols Widget          # Definitions, exact match first (path:start-end)
+codixing usages add_chunk        # Every reference as path:line:kind (exact; --complete for all)
 codixing callers src/engine.rs   # Who imports this file
 codixing callees src/engine.rs   # What this file imports
 codixing graph --map             # Architecture overview
@@ -219,10 +219,10 @@ codixing impact src/engine.rs    # Blast radius (compact by default; --full for 
 codixing api src/engine.rs       # Public API surface
 codixing types Engine            # Type relationships
 codixing examples add_chunk      # Usage examples from tests + callers
-codixing context src/engine.rs   # Cross-file context assembly
-codixing ask "task: inspect auth" # Recommended agent entrypoint; punctuation-safe
+codixing context src/engine.rs --line 120  # Innermost function + imports/callees (1-based line)
+codixing ask "task: inspect auth" # Recommended agent entrypoint: compact text pack (--json for the schema)
 codixing agent-context-pack "task" # Stable JSON context pack for agents
-codixing symbols Widget --defs-only  # Definitions only (no Import rows)
+codixing symbols Widget --imports  # Also list import rows (hidden by default)
 codixing search IndexStore --strategy goto  # Definition-first symbol jump
 codixing init --dry-run .         # Inventory + disk estimate before writing an index
 codixing doctor --check-update    # Free space, lock owner, ONNX hints, optional release check

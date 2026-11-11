@@ -603,8 +603,8 @@ pub(crate) fn call_find_similar(engine: &Engine, args: &Value) -> (String, bool)
         out.push_str(&format!(
             "**{}** L{}-{}  (score: {:.3})\n```\n{}\n```\n\n",
             r.file_path,
-            r.line_start,
-            r.line_end,
+            r.display_lines().0,
+            r.display_lines().1,
             r.score,
             r.content.trim()
         ));
@@ -934,7 +934,9 @@ pub(crate) fn call_api_surface(engine: &Engine, args: &Value) -> (String, bool) 
         let sig = s.signature.as_deref().unwrap_or(&s.name);
         out.push_str(&format!(
             "- {:?} `{}` (line {})\n",
-            s.kind, sig, s.line_start
+            s.kind,
+            sig,
+            s.line_start + 1
         ));
     }
     (out, false)

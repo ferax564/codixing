@@ -164,6 +164,14 @@ pub struct SearchResult {
 }
 
 impl SearchResult {
+    /// The result's span as 1-based inclusive line numbers, the convention
+    /// used by editors, `grep`, and every user-facing Codixing output.
+    /// (`line_start` is 0-based and `line_end` 0-based exclusive.)
+    pub fn display_lines(&self) -> (u64, u64) {
+        let start = self.line_start + 1;
+        (start, self.line_end.max(start))
+    }
+
     /// Whether this result comes from a documentation file
     /// (Markdown, HTML, reStructuredText, AsciiDoc, plain text).
     pub fn is_doc(&self) -> bool {

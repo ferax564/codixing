@@ -45,9 +45,13 @@ description = "Optional list of query reformulations for multi-query RRF fusion.
 type = "string"
 description = "Restrict results to imported external context (see import_external). Use 'external' for any import, or a specific source namespace: 'github', 'adr', 'jira', 'linear'."
 
+[tools.params.compact]
+type = "boolean"
+description = "If true, return one line per hit (path:start-end, signature, a 3-line query-focused snippet) instead of full code blocks. Cheapest way to locate code; read the range afterwards."
+
 [[tools]]
 name = "find_symbol"
-description = "Look up symbols (functions, structs, classes, traits, methods, etc.) in the indexed codebase by name. Performs case-insensitive substring matching. Use when you already know the symbol name and need its definition file/line \u2014 prefer `code_search` for concept queries, `read_symbol` to read the full source."
+description = "Look up symbols (functions, structs, classes, traits, methods, etc.) by name. Case-insensitive substring match, ordered exact name first, then types before functions before impl blocks, production code before tests. One line per symbol: `Kind name  path:start-end` (1-based lines). Use when you know the symbol name \u2014 prefer `code_search` for concept queries, `read_symbol` to read the source."
 handler = "search::call_find_symbol"
 calling_convention = "engine_args"
 read_only = true
@@ -61,9 +65,17 @@ required = true
 type = "string"
 description = "Optional file path substring to restrict results to a specific file (e.g. 'engine.rs')"
 
+[tools.params.limit]
+type = "integer"
+description = "Maximum rows (default: 50, hard max: 100). The response states how many more matched."
+
+[tools.params.include_imports]
+type = "boolean"
+description = "Also list import/use rows (default: false; they name a symbol without defining it)."
+
 [[tools]]
 name = "search_usages"
-description = "Find code locations where a symbol (function, struct, variable, etc.) is referenced or called. Unlike find_symbol which finds definitions, this finds usages \u2014 call sites, imports, and references. Essential for impact analysis before refactoring. Use `complete=true` for a deterministic, pageable bounded scan where the ranked view hides the long tail; follow `next_offset` until `has_more=false`. Tip: For graph-based caller discovery, use symbol_callers instead \u2014 it uses the dependency graph for more precise results."
+description = "Find every place a symbol (function, struct, variable, etc.) is referenced. Exhaustive whole-word scan through the trigram index, so no call site is missed. One line per hit: `path:line:kind: source` (1-based lines; kind is definition, call, reference, import, comment or doc), ordered most useful first: definition, production code, imports, tests, comments, docs. Use this before changing a signature or renaming a symbol. Use `complete=true` to page through the full set ordered by (file, line); follow `next_offset` until `has_more=false`."
 handler = "search::call_search_usages"
 calling_convention = "engine_args"
 read_only = true
@@ -79,7 +91,7 @@ description = "Maximum usage locations per response page (default: 20, hard max:
 
 [tools.params.complete]
 type = "boolean"
-description = "If true, scans up to 100000 candidate chunks for known call sites/imports without ranking, sorts references deterministically by (file, line), and returns total-within-scan/has_more/next_offset pagination metadata. Default: false."
+description = "If true, returns the full reference set (up to 100000) ordered by (file, line) with total/has_more/next_offset pagination metadata instead of the ranked first page. Default: false."
 
 [tools.params.offset]
 type = "integer"

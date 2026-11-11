@@ -384,11 +384,34 @@ pub(super) fn load_persisted_file_trigram(
 pub(super) enum ReadOnlyLoadMode {
     Full,
     Lexical,
+    /// Indexed file list and the lazily mapped file trigram only: everything
+    /// `grep` needs. No symbols, chunk metadata, graph or vectors.
+    Files,
+    /// Symbol table only: everything a symbol-name lookup needs.
+    Symbols,
+    /// File list, file trigram and symbol table: everything an exact
+    /// reference scan needs.
+    References,
 }
 
 impl ReadOnlyLoadMode {
     pub(super) fn loads_graph(self) -> bool {
         matches!(self, Self::Full)
+    }
+
+    /// Chunk metadata is the largest resident structure (hundreds of
+    /// megabytes on a kernel-sized index); only search needs it.
+    pub(super) fn loads_chunk_meta(self) -> bool {
+        matches!(self, Self::Full | Self::Lexical)
+    }
+
+    pub(super) fn loads_symbols(self) -> bool {
+        !matches!(self, Self::Files)
+    }
+
+    /// Whether ranked/exact search may run on an engine opened in this mode.
+    pub(super) fn supports_search(self) -> bool {
+        matches!(self, Self::Full | Self::Lexical)
     }
 
     pub(super) fn loads_vectors(self) -> bool {

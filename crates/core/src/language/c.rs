@@ -84,6 +84,12 @@ fn collect_entities(
     }
 }
 
+/// True when a struct/enum/class specifier carries a body, i.e. it defines
+/// the type rather than merely naming it.
+fn has_body(node: &Node) -> bool {
+    node.child_by_field_name("body").is_some()
+}
+
 fn match_entity_kind(kind: &str, node: &Node, source: &[u8]) -> Option<EntityKind> {
     match kind {
         "function_definition" => Some(EntityKind::Function),
@@ -94,12 +100,22 @@ fn match_entity_kind(kind: &str, node: &Node, source: &[u8]) -> Option<EntityKin
             {
                 return None; // Will be handled by type_definition
             }
+            // A specifier without a body (`struct foo *p;`, `struct foo;`) is a
+            // reference or forward declaration, not a definition.
+            if !has_body(node) {
+                return None;
+            }
             Some(EntityKind::Struct)
         }
         "enum_specifier" => {
             if let Some(parent) = node.parent()
                 && parent.kind() == "type_definition"
             {
+                return None;
+            }
+            // A specifier without a body (`struct foo *p;`, `struct foo;`) is a
+            // reference or forward declaration, not a definition.
+            if !has_body(node) {
                 return None;
             }
             Some(EntityKind::Enum)
@@ -271,6 +287,35 @@ int add(int a, int b) {
                 .as_ref()
                 .unwrap()
                 .contains("Add two integers")
+        );
+    }
+
+    #[test]
+    fn struct_references_are_not_definitions() {
+        // Regression: every `struct task *p` field or parameter used to be
+        // indexed as a struct definition, burying the real one on large C
+        // codebases.
+        let src = r#"
+struct task;
+
+struct task {
+    int pid;
+    struct task *parent;
+    enum state st;
+};
+
+int run(struct task *t);
+"#;
+        let (_, entities) = parse_c(src);
+        let structs: Vec<_> = entities
+            .iter()
+            .filter(|e| e.kind == EntityKind::Struct)
+            .collect();
+        assert_eq!(structs.len(), 1, "only the bodied struct is a definition");
+        assert_eq!(structs[0].name, "task");
+        assert!(
+            entities.iter().all(|e| e.kind != EntityKind::Enum),
+            "bodiless enum reference must not be a definition"
         );
     }
 

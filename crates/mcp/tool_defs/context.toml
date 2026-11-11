@@ -20,7 +20,7 @@ description = "Maximum number of code snippets (default: 10)"
 
 [[tools]]
 name = "agent_context_pack"
-description = "Compile a stable JSON context pack for an AI agent task. Returns ranked repo orientation, must-read evidence handles, related symbols, likely tests, docs/conventions, risks, and recommended next Codixing tools under a token budget. Use this as the default first call before locate/understand/edit/review/test/migrate/incident workflows."
+description = "Compile a context pack for an AI agent task: ranked must-read evidence (path, 1-based line range, signature, short source preview), symbols defined in and around it, likely tests, docs, risks, and next tools, under a token budget. Use this as the default first call before locate/understand/edit/review/test/migrate/incident workflows. Returns stable compact JSON by default; pass format='text' for a line-oriented rendering at roughly a third of the tokens."
 handler = "context::call_agent_context_pack"
 calling_convention = "engine_args_progress"
 read_only = true
@@ -32,12 +32,17 @@ required = true
 
 [tools.params.mode]
 type = "string"
-description = "Workflow mode for retrieval routing and next-tool recommendations"
+description = "Workflow mode for retrieval routing and next-tool recommendations. Omit to infer it from the task wording."
 enum = ["locate", "understand", "edit", "review", "test", "migrate", "incident"]
 
 [tools.params.token_budget]
 type = "integer"
-description = "Maximum serialized response tokens (default: 4000, hard max: 12000). The context payload reserves space for JSON structure and pretty-printing."
+description = "Maximum serialized response tokens (default: 4000, hard max: 12000)."
+
+[tools.params.format]
+type = "string"
+description = "Output format: 'json' (default, stable schema) or 'text' (compact, same evidence)."
+enum = ["json", "text"]
 
 [tools.params.changed_files]
 type = "array"

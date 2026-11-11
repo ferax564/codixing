@@ -9,6 +9,83 @@ use std::sync::Arc;
 
 use crate::language::{EntityKind, Language, TypeRelation, Visibility};
 
+/// Rank of a symbol kind as a "go to definition" target.
+///
+/// - `3`: the type itself (struct/class/enum/trait/interface/alias)
+/// - `2`: callable or value definitions (fn/method/const/static/variable)
+/// - `1`: blocks that *extend* a definition (`impl Foo`, modules, namespaces)
+/// - `0`: imports and anything else that only names the symbol
+///
+/// `impl Foo` blocks share the name of the type they extend. Ranking them
+/// alongside `struct Foo` buried the type under every impl block in the
+/// repository, in file-path order.
+pub fn definition_tier(kind: &EntityKind) -> u8 {
+    match kind {
+        EntityKind::Class
+        | EntityKind::Struct
+        | EntityKind::Enum
+        | EntityKind::Interface
+        | EntityKind::Trait
+        | EntityKind::TypeAlias
+        | EntityKind::Type => 3,
+        EntityKind::Function
+        | EntityKind::Method
+        | EntityKind::Constant
+        | EntityKind::Static
+        | EntityKind::Variable => 2,
+        EntityKind::Import => 0,
+        _ => 1,
+    }
+}
+
+/// Heuristic: does this path look like test code?
+pub fn is_test_like_path(path: &str) -> bool {
+    path.contains("/test")
+        || path.starts_with("test")
+        || path.contains("__tests__")
+        || path.ends_with("_test.rs")
+        || path.ends_with("_test.go")
+        || path.ends_with("_test.py")
+        || path.ends_with(".test.ts")
+        || path.ends_with(".test.tsx")
+        || path.ends_with(".test.js")
+        || path.ends_with(".spec.ts")
+        || path.ends_with(".spec.tsx")
+        || path.ends_with(".spec.js")
+}
+
+/// Order symbols the way a name lookup should present them.
+///
+/// Closest name match first (exact, exact ignoring case, prefix, substring),
+/// then the strongest definition kind, then production code before tests,
+/// then path and line for determinism. A substring lookup for `Engine` thus
+/// starts with `struct Engine`, not with whatever sorts first by file path.
+pub fn sort_for_lookup(symbols: &mut [Symbol], query: &str) {
+    let query_lower = query.to_ascii_lowercase();
+    let closeness = |name: &str| -> u8 {
+        if query.is_empty() {
+            return 0;
+        }
+        if name == query {
+            0
+        } else if name.eq_ignore_ascii_case(query) {
+            1
+        } else if name.to_ascii_lowercase().starts_with(&query_lower) {
+            2
+        } else {
+            3
+        }
+    };
+    symbols.sort_by(|a, b| {
+        closeness(&a.name)
+            .cmp(&closeness(&b.name))
+            .then_with(|| definition_tier(&b.kind).cmp(&definition_tier(&a.kind)))
+            .then_with(|| is_test_like_path(&a.file_path).cmp(&is_test_like_path(&b.file_path)))
+            .then_with(|| a.file_path.cmp(&b.file_path))
+            .then_with(|| a.line_start.cmp(&b.line_start))
+    });
+}
+
 /// A symbol extracted from source code, representing a named semantic entity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Symbol {
@@ -22,7 +99,8 @@ pub struct Symbol {
     pub file_path: String,
     /// First line of the symbol definition (0-indexed).
     pub line_start: usize,
-    /// Last line of the symbol definition (0-indexed).
+    /// End of the symbol definition (0-indexed, exclusive — equivalently the
+    /// 1-based number of its last line).
     pub line_end: usize,
     /// Byte offset where the symbol starts.
     pub byte_start: usize,
@@ -38,6 +116,16 @@ pub struct Symbol {
     pub visibility: Visibility,
     /// Type relationships extracted from AST.
     pub type_relations: Vec<TypeRelation>,
+}
+
+impl Symbol {
+    /// The symbol's span as 1-based inclusive line numbers, the convention
+    /// used by editors, `grep`, and every user-facing Codixing output.
+    /// (`line_start` / `line_end` themselves are 0-based.)
+    pub fn display_lines(&self) -> (usize, usize) {
+        let start = self.line_start + 1;
+        (start, self.line_end.max(start))
+    }
 }
 
 /// Mutable, concurrent symbol table backed by `DashMap`.
@@ -683,6 +771,23 @@ impl SymbolTable {
             Self::InMemory(t) => t.symbols_in_file(file_path, name_pattern),
             Self::Mmap(t) => t.symbols_in_file(file_path, name_pattern),
             Self::Overlay(t) => t.symbols_in_file(file_path, name_pattern),
+        }
+    }
+
+    /// All symbols of exactly `file_path`.
+    ///
+    /// Uses the per-file postings when the table has them, so the cost is
+    /// proportional to that file. `filter("", Some(path))` — the previous way
+    /// to ask this — walks every symbol in the repository per call, which
+    /// made per-file loops (repo map, context assembly) take seconds to
+    /// minutes on large indexes.
+    pub fn file_symbols(&self, file_path: &str) -> Vec<Symbol> {
+        if self.supports_exact_file_postings() {
+            self.symbols_in_file(file_path, None)
+        } else {
+            let mut symbols = self.filter("", Some(file_path));
+            symbols.retain(|s| s.file_path == file_path);
+            symbols
         }
     }
 

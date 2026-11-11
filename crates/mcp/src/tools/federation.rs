@@ -268,8 +268,8 @@ pub fn call_federation_search(
                     i + 1,
                     r.project,
                     r.result.file_path,
-                    r.result.line_start,
-                    r.result.line_end,
+                    r.result.display_lines().0,
+                    r.result.display_lines().1,
                     r.result.score,
                 ));
                 // Show first 3 lines of content as preview.

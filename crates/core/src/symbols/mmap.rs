@@ -121,9 +121,104 @@ fn invalid_structure(message: impl Into<String>) -> CodixingError {
     CodixingError::Serialization(format!("invalid symbols_v2.bin: {}", message.into()))
 }
 
+/// Magic prefix of a validation stamp (`<symbols file>.sum`).
+const STAMP_MAGIC: &[u8; 8] = b"CXSYMOK1";
+/// Stamp layout: magic, file length (u64 LE), xxh3-64 of the file (u64 LE).
+const STAMP_LEN: usize = 24;
+
+/// Path of the validation stamp that accompanies a symbols file.
+pub(crate) fn validation_stamp_path(path: &Path) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".sum");
+    std::path::PathBuf::from(name)
+}
+
+fn encode_stamp(bytes: &[u8]) -> [u8; STAMP_LEN] {
+    let mut stamp = [0u8; STAMP_LEN];
+    stamp[..8].copy_from_slice(STAMP_MAGIC);
+    stamp[8..16].copy_from_slice(&(bytes.len() as u64).to_le_bytes());
+    stamp[16..24].copy_from_slice(&xxhash_rust::xxh3::xxh3_64(bytes).to_le_bytes());
+    stamp
+}
+
+/// Record that the symbols file at `path` passed full structural validation.
+///
+/// The stamp binds the verdict to the exact bytes (length + xxh3-64 digest).
+/// [`MmapSymbolTable::load`] may then replace the structural walk — which
+/// visits every record and string of a file that can be hundreds of megabytes
+/// — with one hash pass over the mapping. On a kernel-sized index that turns
+/// a 2.5 s step of *every* process start into about 50 ms.
+///
+/// Only writers call this, right after producing the file. Any later change
+/// to the file makes the digest mismatch, and loading falls back to the full
+/// validation. Failing to write the stamp is not an error: it only costs the
+/// fast path.
+pub(crate) fn write_validation_stamp(path: &Path) -> Result<()> {
+    // Full validation first: the stamp must never vouch for a file that the
+    // structural checks would reject.
+    let table = MmapSymbolTable::load_validated(path)?;
+    let stamp = encode_stamp(&table.mmap);
+    crate::persistence::atomic_write_with(validation_stamp_path(path), move |file| {
+        use std::io::Write as _;
+        file.write_all(&stamp)?;
+        Ok(())
+    })?;
+    Ok(())
+}
+
+/// Write the validation stamp for an existing symbols file when it is missing
+/// or stale. Called by writers when they open an index, so indexes built
+/// before stamps existed gain the fast open path after their next `sync`.
+pub(crate) fn ensure_validation_stamp(path: &Path) {
+    if !path.is_file() {
+        return;
+    }
+    let stamped = MmapSymbolTable::map(path).is_ok_and(|table| table.has_matching_stamp(path));
+    if !stamped && let Err(error) = write_validation_stamp(path) {
+        tracing::debug!(%error, "could not write symbol validation stamp");
+    }
+}
+
 impl MmapSymbolTable {
     /// Load a memory-mapped symbol table from `symbols_v2.bin`.
+    ///
+    /// The file is structurally validated unless a matching validation stamp
+    /// (see [`write_validation_stamp`]) proves these exact bytes were already
+    /// validated by the writer that produced them.
     pub fn load(path: &Path) -> Result<Self> {
+        let table = Self::map(path)?;
+        if !table.has_matching_stamp(path) {
+            table.validate_structure()?;
+        }
+        Ok(table)
+    }
+
+    /// Load with full structural validation, ignoring any stamp.
+    pub(crate) fn load_validated(path: &Path) -> Result<Self> {
+        let table = Self::map(path)?;
+        table.validate_structure()?;
+        Ok(table)
+    }
+
+    /// True when the stamp next to `path` matches the mapped bytes.
+    fn has_matching_stamp(&self, path: &Path) -> bool {
+        let Ok(stamp) = std::fs::read(validation_stamp_path(path)) else {
+            return false;
+        };
+        // Cheap rejections first; the digest pass only runs for a stamp that
+        // already agrees on the length.
+        if stamp.len() != STAMP_LEN
+            || &stamp[..8] != STAMP_MAGIC
+            || stamp[8..16] != (self.mmap.len() as u64).to_le_bytes()
+        {
+            return false;
+        }
+        stamp == encode_stamp(&self.mmap)
+    }
+
+    /// Map the file and parse its header and section layout, without walking
+    /// the records.
+    fn map(path: &Path) -> Result<Self> {
         let file = std::fs::File::open(path)?;
         let file_len = usize::try_from(file.metadata()?.len()).map_err(|_| {
             CodixingError::Serialization(
@@ -405,7 +500,6 @@ impl MmapSymbolTable {
             symbol_data_end,
             public_line_data_offset: symbol_data_end,
         };
-        table.validate_structure()?;
         Ok(table)
     }
 

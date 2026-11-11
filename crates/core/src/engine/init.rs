@@ -763,6 +763,11 @@ impl Engine {
             store.ensure_generation_lease_for_mutation()?;
         }
 
+        // Writers vouch for the symbol table (one full validation) so this and
+        // every later open can skip the structural walk.
+        if !read_only {
+            crate::symbols::mmap::ensure_validation_stamp(&store.symbols_v2_path());
+        }
         let symbols = load_persisted_symbols(&store)?;
 
         let parser = Parser::new();
@@ -955,6 +960,32 @@ impl Engine {
         Self::open_read_only_with_mode(root, ReadOnlyLoadMode::Lexical)
     }
 
+    /// Open only what [`grep_code_opts`](Self::grep_code_opts) needs: the
+    /// indexed file list and the (lazily mapped) file trigram index.
+    ///
+    /// A text scan consults neither symbols, chunk metadata nor the graph, and
+    /// on a large repository loading them is what makes a one-shot `grep`
+    /// slower than scanning the tree directly. Every other query on the
+    /// returned engine sees an empty index; search is rejected outright.
+    pub fn open_read_only_files(root: impl AsRef<Path>) -> Result<Self> {
+        Self::open_read_only_with_mode(root, ReadOnlyLoadMode::Files)
+    }
+
+    /// Open the file list, file trigram and symbol table: what
+    /// [`exact_symbol_references`](Self::exact_symbol_references) needs. Every
+    /// other query on the returned engine sees an empty index; search is
+    /// rejected outright.
+    pub fn open_read_only_references(root: impl AsRef<Path>) -> Result<Self> {
+        Self::open_read_only_with_mode(root, ReadOnlyLoadMode::References)
+    }
+
+    /// Open only the symbol table, for symbol-name lookups
+    /// ([`symbols`](Self::symbols)). Every other query on the returned engine
+    /// sees an empty index; search is rejected outright.
+    pub fn open_read_only_symbols(root: impl AsRef<Path>) -> Result<Self> {
+        Self::open_read_only_with_mode(root, ReadOnlyLoadMode::Symbols)
+    }
+
     pub(super) fn open_read_only_with_mode(
         root: impl AsRef<Path>,
         read_only_load_mode: ReadOnlyLoadMode,
@@ -974,21 +1005,47 @@ impl Engine {
 
         // New indexes use the full-fidelity mmap format. Legacy mmap files fall
         // back to bitcode when available so compatibility never drops fields.
-        let symbols = load_persisted_symbols(&store)?;
+        let symbols = if read_only_load_mode.loads_symbols() {
+            load_persisted_symbols(&store)?
+        } else {
+            SymbolTable::new()
+        };
 
         let parser = Parser::new();
         let meta = store.load_meta()?;
 
         // Restore chunk_meta (compact format first, fall back to legacy with content).
-        let chunk_meta: DashMap<u64, ChunkMeta> = if store.chunk_meta_path().exists() {
-            let bytes = store.load_chunk_meta_bytes()?;
-            super::indexing::deserialize_chunk_meta(&bytes)?
-        } else {
-            DashMap::new()
-        };
+        let chunk_meta: DashMap<u64, ChunkMeta> =
+            if read_only_load_mode.loads_chunk_meta() && store.chunk_meta_path().exists() {
+                let bytes = store.load_chunk_meta_bytes()?;
+                super::indexing::deserialize_chunk_meta(&bytes)?
+            } else {
+                DashMap::new()
+            };
 
-        // Rebuild exact per-file chunk postings from compact metadata.
-        let file_chunk_ids = super::collect_file_chunk_ids(&chunk_meta);
+        let file_chunk_ids = if read_only_load_mode.loads_chunk_meta() {
+            // Rebuild exact per-file chunk postings from compact metadata.
+            super::collect_file_chunk_ids(&chunk_meta)
+        } else if matches!(
+            read_only_load_mode,
+            ReadOnlyLoadMode::Files | ReadOnlyLoadMode::References
+        ) {
+            // The file list alone, from the authoritative hash snapshot: a
+            // few megabytes instead of the whole chunk table.
+            let mut files: HashMap<String, Box<[u64]>> = HashMap::new();
+            for (path, _) in store.load_tree_hashes_v2()? {
+                let relative = match path.strip_prefix(&config.root) {
+                    Ok(rel) => Some(rel.to_string_lossy().replace('\\', "/")),
+                    Err(_) => config.normalize_path(&path),
+                };
+                if let Some(relative) = relative {
+                    files.insert(relative, Box::default());
+                }
+            }
+            files
+        } else {
+            HashMap::new()
+        };
 
         // Restore vector index if it exists.
         let (embedder, vector) = if read_only_load_mode.loads_vectors()

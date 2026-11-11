@@ -283,6 +283,111 @@ pub struct AgentContextPack {
     pub truncated: bool,
 }
 
+impl AgentContextPack {
+    /// Render the pack as compact line-oriented text.
+    ///
+    /// This carries the same evidence as the JSON form at a fraction of the
+    /// tokens: no repeated keys, one line per item, `path:start-end` ranges
+    /// (1-based, inclusive) that can be handed straight to a file reader.
+    pub fn render_text(&self) -> String {
+        use std::fmt::Write as _;
+
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "# {} pack: {} evidence{}",
+            self.mode.as_str(),
+            self.must_read.len(),
+            if self.truncated {
+                " (truncated to budget)"
+            } else {
+                ""
+            }
+        );
+
+        if self.must_read.is_empty() {
+            out.push_str("No matching code found. Try `codixing search` with different terms or `codixing grep` for a literal.\n");
+        } else {
+            out.push_str("\n## Read first\n");
+        }
+        for evidence in &self.must_read {
+            let kind = match evidence.kind.as_str() {
+                "implementation" => String::new(),
+                other => format!(" [{other}]"),
+            };
+            let signature = evidence
+                .signature
+                .as_deref()
+                .map(first_line)
+                .filter(|s| !s.is_empty())
+                .map(|s| format!("  {s}"))
+                .unwrap_or_default();
+            let _ = writeln!(
+                out,
+                "{} {}:{}-{}{}{}",
+                evidence.id, evidence.path, evidence.start_line, evidence.end_line, kind, signature
+            );
+            if let Some(preview) = &evidence.preview {
+                for line in preview.lines() {
+                    let _ = writeln!(out, "   | {line}");
+                }
+            }
+        }
+
+        if !self.related_symbols.is_empty() {
+            out.push_str("\n## Defined in the evidence\n");
+            for symbol in &self.related_symbols {
+                let label = symbol
+                    .signature
+                    .clone()
+                    .unwrap_or_else(|| format!("{} {}", symbol.kind, symbol.name));
+                let start = symbol
+                    .range
+                    .trim_start_matches('L')
+                    .split('-')
+                    .next()
+                    .unwrap_or("");
+                let _ = writeln!(out, "{}:{} {}", symbol.path, start, label);
+            }
+        }
+
+        // `repo_orientation` (neighbouring symbols per file) stays in the JSON
+        // form; in text it costs more tokens than it saves follow-up calls.
+
+        if !self.likely_tests.is_empty() {
+            out.push_str("\n## Likely tests\n");
+            for test in &self.likely_tests {
+                let _ = writeln!(out, "{}  (covers {})", test.path, test.source_path);
+            }
+        }
+
+        if !self.docs_and_conventions.is_empty() {
+            out.push_str("\n## Docs\n");
+            for doc in &self.docs_and_conventions {
+                let title = doc
+                    .title
+                    .as_deref()
+                    .map(|t| format!("  {t}"))
+                    .unwrap_or_default();
+                let range = doc.range.replace('L', "");
+                let _ = writeln!(out, "{} {}:{}{}", doc.id, doc.path, range, title);
+            }
+        }
+
+        if !self.risks.is_empty() {
+            out.push_str("\n## Notes\n");
+            for risk in &self.risks {
+                let _ = writeln!(out, "- {risk}");
+            }
+        }
+
+        if !self.recommended_next_tools.is_empty() {
+            let _ = writeln!(out, "\nNext: {}", self.recommended_next_tools.join(" · "));
+        }
+        out
+    }
+}
+
 /// File-level orientation for an agent context pack.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentContextOrientation {
@@ -304,6 +409,9 @@ pub struct AgentContextEvidence {
     pub reason: String,
     pub score: f32,
     pub signature: Option<String>,
+    /// First lines of the evidence span, present for the leading items only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
 }
 
 /// Related symbol metadata for task-local files.
@@ -368,7 +476,7 @@ pub struct ContextSnippet {
     pub file_path: String,
     /// Start line (0-indexed).
     pub line_start: usize,
-    /// End line (0-indexed).
+    /// End line (0-indexed, exclusive).
     pub line_end: usize,
     /// The source code content.
     pub content: String,
@@ -464,7 +572,8 @@ fn shrink_primary_to_window(
     }
 
     primary.line_start = start as u64;
-    primary.line_end = end as u64;
+    // Exclusive end, like every other result span.
+    primary.line_end = end as u64 + 1;
     primary.content = content;
 }
 
@@ -478,10 +587,120 @@ fn human_result_range(start: u64, end: u64) -> (u64, u64, String) {
     )
 }
 
+/// 1-based inclusive range of a symbol (`end` is 0-based exclusive).
 fn human_symbol_range(start: usize, end: usize) -> String {
     let human_start = start + 1;
-    let human_end = end + 1;
+    let human_end = end.max(human_start);
     format!("L{human_start}-L{human_end}")
+}
+
+/// Number of leading evidence items that carry a source preview.
+const AGENT_PACK_PREVIEW_ITEMS: usize = 3;
+/// Maximum preview size per evidence item.
+const AGENT_PACK_PREVIEW_LINES: usize = 6;
+const AGENT_PACK_PREVIEW_LINE_BYTES: usize = 140;
+
+fn first_line(text: &str) -> String {
+    text.lines().next().unwrap_or("").trim_end().to_string()
+}
+
+/// Lower-cased search terms of a query worth matching against source lines.
+fn snippet_terms(query: &str) -> Vec<String> {
+    const SKIP: &[&str] = &[
+        "the", "and", "for", "how", "does", "what", "where", "which", "with", "from", "that",
+        "this", "are", "was", "when", "why", "who", "into", "its", "any", "all", "not",
+    ];
+    let mut terms: Vec<String> = Vec::new();
+    for raw in query.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+        let lower = raw.to_ascii_lowercase();
+        if lower.len() < 3 || SKIP.contains(&lower.as_str()) {
+            continue;
+        }
+        // `snake_case` terms also match on their parts.
+        for part in lower.split('_').filter(|p| p.len() >= 3) {
+            if part != lower && !terms.iter().any(|t| t == part) {
+                terms.push(part.to_string());
+            }
+        }
+        if !terms.contains(&lower) {
+            terms.push(lower);
+        }
+    }
+    terms
+}
+
+/// Pick the window of `max_lines` consecutive lines that best matches `query`.
+///
+/// Returns the zero-based offset of the window inside `content` and its lines.
+/// A chunk's first lines are often a doc comment or the tail of the previous
+/// item; the lines that actually mention the query terms are what lets a
+/// reader judge a hit without opening the file. Falls back to the leading
+/// non-blank lines when nothing matches.
+pub fn query_focused_lines<'a>(
+    content: &'a str,
+    query: &str,
+    max_lines: usize,
+) -> (usize, Vec<&'a str>) {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() || max_lines == 0 {
+        return (0, Vec::new());
+    }
+    let terms = snippet_terms(query);
+    let scores: Vec<usize> = lines
+        .iter()
+        .map(|line| {
+            if terms.is_empty() {
+                return 0;
+            }
+            let lower = line.to_ascii_lowercase();
+            terms.iter().filter(|t| lower.contains(t.as_str())).count()
+        })
+        .collect();
+
+    let window = max_lines.min(lines.len());
+    let mut best_start = 0;
+    let mut best_score = 0;
+    let mut running: usize = scores[..window].iter().sum();
+    if running > best_score {
+        best_score = running;
+    }
+    for start in 1..=(lines.len() - window) {
+        running = running + scores[start + window - 1] - scores[start - 1];
+        if running > best_score {
+            best_score = running;
+            best_start = start;
+        }
+    }
+    if best_score == 0 {
+        // No term matched: show the leading non-blank lines.
+        let start = lines.iter().position(|l| !l.trim().is_empty()).unwrap_or(0);
+        let end = (start + window).min(lines.len());
+        return (start, lines[start..end].to_vec());
+    }
+    // Do not open the window on blank lines.
+    let mut start = best_start;
+    let end = best_start + window;
+    while start + 1 < end && lines[start].trim().is_empty() {
+        start += 1;
+    }
+    (start, lines[start..end].to_vec())
+}
+
+/// Query-focused preview of an evidence span, bounded per line.
+fn evidence_preview(content: &str, query: &str) -> Option<String> {
+    let (_, window) = query_focused_lines(content, query, AGENT_PACK_PREVIEW_LINES);
+    let mut lines = Vec::new();
+    for line in window {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut end = line.len().min(AGENT_PACK_PREVIEW_LINE_BYTES);
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        lines.push(line[..end].trim_end().to_string());
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 fn result_kind(result: &SearchResult) -> &'static str {
@@ -531,8 +750,33 @@ fn search_limit_for_mode(mode: AgentContextMode, token_budget: usize) -> usize {
     mode_limit.min((token_budget / 300).clamp(4, 16))
 }
 
-/// Extract identifier-like tokens from a task for symbol-table boosting.
-fn task_identifier_candidates(task: &str) -> Vec<String> {
+/// A task token that may name a symbol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IdentifierCandidate {
+    text: String,
+    /// True when the token has identifier *shape* (`snake_case`, `camelCase`,
+    /// `Foo::bar`, letters mixed with digits). Unshaped tokens are ordinary
+    /// words and only count when the symbol table knows them exactly.
+    shaped: bool,
+}
+
+/// Words that never name a symbol worth pinning, however the task is phrased.
+const TASK_STOPWORDS: &[&str] = &[
+    "about", "after", "also", "been", "before", "between", "call", "calls", "change", "changed",
+    "class", "code", "command", "does", "each", "file", "files", "find", "flag", "from",
+    "function", "have", "into", "make", "method", "more", "most", "need", "only", "over", "result",
+    "results", "should", "some", "test", "tests", "than", "that", "their", "then", "there",
+    "these", "this", "type", "used", "uses", "using", "value", "what", "when", "where", "which",
+    "while", "will", "with", "work", "works", "would",
+];
+
+/// Extract tokens from a task that may name symbols.
+///
+/// Prose words are kept only as *unshaped* candidates; the caller accepts them
+/// solely on an exact, specific symbol-table hit. Treating every long word as
+/// an identifier pinned unrelated symbols (anything containing "incremental")
+/// above the real search hits.
+fn task_identifier_candidates(task: &str) -> Vec<IdentifierCandidate> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for raw in task.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':')) {
@@ -540,28 +784,32 @@ fn task_identifier_candidates(task: &str) -> Vec<String> {
         if token.len() < 3 {
             continue;
         }
-        // Prefer CamelCase / snake_case / path-like identifiers over prose words.
-        let looks_ident = token.contains('_')
-            || token.contains(':')
-            || token.chars().any(|c| c.is_ascii_uppercase())
-            || token.chars().any(|c| c.is_ascii_digit());
-        if !looks_ident && token.len() < 8 {
-            continue;
+        let has_lower = token.chars().any(|c| c.is_ascii_lowercase());
+        let has_alpha = token.chars().any(|c| c.is_ascii_alphabetic());
+        let inner_upper = token.chars().skip(1).any(|c| c.is_ascii_uppercase());
+        let shaped = token.contains('_')
+            || token.contains("::")
+            || (inner_upper && has_lower)
+            || (has_alpha && token.chars().any(|c| c.is_ascii_digit()));
+        if !shaped {
+            if token.len() < 4 || !has_alpha {
+                continue;
+            }
+            if TASK_STOPWORDS.contains(&token.to_ascii_lowercase().as_str()) {
+                continue;
+            }
         }
-        let key = token.to_ascii_lowercase();
-        if seen.insert(key) {
-            out.push(token.to_string());
+        if seen.insert(token.to_string()) {
+            out.push(IdentifierCandidate {
+                text: token.to_string(),
+                shaped,
+            });
         }
-        if out.len() >= 8 {
+        if out.len() >= 12 {
             break;
         }
     }
     out
-}
-
-fn is_definition_entity(kind: &crate::language::EntityKind) -> bool {
-    use crate::language::EntityKind;
-    !matches!(kind, EntityKind::Import)
 }
 
 fn demote_test_path_score(path: &str, score: f32) -> f32 {
@@ -604,6 +852,33 @@ fn enforce_agent_pack_budget(pack: &mut AgentContextPack) {
         pack.truncated = true;
         update_pack_token_estimate(pack);
     }
+}
+
+/// The definition a result is "about": the innermost non-import symbol that
+/// starts inside the result or contains its first line. Taking the first
+/// overlapping symbol picked the enclosing `impl` block (or an import) rather
+/// than the function being looked at.
+fn primary_symbol_of<'a>(
+    file_symbols: &'a [crate::symbols::Symbol],
+    result: &SearchResult,
+) -> Option<&'a crate::symbols::Symbol> {
+    file_symbols
+        .iter()
+        .filter(|s| !matches!(s.kind, crate::language::EntityKind::Import))
+        .filter(|s| {
+            let sym_start = s.line_start as u64;
+            let sym_end = s.line_end as u64;
+            sym_start >= result.line_start && sym_start <= result.line_end
+                || result.line_start >= sym_start && result.line_start <= sym_end
+        })
+        .min_by_key(|s| {
+            (
+                // Prefer the symbol that starts closest to the result's start,
+                // then the smallest span.
+                (s.line_start as u64).abs_diff(result.line_start),
+                s.line_end - s.line_start,
+            )
+        })
 }
 
 impl Engine {
@@ -654,116 +929,146 @@ impl Engine {
         branch: Option<String>,
         risk_level: Option<String>,
     ) -> Result<AgentContextPack> {
+        use super::pipeline::{definition_tier, is_test_like_path};
+
         let token_budget = token_budget.max(256);
         let limit = search_limit_for_mode(mode, token_budget);
-        let identifiers = task_identifier_candidates(task);
-        // Prefer definition-first goto when the task names concrete identifiers.
-        let strategy = match mode {
-            AgentContextMode::Locate if identifiers.is_empty() => Strategy::Instant,
-            AgentContextMode::Locate => Strategy::Goto,
-            AgentContextMode::Understand | AgentContextMode::Edit | AgentContextMode::Incident
-                if !identifiers.is_empty() =>
-            {
-                Strategy::Goto
-            }
-            _ => self.detect_strategy(task),
-        };
+        let word_count = task.split_whitespace().count();
 
+        // The task text goes through the same retrieval path as `search`, so a
+        // pack is never worse than a plain search for the same words.
+        let strategy = self.detect_strategy(task);
         let mut results = self.search_agent_task(task, limit, strategy, DocFilter::CodeOnly)?;
-        // Definition boost: pin symbol-table hits for identifier tokens ahead of
-        // BM25 chunks (which often surface tests/usages before the defining span).
-        let mut definition_hits = Vec::new();
-        for ident in &identifiers {
-            let mut symbols = self.symbols.filter(ident, None);
-            let ident_lower = ident.to_ascii_lowercase();
-            symbols.retain(|s| {
-                if !is_definition_entity(&s.kind) {
-                    return false;
+
+        // Exact symbol-table definitions named by the task are merged in ahead
+        // of the text hits. A single-identifier task is already served by the
+        // definition-first `Goto` strategy above.
+        if word_count > 1 {
+            const MAX_PINNED: usize = 4;
+            let top_score = results.first().map(|r| r.score).unwrap_or(1.0).max(1.0);
+            let mut pinned: Vec<SearchResult> = Vec::new();
+            for candidate in task_identifier_candidates(task) {
+                if pinned.len() >= MAX_PINNED {
+                    break;
                 }
-                let name_lower = s.name.to_ascii_lowercase();
-                name_lower == ident_lower || name_lower.contains(&ident_lower)
-            });
-            symbols.sort_by(|a, b| {
-                let a_exact = a.name.eq_ignore_ascii_case(ident) as i32;
-                let b_exact = b.name.eq_ignore_ascii_case(ident) as i32;
-                b_exact
-                    .cmp(&a_exact)
-                    .then_with(|| a.line_start.cmp(&b.line_start))
-            });
-            for symbol in symbols.into_iter().take(3) {
-                let content = self
-                    .read_file_range(
-                        &symbol.file_path,
-                        Some(symbol.line_start as u64),
-                        Some(symbol.line_end as u64),
-                    )?
-                    .unwrap_or_default();
-                let score = if symbol.name.eq_ignore_ascii_case(ident) {
-                    50_000.0
-                } else {
-                    25_000.0
-                };
-                definition_hits.push(SearchResult {
-                    chunk_id: format!(
-                        "agent-def:{}:{}:{}",
-                        symbol.file_path, symbol.name, symbol.line_start
-                    ),
-                    file_path: symbol.file_path.clone(),
-                    language: symbol.language.name().to_string(),
-                    score: demote_test_path_score(&symbol.file_path, score),
-                    line_start: symbol.line_start as u64,
-                    line_end: (symbol.line_end as u64).saturating_add(1),
-                    signature: symbol.signature.clone().unwrap_or_default(),
-                    scope_chain: symbol.scope.clone(),
-                    content,
+                let mut defs = self.symbols.lookup(&candidate.text);
+                if defs.is_empty()
+                    && let Some(last) = candidate.text.rsplit("::").next()
+                    && last != candidate.text
+                {
+                    defs = self.symbols.lookup(last);
+                }
+                // Pin production definitions only; an ordinary word must also
+                // match the symbol name exactly, including case (`request`
+                // is not `Request`).
+                defs.retain(|s| {
+                    definition_tier(&s.kind) >= 2
+                        && !is_test_like_path(&s.file_path)
+                        && (candidate.shaped || s.name == candidate.text)
+                });
+                let production = defs.len();
+                if production == 0 {
+                    continue;
+                }
+                if !candidate.shaped {
+                    // An ordinary word must name something specific: `sync`
+                    // with one definition qualifies, `read` with hundreds
+                    // does not.
+                    let capitalised = candidate
+                        .text
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_uppercase());
+                    let cap = if capitalised { 8 } else { 3 };
+                    if production > cap {
+                        continue;
+                    }
+                }
+                defs.sort_by(|a, b| {
+                    definition_tier(&b.kind)
+                        .cmp(&definition_tier(&a.kind))
+                        .then_with(|| a.file_path.cmp(&b.file_path))
+                        .then_with(|| a.line_start.cmp(&b.line_start))
+                });
+                let per_identifier = if candidate.shaped { 2 } else { 1 };
+                for symbol in defs.into_iter().take(per_identifier) {
+                    if pinned.len() >= MAX_PINNED {
+                        break;
+                    }
+                    // Only the head of the definition is needed for the
+                    // preview; large symbols are read on demand by the agent.
+                    let head_end = symbol.line_end.min(symbol.line_start + 12);
+                    let content = self
+                        .read_file_range(
+                            &symbol.file_path,
+                            Some(symbol.line_start as u64),
+                            Some(head_end as u64),
+                        )?
+                        .unwrap_or_default();
+                    // A shaped identifier is strong evidence and leads the
+                    // pack. An ordinary word that happens to name a symbol is
+                    // weaker: it slots in right below the best text hit.
+                    let weight = if candidate.shaped { 2.0 } else { 0.99 };
+                    pinned.push(SearchResult {
+                        chunk_id: format!(
+                            "agent-def:{}:{}:{}",
+                            symbol.file_path, symbol.name, symbol.line_start
+                        ),
+                        file_path: symbol.file_path.clone(),
+                        language: symbol.language.name().to_string(),
+                        score: top_score * weight - pinned.len() as f32 * 0.01,
+                        line_start: symbol.line_start as u64,
+                        // Symbol and chunk spans share one convention:
+                        // 0-based start, exclusive end.
+                        line_end: symbol.line_end as u64,
+                        signature: symbol.signature.clone().unwrap_or_default(),
+                        scope_chain: symbol.scope.clone(),
+                        content,
+                    });
+                }
+            }
+            if !pinned.is_empty() {
+                for result in &mut pinned {
+                    result.score = demote_test_path_score(&result.file_path, result.score);
+                }
+                pinned.extend(results);
+                results = pinned;
+                results.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 });
             }
         }
-        if !definition_hits.is_empty() {
-            definition_hits.extend(results);
-            results = definition_hits;
-        }
-        for result in &mut results {
-            result.score = demote_test_path_score(&result.file_path, result.score);
-        }
-        results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
 
-        let mut selected = Vec::new();
-        let mut seen_locations = HashSet::new();
+        let mut selected: Vec<SearchResult> = Vec::new();
+        // Two entries for the same file are duplicates when their line ranges
+        // overlap (a pinned definition and the chunk that contains it).
+        let overlaps_selected = |selected: &[SearchResult], candidate: &SearchResult| {
+            selected.iter().any(|kept| {
+                kept.file_path == candidate.file_path
+                    && kept.line_start <= candidate.line_end
+                    && candidate.line_start <= kept.line_end
+            })
+        };
 
         for file in changed_files {
             if let Some(result) = results.iter().find(|r| r.file_path == *file).cloned() {
-                let key = format!(
-                    "{}:{}:{}",
-                    result.file_path, result.line_start, result.line_end
-                );
-                if seen_locations.insert(key) {
+                if !overlaps_selected(&selected, &result) {
                     selected.push(result);
                 }
                 continue;
             }
 
-            if let Some(result) = self.agent_context_file_anchor(file)? {
-                let key = format!(
-                    "{}:{}:{}",
-                    result.file_path, result.line_start, result.line_end
-                );
-                if seen_locations.insert(key) {
-                    selected.push(result);
-                }
+            if let Some(result) = self.agent_context_file_anchor(file)?
+                && !overlaps_selected(&selected, &result)
+            {
+                selected.push(result);
             }
         }
 
         for result in results {
-            let key = format!(
-                "{}:{}:{}",
-                result.file_path, result.line_start, result.line_end
-            );
-            if seen_locations.insert(key) {
+            if !overlaps_selected(&selected, &result) {
                 selected.push(result);
             }
         }
@@ -774,9 +1079,18 @@ impl Engine {
             let (start_line, end_line, range) =
                 human_result_range(result.line_start, result.line_end);
             let reason = if changed_set.contains(result.file_path.as_str()) {
-                "Caller marked this file as changed or task-local".to_string()
+                "changed file".to_string()
+            } else if result.chunk_id.starts_with("agent-def:") {
+                "definition named in the task".to_string()
             } else {
-                format!("Ranked {:.2} for the task query", result.score)
+                "matches the task".to_string()
+            };
+            // A few lines of source for the leading evidence often answer the
+            // question without a follow-up read.
+            let preview = if must_read.len() < AGENT_PACK_PREVIEW_ITEMS {
+                evidence_preview(&result.content, task)
+            } else {
+                None
             };
             must_read.push(AgentContextEvidence {
                 id: format!("E{}", must_read.len() + 1),
@@ -792,29 +1106,110 @@ impl Engine {
                 } else {
                     Some(result.signature.clone())
                 },
+                preview,
             });
         }
 
+        // Per-file symbol context. Imports and module declarations carry no
+        // navigational value, so only real definitions are listed:
+        // `related_symbols` are the ones defined *inside* an evidence span,
+        // `repo_orientation` the nearest ones *around* it.
         let mut repo_orientation = Vec::new();
+        let mut related_symbols = Vec::new();
         let mut seen_files = HashSet::new();
         for evidence in &must_read {
             if !seen_files.insert(evidence.path.clone()) {
                 continue;
             }
-            let mut symbols = self.symbols.filter("", Some(&evidence.path));
-            symbols.sort_by_key(|s| s.line_start);
-            let symbols = symbols
+            // Zero-based inclusive spans of every evidence item in this file.
+            let spans: Vec<(usize, usize)> = must_read
+                .iter()
+                .filter(|e| e.path == evidence.path)
+                .map(|e| {
+                    (
+                        e.start_line.saturating_sub(1) as usize,
+                        e.end_line.saturating_sub(1) as usize,
+                    )
+                })
+                .collect();
+            let evidence_ids: Vec<&str> = must_read
+                .iter()
+                .filter(|e| e.path == evidence.path)
+                .map(|e| e.id.as_str())
+                .collect();
+
+            let mut definitions = self.symbols.file_symbols(&evidence.path);
+            definitions.retain(|s| s.file_path == evidence.path && definition_tier(&s.kind) >= 2);
+            definitions.sort_by_key(|s| s.line_start);
+
+            let mut inside = Vec::new();
+            let mut around = Vec::new();
+            for symbol in definitions {
+                let distance = spans
+                    .iter()
+                    .map(|&(start, end)| {
+                        if symbol.line_start < start {
+                            start - symbol.line_start
+                        } else {
+                            symbol.line_start.saturating_sub(end)
+                        }
+                    })
+                    .min()
+                    .unwrap_or(usize::MAX);
+                if distance == 0 {
+                    inside.push(symbol);
+                } else {
+                    around.push((distance, symbol));
+                }
+            }
+
+            // The evidence line already shows its own signature; list only
+            // the *other* definitions that live inside the span.
+            let own_signatures: Vec<String> = must_read
+                .iter()
+                .filter(|e| e.path == evidence.path)
+                .filter_map(|e| e.signature.as_deref().map(first_line))
+                .collect();
+            inside.retain(|s| {
+                s.signature
+                    .as_deref()
+                    .map(first_line)
+                    .is_none_or(|sig| !own_signatures.contains(&sig))
+            });
+            for symbol in inside.into_iter().take(2) {
+                if related_symbols.len() >= 8 {
+                    break;
+                }
+                related_symbols.push(AgentContextSymbol {
+                    name: symbol.name,
+                    kind: symbol.kind.to_string(),
+                    path: symbol.file_path,
+                    range: human_symbol_range(symbol.line_start, symbol.line_end),
+                    signature: symbol.signature.as_deref().map(first_line),
+                });
+            }
+
+            around.sort_by_key(|(distance, symbol)| (*distance, symbol.line_start));
+            // Orientation is most useful for the leading files; later files
+            // get fewer neighbours so the pack stays small.
+            let keep = if repo_orientation.len() < 3 { 4 } else { 2 };
+            around.truncate(keep);
+            around.sort_by_key(|(_, symbol)| symbol.line_start);
+            let symbols = around
                 .into_iter()
-                .take(6)
-                .map(|s| {
-                    s.signature
-                        .unwrap_or_else(|| format!("{} {}", s.kind, s.name))
+                .map(|(_, s)| {
+                    let label = s
+                        .signature
+                        .as_deref()
+                        .map(first_line)
+                        .unwrap_or_else(|| format!("{} {}", s.kind, s.name));
+                    format!("L{} {}", s.line_start + 1, label)
                 })
                 .collect();
             let why = if changed_set.contains(evidence.path.as_str()) {
-                "Changed-file anchor for this task".to_string()
+                "changed file".to_string()
             } else {
-                format!("Contains evidence handle {}", evidence.id)
+                format!("holds {}", evidence_ids.join(", "))
             };
             repo_orientation.push(AgentContextOrientation {
                 id: format!("O{}", repo_orientation.len() + 1),
@@ -824,40 +1219,16 @@ impl Engine {
             });
         }
 
-        let mut related_symbols = Vec::new();
-        let mut seen_symbols = HashSet::new();
-        for evidence in &must_read {
-            let mut symbols = self.symbols.filter("", Some(&evidence.path));
-            symbols.sort_by_key(|s| s.line_start);
-            for symbol in symbols.into_iter().take(8) {
-                let key = format!("{}:{}:{}", symbol.file_path, symbol.name, symbol.line_start);
-                if !seen_symbols.insert(key) {
-                    continue;
-                }
-                related_symbols.push(AgentContextSymbol {
-                    name: symbol.name,
-                    kind: symbol.kind.to_string(),
-                    path: symbol.file_path,
-                    range: human_symbol_range(symbol.line_start, symbol.line_end),
-                    signature: symbol.signature,
-                });
-                if related_symbols.len() >= 16 {
-                    break;
-                }
-            }
-            if related_symbols.len() >= 16 {
-                break;
-            }
-        }
-
         let mut likely_tests = Vec::new();
         let mut seen_tests = HashSet::new();
-        for path in changed_files
+        let test_sources: Vec<&str> = changed_files
             .iter()
             .map(String::as_str)
             .chain(repo_orientation.iter().map(|o| o.path.as_str()))
-        {
-            for mapping in self.find_tests_for_file(path).into_iter().take(4) {
+            .collect();
+        // One snapshot of the file list serves every source file in the pack.
+        'tests: for (_, mappings) in self.find_tests_for_files(&test_sources) {
+            for mapping in mappings.into_iter().take(4) {
                 let key = format!("{}:{}", mapping.source_file, mapping.test_file);
                 if seen_tests.insert(key) {
                     likely_tests.push(AgentContextTest {
@@ -867,12 +1238,9 @@ impl Engine {
                         reason: mapping.reason,
                     });
                 }
-                if likely_tests.len() >= 12 {
-                    break;
+                if likely_tests.len() >= 8 {
+                    break 'tests;
                 }
-            }
-            if likely_tests.len() >= 12 {
-                break;
             }
         }
 
@@ -987,7 +1355,7 @@ impl Engine {
     }
 
     fn agent_context_file_anchor(&self, file: &str) -> Result<Option<SearchResult>> {
-        let mut symbols = self.symbols.filter("", Some(file));
+        let mut symbols = self.symbols.file_symbols(file);
         symbols.sort_by_key(|s| s.line_start);
 
         if let Some(symbol) = symbols.into_iter().next() {
@@ -1004,7 +1372,7 @@ impl Engine {
                 language: symbol.language.name().to_string(),
                 score: 1.0,
                 line_start: symbol.line_start as u64,
-                line_end: symbol.line_end as u64 + 1,
+                line_end: symbol.line_end as u64,
                 signature: symbol.signature.clone().unwrap_or_default(),
                 scope_chain: symbol.scope.clone(),
                 content,
@@ -1059,13 +1427,20 @@ impl Engine {
             .flatten()
             .unwrap_or_default();
 
-        // Find a symbol that overlaps this line for better context.
-        let symbols = self.symbols.filter("", Some(file));
-        let overlapping = symbols.iter().find(|s| {
-            let start = s.line_start as u64;
-            let end = s.line_end as u64;
-            line >= start && line <= end
-        });
+        // Find the *innermost* definition that contains this line. Taking the
+        // first overlapping symbol returned the enclosing `impl` block or
+        // class (thousands of lines) instead of the method the caller asked
+        // about.
+        let symbols = self.symbols.file_symbols(file);
+        let overlapping = symbols
+            .iter()
+            .filter(|s| {
+                s.file_path == file
+                    && !matches!(s.kind, crate::language::EntityKind::Import)
+                    && line >= s.line_start as u64
+                    && line < s.line_end as u64
+            })
+            .min_by_key(|s| (s.line_end - s.line_start, s.line_start));
 
         let (line_start, line_end, signature, content) = if let Some(sym) = overlapping {
             let sym_content = self
@@ -1223,7 +1598,7 @@ impl Engine {
             }
 
             // Find symbols in the dependency file that appear in the primary content.
-            let dep_symbols = self.symbols.filter("", Some(dep_file.as_str()));
+            let dep_symbols = self.symbols.file_symbols(dep_file.as_str());
             for sym in &dep_symbols {
                 if used_tokens >= budget {
                     break;
@@ -1269,13 +1644,8 @@ impl Engine {
         let mut used_tokens = 0;
 
         // Find the primary symbol (whose line range overlaps the chunk).
-        let file_symbols = self.symbols.filter("", Some(&result.file_path));
-        let primary_sym = file_symbols.iter().find(|s| {
-            let sym_start = s.line_start as u64;
-            let sym_end = s.line_end as u64;
-            sym_start >= result.line_start && sym_start <= result.line_end
-                || result.line_start >= sym_start && result.line_start <= sym_end
-        });
+        let file_symbols = self.symbols.file_symbols(&result.file_path);
+        let primary_sym = primary_symbol_of(&file_symbols, result);
 
         let sym_name = match primary_sym {
             Some(s) => s.name.clone(),
@@ -1324,13 +1694,8 @@ impl Engine {
     /// Gather usage examples within the remaining token budget.
     fn gather_usage_examples(&self, result: &SearchResult, budget: usize) -> Vec<UsageExample> {
         // Find the primary symbol name from the chunk.
-        let file_symbols = self.symbols.filter("", Some(&result.file_path));
-        let primary_sym = file_symbols.iter().find(|s| {
-            let sym_start = s.line_start as u64;
-            let sym_end = s.line_end as u64;
-            sym_start >= result.line_start && sym_start <= result.line_end
-                || result.line_start >= sym_start && result.line_start <= sym_end
-        });
+        let file_symbols = self.symbols.file_symbols(&result.file_path);
+        let primary_sym = primary_symbol_of(&file_symbols, result);
 
         let sym_name = match primary_sym {
             Some(s) => s.name.clone(),

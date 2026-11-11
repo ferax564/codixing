@@ -133,7 +133,7 @@ fn render_file_section(
     let mut section = format!("## {} [pr={:.3}]\n", node.file_path, node.pagerank);
 
     if options.include_signatures {
-        let mut file_symbols = symbols.filter("", Some(&node.file_path));
+        let mut file_symbols = symbols.file_symbols(&node.file_path);
         // Prefer primary definitions over imports.
         file_symbols.sort_by_key(|s| match s.kind {
             crate::language::EntityKind::Import => 2,

@@ -173,9 +173,19 @@ enum Command {
         #[arg(short, long)]
         file: Option<String>,
 
-        /// Only show primary definitions (exclude Import rows).
+        /// Definitions only. This is the default; the flag is kept so existing
+        /// invocations keep working.
         #[arg(long)]
         defs_only: bool,
+
+        /// Also list import/use rows (they name a symbol without defining it).
+        #[arg(long, conflicts_with = "defs_only")]
+        imports: bool,
+
+        /// Maximum rows to print; `0` lists everything. The best matches come
+        /// first (exact name, then types before functions before impl blocks).
+        #[arg(short, long, default_value_t = codixing_core::formatter::compact::DEFAULT_SYMBOL_LIMIT)]
+        limit: usize,
 
         /// Print only the result count, not the full results.
         #[arg(long)]
@@ -648,6 +658,11 @@ enum Command {
         #[arg(long, value_enum, default_value_t = AuditProfileArg::Mixed)]
         profile: AuditProfileArg,
 
+        /// List every entry. By default each tier shows its oldest 15 files
+        /// and a count of the rest.
+        #[arg(long)]
+        full: bool,
+
         /// Project root directory (defaults to current directory).
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -707,19 +722,21 @@ enum Command {
         /// File path (relative to project root).
         file: String,
 
-        /// Line number (0-indexed).
-        #[arg(long, default_value = "0")]
+        /// Line number (1-based, as printed by `grep`, `search` and `symbols`).
+        /// The innermost function or type containing it becomes the primary
+        /// chunk.
+        #[arg(long, default_value = "1")]
         line: u64,
 
         /// Token budget for context assembly.
         #[arg(long, default_value = "4096")]
         token_budget: usize,
 
-        /// How to treat `--token-budget`. `soft` (default) emits the
-        /// primary chunk in full even when it exceeds the budget and
-        /// reports the overshoot; `strict` slices the primary chunk to a
-        /// line window around `--line N` so the assembled context fits.
-        #[arg(long, value_enum, default_value_t = BudgetModeArg::Soft)]
+        /// How to treat `--token-budget`. `strict` (default) slices an
+        /// oversized primary chunk to a line window around `--line N` so the
+        /// assembled context fits; `soft` emits the primary chunk in full
+        /// even when it exceeds the budget and reports the overshoot.
+        #[arg(long, value_enum, default_value_t = BudgetModeArg::Strict)]
         budget_mode: BudgetModeArg,
 
         /// Output as JSON.
@@ -754,8 +771,10 @@ enum Command {
         risk_level: Option<String>,
     },
 
-    /// Shortcut for `agent-context-pack` — the recommended agent entrypoint.
+    /// Task-level context in one call — the recommended agent entrypoint.
     ///
+    /// Prints compact text (evidence as `path:start-end` with a short source
+    /// preview). Pass `--json` for the stable `agent-context-pack` schema.
     /// Defaults to mode=`locate` for short tasks and mode=`understand` otherwise;
     /// pass `--mode` to override.
     Ask {
@@ -781,6 +800,10 @@ enum Command {
         /// Optional caller risk label (for example: low, medium, high).
         #[arg(long)]
         risk_level: Option<String>,
+
+        /// Emit the stable JSON schema instead of compact text.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Measure token savings of Codixing workflows vs naive grep+read baselines.
@@ -1057,14 +1080,27 @@ fn run_cli() -> Result<()> {
 }
 
 async fn async_main() -> Result<()> {
+    // Diagnostics go to stderr so stdout stays pure command output: an agent
+    // capturing `codixing init` must not receive log lines (or ANSI colour
+    // codes) mixed into the result. Third-party crates are limited to errors;
+    // their warnings (for example the HTML parser's recovery notices) are not
+    // actionable for a Codixing user.
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
-        )
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new("error,codixing=warn,codixing_core=warn,codixing_server=warn")
+        }))
         .with_target(false)
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
 
     let cli = Cli::parse();
+
+    // One-shot commands should end quietly when their reader goes away
+    // (`codixing symbols foo | head`). The HTTP server keeps the default.
+    if !matches!(cli.command, Command::Serve { .. }) {
+        codixing_core::process::restore_default_sigpipe();
+    }
 
     match cli.command {
         Command::Init {
@@ -1134,9 +1170,11 @@ async fn async_main() -> Result<()> {
         Command::Symbols {
             filter,
             file,
-            defs_only,
+            defs_only: _,
+            imports,
+            limit,
             count,
-        } => cmd_symbols(filter, file, defs_only, count),
+        } => cmd_symbols(filter, file, imports, limit, count),
         Command::Graph {
             path,
             token_budget,
@@ -1244,8 +1282,9 @@ async fn async_main() -> Result<()> {
             include,
             exclude,
             profile,
+            full,
             path,
-        } => cmd_audit(path, threshold_days, include, exclude, profile.into()),
+        } => cmd_audit(path, threshold_days, include, exclude, profile.into(), full),
         Command::Impact { file, full, json } => cmd_impact(file, full, json),
         Command::Api { file, json } => cmd_api(file, json),
         Command::Types { symbol, json } => cmd_types(symbol, json),
@@ -1275,6 +1314,7 @@ async fn async_main() -> Result<()> {
             changed_files,
             branch,
             risk_level,
+            true,
         ),
         Command::Ask {
             task,
@@ -1283,6 +1323,7 @@ async fn async_main() -> Result<()> {
             changed_files,
             branch,
             risk_level,
+            json,
         } => {
             let mode = mode.unwrap_or_else(|| {
                 agent_mode_arg_from_core(AgentContextMode::infer_from_task(&task))
@@ -1294,6 +1335,7 @@ async fn async_main() -> Result<()> {
                 changed_files,
                 branch,
                 risk_level,
+                json,
             )
         }
         Command::BenchTokens { path, output } => cmd_bench_tokens(path, output),
@@ -1366,13 +1408,24 @@ fn default_thread_cap_for(cpus: usize) -> usize {
 /// Read commands must never probe the Tantivy writer lock first: doing so
 /// adds the writer retry backoff to every concurrent CLI invocation and can
 /// make a healthy read take more than a second while `sync` is running.
-fn open_read_engine(root: &Path) -> Result<Engine> {
-    Engine::open_read_only(root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })
+/// A read-only engine that is never dropped.
+///
+/// A one-shot command exits right after printing. Dropping the engine first
+/// walks and frees every map it loaded (hundreds of megabytes on a large
+/// index), which is pure overhead when the process is about to return all of
+/// its memory to the OS anyway. Read-only engines hold no writer lock and have
+/// nothing to flush, so skipping the destructor is safe.
+type ReadEngine = std::mem::ManuallyDrop<Engine>;
+
+fn open_read_engine(root: &Path) -> Result<ReadEngine> {
+    Engine::open_read_only(root)
+        .map(std::mem::ManuallyDrop::new)
+        .with_context(|| {
+            format!(
+                "no index found at {} — run `codixing init` first",
+                root.display()
+            )
+        })
 }
 
 /// Check if an error indicates write-lock contention and print a helpful message.
@@ -1711,18 +1764,24 @@ fn cmd_search(
             && source_filter.is_none()
             && matches!(strategy, StrategyArg::Auto);
         if can_use_daemon && let Some(text) = daemon_proxy::try_search(&root, &query, limit) {
-            print!("{text}");
+            if text.trim().is_empty() {
+                eprintln!("No results for \"{}\"", query);
+            } else {
+                print!("{text}");
+            }
             return Ok(());
         }
     }
 
     let engine = if strategy.uses_lexical_read_profile() {
-        Engine::open_read_only_lexical(&root).with_context(|| {
-            format!(
-                "no index found at {} — run `codixing init` first",
-                root.display()
-            )
-        })?
+        Engine::open_read_only_lexical(&root)
+            .map(std::mem::ManuallyDrop::new)
+            .with_context(|| {
+                format!(
+                    "no index found at {} — run `codixing init` first",
+                    root.display()
+                )
+            })?
     } else {
         open_read_engine(&root)?
     };
@@ -1766,8 +1825,14 @@ fn cmd_search(
         let json_results: Vec<serde_json::Value> = results
             .iter()
             .map(|r| {
+                let (start_line, end_line) = r.display_lines();
                 serde_json::json!({
                     "file": r.file_path,
+                    // 1-based inclusive, same convention as `grep` and editors.
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    // Raw chunk coordinates (0-based start, exclusive end),
+                    // kept for existing consumers.
                     "line_start": r.line_start,
                     "line_end": r.line_end,
                     "language": r.language,
@@ -1784,50 +1849,12 @@ fn cmd_search(
         return Ok(());
     }
 
-    for (i, result) in results.iter().enumerate() {
-        let is_doc = result.is_doc();
-
-        if is_doc {
-            let breadcrumb = if result.scope_chain.is_empty() {
-                String::new()
-            } else {
-                format!(" \u{00a7} {}", result.scope_chain.join(" > "))
-            };
-            println!(
-                "{}. {}{} [doc] score={:.3}",
-                i + 1,
-                result.file_path,
-                breadcrumb,
-                result.score,
-            );
-        } else {
-            println!(
-                "{}. {} [L{}-L{}] ({}) score={:.3}",
-                i + 1,
-                result.file_path,
-                result.line_start,
-                result.line_end,
-                result.language,
-                result.score,
-            );
-            if !result.signature.is_empty() {
-                println!("   {}", result.signature);
-            }
-        }
-
-        // Snippet (3 lines) — same for both.
-        let snippet: String = result
-            .content
-            .lines()
-            .take(3)
-            .map(|l| format!("   | {l}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !snippet.is_empty() {
-            println!("{snippet}");
-        }
-        println!();
-    }
+    // One line per hit plus a query-focused snippet; identical to what the
+    // daemon proxy prints (both go through the same core formatter).
+    print!(
+        "{}",
+        codixing_core::formatter::compact::search_results(&results, &query)
+    );
 
     Ok(())
 }
@@ -1901,7 +1928,15 @@ fn cmd_grep(args: GrepArgs) -> Result<()> {
         return Ok(());
     }
 
-    let engine = open_read_engine(&root)?;
+    // A text scan needs the file list and the trigram index, nothing else.
+    let engine = Engine::open_read_only_files(&root)
+        .map(std::mem::ManuallyDrop::new)
+        .with_context(|| {
+            format!(
+                "no index found at {} — run `codixing init` first",
+                root.display()
+            )
+        })?;
 
     let opts = GrepOptions {
         pattern: args.pattern.clone(),
@@ -1915,9 +1950,19 @@ fn cmd_grep(args: GrepArgs) -> Result<()> {
         count_mode: args.count || args.files_with_matches,
     };
 
-    let matches = engine
+    let mut matches = engine
         .grep_code_opts(&opts)
         .map_err(|e| handle_engine_err(e, || "grep failed".into()))?;
+
+    // `--file` names one file. The glob it is matched with also accepts the
+    // same name in other directories (`README.md` vs `docs/README.md`); when
+    // the exact path is among the hits, keep only that file.
+    if let Some(file) = args.file.as_deref() {
+        let wanted = file.trim_start_matches("./");
+        if matches.iter().any(|m| m.file_path == wanted) {
+            matches.retain(|m| m.file_path == wanted);
+        }
+    }
 
     if args.count {
         let files: std::collections::BTreeSet<&str> =
@@ -1953,54 +1998,117 @@ fn cmd_grep(args: GrepArgs) -> Result<()> {
     }
 
     // Default format: path:line:col:text (1-indexed line/col to match grep -n).
+    // Very long lines (minified or generated code) are clipped around the
+    // match so a single hit cannot cost thousands of tokens.
+    const MAX_LINE_BYTES: usize = 240;
     for m in &matches {
         println!(
             "{}:{}:{}:{}",
             m.file_path,
             m.line_number + 1,
             m.match_start + 1,
-            m.line
+            clip_grep_line(&m.line, m.match_start, MAX_LINE_BYTES)
         );
     }
     if matches.is_empty() {
         eprintln!("No matches for `{}`.", args.pattern);
+        if !args.literal && args.pattern.contains("\\|") {
+            eprintln!(
+                "Hint: this is Rust regex syntax, where `\\|` is a literal pipe. Use `a|b` for alternation."
+            );
+        }
+    } else if args.limit.is_none() && matches.len() >= effective_limit {
+        // Never truncate silently: a caller must be able to tell a complete
+        // listing from the first page of one.
+        eprintln!(
+            "Showing the first {effective_limit} matches; there may be more. Use --limit N, --count, or --files-with-matches."
+        );
     }
 
     Ok(())
 }
 
-fn cmd_symbols(filter: String, file: Option<String>, defs_only: bool, count: bool) -> Result<()> {
-    use codixing_core::EntityKind;
+/// Clip `line` to about `max_bytes`, keeping the match at `match_start`
+/// visible and marking elided text with `…`.
+fn clip_grep_line(line: &str, match_start: usize, max_bytes: usize) -> std::borrow::Cow<'_, str> {
+    if line.len() <= max_bytes {
+        return std::borrow::Cow::Borrowed(line);
+    }
+    let mut start = match_start.saturating_sub(max_bytes / 4).min(line.len());
+    while start > 0 && !line.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = (start + max_bytes).min(line.len());
+    while end < line.len() && !line.is_char_boundary(end) {
+        end += 1;
+    }
+    let mut out = String::with_capacity(end - start + 8);
+    if start > 0 {
+        out.push('…');
+    }
+    out.push_str(&line[start..end]);
+    if end < line.len() {
+        out.push('…');
+    }
+    std::borrow::Cow::Owned(out)
+}
 
+fn cmd_symbols(
+    filter: String,
+    file: Option<String>,
+    include_imports: bool,
+    limit: usize,
+    count: bool,
+) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
 
-    // Fast path: proxy through the daemon if one is running.
-    // Skip daemon proxy for --count / --defs-only: we need the raw symbol list.
+    // Fast path: proxy through the daemon if one is running. `--count` and an
+    // unlimited listing need the complete symbol list, which MCP caps.
     if !filter.is_empty()
         && !count
-        && !defs_only
-        && let Some(text) = daemon_proxy::try_symbols(&root, &filter, file.as_deref())
+        && limit > 0
+        && limit <= 100
+        && let Some(text) =
+            daemon_proxy::try_symbols(&root, &filter, file.as_deref(), include_imports, limit)
     {
-        print!("{text}");
+        if text.trim().is_empty() {
+            eprintln!("No symbols matching \"{}\"", filter);
+        } else {
+            print!("{text}");
+        }
         return Ok(());
     }
 
-    let engine = open_read_engine(&root)?;
+    // A name lookup needs the symbol table, nothing else.
+    let engine = Engine::open_read_only_symbols(&root)
+        .map(std::mem::ManuallyDrop::new)
+        .with_context(|| {
+            format!(
+                "no index found at {} — run `codixing init` first",
+                root.display()
+            )
+        })?;
 
-    let mut symbols = engine
+    let symbols = engine
         .symbols(&filter, file.as_deref())
         .context("symbol lookup failed")?;
 
-    if defs_only {
-        symbols.retain(|s| !matches!(s.kind, EntityKind::Import));
-    }
+    // Exact name first, strongest definition kind next, production code before
+    // tests. Imports are hidden by default; the listing is limited so one
+    // lookup on a huge repository cannot flood the caller.
+    let listing = codixing_core::formatter::compact::symbol_lookup(
+        symbols,
+        &filter,
+        include_imports,
+        if count { 0 } else { limit },
+    );
 
     if count {
-        println!("{} symbol(s) found", symbols.len());
+        println!("{} symbol(s) found", listing.total);
         return Ok(());
     }
 
-    if symbols.is_empty() {
+    if listing.total == 0 {
         if filter.is_empty() {
             eprintln!("No symbols in index.");
         } else {
@@ -2009,19 +2117,8 @@ fn cmd_symbols(filter: String, file: Option<String>, defs_only: bool, count: boo
         return Ok(());
     }
 
-    println!("{:<12} {:<40} {:<30} LINES", "KIND", "NAME", "FILE");
-    println!("{}", "-".repeat(90));
-    for sym in &symbols {
-        println!(
-            "{:<12} {:<40} {:<30} L{}-L{}",
-            format!("{:?}", sym.kind),
-            sym.name,
-            sym.file_path,
-            sym.line_start,
-            sym.line_end,
-        );
-    }
-    eprintln!("\n{} symbol(s) found.", symbols.len());
+    print!("{}", listing.text);
+    eprintln!("\n{} symbol(s) found.", listing.total);
 
     Ok(())
 }
@@ -2487,89 +2584,63 @@ fn cmd_usages(
     count: bool,
     complete: bool,
 ) -> Result<()> {
+    use codixing_core::formatter::compact;
+
     let root = std::env::current_dir().context("cannot determine current directory")?;
 
-    // Fast path: proxy through the daemon when no file filter (the MCP
-    // search_usages tool doesn't expose a file filter parameter).
-    // Skip daemon proxy for --count / --complete: both need the raw result
-    // list (count for accuracy, complete for the full deterministic set).
-    if file.is_none() && !count && !complete {
-        let _ = limit; // MCP tool uses its own limit; CLI limit is approximated
-        if let Some(text) = daemon_proxy::try_usages(&root, &symbol) {
+    // Fast path: proxy the ranked listing through the daemon. `--count` and
+    // `--complete` need the whole reference set, which MCP pages.
+    if file.is_none()
+        && !count
+        && !complete
+        && (1..=100).contains(&limit)
+        && let Some(text) = daemon_proxy::try_usages(&root, &symbol, limit)
+    {
+        if text.trim().is_empty() {
+            eprintln!("No usages found for \"{}\"", symbol);
+        } else {
             print!("{text}");
-            return Ok(());
         }
-    }
-
-    let engine = open_read_engine(&root)?;
-
-    if complete {
-        use codixing_core::ReferenceOptions;
-        let mut refs = engine.symbol_references(
-            &symbol,
-            ReferenceOptions {
-                complete: true,
-                max_results: None,
-            },
-        );
-        if let Some(ref f) = file {
-            refs.retain(|r| r.file_path.contains(f.as_str()));
-        }
-        if count {
-            println!("{} usage(s) found", refs.len());
-            return Ok(());
-        }
-        if refs.is_empty() {
-            eprintln!("No usages found for \"{}\" (complete mode)", symbol);
-            return Ok(());
-        }
-        println!("{:<60} {:<8} CONTEXT", "FILE", "LINE");
-        println!("{}", "-".repeat(90));
-        for r in &refs {
-            let preview: String = r.context.chars().take(40).collect();
-            println!("{:<60} {:<8} {}", r.file_path, r.line + 1, preview);
-        }
-        eprintln!(
-            "\n{} usage location(s) found (complete, deterministic, no ranking).",
-            refs.len()
-        );
         return Ok(());
     }
 
-    let mut results = engine
-        .search_usages(&symbol, limit)
-        .context("usage search failed")?;
+    // An exact reference scan needs the file list, the trigram index and the
+    // symbol table; nothing else is loaded.
+    let engine = Engine::open_read_only_references(&root)
+        .map(std::mem::ManuallyDrop::new)
+        .with_context(|| {
+            format!(
+                "no index found at {} — run `codixing init` first",
+                root.display()
+            )
+        })?;
 
+    // Every whole-word occurrence, located through the trigram index. This
+    // has the recall of a text search, so no call site is missed because of
+    // how a chunk happened to rank.
+    let mut refs = engine.exact_symbol_references(&symbol);
     if let Some(ref f) = file {
-        results.retain(|r| r.file_path.contains(f.as_str()));
+        refs.retain(|r| r.file_path.contains(f.as_str()));
     }
 
     if count {
-        println!("{} usage(s) found", results.len());
+        println!("{} usage(s) found", refs.len());
         return Ok(());
     }
 
-    if results.is_empty() {
+    if refs.is_empty() {
         eprintln!("No usages found for \"{}\"", symbol);
+        eprintln!(
+            "Hint: usages matches whole identifiers. Try `codixing symbols {symbol}` for similarly named symbols or `codixing search {symbol}` for related code."
+        );
         return Ok(());
     }
 
-    println!("{:<50} {:<12} PREVIEW", "FILE [LINES]", "SCORE");
-    println!("{}", "-".repeat(90));
-    for r in &results {
-        let loc = format!("{} [L{}-L{}]", r.file_path, r.line_start, r.line_end);
-        let preview: String = r
-            .content
-            .lines()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("")
-            .trim()
-            .chars()
-            .take(40)
-            .collect();
-        println!("{:<50} {:<12.3} {}", loc, r.score, preview);
-    }
-    eprintln!("\n{} usage location(s) found.", results.len());
+    // Default: most useful first (definition, production code, imports,
+    // tests, comments, docs), limited. `--complete`: everything, by path.
+    let listing = compact::references(refs, if complete { 0 } else { limit }, !complete);
+    print!("{}", listing.text);
+    eprintln!("\n{} usage(s) in {} file(s).", listing.total, listing.files);
 
     Ok(())
 }
@@ -3189,8 +3260,8 @@ fn cmd_federation(action: FederationAction) -> Result<()> {
                     i + 1,
                     r.project,
                     r.result.file_path,
-                    r.result.line_start,
-                    r.result.line_end,
+                    r.result.display_lines().0,
+                    r.result.display_lines().1,
                     r.result.score,
                 );
                 let snippet: String = r
@@ -3304,6 +3375,7 @@ fn cmd_audit(
     include: Option<String>,
     exclude: Vec<String>,
     profile: codixing_core::AuditProfile,
+    full: bool,
 ) -> Result<()> {
     let root = path
         .canonicalize()
@@ -3351,44 +3423,54 @@ fn cmd_audit(
         .filter(|e| e.tier == FreshnessTier::Info)
         .collect();
 
-    if !critical.is_empty() {
-        println!("\nCritical (orphan + stale, {}+ days):", threshold_days);
+    // Each tier lists its oldest entries first. Without `--full` a tier is
+    // capped so an audit of a large repository stays readable (and cheap for
+    // an agent to consume); the remainder is reported as a count.
+    const DEFAULT_TIER_ROWS: usize = 15;
+    let print_tier = |title: String, tag: &str, entries: &[&codixing_core::FreshnessEntry]| {
+        if entries.is_empty() {
+            return;
+        }
+        println!("\n{title}");
         println!("{}", "-".repeat(80));
-        for e in &critical {
+        let mut ordered: Vec<_> = entries.to_vec();
+        ordered.sort_by(|a, b| {
+            b.days_old
+                .cmp(&a.days_old)
+                .then_with(|| a.file_path.cmp(&b.file_path))
+        });
+        let shown = if full {
+            ordered.len()
+        } else {
+            ordered.len().min(DEFAULT_TIER_ROWS)
+        };
+        for e in &ordered[..shown] {
             let days_str = if e.days_old == u64::MAX {
                 "very old".to_string()
             } else {
                 format!("{} days", e.days_old)
             };
-            println!("  [CRITICAL] {} ({}) — {}", e.file_path, days_str, e.reason);
+            println!("  [{tag}] {} ({}) — {}", e.file_path, days_str, e.reason);
         }
-    }
+        if shown < ordered.len() {
+            println!(
+                "  … {} more (pass --full to list all, or narrow with --include)",
+                ordered.len() - shown
+            );
+        }
+    };
 
-    if !warning.is_empty() {
-        println!("\nWarning (stale but connected, {}+ days):", threshold_days);
-        println!("{}", "-".repeat(80));
-        for e in &warning {
-            let days_str = if e.days_old == u64::MAX {
-                "very old".to_string()
-            } else {
-                format!("{} days", e.days_old)
-            };
-            println!("  [WARNING] {} ({}) — {}", e.file_path, days_str, e.reason);
-        }
-    }
-
-    if !info.is_empty() {
-        println!("\nInfo (recently orphaned):");
-        println!("{}", "-".repeat(80));
-        for e in &info {
-            let days_str = if e.days_old == u64::MAX {
-                "very old".to_string()
-            } else {
-                format!("{} days", e.days_old)
-            };
-            println!("  [INFO] {} ({}) — {}", e.file_path, days_str, e.reason);
-        }
-    }
+    print_tier(
+        format!("Critical (orphan + stale, {threshold_days}+ days):"),
+        "CRITICAL",
+        &critical,
+    );
+    print_tier(
+        format!("Warning (stale but connected, {threshold_days}+ days):"),
+        "WARNING",
+        &warning,
+    );
+    print_tier("Info (recently orphaned):".to_string(), "INFO", &info);
 
     eprintln!(
         "\nSummary: {} file(s) audited — {} critical, {} warning, {} info",
@@ -3406,13 +3488,10 @@ fn cmd_impact(file: String, full: bool, json: bool) -> Result<()> {
 
     let root = std::env::current_dir().context("cannot determine current directory")?;
 
-    // Fast path: proxy through the daemon only for full text dumps so we do
-    // not silently serve a pre-compact daemon response when the CLI now
-    // defaults to compact output.
-    if full
-        && !json
-        && let Some(text) = daemon_proxy::try_impact(&root, &file)
-    {
+    // Fast path: proxy through the daemon. The daemon renders with the same
+    // core formatter and honours `full`, so both modes are identical to the
+    // in-process output.
+    if !json && let Some(text) = daemon_proxy::try_impact(&root, &file, full) {
         print!("{text}");
         return Ok(());
     }
@@ -3466,7 +3545,7 @@ fn cmd_api(file: String, json: bool) -> Result<()> {
     println!("# Public API: {file}\n");
     for s in &symbols {
         let sig = s.signature.as_deref().unwrap_or(&s.name);
-        println!("  {:?} {} (line {})", s.kind, sig, s.line_start);
+        println!("  {:?} {} (line {})", s.kind, sig, s.line_start + 1);
     }
     Ok(())
 }
@@ -3570,8 +3649,14 @@ fn cmd_context(
     let root = std::env::current_dir().context("cannot determine current directory")?;
     let engine = open_read_engine(&root)?;
 
-    let ctx =
-        engine.assemble_context_for_location_with_mode(&file, line, token_budget, budget_mode);
+    // `--line` is 1-based like every line number Codixing prints; the engine
+    // works with 0-based lines. `0` is accepted as "start of file".
+    let ctx = engine.assemble_context_for_location_with_mode(
+        &file,
+        line.saturating_sub(1),
+        token_budget,
+        budget_mode,
+    );
 
     if json {
         println!("{}", serde_json::to_string_pretty(&ctx)?);
@@ -3598,7 +3683,8 @@ fn cmd_context(
 
     println!(
         "## Primary chunk (L{}-L{})",
-        ctx.primary.line_start, ctx.primary.line_end
+        ctx.primary.display_lines().0,
+        ctx.primary.display_lines().1
     );
     println!("```");
     println!("{}", ctx.primary.content);
@@ -3609,7 +3695,10 @@ fn cmd_context(
         for imp in &ctx.imports {
             println!(
                 "  {} (L{}-L{}, relevance: {:.2})",
-                imp.file_path, imp.line_start, imp.line_end, imp.relevance
+                imp.file_path,
+                imp.line_start + 1,
+                imp.line_end.max(imp.line_start + 1),
+                imp.relevance
             );
             for line_content in imp.content.lines() {
                 println!("    {line_content}");
@@ -3623,7 +3712,10 @@ fn cmd_context(
         for callee in &ctx.callees {
             println!(
                 "  {} (L{}-L{}, relevance: {:.2})",
-                callee.file_path, callee.line_start, callee.line_end, callee.relevance
+                callee.file_path,
+                callee.line_start + 1,
+                callee.line_end.max(callee.line_start + 1),
+                callee.relevance
             );
             for line_content in callee.content.lines() {
                 println!("    {line_content}");
@@ -3665,6 +3757,7 @@ fn cmd_agent_context_pack(
     changed_files: Vec<String>,
     branch: Option<String>,
     risk_level: Option<String>,
+    json: bool,
 ) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
     let engine = open_read_engine(&root)?;
@@ -3677,7 +3770,12 @@ fn cmd_agent_context_pack(
         branch,
         risk_level,
     )?;
-    println!("{}", serde_json::to_string_pretty(&pack)?);
+    if json {
+        // Compact: indentation costs ~40% more tokens and no consumer needs it.
+        println!("{}", serde_json::to_string(&pack)?);
+    } else {
+        print!("{}", pack.render_text());
+    }
     Ok(())
 }
 

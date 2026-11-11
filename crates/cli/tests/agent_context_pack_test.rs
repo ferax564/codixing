@@ -78,6 +78,7 @@ fn ask_infers_edit_mode_and_finds_definition() {
             "change greeting output format",
             "--token-budget",
             "2000",
+            "--json",
         ])
         .current_dir(root)
         .output()
@@ -99,4 +100,38 @@ fn ask_infers_edit_mode_and_finds_definition() {
             .any(|entry| entry["path"] == "src/greeting.rs"),
         "definition should appear in must_read: {pack:#?}"
     );
+}
+
+#[test]
+fn ask_defaults_to_compact_text_with_one_based_ranges() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/greeting.rs"),
+        "pub fn greeting(name: &str) -> String {\n    format!(\"hello {name}\")\n}\n",
+    )
+    .unwrap();
+    no_embed_index(root);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_codixing"))
+        .args(["ask", "change greeting output format"])
+        .current_dir(root)
+        .output()
+        .expect("failed to run codixing ask");
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+
+    // Text, not JSON: no braces-and-keys overhead for the agent to pay for.
+    assert!(
+        serde_json::from_str::<serde_json::Value>(&text).is_err(),
+        "default ask output should be text: {text}"
+    );
+    assert!(text.starts_with("# edit pack:"), "{text}");
+    // `greeting` is defined on the first line of the file; ranges are 1-based.
+    assert!(
+        text.contains("E1 src/greeting.rs:1-"),
+        "evidence should use path:start-end with 1-based lines: {text}"
+    );
+    assert!(text.contains("pub fn greeting"), "{text}");
 }

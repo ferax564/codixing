@@ -19,8 +19,8 @@
 ```bash
 codixing search "rate limiting"     # semantic code search
 codixing grep "TODO" --literal      # literal/regex text scan with line numbers
-codixing symbols Widget             # find symbol definitions
-codixing usages add_chunk           # find call sites and imports
+codixing symbols Widget             # definitions, exact match first (path:start-end)
+codixing usages add_chunk           # every reference as path:line:kind (exact, no misses)
 codixing callers src/engine/mod.rs  # who imports this file
 codixing callees src/engine/mod.rs  # what this file imports
 codixing graph --map                # repo architecture map
@@ -28,10 +28,10 @@ codixing impact src/engine/mod.rs   # blast radius analysis
 codixing api src/engine/mod.rs      # public API surface
 codixing types Engine               # type relationships
 codixing examples add_chunk         # usage examples from tests + callers
-codixing context src/engine/mod.rs  # cross-file context assembly
+codixing context src/engine/mod.rs --line 120  # innermost function + imports/callees (1-based line)
 codixing agent-context-pack "task"  # stable JSON context pack for agents
-codixing ask "task"                 # recommended agent entrypoint (context pack)
-codixing symbols Widget --defs-only # definitions only (no Import rows)
+codixing ask "task"                 # recommended agent entrypoint (compact text; --json for the schema)
+codixing symbols Widget --imports   # also list import rows (hidden by default)
 codixing impact path --full         # full blast radius (default is compact)
 codixing doctor --fix-path          # PATH binary version gate
 codixing doctor --check-update       # free space, lock owner, ONNX hints, optional release check
@@ -42,6 +42,8 @@ codixing bench-tokens               # token-savings harness vs grep+read
 The MCP server is also available when connected to an editor, but the CLI is preferred — it's simpler, works for subagents, and dogfoods the search quality directly.
 
 For broad codebase exploration, always try Codixing first. Fall back to Grep/Bash only if the CLI doesn't cover the case.
+
+**Line numbers are 1-based everywhere** (`search`, `symbols`, `usages`, `grep`, `ask`, `context --line`), so a number from any command can be passed straight to a file reader.
 
 **Before editing ANY file**, run `codixing impact <file>` to check downstream dependencies. This applies to all files — Rust, HTML, config, docs — not just code. Even "simple" changes like CSS updates can break references in other files.
 
@@ -57,13 +59,14 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 - **Public API surface of a file** → `codixing api <file>`
 - **Type relationships for a symbol** → `codixing types <name>`
 - **Usage examples for a symbol** → `codixing examples <name>` (tests + callers + doc blocks)
-- **Cross-file context for understanding** → `codixing context <file> --line N`
+- **Cross-file context for understanding** → `codixing context <file> --line N` (1-based, as printed by `grep`/`search`)
 - **Task-local agent context pack** → `codixing ask "<task>"` or `agent-context-pack "<task>" --mode edit`
-- **Finding a definition** → `codixing search Name --strategy goto` or `symbols Name --defs-only`
+- **Finding a definition** → `codixing search Name --strategy goto` or `symbols Name`
 - **Architecture overview** → `codixing graph --map --token-budget 1500`
 - **Token-savings proof** → `codixing bench-tokens`
 - **Test coverage discovery** → `codixing search "test <name>"`
-- **Index freshness / stale files** → `codixing audit`
+- **Stale or orphaned source files** → `codixing audit` (top entries per tier; `--full` for all)
+- **Index health / freshness** → `codixing doctor`, then `codixing sync`
 - **Incremental re-index after changes** → `codixing sync`
 - **Code/config results only** → `codixing search "<query>" --code-only`
 - **Documentation results only** → `codixing search "<query>" --docs-only`

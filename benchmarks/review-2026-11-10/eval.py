@@ -39,13 +39,21 @@ def main():
             plain, _, _, _ = run(["codixing", "search", t["q"], "--limit", "10"], root)
             row["search"] = {"rank": rank(paths, t["expect"]), "tok": tok(plain), "ms": ms}
         if "ask" in surfaces:
-            out, err, ms, rc = run(["codixing", "ask", t["q"]], root)
+            # Ranks come from the stable JSON schema; token cost from the
+            # default (text) rendering an agent actually receives. Binaries
+            # older than the text default print JSON for both.
+            out, err, ms, rc = run(["codixing", "ask", t["q"], "--json"], root)
+            if rc != 0:
+                out, err, ms, rc = run(["codixing", "ask", t["q"]], root)
+                plain = out
+            else:
+                plain, _, _, _ = run(["codixing", "ask", t["q"]], root)
             try:
                 pack = json.loads(out)
                 paths = [e["path"] for e in pack["must_read"]]
             except Exception:
                 paths = []
-            row["ask"] = {"rank": rank(paths, t["expect"]), "tok": tok(out), "ms": ms, "n": len(paths)}
+            row["ask"] = {"rank": rank(paths, t["expect"]), "tok": tok(plain), "ms": ms, "n": len(paths)}
         if "rg" in surfaces and t["kind"] == "id":
             out, _, ms, _ = run(["rg", "-n", "-w", "--no-heading", t["q"], "."], root)
             row["rg"] = {"tok": tok(out), "lines": out.count("\n"), "ms": ms}

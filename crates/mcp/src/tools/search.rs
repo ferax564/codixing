@@ -239,7 +239,8 @@ fn apply_kind_filter(
             let slice_len = end - start;
             r.content = lines[start..end].join("\n");
             r.line_start += start as u64;
-            r.line_end = r.line_start + slice_len.saturating_sub(1) as u64;
+            // `line_end` is exclusive, like every other search result.
+            r.line_end = r.line_start + slice_len as u64;
             filtered.push(r);
         }
     }
@@ -274,14 +275,24 @@ fn apply_kind_filter(
 }
 
 /// Format the final output string for `call_code_search`.
+#[allow(clippy::too_many_arguments)]
 fn format_search_output(
     engine: &Engine,
     results: &[SearchResult],
+    query: &str,
     limit: usize,
     kind_filter: &Option<String>,
     token_budget: usize,
     check_staleness: bool,
+    compact: bool,
 ) -> String {
+    // Compact mode is the CLI's one-line-per-hit listing. The CLI proxies
+    // through a warm daemon when one is running and must print exactly what
+    // it prints in-process, so the same core formatter renders both.
+    if compact {
+        return codixing_core::formatter::compact::search_results(results, query);
+    }
+
     let session = engine.session().clone();
     let mut out = String::new();
 
@@ -313,10 +324,8 @@ fn format_search_output(
         // site. Render them directly to avoid the formatter's truncation hiding
         // the declaration line.
         for r in results {
-            out.push_str(&format!(
-                "// File: {} [L{}-L{}]",
-                r.file_path, r.line_start, r.line_end
-            ));
+            let (start, end) = r.display_lines();
+            out.push_str(&format!("// File: {} [L{}-L{}]", r.file_path, start, end));
             if !r.signature.is_empty() {
                 out.push_str(&format!(
                     " ({})",
@@ -352,6 +361,10 @@ pub(crate) fn call_code_search(
     };
 
     let query = build_search_query(&parsed, args);
+    let compact = args
+        .get("compact")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // Report progress for deep/thorough strategies that take longer.
     let report_progress = matches!(
@@ -370,6 +383,10 @@ pub(crate) fn call_code_search(
                 query: parsed.query_str,
                 result_count: 0,
             });
+            if compact {
+                // The CLI prints its own "no results" notice on stderr.
+                return (String::new(), false);
+            }
             ("No results found.".to_string(), false)
         }
         Ok(mut results) => {
@@ -409,10 +426,12 @@ pub(crate) fn call_code_search(
             let out = format_search_output(
                 engine,
                 &results,
+                &parsed.query_str,
                 parsed.limit,
                 &parsed.kind_filter,
                 parsed.token_budget,
                 parsed.check_staleness,
+                compact,
             );
             (out, false)
         }
@@ -428,33 +447,43 @@ pub(crate) fn call_find_symbol(engine: &Engine, args: &Value) -> (String, bool) 
 
     let file = args.get("file").and_then(|v| v.as_str());
 
-    match engine.symbols(&name, file) {
-        Ok(symbols) if symbols.is_empty() => {
-            (format!("No symbols found matching '{name}'."), false)
-        }
-        Ok(mut symbols) => {
-            // Prefer primary definitions (struct/fn/…) over Import rows so the
-            // first hit is something an agent should open.
-            symbols.sort_by_key(|s| match s.kind {
-                codixing_core::EntityKind::Import => 9u8,
-                codixing_core::EntityKind::Module | codixing_core::EntityKind::Namespace => 3,
-                codixing_core::EntityKind::Constant
-                | codixing_core::EntityKind::Static
-                | codixing_core::EntityKind::Variable => 2,
-                codixing_core::EntityKind::Function
-                | codixing_core::EntityKind::Method
-                | codixing_core::EntityKind::Impl => 1,
-                _ => 0,
-            });
+    let include_imports = args
+        .get("include_imports")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let limit = requested_result_count(
+        args,
+        "limit",
+        codixing_core::formatter::compact::DEFAULT_SYMBOL_LIMIT,
+    );
+    // `cli: true` is set by the `codixing symbols` daemon proxy, which prints
+    // the bare listing exactly as the in-process command does.
+    let cli = args.get("cli").and_then(|v| v.as_bool()).unwrap_or(false);
 
-            // Record session event.
-            let first_file = symbols.first().map(|s| s.file_path.clone());
+    match engine.symbols(&name, file) {
+        Ok(symbols) => {
+            // Exact name first, then the strongest definition kind, production
+            // code before tests. Imports only on request: they name a symbol
+            // without defining it.
+            let listing = codixing_core::formatter::compact::symbol_lookup(
+                symbols,
+                &name,
+                include_imports,
+                limit,
+            );
+            if listing.total == 0 {
+                if cli {
+                    return (String::new(), false);
+                }
+                return (format!("No symbols found matching '{name}'."), false);
+            }
+
+            // Record the lookup for session ranking and cross-agent context.
+            let first_file = listing.first_file.clone();
             engine.session().record(SessionEventKind::SymbolLookup {
                 name: name.clone(),
                 file: first_file.clone(),
             });
-
-            // Record in shared session for cross-agent context.
             if let Some(ref file) = first_file {
                 engine.shared_session().record(SharedSessionEvent {
                     timestamp: Instant::now(),
@@ -465,19 +494,21 @@ pub(crate) fn call_find_symbol(engine: &Engine, args: &Value) -> (String, bool) 
                 });
             }
 
-            let mut out = format!("Found {} symbol(s) matching '{name}':\n\n", symbols.len());
-            for sym in &symbols {
-                out.push_str(&format!(
-                    "  {:?} `{}` \u{2014} {} (lines {}-{})\n",
-                    sym.kind, sym.name, sym.file_path, sym.line_start, sym.line_end
-                ));
-                if let Some(sig) = &sym.signature
-                    && !sig.is_empty()
-                {
-                    out.push_str(&format!("    {sig}\n"));
-                }
+            if cli {
+                return (listing.text, false);
             }
-            (out, false)
+            let shown = if listing.shown < listing.total {
+                format!(" (showing {})", listing.shown)
+            } else {
+                String::new()
+            };
+            (
+                format!(
+                    "Found {} symbol(s) matching '{name}'{shown}:\n{}",
+                    listing.total, listing.text
+                ),
+                false,
+            )
         }
         Err(e) => (format!("Symbol lookup error: {e}"), true),
     }
@@ -521,38 +552,54 @@ pub(crate) fn call_search_usages(engine: &Engine, args: &Value) -> (String, bool
             .map(|value| value.to_string())
             .unwrap_or_else(|| "null".to_string());
         let mut out = format!(
-            "Found {total} location(s) referencing `{symbol}` in the deterministic bounded scan (no ranking; candidate cap: 100000).\n\
+            "Found {total} location(s) referencing `{symbol}` in the exhaustive whole-word scan (no ranking; cap: 100000).\n\
              Page: offset={offset}, returned={}, limit={limit}, has_more={has_more}, next_offset={next_offset}\n\n",
             page.len()
         );
-        for r in page {
-            out.push_str(&format!("  {} L{} [{}]\n", r.file_path, r.line + 1, r.kind));
-            if !r.context.is_empty() {
-                out.push_str(&format!("    {}\n", r.context));
-            }
-        }
+        out.push_str(&codixing_core::formatter::compact::references(page.to_vec(), 0, false).text);
         return (out, false);
     }
 
+    // Ranked mode: every whole-word occurrence from the trigram index (the
+    // recall of a text search), ordered by usefulness and limited.
+    let cli = args.get("cli").and_then(|v| v.as_bool()).unwrap_or(false);
+    let refs = engine.exact_symbol_references(&symbol);
+    if !refs.is_empty() {
+        let listing = codixing_core::formatter::compact::references(refs, limit, true);
+        if cli {
+            return (listing.text, false);
+        }
+        return (
+            format!(
+                "Found {} reference(s) to `{symbol}` in {} file(s), most useful first (path:line:kind: source):\n{}",
+                listing.total, listing.files, listing.text
+            ),
+            false,
+        );
+    }
+    if cli {
+        return (String::new(), false);
+    }
+
+    // No whole-word occurrence: the caller may have passed a partial name.
+    // Fall back to ranked text retrieval.
     match engine.search_usages(&symbol, limit) {
         Ok(results) if results.is_empty() => (format!("No usages found for '{symbol}'."), false),
         Ok(results) => {
             let mut out = format!(
-                "Found {} location(s) referencing `{symbol}`:\n\n",
+                "No exact identifier `{symbol}`; {} related location(s):\n\n",
                 results.len()
             );
             for r in &results {
-                out.push_str(&format!(
-                    "  {} [L{}-L{}]",
-                    r.file_path, r.line_start, r.line_end
-                ));
+                let (start, end) = r.display_lines();
+                out.push_str(&format!("  {} [L{}-L{}]", r.file_path, start, end));
                 if !r.signature.is_empty() {
-                    out.push_str(&format!("  \u{2014} {}", r.signature));
+                    out.push_str(&format!(
+                        "  \u{2014} {}",
+                        r.signature.lines().next().unwrap_or("")
+                    ));
                 }
                 out.push('\n');
-                if let Some(preview) = r.content.lines().find(|l| !l.trim().is_empty()) {
-                    out.push_str(&format!("    {}\n", preview.trim()));
-                }
             }
             (out, false)
         }
@@ -593,18 +640,8 @@ pub(crate) fn call_read_symbol(engine: &Engine, args: &Value) -> (String, bool) 
         );
     }
 
-    // Align listing order with definition-first ranking used by read_symbol_source.
-    symbols.sort_by_key(|s| match s.kind {
-        codixing_core::EntityKind::Import => 9u8,
-        codixing_core::EntityKind::Module | codixing_core::EntityKind::Namespace => 3,
-        codixing_core::EntityKind::Constant
-        | codixing_core::EntityKind::Static
-        | codixing_core::EntityKind::Variable => 2,
-        codixing_core::EntityKind::Function
-        | codixing_core::EntityKind::Method
-        | codixing_core::EntityKind::Impl => 1,
-        _ => 0,
-    });
+    // Same ordering as `read_symbol_source`: exact name, then definition tier.
+    codixing_core::sort_for_lookup(&mut symbols, name);
 
     // Prefer reading the ranked primary definition (not symbols[0] pre-sort).
     let preferred_file = symbols.first().map(|s| s.file_path.as_str());
@@ -618,25 +655,37 @@ pub(crate) fn call_read_symbol(engine: &Engine, args: &Value) -> (String, bool) 
         ),
         Ok(Some(source)) => {
             let sym = &symbols[0];
+            let (start, end) = sym.display_lines();
             let mut out = format!(
                 "// {:?} `{}` \u{2014} {} [L{}-L{}]\n```{}\n{}\n```",
                 sym.kind,
                 sym.name,
                 sym.file_path,
-                sym.line_start,
-                sym.line_end,
+                start,
+                end,
                 sym.language.name(),
                 source,
             );
-            if symbols.len() > 1 {
-                out.push_str(&format!(
-                    "\n\n*{} additional match(es):*\n",
-                    symbols.len() - 1
-                ));
-                for s in symbols.iter().skip(1) {
+            // Other matches are pointers only; list the closest few.
+            const MAX_OTHER_MATCHES: usize = 10;
+            let others: Vec<_> = symbols
+                .iter()
+                .skip(1)
+                .filter(|s| !matches!(s.kind, codixing_core::EntityKind::Import))
+                .collect();
+            if !others.is_empty() {
+                out.push_str(&format!("\n\n*{} other match(es):*\n", others.len()));
+                for s in others.iter().take(MAX_OTHER_MATCHES) {
+                    let (start, end) = s.display_lines();
                     out.push_str(&format!(
                         "  \u{2022} {:?} `{}` \u{2014} {} [L{}-L{}]\n",
-                        s.kind, s.name, s.file_path, s.line_start, s.line_end
+                        s.kind, s.name, s.file_path, start, end
+                    ));
+                }
+                if others.len() > MAX_OTHER_MATCHES {
+                    out.push_str(&format!(
+                        "  \u{2026} {} more (use find_symbol to list them)\n",
+                        others.len() - MAX_OTHER_MATCHES
                     ));
                 }
             }
@@ -674,8 +723,8 @@ pub(crate) fn call_stitch_context(engine: &Engine, args: &Value) -> (String, boo
         stitched.push_str(&format!(
             "**{}** L{}-{}\n```\n{}\n```\n\n",
             r.file_path,
-            r.line_start,
-            r.line_end,
+            r.display_lines().0,
+            r.display_lines().1,
             r.content.trim()
         ));
 
@@ -804,7 +853,7 @@ fn format_explain_output(
     if !usages.is_empty() {
         out.push_str(&format!("### Callers ({} usage sites)\n", usages.len()));
         for u in usages {
-            out.push_str(&format!("  - `{}` L{}", u.file_path, u.line_start));
+            out.push_str(&format!("  - `{}` L{}", u.file_path, u.display_lines().0));
             if !u.signature.is_empty() {
                 out.push_str(&format!("  \u{2014} {}", u.signature));
             }

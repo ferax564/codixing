@@ -1,3 +1,5 @@
+pub mod compact;
+
 use tiktoken_rs::cl100k_base;
 use tracing::warn;
 
@@ -579,8 +581,9 @@ fn render_result(r: &SearchResult) -> String {
     format!(
         "// File: {} [L{}-L{}]{}{}\n```{}\n{}\n```\n\n",
         r.file_path,
-        r.line_start,
-        r.line_end,
+        // 1-based inclusive, like `grep` and editors.
+        r.display_lines().0,
+        r.display_lines().1,
         scope,
         sig,
         r.language.to_lowercase(),

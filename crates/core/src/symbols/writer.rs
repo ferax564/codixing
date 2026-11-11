@@ -414,6 +414,13 @@ fn write_mmap_symbols_from_source(
     })
     .map_err(|e| CodixingError::Serialization(format!("failed to write symbols_v2.bin: {e}")))?;
 
+    // Vouch for the file just written so readers can skip the structural
+    // walk on every open. Best effort: without a stamp loading still works,
+    // through the slower fully validated path.
+    if let Err(error) = super::mmap::write_validation_stamp(path) {
+        tracing::warn!(%error, "failed to write symbol validation stamp");
+    }
+
     Ok(write_stats)
 }
 

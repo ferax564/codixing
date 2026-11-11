@@ -6,6 +6,91 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+Follow-up to `codixing-review-2026-11-10.md`: retrieval correctness, output
+size, and cold-start cost on very large repositories. Measured on Linux 6.6
+(71K indexed files) unless stated.
+
+### Changed
+
+- **Line numbers are 1-based everywhere.** `search`, `symbols`, `usages`,
+  `ask`, `context`, and the MCP tools now print the same line numbers as
+  `grep` and editors. `codixing context --line N` and the MCP
+  `assemble_location_context` `line` argument are 1-based as well (they were
+  0-based). `search --json` gains `start_line`/`end_line` (1-based); the raw
+  `line_start`/`line_end` fields are unchanged.
+- **`codixing ask` prints compact text by default** (evidence as
+  `path:start-end` with a short query-focused source preview) at roughly a
+  third of the previous size. `--json` and `agent-context-pack` emit the stable
+  schema as compact JSON; MCP `agent_context_pack` accepts `format="text"` and
+  infers `mode` from the task when omitted.
+- **`codixing symbols` lists definitions only, best match first, 50 rows by
+  default** as `Kind name  path:start-end`. `--imports` adds import rows,
+  `--limit N` (`0` = all) changes the cap, and a cut listing says how much was
+  left out. `--defs-only` is still accepted. MCP `find_symbol` returns the same
+  listing with `limit` / `include_imports`.
+- **`codixing usages` is an exhaustive whole-word scan** through the file
+  trigram index, printed as `path:line:kind: source` (kind: definition, call,
+  reference, import, comment, doc), most useful first. `--complete` lists
+  everything by path. MCP `search_usages` uses the same engine.
+- **`codixing search` prints one line per hit** (`path:start-end  signature`)
+  plus a three-line snippet anchored on the definition or the best
+  query-matching lines, each with its real line number. Relevance scores are no
+  longer printed (they are not comparable between queries).
+- **`codixing context` defaults to `--budget-mode strict`** and selects the
+  innermost function or type containing the line instead of the enclosing
+  `impl` block or class.
+- **`codixing audit` shows the 15 oldest entries per tier** and a count of the
+  rest; `--full` lists everything. Build scripts, shell scripts and hook files
+  are treated as entry points rather than dead code.
+- **`codixing impact` lists code before documentation** and reports the blast
+  radius as code and docs separately; both compact and full modes are served
+  by a running daemon.
+- CLI diagnostics go to stderr without colour codes when stderr is not a
+  terminal; third-party crates log errors only.
+
+### Fixed
+
+- **`ask` ranked worse than `search`.** Any word of eight or more characters
+  was treated as an identifier and unrelated symbols containing it were pinned
+  above the real hits. Only identifier-shaped tokens, or ordinary words that
+  exactly name a specific production symbol, are merged in now, and the task
+  text goes through the same retrieval path as `search`.
+- **`impl` blocks outranked the type they extend.** Definition lookups rank
+  types, then functions and values, then `impl`/module blocks; production code
+  before tests; and show the chunk holding the definition's first line.
+  `symbols`, `find_symbol` and `read_symbol` order by exact name first.
+- **C and C++ type references indexed as definitions.** `struct foo *p;` and
+  forward declarations no longer count as a definition of `foo`
+  (`task_struct` on Linux: 6,735 symbols before, 64 after, real one first).
+- **A smaller `--limit` changed the first result.** Ranked strategies now rank
+  a pool of at least the default size and truncate afterwards, so `--limit N`
+  returns a prefix of the default results.
+- **`usages --complete` missed call sites** because its candidates came from
+  ranked retrieval. It now matches a word-boundary text search on every
+  indexed file.
+- **`find_tests` returned nothing for most files of a large repository**: the
+  project-wide map was capped at 200 entries before filtering. Tests are now
+  resolved per file.
+- Piping to `head` (or any reader that closes early) no longer panics with
+  "Broken pipe" and exit code 101.
+- `grep` no longer truncates silently at 50 matches (it says so on stderr),
+  clips very long lines around the match, makes `--file` match that exact path
+  when present, and hints at `a|b` when a pattern uses `\|`.
+
+### Performance
+
+- **Index open no longer re-validates the symbol table.** Writers stamp
+  `symbols_v2.bin` with its length and xxh3 digest after a full validation;
+  readers verify the digest instead of walking every record (2.55 s → 27 ms).
+  Existing indexes gain the stamp at their next `sync`.
+- **`grep`, `symbols` and `usages` load only what they need** (file list and
+  trigram index; symbol table), and one-shot read-only commands skip engine
+  teardown. Cold start per command: `grep --count` 4.8 s → 0.11 s, `symbols`
+  4.7 s → 0.10 s, `usages` 4.5 s → 0.21 s, `search` 4.7 s → 1.4 s.
+- **Test mapping is no longer quadratic** and per-file symbol lookups use the
+  file postings instead of scanning every symbol: `ask` 19.5 s → 1.4 s,
+  `context` 130 s → 1.6 s, `impact` 7.4 s → 1.8 s, `graph --map` 15 s → 1.8 s.
+
 ## [0.48.0] - 2026-07-22
 
 ### Added

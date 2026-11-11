@@ -70,6 +70,12 @@ fn collect_explore_neighbour_files(
 
 impl Engine {
     fn ensure_read_profile_supports(&self, query: &SearchQuery) -> Result<()> {
+        if !self.read_only_load_mode.supports_search() {
+            return Err(CodixingError::Config(format!(
+                "this engine was opened in {:?} mode, which does not load the search index",
+                self.read_only_load_mode
+            )));
+        }
         if self.read_only_load_mode != ReadOnlyLoadMode::Lexical {
             return Ok(());
         }
@@ -103,6 +109,36 @@ impl Engine {
     /// - `Thorough` → hybrid + MMR deduplication
     /// - `Exact`   → Trigram index fast-path with BM25 fallback
     pub fn search(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
+        // Ranked strategies re-order candidates *after* retrieval (definition
+        // boost, test demotion, graph/recency boosts). Retrieving exactly
+        // `limit` candidates meant those stages could only shuffle what BM25
+        // already put on top, so `--limit 1` returned a different (worse)
+        // first hit than `--limit 10`. Always rank a pool of at least the
+        // default size and truncate afterwards: a smaller limit now returns a
+        // prefix of the default result list.
+        let requested = query.limit;
+        let overfetch = requested > 0
+            && matches!(
+                query.strategy,
+                Strategy::Instant | Strategy::Fast | Strategy::Thorough
+            );
+        if !overfetch {
+            return self.search_ranked(query);
+        }
+        let fetch_limit = requested.max(Self::MIN_RANKING_CANDIDATES);
+        let mut results = self.search_ranked(SearchQuery {
+            limit: fetch_limit,
+            ..query
+        })?;
+        results.truncate(requested);
+        Ok(results)
+    }
+
+    /// Smallest candidate pool handed to the post-retrieval ranking pipeline
+    /// (the default result limit, which the boost weights are tuned against).
+    const MIN_RANKING_CANDIDATES: usize = 10;
+
+    fn search_ranked(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
         self.ensure_read_profile_supports(&query)?;
 
         // Expand CamelCase/snake_case identifiers in the query for better BM25 matching.
@@ -619,7 +655,7 @@ impl Engine {
     /// ranked so structs/classes/functions beat imports and impl blocks.
     /// Falls back to [`Self::search_exact`] when no defining symbol is indexed.
     fn search_goto(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
-        use super::pipeline::is_primary_definition_kind;
+        use super::pipeline::{definition_tier, is_test_like_path};
         use crate::language::EntityKind;
 
         let name = query.query.trim();
@@ -637,12 +673,12 @@ impl Engine {
             return self.search_exact(query);
         }
 
-        // Prefer primary definitions over impl/module noise.
+        // Types first, then functions/values, then impl/module blocks. Within
+        // a tier, production code beats tests; path/line keep it deterministic.
         symbols.sort_by(|a, b| {
-            let a_primary = is_primary_definition_kind(&a.kind);
-            let b_primary = is_primary_definition_kind(&b.kind);
-            b_primary
-                .cmp(&a_primary)
+            definition_tier(&b.kind)
+                .cmp(&definition_tier(&a.kind))
+                .then_with(|| is_test_like_path(&a.file_path).cmp(&is_test_like_path(&b.file_path)))
                 .then_with(|| a.file_path.cmp(&b.file_path))
                 .then_with(|| a.line_start.cmp(&b.line_start))
         });
@@ -659,11 +695,17 @@ impl Engine {
                 continue;
             }
 
-            let score = if is_primary_definition_kind(&symbol.kind) {
-                1000.0 - rank as f32
-            } else {
-                100.0 - rank as f32
+            let tier_base = match definition_tier(&symbol.kind) {
+                3 => 3000.0,
+                2 => 2000.0,
+                _ => 1000.0,
             };
+            let test_penalty = if is_test_like_path(&symbol.file_path) {
+                500.0
+            } else {
+                0.0
+            };
+            let score = tier_base - test_penalty - rank.min(400) as f32;
             let mut best: Option<SearchResult> = None;
             let paths = [symbol.file_path.clone()];
             let _ = self
@@ -672,18 +714,20 @@ impl Engine {
                     let Some(meta) = self.chunk_meta.get(&chunk_id) else {
                         return Ok(());
                     };
-                    let overlaps = meta.line_start <= symbol.line_end as u64
+                    // The chunk must contain the first line of the symbol:
+                    // for a 700-line `impl` any overlapping chunk used to
+                    // qualify, so an arbitrary inner fragment was shown.
+                    let holds_head = meta.line_start <= symbol.line_start as u64
                         && meta.line_end >= symbol.line_start as u64;
-                    if !overlaps {
+                    if !holds_head {
                         return Ok(());
                     }
-                    // Prefer the tightest chunk covering the definition.
-                    let span = meta.line_end.saturating_sub(meta.line_start);
+                    // Prefer the tightest chunk covering the definition head.
                     let candidate = SearchResult {
                         chunk_id: format!("{chunk_id}"),
                         file_path: meta.file_path.clone(),
                         language: meta.language.clone(),
-                        score: score + 1.0 / (1.0 + span as f32),
+                        score,
                         line_start: meta.line_start,
                         line_end: meta.line_end,
                         signature: symbol

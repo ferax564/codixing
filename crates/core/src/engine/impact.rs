@@ -47,9 +47,42 @@ pub fn format_change_impact(impact: &ChangeImpact, detail: ImpactDetail) -> Stri
     const COMPACT_TRANSITIVE: usize = 10;
     const COMPACT_TESTS: usize = 12;
 
+    // Documents that merely mention a file are linked to it and therefore
+    // count as dependents, but nothing breaks in them when the code changes.
+    // List code first and report the two groups separately, so the headline
+    // number reflects what a change can actually break.
+    fn is_doc(path: &str) -> bool {
+        let lower = path.to_ascii_lowercase();
+        [".md", ".mdx", ".rst", ".txt", ".adoc", ".html", ".htm"]
+            .iter()
+            .any(|ext| lower.ends_with(ext))
+    }
+    fn code_first(paths: &[String]) -> Vec<&String> {
+        let (docs, code): (Vec<&String>, Vec<&String>) = paths.iter().partition(|p| is_doc(p));
+        code.into_iter().chain(docs).collect()
+    }
+    let direct = code_first(&impact.direct_dependents);
+    let transitive = code_first(&impact.transitive_dependents);
+    let doc_count = impact
+        .direct_dependents
+        .iter()
+        .chain(&impact.transitive_dependents)
+        .filter(|p| is_doc(p))
+        .count();
+    let radius = if doc_count == 0 {
+        format!("{} files", impact.blast_radius)
+    } else {
+        format!(
+            "{} files ({} code, {} docs)",
+            impact.blast_radius,
+            impact.blast_radius.saturating_sub(doc_count),
+            doc_count
+        )
+    };
+
     let mut out = format!(
-        "# Change Impact: {}\n\nBlast radius: {} files\n\n",
-        impact.file_path, impact.blast_radius
+        "# Change Impact: {}\n\nBlast radius: {radius}\n\n",
+        impact.file_path
     );
 
     match detail {
@@ -61,7 +94,7 @@ pub fn format_change_impact(impact: &ChangeImpact, detail: ImpactDetail) -> Stri
             if impact.direct_dependents.is_empty() {
                 out.push_str("  (none)\n\n");
             } else {
-                for d in &impact.direct_dependents {
+                for d in &direct {
                     out.push_str(&format!("  {d}\n"));
                 }
                 out.push('\n');
@@ -74,7 +107,7 @@ pub fn format_change_impact(impact: &ChangeImpact, detail: ImpactDetail) -> Stri
             if impact.transitive_dependents.is_empty() {
                 out.push_str("  (none)\n\n");
             } else {
-                for t in &impact.transitive_dependents {
+                for t in &transitive {
                     out.push_str(&format!("  {t}\n"));
                 }
                 out.push('\n');
@@ -100,7 +133,7 @@ pub fn format_change_impact(impact: &ChangeImpact, detail: ImpactDetail) -> Stri
             if impact.direct_dependents.is_empty() {
                 out.push_str("  (none)\n\n");
             } else {
-                for d in impact.direct_dependents.iter().take(COMPACT_DIRECT) {
+                for d in direct.iter().take(COMPACT_DIRECT) {
                     out.push_str(&format!("  {d}\n"));
                 }
                 if impact.direct_dependents.len() > COMPACT_DIRECT {
@@ -120,7 +153,7 @@ pub fn format_change_impact(impact: &ChangeImpact, detail: ImpactDetail) -> Stri
                 out.push_str("\n\n");
             } else {
                 out.push_str(&format!(" (showing up to {COMPACT_TRANSITIVE}):\n"));
-                for t in impact.transitive_dependents.iter().take(COMPACT_TRANSITIVE) {
+                for t in transitive.iter().take(COMPACT_TRANSITIVE) {
                     out.push_str(&format!("  {t}\n"));
                 }
                 if impact.transitive_dependents.len() > COMPACT_TRANSITIVE {
@@ -149,9 +182,6 @@ pub fn format_change_impact(impact: &ChangeImpact, detail: ImpactDetail) -> Stri
                     ));
                 }
             }
-            out.push_str(
-                "\nTip: use `impact --full` or MCP `change_impact` with `full=true` for the complete list.\n",
-            );
         }
     }
 

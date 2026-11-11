@@ -115,14 +115,24 @@ pub(crate) fn call_agent_context_pack(
         Some(t) => t.to_string(),
         None => return ("Missing required argument: task".to_string(), true),
     };
-    let mode = match args
-        .get("mode")
-        .and_then(|v| v.as_str())
-        .unwrap_or("understand")
-        .parse::<AgentContextMode>()
-    {
-        Ok(mode) => mode,
-        Err(e) => return (e, true),
+    // Infer the workflow mode from the task wording when the caller does not
+    // name one, matching the `codixing ask` CLI.
+    let mode = match args.get("mode").and_then(|v| v.as_str()) {
+        Some(mode) => match mode.parse::<AgentContextMode>() {
+            Ok(mode) => mode,
+            Err(e) => return (e, true),
+        },
+        None => AgentContextMode::infer_from_task(&task),
+    };
+    let text_format = match args.get("format").and_then(|v| v.as_str()) {
+        None | Some("json") => false,
+        Some("text") => true,
+        Some(other) => {
+            return (
+                format!("invalid format '{other}' (expected json or text)"),
+                true,
+            );
+        }
     };
     let token_budget = requested_structured_tool_token_budget(args);
     let changed_files = match args.get("changed_files") {
@@ -169,7 +179,11 @@ pub(crate) fn call_agent_context_pack(
         p.report(100, "Agent context pack ready.");
     }
 
-    match serde_json::to_string_pretty(&pack) {
+    if text_format {
+        return (pack.render_text(), false);
+    }
+    // Compact JSON: pretty-printing adds ~40% tokens for no information.
+    match serde_json::to_string(&pack) {
         Ok(json) => (json, false),
         Err(e) => (format!("JSON serialization error: {e}"), true),
     }
@@ -182,15 +196,21 @@ pub(crate) fn call_assemble_location_context(engine: &Engine, args: &Value) -> (
         Some(f) => f.to_string(),
         None => return ("Missing required argument: file".to_string(), true),
     };
-    let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
+    // `line` is 1-based, matching every line number the tools print. The
+    // engine works with 0-based lines; 0 is accepted as "start of file".
+    let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(1);
     let token_budget = requested_tool_token_budget(args);
     let budget_mode = match args.get("budget_mode").and_then(|v| v.as_str()) {
-        Some("strict") => BudgetMode::Strict,
-        _ => BudgetMode::Soft,
+        Some("soft") => BudgetMode::Soft,
+        _ => BudgetMode::Strict,
     };
 
-    let ctx =
-        engine.assemble_context_for_location_with_mode(&file, line, token_budget, budget_mode);
+    let ctx = engine.assemble_context_for_location_with_mode(
+        &file,
+        line.saturating_sub(1),
+        token_budget,
+        budget_mode,
+    );
 
     let over_marker = if ctx.over_budget {
         " ⚠ over budget"
@@ -213,7 +233,9 @@ pub(crate) fn call_assemble_location_context(engine: &Engine, args: &Value) -> (
 
     out.push_str(&format!(
         "### Primary (L{}\u{2013}L{})\n```\n{}\n```\n\n",
-        ctx.primary.line_start, ctx.primary.line_end, ctx.primary.content
+        ctx.primary.display_lines().0,
+        ctx.primary.display_lines().1,
+        ctx.primary.content
     ));
 
     if !ctx.imports.is_empty() {
@@ -221,7 +243,11 @@ pub(crate) fn call_assemble_location_context(engine: &Engine, args: &Value) -> (
         for imp in &ctx.imports {
             out.push_str(&format!(
                 "- `{}` L{}\u{2013}L{} (relevance: {:.2})\n  ```\n  {}\n  ```\n",
-                imp.file_path, imp.line_start, imp.line_end, imp.relevance, imp.content
+                imp.file_path,
+                imp.line_start + 1,
+                imp.line_end.max(imp.line_start + 1),
+                imp.relevance,
+                imp.content
             ));
         }
         out.push('\n');
@@ -233,8 +259,8 @@ pub(crate) fn call_assemble_location_context(engine: &Engine, args: &Value) -> (
             out.push_str(&format!(
                 "- `{}` L{}\u{2013}L{} (relevance: {:.2})\n  ```\n  {}\n  ```\n",
                 callee.file_path,
-                callee.line_start,
-                callee.line_end,
+                callee.line_start + 1,
+                callee.line_end.max(callee.line_start + 1),
                 callee.relevance,
                 callee.content
             ));
