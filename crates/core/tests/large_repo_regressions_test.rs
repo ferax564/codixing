@@ -150,6 +150,47 @@ fn exact_references_find_every_call_site() {
 }
 
 #[test]
+fn a_recursive_call_next_to_the_definition_is_a_call() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "src/math.rs",
+        "pub fn countdown(n: u32) -> u32 {\n    if n == 0 { 0 } else { countdown(n - 1) }\n}\n\n/// Uses countdown in a doc comment.\n#[inline]\npub fn wrapper() -> u32 {\n    countdown(3)\n}\n",
+    );
+    let engine = Engine::init(root, no_embed_config(root)).unwrap();
+
+    let refs = engine.exact_symbol_references("countdown");
+    let kind_at = |line: usize| {
+        refs.iter()
+            .find(|r| r.file_path == "src/math.rs" && r.line + 1 == line)
+            .map(|r| r.kind.as_str())
+            .unwrap_or_else(|| panic!("no reference on line {line}: {refs:#?}"))
+    };
+
+    assert_eq!(kind_at(1), "definition");
+    // The recursive call sits one line below the definition head; it used to
+    // be reported as a second definition and vanish from usage examples.
+    assert_eq!(kind_at(2), "call");
+    assert_eq!(kind_at(5), "comment");
+    assert_eq!(kind_at(8), "call");
+    assert_eq!(
+        refs.iter().filter(|r| r.kind == "definition").count(),
+        1,
+        "exactly one line defines the symbol: {refs:#?}"
+    );
+
+    // The recursive call is available as a usage example again.
+    let examples = engine.find_usage_examples("countdown", 10);
+    assert!(
+        examples
+            .iter()
+            .any(|e| e.file_path == "src/math.rs" && e.line_start + 1 == 2),
+        "recursive call missing from usage examples: {examples:#?}"
+    );
+}
+
+#[test]
 fn complete_reference_mode_is_exhaustive_and_ordered() {
     let dir = tempdir().unwrap();
     let root = dir.path();

@@ -177,7 +177,7 @@ impl Engine {
     /// At most [`Self::MAX_EXACT_REFERENCES`] hits are returned, in
     /// unspecified order.
     pub fn exact_symbol_references(&self, symbol: &str) -> Vec<SymbolReference> {
-        use std::collections::HashSet;
+        use std::collections::{HashMap, HashSet};
 
         let base = symbol.rsplit("::").next().unwrap_or(symbol).trim();
         if base.is_empty() {
@@ -207,17 +207,41 @@ impl Engine {
             .map(|s| (s.file_path, s.line_start))
             .collect();
 
+        // The line that *is* each definition: the first occurrence of the name
+        // at or just below the symbol's first line (attributes or decorators
+        // may precede the name). Only that line is the definition; a
+        // recursive call two lines further down is a call.
+        let mut occurrences: HashMap<&str, Vec<(usize, bool)>> = HashMap::new();
+        for m in &matches {
+            occurrences
+                .entry(m.file_path.as_str())
+                .or_default()
+                .push((m.line_number as usize, is_comment_like(&m.line)));
+        }
+        for lines in occurrences.values_mut() {
+            lines.sort_unstable();
+        }
+        let mut definition_lines: HashSet<(String, usize)> = HashSet::new();
+        for (file, start) in &definitions {
+            let Some(lines) = occurrences.get(file.as_str()) else {
+                continue;
+            };
+            let first = lines.partition_point(|(line, _)| line < start);
+            if let Some((line, _)) = lines[first..]
+                .iter()
+                .take_while(|(line, _)| *line <= start + DEFINITION_HEAD_WINDOW)
+                .find(|(_, comment)| !comment)
+            {
+                definition_lines.insert((file.clone(), *line));
+            }
+        }
+
         matches
             .into_iter()
             .map(|m| {
                 let line_number = m.line_number as usize;
-                let kind = classify_reference(
-                    &m.file_path,
-                    line_number,
-                    &m.line,
-                    m.match_end,
-                    &definitions,
-                );
+                let is_definition = definition_lines.contains(&(m.file_path.clone(), line_number));
+                let kind = classify_reference(&m.file_path, &m.line, m.match_end, is_definition);
                 SymbolReference {
                     file_path: m.file_path,
                     line: line_number,
@@ -318,25 +342,32 @@ impl Engine {
 }
 
 /// Convert a `ReferenceKind` to a human-readable string.
-/// Classify one whole-word occurrence of a symbol.
+/// Lines below a symbol's first line in which its name may first appear
+/// (attributes or decorators can sit between the two).
+const DEFINITION_HEAD_WINDOW: usize = 3;
+
+/// Whether a line is a comment or an attribute/preprocessor line, which never
+/// holds the definition itself.
+fn is_comment_like(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("//")
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with('*')
+        || trimmed.starts_with('#')
+}
+
+/// Classify one whole-word occurrence of a symbol. `is_definition` is true
+/// for the single line that declares the symbol.
 fn classify_reference(
     file_path: &str,
-    line_number: usize,
     line: &str,
     match_end: usize,
-    definitions: &std::collections::HashSet<(String, usize)>,
+    is_definition: bool,
 ) -> &'static str {
-    // A definition symbol starts on its first line; attributes or decorators
-    // may sit on the lines just above the name, so allow a small window.
-    let defined_here = (0..=3).any(|back| {
-        line_number
-            .checked_sub(back)
-            .is_some_and(|start| definitions.contains(&(file_path.to_string(), start)))
-    });
-    let trimmed = line.trim_start();
-    if defined_here && !trimmed.starts_with("//") && !trimmed.starts_with('#') {
+    if is_definition {
         return "definition";
     }
+    let trimmed = line.trim_start();
 
     let lower_path = file_path.to_ascii_lowercase();
     if [".md", ".mdx", ".rst", ".txt", ".adoc", ".html", ".htm"]

@@ -859,6 +859,16 @@ fn enforce_agent_pack_budget(pack: &mut AgentContextPack) {
     }
 }
 
+/// Whether two line spans (0-based start, exclusive end) share a line.
+///
+/// Ends are exclusive, so `[0, 10)` and `[10, 20)` are neighbours, not
+/// duplicates: comparing with `<=` dropped the chunk right after one that
+/// was already selected. Identical spans always count as overlapping, which
+/// also covers a degenerate empty span.
+fn spans_overlap(a: (u64, u64), b: (u64, u64)) -> bool {
+    a == b || (a.0 < b.1 && b.0 < a.1)
+}
+
 /// The definition a result is "about": the innermost non-import symbol that
 /// starts inside the result or contains its first line. Taking the first
 /// overlapping symbol picked the enclosing `impl` block (or an import) rather
@@ -1052,8 +1062,10 @@ impl Engine {
         let overlaps_selected = |selected: &[SearchResult], candidate: &SearchResult| {
             selected.iter().any(|kept| {
                 kept.file_path == candidate.file_path
-                    && kept.line_start <= candidate.line_end
-                    && candidate.line_start <= kept.line_end
+                    && spans_overlap(
+                        (kept.line_start, kept.line_end),
+                        (candidate.line_start, candidate.line_end),
+                    )
             })
         };
 
@@ -1796,6 +1808,21 @@ mod tests {
 
         shrink_primary_to_window(&mut primary, "escape.rs", 0, 100, &engine);
         assert_eq!(primary.content, "original content");
+    }
+
+    #[test]
+    fn adjacent_spans_are_not_duplicates() {
+        // Exclusive ends: a chunk that starts where another stops is a
+        // different chunk and must stay in the pack.
+        assert!(!spans_overlap((0, 10), (10, 20)));
+        assert!(!spans_overlap((10, 20), (0, 10)));
+        // A definition inside the chunk that contains it is a duplicate.
+        assert!(spans_overlap((0, 10), (4, 6)));
+        assert!(spans_overlap((4, 6), (0, 10)));
+        assert!(spans_overlap((0, 10), (9, 30)));
+        // Identical spans, including empty ones.
+        assert!(spans_overlap((5, 9), (5, 9)));
+        assert!(spans_overlap((5, 5), (5, 5)));
     }
 
     #[test]
