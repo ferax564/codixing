@@ -419,6 +419,97 @@ impl ReadOnlyLoadMode {
     }
 }
 
+/// Load the file-level dependency graph and merge the symbol-level graph
+/// into it. A missing or unreadable graph yields `None`: the engine then runs
+/// without graph intelligence.
+pub(super) fn load_persisted_graph(store: &IndexStore) -> Option<CodeGraph> {
+    match store.load_graph() {
+        Ok(Some(data)) => {
+            let mut graph = CodeGraph::from_flat(data);
+            match store.load_symbol_graph() {
+                Ok(Some(symbol_graph)) => graph.replace_symbol_graph(symbol_graph),
+                Ok(None) => {}
+                Err(error) => tracing::warn!(%error, "failed to load symbol graph"),
+            }
+            Some(graph)
+        }
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(%error, "failed to load graph; running without graph intelligence");
+            None
+        }
+    }
+}
+
+/// Chunk metadata that a read-only engine decodes on first use.
+///
+/// On a kernel-sized index `chunk_meta.bin` holds about 700,000 records.
+/// Decoding it took a third of the cold-start time of every command and most
+/// of its memory, and a BM25 search never reads it: each hit carries the
+/// same fields as stored Tantivy values.
+///
+/// The table dereferences to the map, so every existing use decodes it
+/// transparently. Code on a hot read path asks [`Self::is_loaded`] first and
+/// uses the stored fields instead.
+pub(super) struct LazyChunkMeta {
+    map: std::sync::OnceLock<Arc<DashMap<u64, ChunkMeta>>>,
+    /// `chunk_meta.bin` and its changed-file overlay in the generation this
+    /// engine opened.
+    source: Option<(std::path::PathBuf, std::path::PathBuf)>,
+}
+
+impl LazyChunkMeta {
+    /// A table that is already in memory (writable engines, fresh indexes).
+    pub(super) fn loaded(map: Arc<DashMap<u64, ChunkMeta>>) -> Self {
+        let cell = std::sync::OnceLock::new();
+        let _ = cell.set(map);
+        Self {
+            map: cell,
+            source: None,
+        }
+    }
+
+    /// The table of `store`'s active generation, decoded on first use.
+    pub(super) fn deferred(store: &IndexStore) -> Self {
+        Self {
+            map: std::sync::OnceLock::new(),
+            source: Some((store.chunk_meta_path(), store.chunk_meta_delta_path())),
+        }
+    }
+
+    /// Whether the table is in memory. False means the next dereference
+    /// pays for the decode.
+    pub(super) fn is_loaded(&self) -> bool {
+        self.map.get().is_some()
+    }
+}
+
+impl std::ops::Deref for LazyChunkMeta {
+    type Target = Arc<DashMap<u64, ChunkMeta>>;
+
+    fn deref(&self) -> &Self::Target {
+        self.map.get_or_init(|| {
+            let Some((base, delta)) = &self.source else {
+                return Arc::new(DashMap::new());
+            };
+            match indexing::load_chunk_meta_from(base, delta) {
+                Ok((map, _)) => {
+                    tracing::debug!(chunks = map.len(), "chunk metadata decoded on first use");
+                    Arc::new(map)
+                }
+                Err(error) => {
+                    tracing::error!(
+                        path = %base.display(),
+                        %error,
+                        "chunk metadata could not be loaded; run `codixing init` to rebuild the index"
+                    );
+                    Arc::new(DashMap::new())
+                }
+            }
+        })
+    }
+}
+
 /// Top-level facade that wires together parsing, chunking, indexing,
 /// and retrieval into a single coherent API.
 pub struct Engine {
@@ -440,9 +531,21 @@ pub struct Engine {
     ///
     /// Wrapped in `Arc` so the background embedding thread can share it
     /// without taking a write lock on the whole engine.
-    pub(super) chunk_meta: Arc<DashMap<u64, ChunkMeta>>,
+    pub(super) chunk_meta: LazyChunkMeta,
+    /// Files whose chunks differ from the persisted `chunk_meta.bin`. The
+    /// next checkpoint writes just these as an overlay.
+    pub(super) chunk_meta_dirty: std::sync::Mutex<HashSet<String>>,
+    /// True when `file_chunk_ids` holds the indexed file list with empty
+    /// postings, because chunk metadata has not been decoded. Only read-only
+    /// engines are opened this way.
+    pub(super) file_list_only: bool,
     /// Optional code dependency graph with PageRank scores.
     pub(super) graph: Option<CodeGraph>,
+    /// True when the dependency graph of this read-only engine is loaded on
+    /// first use into `lazy_graph`, leaving `graph` empty.
+    pub(super) graph_deferred: bool,
+    /// The dependency graph of an engine opened with `graph_deferred`.
+    pub(super) lazy_graph: std::sync::OnceLock<Option<CodeGraph>>,
     /// Semantic concept index mapping domain concepts to symbol clusters.
     /// Lazy-loaded from disk on first use via OnceLock — saves ~2.1 GB of
     /// bitcode decode on cold start for large repos.
@@ -675,19 +778,35 @@ impl Engine {
             .unwrap_or_default()
     }
 
+    /// Number of indexed files. Unlike [`Self::stats`] this never decodes a
+    /// deferred component, so it is free on a freshly opened engine.
+    pub fn file_count(&self) -> usize {
+        self.file_chunk_ids.len()
+    }
+
     /// Return summary statistics about the current index.
     pub fn stats(&self) -> IndexStats {
         let (graph_node_count, graph_edge_count, symbol_node_count, symbol_edge_count) = self
-            .graph
-            .as_ref()
+            .graph_ref()
             .map(|g| {
                 let s = g.stats();
                 (s.node_count, s.edge_count, s.symbol_nodes, s.symbol_edges)
             })
             .unwrap_or((0, 0, 0, 0));
+        // With only the file list resident, the chunk total comes from the
+        // generation's metadata; decoding every chunk to count them would
+        // defeat the lazy load.
+        let chunk_count = if self.file_list_only {
+            self.store
+                .load_meta()
+                .map(|meta| meta.chunk_count)
+                .unwrap_or_else(|_| self.chunk_meta.len())
+        } else {
+            self.file_chunk_ids.values().map(|ids| ids.len()).sum()
+        };
         IndexStats {
             file_count: self.file_chunk_ids.len(),
-            chunk_count: self.file_chunk_ids.values().map(|ids| ids.len()).sum(),
+            chunk_count,
             symbol_count: self.symbols.len(),
             vector_count: self
                 .vector
@@ -741,6 +860,36 @@ impl Engine {
         self.shared_session = shared;
     }
 
+    /// The dependency graph, loading it first if this engine deferred it.
+    ///
+    /// Decoding the graph of a kernel-sized index takes about half a second,
+    /// and most one-shot commands never consult it. Read paths go through
+    /// this accessor; write paths own `self.graph` directly and never defer.
+    pub(super) fn graph_ref(&self) -> Option<&CodeGraph> {
+        if let Some(graph) = self.graph.as_ref() {
+            return Some(graph);
+        }
+        if !self.graph_deferred {
+            return None;
+        }
+        self.lazy_graph
+            .get_or_init(|| load_persisted_graph(&self.store))
+            .as_ref()
+    }
+
+    /// Mutable access to the dependency graph, moving a deferred graph into
+    /// place first.
+    pub(super) fn graph_mut(&mut self) -> Option<&mut CodeGraph> {
+        if self.graph.is_none() && self.graph_deferred {
+            self.graph = match self.lazy_graph.take() {
+                Some(graph) => graph,
+                None => load_persisted_graph(&self.store),
+            };
+            self.graph_deferred = false;
+        }
+        self.graph.as_mut()
+    }
+
     /// Retrieve chunk content from Tantivy stored fields.
     ///
     /// Used when `chunk_meta.content` is empty (compact persistence mode).
@@ -752,7 +901,10 @@ impl Engine {
     /// Retrieve chunk content, first checking the in-memory `chunk_meta` map
     /// and falling back to Tantivy stored fields if the content is empty.
     pub fn resolve_chunk_content(&self, chunk_id: u64) -> Option<String> {
-        if let Some(meta) = self.chunk_meta.get(&chunk_id)
+        // Metadata decoded from disk never carries bodies, so an undecoded
+        // table has nothing to offer here.
+        if self.chunk_meta.is_loaded()
+            && let Some(meta) = self.chunk_meta.get(&chunk_id)
             && !meta.content.is_empty()
         {
             return Some(meta.content.clone());
@@ -774,15 +926,19 @@ impl Engine {
         let mut contents = HashMap::with_capacity(chunk_ids.len());
         let mut missing = HashSet::new();
 
-        for &chunk_id in chunk_ids {
-            match self.chunk_meta.get(&chunk_id) {
-                Some(meta) if !meta.content.is_empty() => {
-                    contents.insert(chunk_id, meta.content.clone());
-                }
-                _ => {
-                    missing.insert(chunk_id);
+        if self.chunk_meta.is_loaded() {
+            for &chunk_id in chunk_ids {
+                match self.chunk_meta.get(&chunk_id) {
+                    Some(meta) if !meta.content.is_empty() => {
+                        contents.insert(chunk_id, meta.content.clone());
+                    }
+                    _ => {
+                        missing.insert(chunk_id);
+                    }
                 }
             }
+        } else {
+            missing.extend(chunk_ids.iter().copied());
         }
 
         if !missing.is_empty() {
@@ -1179,6 +1335,74 @@ pub trait Processor {
         );
 
         drop(dir);
+    }
+
+    #[test]
+    fn read_only_search_decodes_neither_chunk_metadata_nor_graph() {
+        let (_dir, root) = setup_project();
+        let mut config = IndexConfig::new(&root);
+        config.embedding.enabled = false;
+        drop(Engine::init(&root, config).unwrap());
+
+        // A writable engine holds everything in memory: the reference.
+        let strategies = [Strategy::Instant, Strategy::Exact, Strategy::Goto];
+        let (expected, expected_stats, expected_files) = {
+            let writable = Engine::open(&root).unwrap();
+            assert!(writable.chunk_meta.is_loaded());
+            assert!(writable.graph.is_some());
+            let results: Vec<_> = strategies
+                .iter()
+                .map(|strategy| {
+                    let results = writable
+                        .search(
+                            SearchQuery::new("helper")
+                                .with_limit(10)
+                                .with_strategy(*strategy),
+                        )
+                        .unwrap();
+                    serde_json::to_vec(&results).unwrap()
+                })
+                .collect();
+            (results, writable.stats(), writable.indexed_files())
+        };
+
+        let reader = Engine::open_read_only(&root).unwrap();
+        assert!(!reader.chunk_meta.is_loaded(), "decoded at open");
+        assert!(reader.graph.is_none() && reader.lazy_graph.get().is_none());
+
+        for (strategy, expected_bytes) in strategies.iter().zip(&expected) {
+            let results = reader
+                .search(
+                    SearchQuery::new("helper")
+                        .with_limit(10)
+                        .with_strategy(*strategy),
+                )
+                .unwrap();
+            assert_eq!(
+                serde_json::to_vec(&results).unwrap(),
+                *expected_bytes,
+                "{strategy:?} must return the same results from stored fields"
+            );
+        }
+        assert_eq!(reader.file_count(), expected_stats.file_count);
+        assert!(
+            !reader.chunk_meta.is_loaded(),
+            "a BM25 search must not decode chunk metadata"
+        );
+        assert!(
+            reader.lazy_graph.get().is_none(),
+            "a BM25 search of unambiguous names must not decode the graph"
+        );
+
+        // Everything is still available, on demand.
+        let stats = reader.stats();
+        assert_eq!(stats.chunk_count, expected_stats.chunk_count);
+        assert_eq!(stats.graph_node_count, expected_stats.graph_node_count);
+        assert_eq!(stats.graph_edge_count, expected_stats.graph_edge_count);
+        assert!(!reader.chunk_meta.is_loaded(), "stats must not decode it");
+        assert_eq!(reader.indexed_files(), expected_files);
+        assert!(reader.chunk_meta.is_loaded());
+        assert_eq!(reader.chunk_meta.len(), expected_stats.chunk_count);
     }
 
     #[test]

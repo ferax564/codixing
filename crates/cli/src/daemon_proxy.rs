@@ -49,6 +49,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 const DEFAULT_DAEMON_PROFILE: &str = "minimal";
 const REVIEWER_PROFILE: &str = "reviewer";
+const INITIALIZE_RESPONSE_ID: u64 = 1;
 const PROFILE_RESPONSE_ID: u64 = 2;
 const CALL_RESPONSE_ID: u64 = 3;
 
@@ -61,9 +62,12 @@ const CALL_RESPONSE_ID: u64 = 3;
 ///   returned an error, or any I/O step failed. The caller should fall back
 ///   to its existing in-process path.
 pub fn try_tools_call(root: &Path, tool_name: &str, arguments: Value) -> Option<String> {
+    if daemon_disabled() {
+        return None;
+    }
     let initialize = json!({
         "jsonrpc": "2.0",
-        "id": 1,
+        "id": INITIALIZE_RESPONSE_ID,
         "method": "initialize",
         "params": { "capabilities": {} }
     });
@@ -96,6 +100,13 @@ pub fn try_tools_call(root: &Path, tool_name: &str, arguments: Value) -> Option<
     parse_response(response_reader)
 }
 
+/// `CODIXING_NO_DAEMON=1`: answer every command in-process and never start
+/// a daemon. For benchmarks and bug reports, where the result must not
+/// depend on what an earlier command left running.
+pub fn daemon_disabled() -> bool {
+    std::env::var_os("CODIXING_NO_DAEMON").is_some_and(|value| !value.is_empty() && value != "0")
+}
+
 /// Parse the daemon's response stream, looking for the tools/call reply.
 fn parse_response<R: BufRead>(mut reader: R) -> Option<String> {
     let mut line = String::new();
@@ -107,6 +118,19 @@ fn parse_response<R: BufRead>(mut reader: R) -> Option<String> {
             return None;
         }
         let resp: Value = serde_json::from_str(line.trim()).ok()?;
+        // A daemon left running by another release ranks and formats with
+        // that release's code, and may not understand this release's index.
+        // Answer in-process instead; the old daemon exits when idle.
+        if resp.get("id") == Some(&json!(INITIALIZE_RESPONSE_ID))
+            && let Some(version) = resp
+                .get("result")
+                .and_then(|r| r.get("serverInfo"))
+                .and_then(|info| info.get("version"))
+                .and_then(|v| v.as_str())
+            && version != env!("CARGO_PKG_VERSION")
+        {
+            return None;
+        }
         // Skip notifications plus initialize/profile-switch responses.
         if resp.get("id") != Some(&json!(CALL_RESPONSE_ID)) {
             continue;
@@ -452,6 +476,7 @@ pub fn spawn_daemon(_root: &Path) -> Result<(), DaemonStartError> {
 /// each launching their own daemon while the first one is still loading.
 pub fn autostart_daemon_if_large(root: &Path, indexed_files: usize) {
     if indexed_files < AUTO_DAEMON_MIN_FILES
+        || daemon_disabled()
         || std::env::var_os("CODIXING_NO_AUTO_DAEMON").is_some_and(|v| !v.is_empty() && v != "0")
         || daemon_is_alive(root)
     {
@@ -521,6 +546,28 @@ pub fn try_repo_map(root: &Path, token_budget: Option<usize>) -> Option<String> 
         args.insert("token_budget".into(), json!(b));
     }
     try_tools_call(root, "get_repo_map", Value::Object(args))
+}
+
+/// Proxy `codixing context <file> --line N` through the daemon's
+/// `assemble_location_context` tool. Both sides render with the same core
+/// formatter, so the text is identical to the in-process command.
+pub fn try_context(
+    root: &Path,
+    file: &str,
+    line: u64,
+    token_budget: usize,
+    budget_mode: &str,
+) -> Option<String> {
+    try_tools_call(
+        root,
+        "assemble_location_context",
+        json!({
+            "file": file,
+            "line": line,
+            "token_budget": token_budget,
+            "budget_mode": budget_mode,
+        }),
+    )
 }
 
 /// Proxy `codixing callers <file>` through the daemon's `file_callers` tool.

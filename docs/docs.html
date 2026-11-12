@@ -724,13 +724,14 @@ Top files by PageRank:
         <p>Traverse the import and call graph to find who depends on a file, or what a file depends on.</p>
 
         <div class="pre-label">usage</div>
-        <pre><code>codixing callers &lt;FILE&gt; [--depth &lt;N&gt;]
-codixing callees &lt;FILE&gt; [--depth &lt;N&gt;]</code></pre>
+        <pre><code>codixing callers &lt;FILE&gt; [--depth &lt;N&gt;] [--limit &lt;N&gt;]
+codixing callees &lt;FILE&gt; [--depth &lt;N&gt;] [--limit &lt;N&gt;]</code></pre>
 
         <table class="doc-table">
           <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
           <tbody>
             <tr><td>--depth &lt;N&gt;</td><td>1</td><td>Traversal depth. <code>--depth 2</code> returns transitive neighbours.</td></tr>
+            <tr><td>--limit &lt;N&gt;</td><td>100</td><td>Maximum paths printed; a trailer reports how many were left out. <code>--limit 0</code> prints all.</td></tr>
           </tbody>
         </table>
 

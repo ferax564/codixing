@@ -302,6 +302,7 @@ impl Engine {
                     .get_mut()
                     .unwrap()
                     .add_prepared(&rel, &trigrams);
+                self.mark_chunk_meta_dirty(&rel);
                 self.file_chunk_ids.insert(
                     rel.clone(),
                     chunks
@@ -408,6 +409,7 @@ impl Engine {
             }
         }
         for rel in &files {
+            self.mark_chunk_meta_dirty(rel);
             if let Some(chunk_ids) = self.file_chunk_ids.remove(rel) {
                 for chunk_id in chunk_ids.iter() {
                     self.chunk_meta.remove(chunk_id);

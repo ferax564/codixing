@@ -7,7 +7,7 @@ use crate::persistence::IndexStore;
 use crate::vector::VectorIndex;
 
 use super::Engine;
-use super::indexing::{build_file_trigram_from_tantivy, deserialize_chunk_meta};
+use super::indexing::{build_file_trigram_from_tantivy, load_chunk_meta};
 use super::init::{load_persisted_symbols, persisted_meta_mtime};
 
 impl Engine {
@@ -85,18 +85,29 @@ impl Engine {
     pub(super) fn reload_from_disk(&mut self) -> Result<()> {
         self.symbols = load_persisted_symbols(&self.store)?;
 
-        // Reload chunk_meta (compact format first, fall back to legacy).
-        if self.store.chunk_meta_path().exists() {
-            let bytes = self.store.load_chunk_meta_bytes()?;
-            let loaded = deserialize_chunk_meta(&bytes)?;
-            self.chunk_meta.clear();
-            for entry in loaded.iter() {
-                self.chunk_meta.insert(*entry.key(), entry.value().clone());
+        if self.file_list_only && !self.chunk_meta.is_loaded() {
+            // Nothing has decoded the chunk metadata yet: keep it deferred,
+            // now pointing at the newly active generation.
+            self.chunk_meta = super::LazyChunkMeta::deferred(&self.store);
+            self.file_chunk_ids = super::init::indexed_file_list(&self.store, &self.config)?;
+        } else {
+            // Reload chunk_meta (compact format first, fall back to legacy).
+            if self.store.chunk_meta_path().exists() {
+                let (loaded, dirty) = load_chunk_meta(&self.store)?;
+                self.chunk_meta.clear();
+                for entry in loaded.iter() {
+                    self.chunk_meta.insert(*entry.key(), entry.value().clone());
+                }
+                *self
+                    .chunk_meta_dirty
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = dirty;
             }
-        }
 
-        // Rebuild exact per-file chunk postings from compact metadata.
-        self.file_chunk_ids = super::collect_file_chunk_ids(&self.chunk_meta);
+            // Rebuild exact per-file chunk postings from compact metadata.
+            self.file_chunk_ids = super::collect_file_chunk_ids(&self.chunk_meta);
+            self.file_list_only = false;
+        }
 
         // Refresh first so the rebuild observes the newest committed segments.
         self.tantivy.refresh_reader()?;
@@ -122,7 +133,11 @@ impl Engine {
         self.file_trigram = std::sync::OnceLock::new();
         let _ = self.file_trigram.set(ft);
 
-        if self.read_only_load_mode.loads_graph() {
+        if self.graph_deferred && self.graph.is_none() {
+            // Still deferred: forget any graph decoded from the previous
+            // generation; the next use loads the active one.
+            self.lazy_graph = std::sync::OnceLock::new();
+        } else if self.read_only_load_mode.loads_graph() {
             self.graph = match self.store.load_graph() {
                 Ok(Some(data)) => {
                     let mut g = CodeGraph::from_flat(data);

@@ -884,28 +884,50 @@ pub struct TestDemotionStage;
 
 impl SearchStage for TestDemotionStage {
     fn apply(&self, results: &mut Vec<SearchResult>, ctx: &SearchContext<'_>) -> Result<()> {
-        use super::search::{apply_header_demotion, is_search_infra, is_test_chunk, is_test_file};
-
-        const TEST_DEMOTION: f32 = 0.5;
-        const INFRA_DEMOTION: f32 = 0.5;
-        let mut changed = false;
-
-        for r in results.iter_mut() {
-            if is_test_file(&r.file_path) || is_test_chunk(r) {
-                r.score *= TEST_DEMOTION;
-                changed = true;
-            } else if is_search_infra(&r.file_path, ctx.query) {
-                r.score *= INFRA_DEMOTION;
-                changed = true;
-            }
-        }
-
-        apply_header_demotion(results, &mut changed);
-
-        if changed {
-            sort_descending(results);
-        }
+        demote_tests(results, ctx, true);
         Ok(())
+    }
+}
+
+/// [`TestDemotionStage`] for definition lookups: tests are demoted, headers
+/// are not.
+///
+/// A definition lookup already orders same-named definitions (a body beats a
+/// prototype). Demoting headers on top of that buried inline functions,
+/// macros and types that are *defined* in a header, such as the kernel's
+/// `kmalloc`, under re-implementations in test harnesses.
+pub struct DefinitionTestDemotionStage;
+
+impl SearchStage for DefinitionTestDemotionStage {
+    fn apply(&self, results: &mut Vec<SearchResult>, ctx: &SearchContext<'_>) -> Result<()> {
+        demote_tests(results, ctx, false);
+        Ok(())
+    }
+}
+
+fn demote_tests(results: &mut [SearchResult], ctx: &SearchContext<'_>, demote_headers: bool) {
+    use super::search::{apply_header_demotion, is_search_infra, is_test_chunk, is_test_file};
+
+    const TEST_DEMOTION: f32 = 0.5;
+    const INFRA_DEMOTION: f32 = 0.5;
+    let mut changed = false;
+
+    for r in results.iter_mut() {
+        if is_test_file(&r.file_path) || is_test_chunk(r) {
+            r.score *= TEST_DEMOTION;
+            changed = true;
+        } else if is_search_infra(&r.file_path, ctx.query) {
+            r.score *= INFRA_DEMOTION;
+            changed = true;
+        }
+    }
+
+    if demote_headers {
+        apply_header_demotion(results, &mut changed);
+    }
+
+    if changed {
+        sort_descending(results);
     }
 }
 
@@ -1060,6 +1082,15 @@ pub fn exact_pipeline() -> SearchPipeline {
         .add(DefinitionBoostStage)
         .add(PathMatchBoostStage)
         .add(TestDemotionStage)
+        .add(FileDedupStage)
+}
+
+/// Build the post-retrieval pipeline for `Strategy::Goto`.
+pub fn goto_pipeline() -> SearchPipeline {
+    SearchPipeline::new()
+        .add(DefinitionBoostStage)
+        .add(PathMatchBoostStage)
+        .add(DefinitionTestDemotionStage)
         .add(FileDedupStage)
 }
 

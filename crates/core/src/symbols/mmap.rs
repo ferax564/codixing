@@ -1261,10 +1261,40 @@ impl MmapSymbolTable {
     /// Filter symbols by name pattern and optional file path.
     ///
     /// Case-insensitive substring match on names; optionally filters by file.
-    /// O(N) — scans all name entries.
+    /// O(N) over names without a file constraint; with one, O(files) plus
+    /// the symbols of the matching files.
     pub fn filter(&self, pattern: &str, file: Option<&str>) -> Vec<Symbol> {
         let pattern_lower = pattern.to_lowercase();
         let mut results = Vec::new();
+
+        // With a file constraint, walk the per-file index (one entry per
+        // file) and decode only the matching files' symbols. Scanning every
+        // name for `filter("", Some(path))` cost over a second per call on a
+        // kernel-sized table.
+        if let Some(file) = file
+            && self.symbol_file_index_offset.is_some()
+        {
+            let name_pattern = (!pattern_lower.is_empty()).then_some(pattern_lower.as_str());
+            for index in 0..self.symbol_file_count as usize {
+                let Some((_, path_offset, postings_offset, postings_count)) =
+                    self.symbol_file_entry(index)
+                else {
+                    break;
+                };
+                let Some(path) = self.read_string_pool(path_offset) else {
+                    continue;
+                };
+                if path.contains(file) {
+                    results.extend(self.read_file_symbol_postings(
+                        &path,
+                        postings_offset,
+                        postings_count,
+                        name_pattern,
+                    ));
+                }
+            }
+            return results;
+        }
 
         for i in 0..self.name_count as usize {
             let entry_offset = self.name_index_offset + i * NAME_INDEX_ENTRY_SIZE;

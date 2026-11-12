@@ -14,6 +14,79 @@ use crate::config::Bm25Config;
 use crate::error::{CodixingError, Result};
 use crate::index::schema::{SchemaFields, build_schema};
 
+/// The stored fields of one chunk document: what a search result needs,
+/// without consulting the engine's chunk-metadata table.
+#[derive(Debug, Clone)]
+pub(crate) struct StoredChunk {
+    pub chunk_id: u64,
+    pub file_path: String,
+    pub language: String,
+    /// 0-based first line.
+    pub line_start: u64,
+    /// 0-based, exclusive.
+    pub line_end: u64,
+    pub signature: String,
+    pub scope_chain: Vec<String>,
+    pub content: String,
+}
+
+/// Parse query text typed by a person or an agent.
+///
+/// The text is usually not written in the query language: a task such as
+/// `add a --json flag to the callers command` used to fail with a syntax
+/// error, and `-v` would have excluded every chunk that mentions `v`.
+///
+/// - A word that starts with two dashes is a command-line flag and is
+///   searched as its name.
+/// - If the text still does not parse, every query-syntax character is
+///   dropped and the remaining words are searched. That parse is lenient, so
+///   it always yields a query.
+fn parse_user_query(parser: &QueryParser, query_str: &str) -> Box<dyn tantivy::query::Query> {
+    let flags_as_words = neutralize_flags(query_str);
+    match parser.parse_query(&flags_as_words) {
+        Ok(query) => query,
+        Err(_) => {
+            let plain = strip_query_syntax(&flags_as_words);
+            parser.parse_query_lenient(&plain).0
+        }
+    }
+}
+
+/// Rewrite `--flag` as `flag`: the leading dashes are not an exclusion.
+fn neutralize_flags(query: &str) -> std::borrow::Cow<'_, str> {
+    if !query.contains("--") {
+        return std::borrow::Cow::Borrowed(query);
+    }
+    let mut out = String::with_capacity(query.len());
+    let mut at_word_start = true;
+    let mut chars = query.chars().peekable();
+    while let Some(c) = chars.next() {
+        if at_word_start && c == '-' && chars.peek() == Some(&'-') {
+            while chars.peek() == Some(&'-') {
+                chars.next();
+            }
+            at_word_start = false;
+            continue;
+        }
+        at_word_start = c.is_whitespace() || c == '(';
+        out.push(c);
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// Replace every character the query grammar gives a meaning to with a
+/// space, keeping the words.
+fn strip_query_syntax(query: &str) -> String {
+    query
+        .chars()
+        .map(|c| match c {
+            '+' | '-' | '!' | '(' | ')' | '{' | '}' | '[' | ']' | '^' | '"' | '~' | '*' | '?'
+            | ':' | '\\' | '/' | '<' | '>' | '=' | '\'' | '`' | ',' => ' ',
+            other => other,
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // CodeTokenizer — splits code identifiers into searchable sub-tokens
 // ---------------------------------------------------------------------------
@@ -707,7 +780,7 @@ impl TantivyIndex {
             self.bm25_config.path_segments_boost,
         );
 
-        let query = query_parser.parse_query(query_str)?;
+        let query = parse_user_query(&query_parser, query_str);
         let top_docs = searcher.search(&query, &TopDocs::with_limit(limit))?;
 
         let mut results = Vec::with_capacity(top_docs.len());
@@ -764,7 +837,7 @@ impl TantivyIndex {
             self.bm25_config.path_segments_boost,
         );
 
-        let query = query_parser.parse_query(query_str)?;
+        let query = parse_user_query(&query_parser, query_str);
         let top_docs = searcher.search(&query, &TopDocs::with_limit(limit))?;
 
         let mut results = Vec::with_capacity(top_docs.len());
@@ -849,6 +922,18 @@ impl TantivyIndex {
         file_paths: &[String],
         mut visit: impl FnMut(u64, String) -> Result<()>,
     ) -> Result<()> {
+        self.visit_chunk_records_by_file_paths(file_paths, |chunk| {
+            visit(chunk.chunk_id, chunk.content)
+        })
+    }
+
+    /// Like [`Self::visit_chunks_by_file_paths`], but hands the visitor every
+    /// stored field of the chunk, so callers need no chunk-metadata table.
+    pub(crate) fn visit_chunk_records_by_file_paths(
+        &self,
+        file_paths: &[String],
+        mut visit: impl FnMut(StoredChunk) -> Result<()>,
+    ) -> Result<()> {
         if file_paths.is_empty() {
             return Ok(());
         }
@@ -874,14 +959,8 @@ impl TantivyIndex {
                 while doc_id != TERMINATED {
                     if !segment_reader.is_deleted(doc_id) {
                         let doc: tantivy::TantivyDocument = store_reader.get(doc_id)?;
-                        if let (Some(chunk_id), Some(content)) = (
-                            doc.get_first(self.fields.chunk_id)
-                                .and_then(|value| value.as_str())
-                                .and_then(|value| value.parse::<u64>().ok()),
-                            doc.get_first(self.fields.content)
-                                .and_then(|value| value.as_str()),
-                        ) {
-                            visit(chunk_id, content.to_string())?;
+                        if let Some(chunk) = self.stored_chunk(&doc) {
+                            visit(chunk)?;
                         }
                     }
                     doc_id = postings.advance();
@@ -890,6 +969,44 @@ impl TantivyIndex {
         }
 
         Ok(())
+    }
+
+    /// Decode the stored fields of a chunk document. `None` when the
+    /// document has no usable chunk id or content.
+    fn stored_chunk(&self, doc: &tantivy::TantivyDocument) -> Option<StoredChunk> {
+        let text = |field: Field| {
+            doc.get_first(field)
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_string()
+        };
+        let number = |field: Field| {
+            doc.get_first(field)
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0)
+        };
+        let chunk_id = doc
+            .get_first(self.fields.chunk_id)
+            .and_then(|value| value.as_str())
+            .and_then(|value| value.parse::<u64>().ok())?;
+        let content = doc
+            .get_first(self.fields.content)
+            .and_then(|value| value.as_str())?
+            .to_string();
+        Some(StoredChunk {
+            chunk_id,
+            file_path: text(self.fields.file_path),
+            language: text(self.fields.language),
+            line_start: number(self.fields.line_start),
+            line_end: number(self.fields.line_end),
+            signature: text(self.fields.signature),
+            // Stored space-joined, as the BM25 retriever reads it.
+            scope_chain: text(self.fields.scope_chain)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect(),
+            content,
+        })
     }
 
     /// Read all chunk IDs and their content from the index.
@@ -1027,6 +1144,52 @@ mod tests {
             writer: Some(Mutex::new(writer)),
             fields,
             bm25_config: Bm25Config::default(),
+        }
+    }
+
+    // --- Query text tests ---
+
+    #[test]
+    fn flags_are_searched_as_words() {
+        assert_eq!(
+            neutralize_flags("add a --json flag to the callers command"),
+            "add a json flag to the callers command"
+        );
+        assert_eq!(
+            neutralize_flags("--count and (--files-with-matches)"),
+            "count and (files-with-matches)"
+        );
+        // Not at a word start: left alone.
+        assert_eq!(neutralize_flags("a--b"), "a--b");
+        assert!(matches!(
+            neutralize_flags("no flags here"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn task_text_with_flags_and_syntax_characters_still_searches() {
+        let index = create_in_ram_single_writer();
+        index
+            .add_chunk(&make_chunk(
+                1,
+                "src/cli.rs",
+                "fn cmd_callers(json: bool) { print_callers(json) }",
+            ))
+            .unwrap();
+        index.commit().unwrap();
+
+        // Used to fail with "query parse error: Syntax Error".
+        for query in [
+            "add a --json flag to the callers command",
+            "callers(json: bool) -> [output]",
+            "what does `cmd_callers` do? (json",
+            "callers AND",
+        ] {
+            let hits = index
+                .search(query, 5)
+                .unwrap_or_else(|e| panic!("`{query}` must not fail: {e}"));
+            assert_eq!(hits.len(), 1, "`{query}` should find the chunk");
         }
     }
 

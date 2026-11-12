@@ -771,6 +771,97 @@ pub(super) fn deserialize_chunk_meta(bytes: &[u8]) -> Result<DashMap<u64, ChunkM
     Ok(map)
 }
 
+/// Files whose chunks changed since `chunk_meta.bin` was last written in
+/// full, with the current metadata of every chunk in them.
+///
+/// Rewriting the base costs time proportional to the whole index (0.8 s for
+/// 690,000 chunks) on every checkpoint, however small the change. The delta
+/// is cumulative: it always describes every file that differs from the base,
+/// so loading is base + one overlay, and a crash between checkpoints leaves
+/// the previous pair intact.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ChunkMetaDelta {
+    /// Every base record of these files is superseded.
+    files: Vec<String>,
+    /// The chunks those files have now. A removed file has none.
+    records: Vec<(u64, ChunkMetaCompact)>,
+}
+
+/// Above this many changed files the base is rewritten and the delta
+/// dropped: the overlay would no longer be small next to the base.
+pub(super) const CHUNK_META_DELTA_MAX_FILES: usize = 4_096;
+
+/// How many changed files the overlay may describe for an index of
+/// `indexed_files` files: an eighth of the index, but at least 64 (rewriting
+/// a small base is cheap either way) and at most
+/// [`CHUNK_META_DELTA_MAX_FILES`].
+pub(super) fn chunk_meta_delta_file_limit(indexed_files: usize) -> usize {
+    (indexed_files / 8).clamp(64, CHUNK_META_DELTA_MAX_FILES)
+}
+
+/// Load chunk metadata for the active generation: the base file with its
+/// changed-file overlay applied. Also returns the files the overlay covers,
+/// which a writable engine carries forward into its next checkpoint.
+pub(super) fn load_chunk_meta(
+    store: &crate::persistence::IndexStore,
+) -> Result<(DashMap<u64, ChunkMeta>, HashSet<String>)> {
+    load_chunk_meta_from(&store.chunk_meta_path(), &store.chunk_meta_delta_path())
+}
+
+/// [`load_chunk_meta`] by path, for the deferred load of a read-only engine.
+pub(super) fn load_chunk_meta_from(
+    base: &Path,
+    delta: &Path,
+) -> Result<(DashMap<u64, ChunkMeta>, HashSet<String>)> {
+    let map = match fs::read(base) {
+        Ok(bytes) => deserialize_chunk_meta(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => DashMap::new(),
+        Err(error) => return Err(error.into()),
+    };
+    let bytes = match fs::read(delta) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((map, HashSet::new()));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let delta: ChunkMetaDelta = bitcode::deserialize(&bytes).map_err(|e| {
+        CodixingError::Serialization(format!("failed to deserialize chunk_meta delta: {e}"))
+    })?;
+    let files: HashSet<String> = delta.files.into_iter().collect();
+    if !files.is_empty() {
+        map.retain(|_, meta| !files.contains(meta.file_path.as_str()));
+    }
+    for (chunk_id, compact) in delta.records {
+        map.insert(chunk_id, ChunkMeta::from(compact));
+    }
+    Ok((map, files))
+}
+
+/// Serialize the overlay for `dirty` files from the resident tables.
+pub(super) fn serialize_chunk_meta_delta(
+    dirty: &HashSet<String>,
+    file_chunk_ids: &HashMap<String, Box<[u64]>>,
+    chunk_meta: &DashMap<u64, ChunkMeta>,
+) -> Result<Vec<u8>> {
+    let mut files: Vec<String> = dirty.iter().cloned().collect();
+    files.sort_unstable();
+    let mut records = Vec::new();
+    for file in &files {
+        let Some(chunk_ids) = file_chunk_ids.get(file) else {
+            continue;
+        };
+        for chunk_id in chunk_ids.iter() {
+            if let Some(meta) = chunk_meta.get(chunk_id) {
+                records.push((*chunk_id, ChunkMetaCompact::from(meta.value())));
+            }
+        }
+    }
+    bitcode::serialize(&ChunkMetaDelta { files, records }).map_err(|e| {
+        CodixingError::Serialization(format!("failed to serialize chunk_meta delta: {e}"))
+    })
+}
+
 /// Serialize chunk_meta in compact format (without content).
 pub(super) fn serialize_chunk_meta_compact(
     chunk_meta: &DashMap<u64, ChunkMeta>,

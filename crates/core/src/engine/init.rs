@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -639,8 +639,12 @@ impl Engine {
             embedder,
             last_vector_publication: None,
             vector: vector_arc,
-            chunk_meta: chunk_meta_arc,
+            chunk_meta: super::LazyChunkMeta::loaded(chunk_meta_arc),
+            chunk_meta_dirty: std::sync::Mutex::new(HashSet::new()),
+            file_list_only: false,
             graph,
+            graph_deferred: false,
+            lazy_graph: std::sync::OnceLock::new(),
             concept_index: std::sync::OnceLock::new(),
             reformulations: std::sync::OnceLock::new(),
             reranker,
@@ -773,13 +777,11 @@ impl Engine {
         let parser = Parser::new();
         let meta = store.load_meta()?;
 
-        // Restore chunk_meta (compact format first, fall back to legacy with content).
-        let chunk_meta: DashMap<u64, ChunkMeta> = if store.chunk_meta_path().exists() {
-            let bytes = store.load_chunk_meta_bytes()?;
-            super::indexing::deserialize_chunk_meta(&bytes)?
-        } else {
-            DashMap::new()
-        };
+        // Restore chunk_meta: the base (compact format first, legacy with
+        // content as fallback) plus its changed-file overlay. The overlay's
+        // files stay dirty so the next checkpoint keeps describing them.
+        let (chunk_meta, chunk_meta_dirty): (DashMap<u64, ChunkMeta>, HashSet<String>) =
+            super::indexing::load_chunk_meta(&store)?;
 
         // Rebuild exact per-file chunk postings from compact metadata.
         let file_chunk_ids = super::collect_file_chunk_ids(&chunk_meta);
@@ -907,8 +909,12 @@ impl Engine {
             embedder,
             last_vector_publication,
             vector: Arc::new(RwLock::new(vector)),
-            chunk_meta: Arc::new(chunk_meta),
+            chunk_meta: super::LazyChunkMeta::loaded(Arc::new(chunk_meta)),
+            chunk_meta_dirty: std::sync::Mutex::new(chunk_meta_dirty),
+            file_list_only: false,
             graph,
+            graph_deferred: false,
+            lazy_graph: std::sync::OnceLock::new(),
             concept_index,
             reformulations,
             reranker,
@@ -1014,38 +1020,43 @@ impl Engine {
         let parser = Parser::new();
         let meta = store.load_meta()?;
 
-        // Restore chunk_meta (compact format first, fall back to legacy with content).
-        let chunk_meta: DashMap<u64, ChunkMeta> =
-            if read_only_load_mode.loads_chunk_meta() && store.chunk_meta_path().exists() {
-                let bytes = store.load_chunk_meta_bytes()?;
-                super::indexing::deserialize_chunk_meta(&bytes)?
-            } else {
-                DashMap::new()
-            };
-
-        let file_chunk_ids = if read_only_load_mode.loads_chunk_meta() {
-            // Rebuild exact per-file chunk postings from compact metadata.
-            super::collect_file_chunk_ids(&chunk_meta)
-        } else if matches!(
-            read_only_load_mode,
-            ReadOnlyLoadMode::Files | ReadOnlyLoadMode::References
-        ) {
-            // The file list alone, from the authoritative hash snapshot: a
-            // few megabytes instead of the whole chunk table.
-            let mut files: HashMap<String, Box<[u64]>> = HashMap::new();
-            for (path, _) in store.load_tree_hashes_v2()? {
-                let relative = match path.strip_prefix(&config.root) {
-                    Ok(rel) => Some(rel.to_string_lossy().replace('\\', "/")),
-                    Err(_) => config.normalize_path(&path),
-                };
-                if let Some(relative) = relative {
-                    files.insert(relative, Box::default());
-                }
-            }
-            files
-        } else {
+        // The indexed file list, from the authoritative hash snapshot: a few
+        // megabytes instead of the whole chunk table. Every read-only mode
+        // except the symbol-only one needs it.
+        let file_list = if matches!(read_only_load_mode, ReadOnlyLoadMode::Symbols) {
             HashMap::new()
+        } else {
+            indexed_file_list(&store, &config).unwrap_or_default()
         };
+
+        // Chunk metadata is decoded on first use (see `LazyChunkMeta`). The
+        // per-file chunk postings are derived from it, and no read-only
+        // operation needs them, so the file list stands in for them. An index
+        // without a hash snapshot keeps the eager path.
+        let (chunk_meta, file_chunk_ids, file_list_only) =
+            if !read_only_load_mode.loads_chunk_meta() || !store.chunk_meta_path().exists() {
+                (
+                    super::LazyChunkMeta::loaded(Arc::new(DashMap::new())),
+                    file_list,
+                    false,
+                )
+            } else if file_list.is_empty() {
+                let (decoded, _): (DashMap<u64, ChunkMeta>, _) =
+                    super::indexing::load_chunk_meta(&store)?;
+                let postings = super::collect_file_chunk_ids(&decoded);
+                (
+                    super::LazyChunkMeta::loaded(Arc::new(decoded)),
+                    postings,
+                    false,
+                )
+            } else {
+                (super::LazyChunkMeta::deferred(&store), file_list, true)
+            };
+        debug!(
+            files = file_chunk_ids.len(),
+            deferred = file_list_only,
+            "file list loaded"
+        );
 
         // Restore vector index if it exists.
         let (embedder, vector) = if read_only_load_mode.loads_vectors()
@@ -1072,54 +1083,22 @@ impl Engine {
             (None, None)
         };
 
-        // Exact and Instant never consult the dependency graph, whose decoded
-        // representation is one of the largest cold-start allocations.
-        let graph = if read_only_load_mode.loads_graph() {
-            match store.load_graph() {
-                Ok(Some(data)) => {
-                    let mut g = CodeGraph::from_flat(data);
-                    // Merge the symbol-level graph if persisted.
-                    match store.load_symbol_graph() {
-                        Ok(Some(sym_graph)) => {
-                            g.replace_symbol_graph(sym_graph);
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            warn!(error = %e, "failed to load symbol graph");
-                        }
-                    }
-                    Some(g)
-                }
-                Ok(None) => None,
-                Err(e) => {
-                    warn!(error = %e, "failed to load graph; running without graph intelligence");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
+        // The dependency graph is decoded on first use (`Engine::graph_ref`):
+        // about half a second on a kernel-sized index, and most one-shot
+        // commands never consult it. Every other profile is graph-free by
+        // contract.
+        let graph: Option<CodeGraph> = None;
+        let graph_deferred = read_only_load_mode.loads_graph();
         // concept_index and reformulations are lazy-loaded via OnceLock on first use.
         // See Engine::get_concept_index / get_reformulations.
         let concept_index = std::sync::OnceLock::new();
         let reformulations = std::sync::OnceLock::new();
-
-        let (graph_nodes, graph_edges) = graph
-            .as_ref()
-            .map(|g| {
-                let s = g.stats();
-                (s.node_count, s.edge_count)
-            })
-            .unwrap_or((0, 0));
 
         info!(
             files = meta.file_count,
             chunks = meta.chunk_count,
             symbols = meta.symbol_count,
             vectors = vector.as_ref().map(|v| v.len()).unwrap_or(0),
-            graph_nodes,
-            graph_edges,
             "index opened in read-only mode"
         );
 
@@ -1159,8 +1138,12 @@ impl Engine {
             embedder,
             last_vector_publication,
             vector: Arc::new(RwLock::new(vector)),
-            chunk_meta: Arc::new(chunk_meta),
+            chunk_meta,
+            chunk_meta_dirty: std::sync::Mutex::new(HashSet::new()),
+            file_list_only,
             graph,
+            graph_deferred,
+            lazy_graph: std::sync::OnceLock::new(),
             concept_index,
             reformulations,
             reranker,
@@ -1189,6 +1172,25 @@ impl Engine {
     pub fn is_read_only(&self) -> bool {
         self.read_only
     }
+}
+
+/// Relative paths of every indexed file, read from the generation's hash
+/// snapshot, each with an empty chunk-posting list.
+pub(super) fn indexed_file_list(
+    store: &IndexStore,
+    config: &IndexConfig,
+) -> Result<HashMap<String, Box<[u64]>>> {
+    let mut files: HashMap<String, Box<[u64]>> = HashMap::new();
+    for (path, _) in store.load_tree_hashes_v2()? {
+        let relative = match path.strip_prefix(&config.root) {
+            Ok(rel) => Some(rel.to_string_lossy().replace('\\', "/")),
+            Err(_) => config.normalize_path(&path),
+        };
+        if let Some(relative) = relative {
+            files.insert(relative, Box::default());
+        }
+    }
+    Ok(files)
 }
 
 /// Release source bodies retained during initialization while preserving the

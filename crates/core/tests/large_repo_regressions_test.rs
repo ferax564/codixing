@@ -191,6 +191,107 @@ fn a_recursive_call_next_to_the_definition_is_a_call() {
 }
 
 #[test]
+fn c_macros_and_functions_behind_attribute_macros_are_found_end_to_end() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "include/slab.h",
+        "#define PAGE_SIZE 4096\n\
+         /* Cast a member out to the containing structure. */\n\
+         #define container_of(ptr, type, member) \\\n\
+         \t((type *)((char *)(ptr) - offsetof(type, member)))\n\
+         \n\
+         static __always_inline __alloc_size(1) void *kmalloc(size_t size, gfp_t flags)\n\
+         {\n\
+         \treturn __kmalloc(size, flags);\n\
+         }\n\
+         void *__kmalloc(size_t size, gfp_t flags) __assume_aligned __alloc_size(1);\n",
+    );
+    write(
+        root,
+        "fs/read.c",
+        "#include \"../include/slab.h\"\n\
+         SYSCALL_DEFINE3(read, unsigned int, fd, char *, buf, size_t, count)\n\
+         {\n\
+         \tstruct item *it = container_of(buf, struct item, node);\n\
+         \tvoid *p = kmalloc(count > PAGE_SIZE ? PAGE_SIZE : count, 0);\n\
+         \treturn it != p;\n\
+         }\n",
+    );
+    let engine = Engine::init(root, no_embed_config(root)).unwrap();
+
+    // The definition behind `__alloc_size(1)` is a symbol spanning its body.
+    let kmalloc = engine.symbols("kmalloc", None).unwrap();
+    let definition = kmalloc
+        .iter()
+        .find(|s| s.name == "kmalloc")
+        .unwrap_or_else(|| panic!("kmalloc not indexed: {kmalloc:#?}"));
+    assert_eq!(definition.file_path, "include/slab.h");
+    assert_eq!((definition.line_start, definition.line_end), (5, 9));
+    assert!(kmalloc.iter().any(|s| s.name == "__kmalloc"));
+
+    // Function-like macros and macro-defined functions are symbols;
+    // object-like macros are not.
+    let names = |query: &str| -> Vec<String> {
+        engine
+            .symbols(query, None)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.name)
+            .collect()
+    };
+    assert_eq!(names("container_of"), ["container_of"]);
+    assert_eq!(names("sys_read"), ["sys_read"]);
+    assert!(names("PAGE_SIZE").is_empty());
+
+    // A definition lookup opens on the definition.
+    let hits = engine
+        .search(
+            SearchQuery::new("kmalloc")
+                .with_limit(5)
+                .with_strategy(Strategy::Goto),
+        )
+        .unwrap();
+    assert_eq!(hits[0].file_path, "include/slab.h");
+    assert!(
+        hits[0].signature.contains("__alloc_size(1) void *kmalloc"),
+        "signature keeps the original text: {}",
+        hits[0].signature
+    );
+
+    // `usages` calls a `#define` line the definition of its macro, indexed
+    // as a symbol or not, and the call sites calls.
+    let kinds = |symbol: &str| -> Vec<(String, usize, String)> {
+        let mut refs: Vec<_> = engine
+            .exact_symbol_references(symbol)
+            .into_iter()
+            .map(|r| (r.file_path, r.line + 1, r.kind))
+            .collect();
+        refs.sort();
+        refs
+    };
+    assert_eq!(
+        kinds("container_of"),
+        [
+            ("fs/read.c".to_string(), 4, "call".to_string()),
+            ("include/slab.h".to_string(), 3, "definition".to_string()),
+        ]
+    );
+    let page_size = kinds("PAGE_SIZE");
+    assert!(
+        page_size.contains(&("include/slab.h".to_string(), 1, "definition".to_string())),
+        "{page_size:#?}"
+    );
+    assert!(
+        page_size
+            .iter()
+            .all(|(path, _, kind)| path != "fs/read.c" || kind == "reference"),
+        "{page_size:#?}"
+    );
+}
+
+#[test]
 fn complete_reference_mode_is_exhaustive_and_ordered() {
     let dir = tempdir().unwrap();
     let root = dir.path();

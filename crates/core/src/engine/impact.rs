@@ -301,7 +301,7 @@ impl Engine {
     ///
     /// Returns an empty impact if the graph is not built or the file is unknown.
     pub fn change_impact(&self, file_path: &str) -> ChangeImpact {
-        let graph = match self.graph.as_ref() {
+        let graph = match self.graph_ref() {
             Some(g) => g,
             None => {
                 return ChangeImpact {

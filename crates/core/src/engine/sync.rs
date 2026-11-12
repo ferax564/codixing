@@ -563,6 +563,7 @@ impl Engine {
                 vec_idx.remove_file(&rel_str)?;
             }
         }
+        self.mark_chunk_meta_dirty(&rel_str);
         if let Some(old_chunk_ids) = self.file_chunk_ids.remove(&rel_str) {
             for chunk_id in old_chunk_ids.iter() {
                 self.chunk_meta.remove(chunk_id);
@@ -1075,6 +1076,7 @@ impl Engine {
                 vec_idx.remove_file(&rel_str)?;
             }
         }
+        self.mark_chunk_meta_dirty(&rel_str);
         if let Some(chunk_ids) = self.file_chunk_ids.remove(&rel_str) {
             for chunk_id in chunk_ids.iter() {
                 self.chunk_meta.remove(chunk_id);
@@ -1280,6 +1282,16 @@ impl Engine {
     /// Persist repository-wide derived artifacts once per checkpoint rather
     /// than once per editor event. Tantivy, symbols, chunk metadata, and graph
     /// overlays remain queryable in memory while this work is deferred.
+    /// Record that `file`'s chunks no longer match the persisted
+    /// `chunk_meta.bin`. Every path that adds or removes a file's chunks
+    /// calls this, so the next checkpoint can write an overlay.
+    pub(super) fn mark_chunk_meta_dirty(&self, file: &str) {
+        self.chunk_meta_dirty
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(file.to_string());
+    }
+
     pub(super) fn persist_checkpoint_artifacts(&mut self) -> Result<()> {
         self.persist_checkpoint_artifacts_with_graph_state(true, true)
     }
@@ -1289,6 +1301,7 @@ impl Engine {
         graph_semantics_changed: bool,
         vector_changed: bool,
     ) -> Result<()> {
+        debug!("checkpoint: persisting file trigram");
         let _ = self.get_file_trigram();
         let file_trigram = self.file_trigram.get_mut().ok_or_else(|| {
             CodixingError::Index("file trigram failed to initialize for checkpoint".to_string())
@@ -3213,7 +3226,9 @@ impl Engine {
             return Ok(());
         }
 
+        debug!("checkpoint: persisting symbols");
         self.persist_symbol_checkpoint()?;
+        debug!("checkpoint: symbols persisted");
         match std::fs::remove_file(self.store.symbols_path()) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -3226,9 +3241,42 @@ impl Engine {
             }
         }
 
-        // Persist chunk_meta in compact format (without content).
-        let meta_bytes = serialize_chunk_meta_compact(&self.chunk_meta)?;
-        self.store.save_chunk_meta_bytes(&meta_bytes)?;
+        // Persist chunk_meta (compact, without content). A small change is
+        // written as an overlay of the changed files; the base is rewritten
+        // only when there is none yet, when nothing is known to be dirty
+        // (a caller asking for a plain save), or when the overlay has grown.
+        {
+            let mut dirty = self
+                .chunk_meta_dirty
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let overlay = !dirty.is_empty()
+                && dirty.len()
+                    <= super::indexing::chunk_meta_delta_file_limit(self.file_chunk_ids.len())
+                && self.store.chunk_meta_path().is_file();
+            if overlay {
+                let delta_bytes = super::indexing::serialize_chunk_meta_delta(
+                    &dirty,
+                    &self.file_chunk_ids,
+                    &self.chunk_meta,
+                )?;
+                self.store.save_chunk_meta_delta_bytes(&delta_bytes)?;
+                debug!(
+                    files = dirty.len(),
+                    bytes = delta_bytes.len(),
+                    "checkpoint: chunk metadata overlay persisted"
+                );
+            } else {
+                let meta_bytes = serialize_chunk_meta_compact(&self.chunk_meta)?;
+                self.store.save_chunk_meta_bytes(&meta_bytes)?;
+                self.store.remove_chunk_meta_delta()?;
+                dirty.clear();
+                debug!(
+                    bytes = meta_bytes.len(),
+                    "checkpoint: chunk metadata rewritten"
+                );
+            }
+        }
 
         // Persist vector index.
         if persist_vectors {
@@ -3295,6 +3343,18 @@ mod incremental_batch_scale_tests {
     }
 
     fn assert_exact_chunk_postings(engine: &Engine) {
+        if engine.file_list_only {
+            // A read-only engine keeps the file list and decodes chunk
+            // metadata on demand: the two must name the same files.
+            let listed: HashSet<String> = engine.file_chunk_ids.keys().cloned().collect();
+            let in_metadata: HashSet<String> = engine
+                .chunk_meta
+                .iter()
+                .map(|entry| entry.value().file_path.clone())
+                .collect();
+            assert_eq!(listed, in_metadata);
+            return;
+        }
         let posting_ids: HashSet<u64> = engine
             .file_chunk_ids
             .values()
@@ -3438,6 +3498,183 @@ mod incremental_batch_scale_tests {
             .unwrap()
             .remove("file_trigram_delta_required");
         fs::write(manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    }
+
+    /// (path, start line, end line) of every chunk, sorted: what chunk
+    /// metadata says about the index, independent of how it was loaded.
+    fn chunk_layout(engine: &Engine) -> Vec<(String, u64, u64)> {
+        let mut layout: Vec<_> = engine
+            .chunk_meta
+            .iter()
+            .map(|entry| {
+                let meta = entry.value();
+                (meta.file_path.clone(), meta.line_start, meta.line_end)
+            })
+            .collect();
+        layout.sort();
+        layout
+    }
+
+    fn published_layout_version(root: &std::path::Path) -> u64 {
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &fs::read(root.join(".codixing").join("active-generation.json")).unwrap(),
+        )
+        .unwrap();
+        manifest["layout_version"].as_u64().unwrap()
+    }
+
+    #[test]
+    fn small_checkpoints_write_a_chunk_metadata_overlay_not_the_base() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let first = root.join("first.rs");
+        let second = root.join("second.rs");
+        let third = root.join("third.rs");
+        fs::write(&first, "pub fn original_first() {}\n").unwrap();
+        fs::write(&second, "pub fn original_second() {}\n").unwrap();
+        fs::write(&third, "pub fn original_third() {}\n").unwrap();
+
+        let mut engine = Engine::init(root, no_embed_config(root)).unwrap();
+        assert!(
+            engine
+                .store
+                .load_chunk_meta_delta_bytes()
+                .unwrap()
+                .is_none(),
+            "a fresh index is a base without an overlay"
+        );
+        assert_eq!(published_layout_version(root), 1);
+        let base_bytes = fs::read(engine.store.chunk_meta_path()).unwrap();
+
+        // One modified file, then one removed file: two checkpoints.
+        fs::write(
+            &first,
+            "pub fn first_after_edit() {}\n\npub fn first_extra() {}\n",
+        )
+        .unwrap();
+        engine
+            .apply_changes(&[FileChange {
+                path: first.clone(),
+                kind: ChangeKind::Modified,
+            }])
+            .unwrap();
+        assert_eq!(
+            fs::read(engine.store.chunk_meta_path()).unwrap(),
+            base_bytes,
+            "a one-file change must not rewrite the whole table"
+        );
+        assert!(
+            engine
+                .store
+                .load_chunk_meta_delta_bytes()
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            published_layout_version(root),
+            2,
+            "a generation with an overlay must not be readable as layout 1"
+        );
+
+        fs::remove_file(&second).unwrap();
+        engine
+            .apply_changes(&[FileChange {
+                path: second.clone(),
+                kind: ChangeKind::Removed,
+            }])
+            .unwrap();
+        assert_eq!(
+            fs::read(engine.store.chunk_meta_path()).unwrap(),
+            base_bytes,
+            "the overlay is cumulative; the base still is not rewritten"
+        );
+        assert_exact_chunk_postings(&engine);
+        let expected = chunk_layout(&engine);
+        assert!(expected.iter().any(|(path, ..)| path == "first.rs"));
+        assert!(expected.iter().all(|(path, ..)| path != "second.rs"));
+        assert!(expected.iter().any(|(path, ..)| path == "third.rs"));
+        drop(engine);
+
+        // Base + overlay load to the same table in every kind of engine.
+        let reader = Engine::open_read_only(root).unwrap();
+        assert_eq!(chunk_layout(&reader), expected);
+        assert!(exact_has(&reader, "first_after_edit"));
+        assert!(!exact_has(&reader, "original_first"));
+        assert!(!exact_has(&reader, "original_second"));
+        drop(reader);
+
+        let mut engine = Engine::open(root).unwrap();
+        assert_eq!(chunk_layout(&engine), expected);
+        assert_exact_chunk_postings(&engine);
+
+        // A later checkpoint of another file still covers the earlier ones.
+        fs::write(&third, "pub fn third_after_edit() {}\n").unwrap();
+        engine
+            .apply_changes(&[FileChange {
+                path: third.clone(),
+                kind: ChangeKind::Modified,
+            }])
+            .unwrap();
+        let expected = chunk_layout(&engine);
+        drop(engine);
+        let reopened = Engine::open(root).unwrap();
+        assert_eq!(chunk_layout(&reopened), expected);
+        assert!(exact_has(&reopened, "first_after_edit"));
+        assert!(exact_has(&reopened, "third_after_edit"));
+        assert_eq!(
+            fs::read(reopened.store.chunk_meta_path()).unwrap(),
+            base_bytes
+        );
+    }
+
+    #[test]
+    fn chunk_metadata_overlay_is_folded_into_the_base_when_it_grows() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.rs"), "pub fn a_original() {}\n").unwrap();
+        let mut engine = Engine::init(root, no_embed_config(root)).unwrap();
+        let base_bytes = fs::read(engine.store.chunk_meta_path()).unwrap();
+
+        // Pretend a large batch is pending alongside one real change.
+        {
+            let mut dirty = engine.chunk_meta_dirty.lock().unwrap();
+            for index in 0..=super::super::indexing::CHUNK_META_DELTA_MAX_FILES {
+                dirty.insert(format!("ghost/{index}.rs"));
+            }
+        }
+        fs::write(
+            root.join("a.rs"),
+            "pub fn a_rewritten() {}\npub fn a_more() {}\n",
+        )
+        .unwrap();
+        engine
+            .apply_changes(&[FileChange {
+                path: root.join("a.rs"),
+                kind: ChangeKind::Modified,
+            }])
+            .unwrap();
+
+        assert_ne!(
+            fs::read(engine.store.chunk_meta_path()).unwrap(),
+            base_bytes,
+            "past the limit the base is rewritten"
+        );
+        assert!(
+            engine
+                .store
+                .load_chunk_meta_delta_bytes()
+                .unwrap()
+                .is_none()
+        );
+        assert!(engine.chunk_meta_dirty.lock().unwrap().is_empty());
+        assert_eq!(
+            published_layout_version(root),
+            1,
+            "without an overlay the generation stays readable by older binaries"
+        );
+        let expected = chunk_layout(&engine);
+        drop(engine);
+        assert_eq!(chunk_layout(&Engine::open(root).unwrap()), expected);
     }
 
     #[test]
@@ -4020,7 +4257,7 @@ mod incremental_batch_scale_tests {
 
         drop(engine);
         let reopened = Engine::open_read_only(root).unwrap();
-        assert!(reopened.graph.as_ref().unwrap().call_edges().is_empty());
+        assert!(reopened.graph_ref().unwrap().call_edges().is_empty());
 
         let fresh_unique = tempdir().unwrap();
         let fresh_src = fresh_unique.path().join("src");
@@ -4029,7 +4266,7 @@ mod incremental_batch_scale_tests {
         let fresh =
             Engine::init(fresh_unique.path(), no_embed_config(fresh_unique.path())).unwrap();
         assert_eq!(
-            reopened.graph.as_ref().unwrap().call_edges(),
+            reopened.graph_ref().unwrap().call_edges(),
             fresh.graph.as_ref().unwrap().call_edges()
         );
     }

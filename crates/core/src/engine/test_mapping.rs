@@ -19,7 +19,7 @@ impl Engine {
 
         // Build import dependency map from the graph (if available). Only test
         // files are consulted by the mapping, so only their imports are read.
-        let import_deps: Option<HashMap<String, Vec<String>>> = self.graph.as_ref().map(|g| {
+        let import_deps: Option<HashMap<String, Vec<String>>> = self.graph_ref().map(|g| {
             let mut deps: HashMap<String, Vec<String>> = HashMap::new();
             for file in all_files.iter().filter(|f| is_test_file(f)) {
                 let callees = g.callees(file);

@@ -86,7 +86,10 @@ impl Engine {
             .map(|(path, ids)| (path.clone(), ids.len()))
             .collect();
 
-        if files.is_empty() && !self.chunk_meta.is_empty() {
+        // A file list without postings has no counts: derive them from the
+        // chunk metadata (decoding it if needed).
+        if (files.is_empty() || self.file_list_only) && !self.chunk_meta.is_empty() {
+            files.values_mut().for_each(|count| *count = 0);
             for entry in self.chunk_meta.iter() {
                 *files.entry(entry.value().file_path.clone()).or_insert(0) += 1;
             }

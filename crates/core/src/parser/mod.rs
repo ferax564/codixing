@@ -221,8 +221,10 @@ impl Parser {
                 message: format!("failed to set language: {e}"),
             })?;
 
+        // Parse the prepared bytes (same length and line breaks), but read
+        // entity text from the original source.
         let tree = ts_parser
-            .parse(source, None)
+            .parse(lang_support.prepare_source(source).as_ref(), None)
             .ok_or_else(|| CodixingError::Parse {
                 path: path.to_path_buf(),
                 message: "tree-sitter returned no tree".to_string(),

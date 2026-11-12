@@ -212,81 +212,9 @@ pub(crate) fn call_assemble_location_context(engine: &Engine, args: &Value) -> (
         budget_mode,
     );
 
-    let over_marker = if ctx.over_budget {
-        " ⚠ over budget"
-    } else {
-        ""
-    };
-    let mut out = format!(
-        "## Context: {}:{}\n\nToken budget: {} ({}) | Used: {}{}\n",
-        ctx.primary.file_path,
-        line,
-        token_budget,
-        ctx.budget_mode.as_str(),
-        ctx.total_tokens,
-        over_marker
-    );
-    if let Some(reason) = &ctx.oversize_reason {
-        out.push_str(&format!("Note: {reason}\n"));
-    }
-    out.push('\n');
-
-    out.push_str(&format!(
-        "### Primary (L{}\u{2013}L{})\n```\n{}\n```\n\n",
-        ctx.primary.display_lines().0,
-        ctx.primary.display_lines().1,
-        ctx.primary.content
-    ));
-
-    if !ctx.imports.is_empty() {
-        out.push_str(&format!("### Imports ({})\n", ctx.imports.len()));
-        for imp in &ctx.imports {
-            out.push_str(&format!(
-                "- `{}` L{}\u{2013}L{} (relevance: {:.2})\n  ```\n  {}\n  ```\n",
-                imp.file_path,
-                imp.line_start + 1,
-                imp.line_end.max(imp.line_start + 1),
-                imp.relevance,
-                imp.content
-            ));
-        }
-        out.push('\n');
-    }
-
-    if !ctx.callees.is_empty() {
-        out.push_str(&format!("### Callees ({})\n", ctx.callees.len()));
-        for callee in &ctx.callees {
-            out.push_str(&format!(
-                "- `{}` L{}\u{2013}L{} (relevance: {:.2})\n  ```\n  {}\n  ```\n",
-                callee.file_path,
-                callee.line_start + 1,
-                callee.line_end.max(callee.line_start + 1),
-                callee.relevance,
-                callee.content
-            ));
-        }
-        out.push('\n');
-    }
-
-    if !ctx.examples.is_empty() {
-        out.push_str(&format!("### Usage Examples ({})\n", ctx.examples.len()));
-        for (i, ex) in ctx.examples.iter().enumerate() {
-            let kind_label = match ex.kind {
-                codixing_core::engine::examples::ExampleKind::Test => "TEST",
-                codixing_core::engine::examples::ExampleKind::CallSite => "CALL",
-                codixing_core::engine::examples::ExampleKind::DocBlock => "DOC",
-            };
-            out.push_str(&format!(
-                "{}. [{}] `{}` L{}\u{2013}L{}\n```\n{}\n```\n\n",
-                i + 1,
-                kind_label,
-                ex.file_path,
-                ex.line_start,
-                ex.line_end,
-                ex.context
-            ));
-        }
-    }
+    // Same renderer as `codixing context`; it enforces a strict budget on
+    // the text that is returned.
+    let out = codixing_core::formatter::compact::location_context(&ctx, line.max(1));
 
     (out, false)
 }

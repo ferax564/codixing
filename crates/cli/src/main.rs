@@ -339,6 +339,11 @@ enum Command {
         /// Transitive depth (default 1 = direct callers only).
         #[arg(long, default_value = "1")]
         depth: usize,
+
+        /// Maximum paths to print (0 = all). A hub header can have
+        /// thousands of importers.
+        #[arg(long, default_value = "100")]
+        limit: usize,
     },
 
     /// Show files imported by the given file.
@@ -349,6 +354,11 @@ enum Command {
         /// Transitive depth (default 1 = direct callees only).
         #[arg(long, default_value = "1")]
         depth: usize,
+
+        /// Maximum paths to print (0 = all). A hub header can have
+        /// thousands of importers.
+        #[arg(long, default_value = "100")]
+        limit: usize,
     },
 
     /// Show transitive dependencies of the given file.
@@ -359,6 +369,10 @@ enum Command {
         /// Transitive depth.
         #[arg(long, default_value = "2")]
         depth: usize,
+
+        /// Maximum paths to print (0 = all).
+        #[arg(long, default_value = "100")]
+        limit: usize,
     },
 
     /// Find files in one directory that import from another directory.
@@ -1061,10 +1075,6 @@ enum StrategyArg {
 }
 
 impl StrategyArg {
-    fn uses_lexical_read_profile(&self) -> bool {
-        matches!(self, Self::Exact | Self::Instant | Self::Goto)
-    }
-
     /// Resolve this argument to a concrete [`Strategy`], using auto-detection when `Auto`.
     fn resolve(self, engine: &Engine, query: &str) -> Strategy {
         match self {
@@ -1244,9 +1254,9 @@ async fn async_main() -> Result<()> {
         } => cmd_doctor(path, json, fix_path, check_update, fix),
         Command::Daemon { action } => cmd_daemon(action),
         Command::Path { from, to } => cmd_path(from, to),
-        Command::Callers { file, depth } => cmd_callers(file, depth),
-        Command::Callees { file, depth } => cmd_callees(file, depth),
-        Command::Dependencies { file, depth } => cmd_dependencies(file, depth),
+        Command::Callers { file, depth, limit } => cmd_callers(file, depth, limit),
+        Command::Callees { file, depth, limit } => cmd_callees(file, depth, limit),
+        Command::Dependencies { file, depth, limit } => cmd_dependencies(file, depth, limit),
         Command::CrossImports {
             from,
             to,
@@ -1494,32 +1504,59 @@ fn handle_engine_err<E: std::fmt::Display>(e: E, ctx: impl FnOnce() -> String) -
 
 /// Print a non-empty list of file paths (one per line to stdout) with a count
 /// summary to stderr. Caller must guarantee the slice is non-empty.
-fn print_nonempty_file_list(items: &[String], count_label: &str) {
-    for item in items {
+///
+/// At most `limit` paths are printed (0 = all); a trailer on stdout says how
+/// many were left out, so a hub file does not cost thousands of tokens.
+fn print_nonempty_file_list(items: &[String], count_label: &str, limit: usize) {
+    let shown = if limit == 0 {
+        items.len()
+    } else {
+        limit.min(items.len())
+    };
+    for item in &items[..shown] {
         println!("{item}");
     }
+    print_file_list_trailer(shown, items.len());
     eprintln!("\n{} {count_label}.", items.len());
 }
 
+fn print_file_list_trailer(shown: usize, total: usize) {
+    if shown < total {
+        println!(
+            "… {} more (showing {shown} of {total}; raise --limit, or --limit 0 for all)",
+            total - shown
+        );
+    }
+}
+
 /// Print a file list or an empty-message if the list is empty.
-fn print_file_list(items: &[String], empty_msg: &str, count_label: &str) {
+fn print_file_list(items: &[String], empty_msg: &str, count_label: &str, limit: usize) {
     if items.is_empty() {
         eprintln!("{empty_msg}");
     } else {
-        print_nonempty_file_list(items, count_label);
+        print_nonempty_file_list(items, count_label, limit);
     }
 }
 
 /// Handle a daemon-proxy response for a file-list command (callers/callees).
 /// Takes the raw text blob returned by the daemon, prints it or an empty
-/// message, and returns `Ok(())`.
-fn emit_daemon_file_list(text: String, empty_msg: &str, count_label: &str) -> Result<()> {
+/// message, and returns `Ok(())`. The same `limit` applies as in-process.
+fn emit_daemon_file_list(
+    text: String,
+    empty_msg: &str,
+    count_label: &str,
+    limit: usize,
+) -> Result<()> {
     if text.is_empty() {
         eprintln!("{empty_msg}");
     } else {
-        print!("{text}");
-        let count = text.lines().count();
-        eprintln!("\n{count} {count_label}.");
+        let total = text.lines().count();
+        let shown = if limit == 0 { total } else { limit.min(total) };
+        for line in text.lines().take(shown) {
+            println!("{line}");
+        }
+        print_file_list_trailer(shown, total);
+        eprintln!("\n{total} {count_label}.");
     }
     Ok(())
 }
@@ -1652,6 +1689,8 @@ fn cmd_init_dry_run(root: &Path, config: &IndexConfig, json: bool) -> Result<()>
     // (chunks, symbols, graph, sidecars). Embeddings add substantially more.
     let estimate_low = inventory.total_bytes;
     let estimate_high = inventory.total_bytes.saturating_mul(2);
+    let (memory_low, memory_high) = estimate_init_peak_memory(inventory.total_bytes);
+    let physical_memory = physical_memory_bytes();
 
     if json {
         let report = serde_json::json!({
@@ -1668,6 +1707,12 @@ fn cmd_init_dry_run(root: &Path, config: &IndexConfig, json: bool) -> Result<()>
                 "note": "BM25+graph roughly 1–2× source bytes; --embed needs additional vector storage",
             },
             "available_disk_bytes": free_bytes,
+            "estimated_peak_memory_bytes": {
+                "low": memory_low,
+                "high": memory_high,
+                "note": "BM25+graph init: roughly 2–3.5× source bytes plus a fixed 0.1–0.3 GB; --embed adds the model",
+            },
+            "physical_memory_bytes": physical_memory,
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
@@ -1725,8 +1770,60 @@ fn cmd_init_dry_run(root: &Path, config: &IndexConfig, json: bool) -> Result<()>
         }
         None => println!("Free disk space: (unavailable)"),
     }
+    println!(
+        "Estimated peak memory during init: {} – {} (about 2–3.5× source bytes)",
+        format_bytes(memory_low),
+        format_bytes(memory_high)
+    );
+    if let Some(physical) = physical_memory {
+        println!("Physical memory: {}", format_bytes(physical));
+        if physical < memory_high {
+            println!(
+                "warning: physical memory ({}) is below the high estimate ({}); init may swap or be killed. \
+                 Lower --threads, or exclude large generated files with --max-file-bytes",
+                format_bytes(physical),
+                format_bytes(memory_high)
+            );
+        }
+    }
     println!("No index written (dry-run).");
     Ok(())
+}
+
+/// Peak resident memory of a BM25+graph `init`, as a (low, high) range.
+///
+/// Fitted to measured runs: 6 MB of source peaked at 143 MB, 23 MB at
+/// 325 MB, and 1.2 GB (the Linux kernel, 71K files) at 3.3–4.0 GB. The
+/// bulk is proportional to source size (chunk bodies queued for Tantivy,
+/// symbols, trigram postings); the rest is a fixed floor.
+fn estimate_init_peak_memory(source_bytes: u64) -> (u64, u64) {
+    const MB: u64 = 1024 * 1024;
+    let low = (100 * MB).saturating_add(source_bytes.saturating_mul(2));
+    let high = (300 * MB).saturating_add(source_bytes.saturating_mul(7) / 2);
+    (low, high)
+}
+
+/// Total physical memory, when the platform makes it cheap to read.
+fn physical_memory_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let line = meminfo.lines().find(|line| line.starts_with("MemTotal:"))?;
+        let kilobytes: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+        Some(kilobytes.saturating_mul(1024))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+            .ok()?;
+        String::from_utf8(output.stdout).ok()?.trim().parse().ok()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
 }
 
 fn parse_embedding_model(s: &str) -> Result<EmbeddingModel> {
@@ -1809,18 +1906,9 @@ fn cmd_search(
         }
     }
 
-    let engine = if strategy.uses_lexical_read_profile() {
-        Engine::open_read_only_lexical(&root)
-            .map(std::mem::ManuallyDrop::new)
-            .with_context(|| {
-                format!(
-                    "no index found at {} — run `codixing init` first",
-                    root.display()
-                )
-            })?
-    } else {
-        open_read_engine(&root)?
-    };
+    // The read-only engine decodes chunk metadata and the dependency graph
+    // only when a strategy asks for them, so one open serves every strategy.
+    let engine = open_read_engine(&root)?;
 
     let resolved_strategy = strategy.resolve(&engine, &query);
     let mut sq = SearchQuery::new(&query)
@@ -1893,7 +1981,7 @@ fn cmd_search(
     );
     // This command paid a cold index open; on a large index make sure the
     // next one does not.
-    daemon_proxy::autostart_daemon_if_large(&root, engine.stats().file_count);
+    daemon_proxy::autostart_daemon_if_large(&root, engine.file_count());
 
     Ok(())
 }
@@ -2402,7 +2490,7 @@ fn cmd_path(from: String, to: String) -> Result<()> {
     Ok(())
 }
 
-fn cmd_callers(file: String, depth: usize) -> Result<()> {
+fn cmd_callers(file: String, depth: usize, limit: usize) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
 
     // Fast path: proxy through the daemon when asking for direct callers only
@@ -2415,6 +2503,7 @@ fn cmd_callers(file: String, depth: usize) -> Result<()> {
             text,
             &format!("No callers found for \"{file}\"."),
             "caller(s) found",
+            limit,
         );
     }
 
@@ -2465,11 +2554,11 @@ fn cmd_callers(file: String, depth: usize) -> Result<()> {
     }
 
     // Empty case was returned above; this branch is always non-empty.
-    print_nonempty_file_list(&callers, "caller(s) found");
+    print_nonempty_file_list(&callers, "caller(s) found", limit);
     Ok(())
 }
 
-fn cmd_callees(file: String, depth: usize) -> Result<()> {
+fn cmd_callees(file: String, depth: usize, limit: usize) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
 
     // Fast path: proxy through the daemon when asking for direct callees only
@@ -2482,6 +2571,7 @@ fn cmd_callees(file: String, depth: usize) -> Result<()> {
             text,
             &format!("No dependencies found for \"{file}\""),
             "dependency/dependencies found",
+            limit,
         );
     }
 
@@ -2496,11 +2586,12 @@ fn cmd_callees(file: String, depth: usize) -> Result<()> {
         &callees,
         &format!("No dependencies found for \"{}\"", file),
         "dependency/dependencies found",
+        limit,
     );
     Ok(())
 }
 
-fn cmd_dependencies(file: String, depth: usize) -> Result<()> {
+fn cmd_dependencies(file: String, depth: usize, limit: usize) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
     let engine = open_read_engine(&root)?;
 
@@ -2509,6 +2600,7 @@ fn cmd_dependencies(file: String, depth: usize) -> Result<()> {
         &deps,
         &format!("No transitive dependencies found for \"{}\"", file),
         "transitive dependency/dependencies found",
+        limit,
     );
     Ok(())
 }
@@ -3664,6 +3756,21 @@ fn cmd_context(
     json: bool,
 ) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
+
+    // Fast path: a running daemon assembles the same context from its warm
+    // graph. Budgets above the tool's cap, and JSON, stay in-process.
+    if !json
+        && token_budget <= 12_000
+        && let Some(text) =
+            daemon_proxy::try_context(&root, &file, line, token_budget, budget_mode.as_str())
+    {
+        print!("{text}");
+        if !text.ends_with('\n') {
+            println!();
+        }
+        return Ok(());
+    }
+
     let engine = open_read_engine(&root)?;
 
     // `--line` is 1-based like every line number Codixing prints; the engine
@@ -3680,89 +3787,15 @@ fn cmd_context(
         return Ok(());
     }
 
-    println!("# Context: {}:{}\n", ctx.primary.file_path, line);
-    let over_marker = if ctx.over_budget {
-        " ⚠ over budget"
-    } else {
-        ""
-    };
-    println!(
-        "Token budget: {} ({}) | Used: {}{}",
-        token_budget,
-        ctx.budget_mode.as_str(),
-        ctx.total_tokens,
-        over_marker
+    // One renderer for the CLI and the MCP tool; it also enforces a strict
+    // budget on the text that is actually printed.
+    print!(
+        "{}",
+        codixing_core::formatter::compact::location_context(&ctx, line.max(1))
     );
-    if let Some(reason) = &ctx.oversize_reason {
-        println!("Note: {reason}");
-    }
-    println!();
-
-    println!(
-        "## Primary chunk (L{}-L{})",
-        ctx.primary.display_lines().0,
-        ctx.primary.display_lines().1
-    );
-    println!("```");
-    println!("{}", ctx.primary.content);
-    println!("```\n");
-
-    if !ctx.imports.is_empty() {
-        println!("## Imports ({}):", ctx.imports.len());
-        for imp in &ctx.imports {
-            println!(
-                "  {} (L{}-L{}, relevance: {:.2})",
-                imp.file_path,
-                imp.line_start + 1,
-                imp.line_end.max(imp.line_start + 1),
-                imp.relevance
-            );
-            for line_content in imp.content.lines() {
-                println!("    {line_content}");
-            }
-        }
-        println!();
-    }
-
-    if !ctx.callees.is_empty() {
-        println!("## Callees ({}):", ctx.callees.len());
-        for callee in &ctx.callees {
-            println!(
-                "  {} (L{}-L{}, relevance: {:.2})",
-                callee.file_path,
-                callee.line_start + 1,
-                callee.line_end.max(callee.line_start + 1),
-                callee.relevance
-            );
-            for line_content in callee.content.lines() {
-                println!("    {line_content}");
-            }
-        }
-        println!();
-    }
-
-    if !ctx.examples.is_empty() {
-        println!("## Usage examples ({}):", ctx.examples.len());
-        for (i, ex) in ctx.examples.iter().enumerate() {
-            let kind_label = match ex.kind {
-                codixing_core::engine::examples::ExampleKind::Test => "TEST",
-                codixing_core::engine::examples::ExampleKind::CallSite => "CALL",
-                codixing_core::engine::examples::ExampleKind::DocBlock => "DOC",
-            };
-            println!(
-                "  {}. [{}] {}:{}-{}",
-                i + 1,
-                kind_label,
-                ex.file_path,
-                ex.line_start,
-                ex.line_end
-            );
-            for line_content in ex.context.lines() {
-                println!("     {line_content}");
-            }
-            println!();
-        }
-    }
+    // This command paid a cold open and a graph decode; on a large index
+    // make sure the next one does not.
+    daemon_proxy::autostart_daemon_if_large(&root, engine.file_count());
 
     Ok(())
 }
@@ -3815,7 +3848,7 @@ fn cmd_agent_context_pack(
     } else {
         print!("{}", pack.render_text());
     }
-    daemon_proxy::autostart_daemon_if_large(&root, engine.stats().file_count);
+    daemon_proxy::autostart_daemon_if_large(&root, engine.file_count());
     Ok(())
 }
 
@@ -5043,6 +5076,23 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    #[test]
+    fn init_peak_memory_estimate_brackets_measured_runs() {
+        const MB: u64 = 1024 * 1024;
+        // (source bytes, measured peak RSS of `codixing init`)
+        for (source, measured) in [
+            (6 * MB, 143 * MB),       // this repository
+            (23 * MB, 325 * MB),      // Django 5.0.6
+            (1_229 * MB, 3_410 * MB), // Linux 6.6
+        ] {
+            let (low, high) = estimate_init_peak_memory(source);
+            assert!(
+                low <= measured && measured <= high,
+                "{measured} outside {low}..{high} for {source} source bytes"
+            );
+        }
+    }
+
     /// `--threads N` flows through to the `Init` variant. Issue #107 regression
     /// guard: if the flag is dropped from the clap variant, `cmd_init` falls
     /// back to Rayon's uncapped default and Windows users hit the NTFS race
@@ -5133,22 +5183,5 @@ mod tests {
             Err("simulated shared-process pool".to_string())
         })
         .expect("tests may share an already initialized global pool");
-    }
-
-    #[test]
-    fn only_explicit_lexical_strategies_use_the_lean_read_profile() {
-        assert!(StrategyArg::Exact.uses_lexical_read_profile());
-        assert!(StrategyArg::Instant.uses_lexical_read_profile());
-
-        for strategy in [
-            StrategyArg::Auto,
-            StrategyArg::Fast,
-            StrategyArg::Thorough,
-            StrategyArg::Explore,
-            StrategyArg::Deep,
-            StrategyArg::Semantic,
-        ] {
-            assert!(!strategy.uses_lexical_read_profile(), "{strategy:?}");
-        }
     }
 }

@@ -225,7 +225,7 @@ codixing ask "task: inspect auth" # Recommended agent entrypoint: compact text p
 codixing agent-context-pack "task" # Stable JSON context pack for agents
 codixing symbols Widget --imports  # Also list import rows (hidden by default)
 codixing search IndexStore --strategy goto  # Definition-first symbol jump
-codixing init --dry-run .         # Inventory + disk estimate before writing an index
+codixing init --dry-run .         # Inventory + disk and peak-memory estimate before writing an index
 codixing doctor --check-update    # Free space, lock owner, ONNX hints, optional release check
 codixing doctor --fix-path       # PATH binary version gate + install hints
 codixing bench-tokens            # Token savings vs grep+read, with exact counts and answer checks
@@ -271,13 +271,18 @@ refresh `tools/list`.
 Daemon mode loads the engine once and serves calls over a Unix socket (or named pipe on Windows).
 The daemon auto-starts on first MCP connection and self-terminates after 30 minutes idle.
 
-The CLI uses the same daemon. `search`, `ask`, `symbols`, `usages`, `impact`, `callers`,
-`callees` and `graph --map` are answered over the socket with output identical to the in-process
-path (`grep` always runs in-process: it opens in milliseconds on its own). On indexes of 20,000+ files the CLI starts a read-only daemon in the background after the
+The CLI uses the same daemon. `search`, `ask`, `symbols`, `usages`, `impact`, `context`,
+`callers`, `callees` and `graph --map` are answered over the socket with output identical to the
+in-process path (`grep` always runs in-process: it opens in milliseconds on its own). On indexes of 20,000+ files the CLI starts a read-only daemon in the background after the
 first cold command (opt out with `CODIXING_NO_AUTO_DAEMON=1`); `codixing daemon start` and
 `codixing daemon status` manage it explicitly. On Linux 6.6 (71K files) a warm `search` takes
 about 10 ms and `ask` about 100 ms. When the repository path is too long for a Unix socket in
 `.codixing/`, the socket moves to a private per-user runtime directory automatically.
+
+Without a daemon a read-only command opens only what it uses: chunk metadata and the dependency
+graph are decoded on first use. On the same kernel index a cold `search` takes about 0.13 s and
+`ask` about 0.25 s. `CODIXING_NO_DAEMON=1` forces the in-process path and never starts a daemon;
+use it for benchmarks. The CLI ignores a daemon left running by a different release.
 
 ```bash
 codixing-mcp --root /path/to/project          # auto-starts daemon
@@ -351,7 +356,7 @@ Raw results: [external_competitor_benchmark.md](benchmarks/results/external_comp
 
 **Large codebase** (368K LoC, 7,607 files): Init 7.9s, search 94ms, 99% token reduction vs grep.
 
-**Linux kernel** (63K C/H files, 30M+ lines, 84K-node dependency graph): 1.57s cold-start search, 0.79s warm via the MCP daemon path. Zero-deserialization mmap for instant startup. Note: fresh-process CLI invocations on a 2GB+ hybrid index pay startup cost on every call — prefer the MCP daemon or a BM25-only index (`codixing init .` without `--embed`) for the CLI path.
+**Linux kernel** (Linux 6.6, 71K indexed files, BM25-only index, 4 vCPU): 0.13 s cold-start `search` and 0.25 s cold `ask` from a fresh CLI process, about 10 ms and 100 ms through a warm daemon (measured 2026-11-12; see `benchmarks/README.md` § Retrieval gate). An earlier measurement on a 63K-file hybrid index reported 1.57s cold-start search, 0.79s warm via the MCP daemon path. Zero-deserialization mmap for instant startup. Note: fresh-process CLI invocations on a 2GB+ hybrid index pay startup cost on every call — prefer the MCP daemon or a BM25-only index (`codixing init .` without `--embed`) for the CLI path.
 
 **SWE-bench Lite** (300 tasks, 12 repos): Recall@5 = 74.3% (vs grep 41.3%).
 
@@ -369,7 +374,9 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Interactive graph dashboard** — `codixing graph --html` generates a self-contained HTML dashboard (no CDN, no framework): force-directed layout, color-by layer/language/directory, a node detail panel (PageRank, language, callers/callees), named architectural layers with show/hide, a deterministic guided tour of the codebase, a client-side path finder, fuzzy search-to-focus, surprise/anomaly edges, and a `--diff-base <ref>` diff-impact overlay that highlights changed files and their blast radius
 - **Graph exports for external tools** — `codixing graph --graphml` (Gephi/yEd), `--cypher` (Neo4j), `--obsidian` (markdown vault with one note per community) for downstream analysis and knowledge-base integration
 - **Git hooks** — `codixing hook install` wires post-commit hooks for automatic index sync after every commit; `codixing hook status` / `uninstall` manage the lifecycle
-- **Caller cascade** — `codixing callers <file> --depth N` walks the import graph N hops to surface the full transitive caller cascade
+- **Caller cascade** — `codixing callers <file> --depth N` walks the import graph N hops to surface the full transitive caller cascade (100 paths by default; `--limit N`, `--limit 0` for all)
+- **C and C++ behind macros** — attribute macros that break the grammar (`__alloc_size(1)`, `__printf(2, 3)`, trailing `__noreturn`) are masked before parsing, function-like `#define`s are symbols, and `SYSCALL_DEFINE3(read, ...)` is indexed as `sys_read`
+- **Retrieval gate** — `benchmarks/retrieval_gate.py` checks answers, hit rates and tokens-to-answer on real repositories; CI runs it on this repository and a pinned Django
 - **TOML output filter pipeline** — Project-local `.codixing/filter_rules.toml` compresses MCP tool output for token-tight agent loops, with tee recovery to disk for full output when agents need it
 - **Edge confidence** — Every dependency edge tagged Verified/High/Medium/Low based on extraction method (AST-resolved, call extraction, doc reference, external)
 - **Ranked cross-imports** — PageRank + git recency scoring for relevance-ranked graph queries across directory boundaries

@@ -280,7 +280,7 @@ impl Engine {
         // 2. Run orphan detection only when the import graph is available.
         //    Without a graph every file looks like an orphan, producing false
         //    Critical alerts.
-        let has_graph = self.graph.is_some();
+        let has_graph = self.graph_ref().is_some();
         let orphan_map: HashMap<String, OrphanConfidence> = if has_graph {
             let mut orphan_opts = OrphanOptions {
                 limit: usize::MAX,
@@ -310,7 +310,7 @@ impl Engine {
         // reports 0 files on a populated index.
         let mut file_set: std::collections::HashSet<String> =
             self.file_chunk_ids.keys().cloned().collect();
-        if let Some(ref graph) = self.graph {
+        if let Some(graph) = self.graph_ref() {
             for file in graph.file_paths() {
                 file_set.insert(file);
             }

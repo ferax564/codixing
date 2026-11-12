@@ -53,7 +53,7 @@ impl Engine {
     /// Otherwise falls back to BM25 search + AST validation.
     pub fn symbol_callers_precise(&self, symbol: &str, limit: usize) -> Vec<SymbolReference> {
         // Phase 0: Check the pre-built symbol graph.
-        if let Some(ref graph) = self.graph {
+        if let Some(graph) = self.graph_ref() {
             let symbol_callers = graph.get_symbol_callers(symbol);
             if !symbol_callers.is_empty() {
                 let mut refs: Vec<SymbolReference> = symbol_callers
@@ -260,7 +260,7 @@ impl Engine {
     /// Otherwise falls back to reading and re-parsing the symbol's source.
     pub fn symbol_callees_precise(&self, symbol: &str, file_hint: Option<&str>) -> Vec<String> {
         // Phase 0: Check the pre-built symbol graph.
-        if let Some(ref graph) = self.graph {
+        if let Some(graph) = self.graph_ref() {
             let symbol_callees = graph.get_symbol_callees(symbol);
             if !symbol_callees.is_empty() {
                 return symbol_callees;
@@ -353,7 +353,23 @@ fn is_comment_like(line: &str) -> bool {
     trimmed.starts_with("//")
         || trimmed.starts_with("/*")
         || trimmed.starts_with('*')
-        || trimmed.starts_with('#')
+        // `#define name(...)` is where a macro is defined, not a comment.
+        || (trimmed.starts_with('#') && macro_name_end(line).is_none())
+}
+
+/// For a `#define NAME ...` line, the byte offset just past `NAME`.
+fn macro_name_end(line: &str) -> Option<usize> {
+    let rest = line.trim_start().strip_prefix('#')?;
+    let rest = rest.trim_start().strip_prefix("define")?;
+    if !rest.starts_with([' ', '\t']) {
+        return None;
+    }
+    let name = rest.trim_start();
+    let length = name
+        .bytes()
+        .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        .count();
+    (length > 0).then(|| line.len() - name.len() + length)
 }
 
 /// Classify one whole-word occurrence of a symbol. `is_definition` is true
@@ -364,7 +380,9 @@ fn classify_reference(
     match_end: usize,
     is_definition: bool,
 ) -> &'static str {
-    if is_definition {
+    // `#define NAME` defines NAME whether or not the macro is in the symbol
+    // table (object-like macros are not indexed as symbols).
+    if is_definition || macro_name_end(line) == Some(match_end) {
         return "definition";
     }
     let trimmed = line.trim_start();

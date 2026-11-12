@@ -2,6 +2,7 @@ pub mod asciidoc;
 pub mod assembly;
 pub mod bash;
 pub mod c;
+pub(crate) mod c_family;
 pub mod cpp;
 pub mod csharp;
 pub mod doc;
@@ -392,6 +393,27 @@ pub trait LanguageSupport: Send + Sync {
 
     /// Extract doc comments preceding a node.
     fn extract_doc_comment(&self, node: &tree_sitter::Node, source: &[u8]) -> Option<String>;
+
+    /// Rewrite the source into a form the grammar can parse.
+    ///
+    /// The result must have the same length and the same line breaks as the
+    /// input, so that byte offsets and line numbers in the resulting tree are
+    /// valid for the original source. Callers parse the prepared bytes and
+    /// read text from the original. The default is the identity.
+    fn prepare_source<'a>(&self, source: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {
+        std::borrow::Cow::Borrowed(source)
+    }
+
+    /// Parse `source` after [`prepare_source`](Self::prepare_source).
+    ///
+    /// Creates a fresh `tree_sitter::Parser`, which is `!Send` and cheap to
+    /// build. Returns `None` when the grammar cannot be loaded or the parse is
+    /// cancelled.
+    fn parse(&self, source: &[u8]) -> Option<tree_sitter::Tree> {
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&self.tree_sitter_language()).ok()?;
+        parser.parse(self.prepare_source(source).as_ref(), None)
+    }
 }
 
 /// Lightweight entity extraction for config languages (YAML, TOML, Dockerfile, Makefile).

@@ -962,6 +962,8 @@ impl Engine {
             const MAX_PINNED: usize = 4;
             let top_score = results.first().map(|r| r.score).unwrap_or(1.0).max(1.0);
             let mut pinned: Vec<SearchResult> = Vec::new();
+            let result_files: std::collections::HashSet<String> =
+                results.iter().map(|r| r.file_path.clone()).collect();
             for candidate in task_identifier_candidates(task) {
                 if pinned.len() >= MAX_PINNED {
                     break;
@@ -997,6 +999,15 @@ impl Engine {
                     let cap = if capitalised { 8 } else { 3 };
                     if production > cap {
                         continue;
+                    }
+                    // A lower-case word is only a name if the search agrees:
+                    // on a large repository `journal`, `commit` and
+                    // `transaction` each name some unrelated driver struct.
+                    if !capitalised {
+                        defs.retain(|s| result_files.contains(s.file_path.as_str()));
+                        if defs.is_empty() {
+                            continue;
+                        }
                     }
                 }
                 defs.sort_by(|a, b| {
@@ -1609,7 +1620,7 @@ impl Engine {
         let mut used_tokens = 0;
 
         // Get dependency files from the graph.
-        let dep_files = match &self.graph {
+        let dep_files = match self.graph_ref() {
             Some(g) => g.callees(&result.file_path),
             None => return snippets,
         };

@@ -34,74 +34,111 @@ task-level work:
 Most of the fixes are small and local. The ten changes in
 [Priorities](#priorities) are ordered by expected effect per unit of work.
 
-## Resolution status (2026-11-11)
+## Resolution status (2026-11-12)
 
-The findings below were addressed on the same branch. Numbers are from the
-same machine and corpora as the review; "before" is v0.48.0 as reviewed.
+The findings below were addressed on the same branch in two passes. Numbers
+are from the same machine and corpora as the review; "reviewed" is v0.48.0.
+The Linux index was rebuilt for the second pass (the C parser changed), so
+its symbol count is 925,976 rather than 827,306.
 
 Retrieval (MRR, `search` / `ask`):
 
-| Corpus | Query type | Before | After |
-|---|---|---|---|
-| Codixing | identifier | 0.89 / 0.81 | 1.00 / 1.00 |
-| Codixing | natural language | 0.52 / 0.16 | 0.72 / 0.79 |
-| Django | identifier | 0.95 / 0.82 | 0.95 / 0.95 |
-| Django | natural language | 0.42 / 0.07 | 0.55 / 0.53 |
-| Linux | identifier | 0.67 / not run | 0.92 / 0.92 |
-| Linux | natural language | 0.16 / not run | 0.31 / 0.27 |
+| Corpus | Query type | Reviewed | First pass | Second pass |
+|---|---|---|---|---|
+| Codixing | identifier | 0.89 / 0.81 | 1.00 / 1.00 | 1.00 / 1.00 |
+| Codixing | natural language | 0.52 / 0.16 | 0.72 / 0.79 | 0.74 / 0.74 |
+| Django | identifier | 0.95 / 0.82 | 0.95 / 0.95 | 1.00 / 1.00 |
+| Django | natural language | 0.42 / 0.07 | 0.55 / 0.53 | 0.70 / 0.63 |
+| Linux | identifier | 0.67 / not run | 0.92 / 0.92 | 1.00 / 1.00 |
+| Linux | natural language | 0.16 / not run | 0.31 / 0.27 | 0.60 / 0.60 |
 
-Median `ask` output: 1,178–2,248 tokens before, 267–955 after.
+`ask` on this repository's natural-language tasks went from 0.79 to 0.74 in
+the second pass: two queries moved from rank 1 to rank 3 while two that were
+missed are now found. The other five cells improved or held.
+
+Median tokens read until the expected file is shown (second pass, identifier
+tasks): 59 on this repository, 42 on Django, 65 on Linux, against 5,127,
+2,909 and 5,471 for `rg -nw`.
 
 Linux 6.6, one-shot CLI command with no daemon:
 
-| Command | Before | After |
-|---|---:|---:|
-| `grep --count` | 4.8 s | 0.11 s |
-| `symbols` | 4.7 s | 0.10 s |
-| `usages` | 4.5 s | 0.18 s |
-| `search` | 4.7 s | 1.3 s |
-| `ask` | 19.5 s | 1.6 s |
-| `impact` | 7.4 s | 1.8 s |
-| `context` | 130–168 s | 1.7 s |
-| `graph --map` | 15 s | 1.4 s |
-| `sync` with no changes | 5.5 s | 2.6 s |
-| `symbols task_struct` output | 126,278 tokens | 1,149 tokens |
+| Command | Reviewed | First pass | Second pass |
+|---|---:|---:|---:|
+| `grep --count` | 4.8 s | 0.11 s | 0.15 s |
+| `symbols` | 4.7 s | 0.10 s | 0.13 s |
+| `usages` | 4.5 s | 0.18 s | 0.22 s |
+| `search` | 4.7 s | 1.3 s | 0.14 s |
+| `search --json` | 4.6 s | 1.3 s | 0.14 s |
+| `ask` | 19.5 s | 1.6 s | 0.28 s |
+| `impact` | 7.4 s | 1.8 s | 1.1 s |
+| `context` | 130–168 s | 1.7 s | 0.9 s |
+| `graph --map` | 15 s | 1.4 s | 0.75 s |
+| `audit` | stopped after 6 min | did not finish in 150 s | 1.9 s |
+| `sync` with no changes | 5.5 s | 2.6 s | 3.6 s |
+| `sync` after a one-file edit, persist phase | 4.7 s | not measured | 2 ms |
+| `search` peak memory | about 900 MB | 800 MB | 276 MB |
+| `symbols task_struct` output | 126,278 tokens | 1,149 tokens | 1,158 tokens |
+| `callers include/linux/slab.h` output | not measured | 8,254 tokens | 1,151 tokens |
+
+The first three rows are within run-to-run noise of the first pass. A no-op
+`sync` did not improve: it opens a writable engine, which still decodes
+everything (1.4 s), then scans the tree (0.9 s). `search kmalloc` takes
+0.66 s rather than 0.14 s because breaking the tie between seven same-named
+definitions loads the dependency graph.
 
 With the daemon warm (started automatically on indexes of 20,000+ files):
-`search` 10 ms, `ask` about 100–130 ms, `symbols` 73 ms, `usages` 75 ms,
-`graph --map` 76 ms, `impact` 351 ms.
+`search` 10–26 ms, `ask` 100–195 ms, `symbols` 73–109 ms, `usages` 75 ms,
+`context` 212 ms, `graph --map` 76 ms, `impact` 351–464 ms.
 
 | Finding | Status |
 |---|---|
-| A1 `ask` ranks worse than `search` | Fixed |
+| A1 `ask` ranks worse than `search` | Fixed. The CI gate fails if `ask` trails `search` by more than 0.10–0.15 MRR |
 | A2 `impl` blocks ahead of the type | Fixed |
-| A3 C/C++ references indexed as definitions | Fixed |
+| A3 C/C++ references indexed as definitions | Fixed. Second pass: definitions behind attribute macros are found (`kmalloc`), function-like macros and `SYSCALL_DEFINE` bodies are symbols |
 | A4 smaller `--limit` changes the first result | Fixed (a smaller limit returns a prefix of the default list) |
 | A5 `usages` misses call sites | Fixed (matches `rg -w` on every indexed file) |
-| A6 natural-language search at kernel scale | Improved by term-coverage re-ranking; Linux MRR is still 0.31 |
+| A6 natural-language search at kernel scale | Improved twice: term coverage (0.16 → 0.31), then path terms, identifier terms and per-file evidence (0.31 → 0.60). One of ten Linux tasks is still missed outright (the out-of-memory killer; the code says `oom`) |
 | B1 `ask` pack size | Fixed (compact text default, compact JSON, no import rows) |
-| B2 unbounded outputs | Fixed for `symbols`, `audit`, `context` |
+| B2 unbounded outputs | Fixed for `symbols`, `audit`, `context`, and in the second pass `callers`, `callees`, `dependencies` |
 | B3 logs on stdout | Fixed |
-| B4 format differs through the daemon | Fixed for `search`, `symbols`, `usages`, `ask`, `impact`; `grep` no longer uses the daemon |
+| B4 format differs through the daemon | Fixed for `search`, `symbols`, `usages`, `ask`, `impact`, and `context` (one renderer shared with the MCP tool); `grep` no longer uses the daemon |
 | B5 two line-number conventions | Fixed (1-based everywhere, including `context --line` and MCP `read_file`) |
-| B6 token estimates undercount | Improved: 3.2 bytes per token, tokenizer built once per process. `context` on C still ran 13% over a strict 1,500 budget |
+| B6 token estimates undercount | Fixed for `context`: strict mode counts real tokens on the returned text and never exceeds the budget (checked at 1,500, 800 and 400 on three kernel files) |
 | B7 panic when piped to `head` | Fixed |
 | B8 default `search` output | Fixed (line-numbered snippet on the definition or best-matching lines, no scores) |
 | B9 MCP surface | Fixed (`minimal` lists 13 tools at 2.7K tokens and can call every read-only tool) |
-| C1 full index reopen per CLI call | Fixed for `grep`, `symbols`, `usages`; `search` and `ask` still load chunk metadata (about 1.3 s, 800 MB) |
+| C1 full index reopen per CLI call | Fixed. Read-only engines decode chunk metadata and the dependency graph on first use; a BM25 search reads hit fields from stored Tantivy values |
 | C2 daemon cannot bind on long paths | Fixed |
-| C3 commands that bypass the daemon | `ask` and both `impact` modes are proxied, the daemon auto-starts on large indexes. `context`, `--count` and `--json` still run in-process |
+| C3 commands that bypass the daemon | `ask`, `impact` and `context` are proxied and the daemon auto-starts on large indexes. `--count` and `--json` run in-process, now in 0.14 s |
 | C4 test map rebuilt per file | Fixed |
-| C5 post-edit hook cost | Edits are coalesced into one update. The 4.7 s persist phase of a one-file sync on Linux was not investigated |
-| C6 indexing memory | Not addressed (`init --dry-run` still reports disk only) |
-| D1 `bench-tokens` | Exact token counts and answer checks added. It is still one workflow; a CI gate on real repositories is not wired up |
+| C5 post-edit hook cost | Edits are coalesced into one update. The persist phase rewrote all chunk metadata (93 MB) on every checkpoint; it now writes a changed-file overlay (1.6 KB for one file) |
+| C6 indexing memory | `init --dry-run` estimates peak memory and warns when it exceeds physical memory. Peak memory itself is unchanged (3.3 GB on Linux) |
+| D1 `bench-tokens` | Exact token counts and answer checks. A separate answer-checked gate, `benchmarks/retrieval_gate.py`, runs task sets against this repository and a pinned Django in CI. `bench-tokens` itself is still one workflow |
 | D2 guidance and hooks | Updated |
 | E smaller issues | Fixed, except brace globs, which now produce a hint |
 
-Still open and worth doing next: `audit` on Linux did not finish within 150 s;
-`kmalloc` is not found because the C parser does not resolve functions behind
-attribute macros; chunk metadata should become a memory-mapped columnar
-artifact so `search` and `ask` open as fast as `grep`.
+Found and fixed during the second pass, not in the original review:
+
+- A query containing `--flag` failed with a Tantivy syntax error.
+- `ask` pinned unrelated driver structs for ordinary words such as `journal`
+  on the kernel.
+- `audit`, and every file-scoped symbol listing in the LSP, MCP and HTTP
+  servers, scanned the whole symbol table per call.
+- A daemon left running by another build kept answering CLI commands. The
+  CLI now ignores a daemon of a different release, and an index with a
+  chunk-metadata overlay is published as layout version 2 so that older
+  binaries refuse it instead of reading stale metadata.
+
+Still open:
+
+- A no-op `sync` on Linux takes about 3.5 s, dominated by the writable open.
+- Initial indexing memory (3.3 GB on Linux) is reported but not reduced.
+- Object-like C macros (`#define PAGE_SIZE 4096`) are not symbols; the kernel
+  has five million of them. `grep` and `usages` find them.
+- Natural-language search without embeddings still depends on the query
+  sharing words with the code or its path.
+- There is no `codixing daemon stop`; a daemon exits after 30 idle minutes.
+- The retrieval task sets are small (62 queries) and written by one reviewer.
 
 ## Method
 
@@ -667,6 +704,9 @@ pip install tiktoken
 python3 benchmarks/review-2026-11-10/eval.py benchmarks/review-2026-11-10/tasks_self.json . search ask rg
 python3 benchmarks/review-2026-11-10/eval.py benchmarks/review-2026-11-10/tasks_django.json /path/to/django search ask rg
 python3 benchmarks/review-2026-11-10/eval.py benchmarks/review-2026-11-10/tasks_linux.json /path/to/linux search rg
+
+# Answer-checked gate with thresholds (added in the second pass; see benchmarks/README.md)
+python3 benchmarks/retrieval_gate.py benchmarks/retrieval/tasks_self.json .
 
 # Time, peak RSS, and token count of any command
 python3 benchmarks/review-2026-11-10/measure.py -- codixing symbols Engine

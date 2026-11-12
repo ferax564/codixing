@@ -513,6 +513,20 @@ impl InMemorySymbolTable {
     pub fn filter(&self, pattern: &str, file: Option<&str>) -> Vec<Symbol> {
         let pattern_lower = pattern.to_lowercase();
         let mut results = Vec::new();
+        // With a file constraint, visit only the matching files.
+        if let Some(file) = file {
+            let name_pattern = (!pattern_lower.is_empty()).then_some(pattern_lower.as_str());
+            let paths: Vec<String> = self
+                .symbols_by_file
+                .iter()
+                .filter(|entry| entry.key().contains(file))
+                .map(|entry| entry.key().to_string())
+                .collect();
+            for path in paths {
+                results.extend(self.symbols_in_file(&path, name_pattern));
+            }
+            return results;
+        }
         for entry in self.symbols.iter() {
             if entry.key().to_lowercase().contains(&pattern_lower) {
                 for sym in entry.value() {

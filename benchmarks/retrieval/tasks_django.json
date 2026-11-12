@@ -1,0 +1,27 @@
+{
+ "corpus": "Django 5.0.6 sdist from PyPI",
+ "note": "Django 5.0.6 source distribution from PyPI.",
+ "gate": {"id": {"search_mrr": 0.9, "ask_mrr": 0.9}, "nl": {"search_mrr": 0.55, "ask_mrr": 0.5, "search_hit_at_10": 8, "ask_within_of_search": 0.15}},
+ "tasks": [
+  {"q": "QuerySet", "kind": "id", "expect": ["django/db/models/query.py"]},
+  {"q": "HttpResponse", "kind": "id", "expect": ["django/http/response.py"]},
+  {"q": "get_object_or_404", "kind": "id", "expect": ["django/shortcuts.py"]},
+  {"q": "CsrfViewMiddleware", "kind": "id", "expect": ["django/middleware/csrf.py"]},
+  {"q": "ModelAdmin", "kind": "id", "expect": ["django/contrib/admin/options.py"]},
+  {"q": "Paginator", "kind": "id", "expect": ["django/core/paginator.py"]},
+  {"q": "authenticate", "kind": "id", "expect": ["django/contrib/auth/__init__.py"]},
+  {"q": "MigrationExecutor", "kind": "id", "expect": ["django/db/migrations/executor.py"]},
+  {"q": "URLResolver", "kind": "id", "expect": ["django/urls/resolvers.py"]},
+  {"q": "SQLCompiler", "kind": "id", "expect": ["django/db/models/sql/compiler.py"]},
+  {"q": "password hashing with pbkdf2", "kind": "nl", "expect": ["django/contrib/auth/hashers.py"]},
+  {"q": "how is the csrf token validated on a request", "kind": "nl", "expect": ["django/middleware/csrf.py"]},
+  {"q": "apply database migrations in order", "kind": "nl", "expect": ["django/db/migrations/executor.py"]},
+  {"q": "match a request path against url patterns", "kind": "nl", "expect": ["django/urls/resolvers.py"]},
+  {"q": "session cookie is set on the response", "kind": "nl", "expect": ["django/contrib/sessions/middleware.py"]},
+  {"q": "resolve a template variable lookup", "kind": "nl", "expect": ["django/template/base.py"]},
+  {"q": "generate the sql for a select query", "kind": "nl", "expect": ["django/db/models/sql/compiler.py"]},
+  {"q": "send email over smtp", "kind": "nl", "expect": ["django/core/mail/backends/smtp.py"]},
+  {"q": "handle uploaded file chunks in memory or temporary file", "kind": "nl", "expect": ["django/core/files/uploadhandler.py"]},
+  {"q": "dispatch a signal to connected receivers", "kind": "nl", "expect": ["django/dispatch/dispatcher.py"]}
+ ]
+}

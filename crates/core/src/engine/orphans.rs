@@ -68,7 +68,10 @@ impl Engine {
                 }
             };
 
-            let symbol_count = self.symbols("", Some(file)).map(|s| s.len()).unwrap_or(0);
+            // Per-file postings: a name filter with an empty pattern walks
+            // every symbol in the repository for each orphan, which did not
+            // finish on a kernel-sized index.
+            let symbol_count = self.symbols.file_symbols(file).len();
 
             orphans.push(OrphanFile {
                 file_path: file.clone(),

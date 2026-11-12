@@ -35,9 +35,11 @@ codixing symbols Widget --imports   # also list import rows (hidden by default)
 codixing impact path --full         # full blast radius (default is compact)
 codixing doctor --fix-path          # PATH binary version gate
 codixing doctor --check-update       # free space, lock owner, ONNX hints, optional release check
-codixing init --dry-run .            # inventory + disk estimate before writing an index
+codixing init --dry-run .            # inventory + disk and peak-memory estimate before writing an index
 codixing bench-tokens               # token savings vs grep+read (exact counts, answer-checked)
 codixing daemon start .             # keep the index warm (automatic on 20K+ file indexes)
+CODIXING_NO_DAEMON=1 codixing ...   # force the in-process path (benchmarks, bug reports)
+python3 benchmarks/retrieval_gate.py benchmarks/retrieval/tasks_self.json .  # answer-checked retrieval gate
 ```
 
 The MCP server is also available when connected to an editor, but the CLI is preferred — it's simpler, works for subagents, and dogfoods the search quality directly.
@@ -222,6 +224,14 @@ The CI workflow (`.github/workflows/ci.yml`) has the following jobs:
 - **msrv** — blocking Ubuntu check of all workspace targets at Rust 1.88 with `--no-default-features`.
 - **npm-installer** — blocking Ubuntu/Node 18 tests for release-version consistency and rollback, exact npm tarball comparison, downloader and signal forwarding, npm package contents, and the checksum-verified shell installer.
 - **audit** — blocking Ubuntu `cargo-audit` run. Its explicit advisory ignores are justified in `audit.toml`; there is no `continue-on-error` escape hatch.
+- **retrieval-gate** — blocking Ubuntu job. Builds the CLI, indexes this
+  repository and a checksum-pinned Django 5.0.6 source distribution, and runs
+  `benchmarks/retrieval_gate.py` against `benchmarks/retrieval/tasks_*.json`.
+  It fails when identifier or natural-language hit rates fall below the
+  thresholds stored in each task file, or when `ask` trails `search` by more
+  than the allowed margin, and uploads both reports as `retrieval-gate`.
+  `tasks_self.json` names files of this repository: update its `expect`
+  entries in the same change that renames or splits one of them.
 - **coverage** — blocking Ubuntu coverage generation and `coverage-report` artifact upload. The final Codecov upload alone is configured not to fail CI on a Codecov service error.
 - **release-build** — blocking three-platform matrix on `main` pushes only (never PRs or tag pushes). It has `needs: [test, npm-installer]`, builds the four binaries for Linux x86_64, macOS arm64, and Windows x86_64 (Windows uses `--no-default-features`), and uploads `binaries-<suffix>` artifacts with 14-day retention.
 - **benchmarks** — blocking Ubuntu job with no `needs` dependency. It runs the
@@ -338,6 +348,21 @@ mutable sidecars atomically, and make the active-generation manifest the last
 durable write. A no-op sync must not fork or publish. On filesystems without
 hard-link support, incremental fallback copying is capped at 64 MiB; use a full
 `codixing init` rather than duplicating a large index.
+
+Chunk metadata is persisted as `chunk_meta.bin` plus a cumulative changed-file
+overlay, `chunk_meta_delta.bin`. A checkpoint that touches few files writes
+only the overlay; the base is rewritten when the overlay would cover more than
+an eighth of the index (at least 64, at most 4,096 files). Always load through
+`indexing::load_chunk_meta`, never the base alone, and call
+`mark_chunk_meta_dirty` wherever a file's chunks are added or removed. A
+generation that carries an overlay is published as layout version 2 so that
+older binaries refuse it instead of reading stale metadata.
+
+Read-only engines decode chunk metadata and the dependency graph on first
+use (`LazyChunkMeta`, `Engine::graph_ref`). Read paths must use
+`self.graph_ref()`, not `self.graph`, and a BM25 search must not touch
+`self.chunk_meta` without checking `is_loaded()`: the test
+`read_only_search_decodes_neither_chunk_metadata_nor_graph` guards this.
 
 To rebuild from scratch (BgeSmallEn is the recommended model — fastest init, good retrieval):
 ```bash

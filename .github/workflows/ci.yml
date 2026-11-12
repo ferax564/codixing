@@ -192,6 +192,71 @@ jobs:
           --ignore RUSTSEC-2026-0098
           --ignore RUSTSEC-2026-0099
 
+  retrieval-gate:
+    # Answer-checked retrieval quality on real repositories: this one and a
+    # pinned Django release. Fails when identifier or natural-language hit
+    # rates drop below the thresholds stored with each task set, or when
+    # `ask` falls behind `search`. See benchmarks/README.md.
+    name: Retrieval gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DJANGO_VERSION: "5.0.6"
+      DJANGO_SHA256: ff1b61005004e476e0aeea47c7f79b85864c70124030e95146315396f1e7951f
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          shared-key: ubuntu-latest
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev clang ripgrep
+      - name: Install exact tokenizer
+        run: python3 -m pip install --user tiktoken
+      - name: Build codixing
+        run: cargo build --release -p codixing
+      - name: Self-test the gate
+        run: python3 benchmarks/retrieval_gate.py --self-test
+      - name: Gate on this repository
+        run: |
+          ./target/release/codixing init .
+          python3 benchmarks/retrieval_gate.py \
+            benchmarks/retrieval/tasks_self.json . \
+            --binary "$PWD/target/release/codixing" \
+            --output "$RUNNER_TEMP/retrieval-self.json"
+      - name: Fetch pinned Django
+        run: |
+          mkdir -p "$RUNNER_TEMP/django-sdist"
+          for attempt in 1 2 3; do
+            if python3 -m pip download --no-deps --no-binary :all: \
+                "Django==${DJANGO_VERSION}" -d "$RUNNER_TEMP/django-sdist"; then
+              break
+            fi
+            sleep $((attempt * 10))
+          done
+          echo "${DJANGO_SHA256}  $RUNNER_TEMP/django-sdist/Django-${DJANGO_VERSION}.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/django-sdist/Django-${DJANGO_VERSION}.tar.gz" -C "$RUNNER_TEMP"
+      - name: Gate on Django
+        run: |
+          binary="$PWD/target/release/codixing"
+          tasks="$PWD/benchmarks/retrieval/tasks_django.json"
+          gate="$PWD/benchmarks/retrieval_gate.py"
+          cd "$RUNNER_TEMP/Django-${DJANGO_VERSION}"
+          "$binary" init .
+          python3 "$gate" "$tasks" . --binary "$binary" \
+            --output "$RUNNER_TEMP/retrieval-django.json"
+      - name: Upload retrieval reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrieval-gate
+          path: |
+            ${{ runner.temp }}/retrieval-self.json
+            ${{ runner.temp }}/retrieval-django.json
+          if-no-files-found: warn
+          retention-days: 14
+
   coverage:
     name: Code coverage
     runs-on: ubuntu-latest
