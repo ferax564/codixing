@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.49.0] - 2026-11-12
+
 Follow-up to `codixing-review-2026-11-10.md`: retrieval correctness, output
 size, and cold-start cost on very large repositories. Measured on Linux 6.6
 (71K indexed files) unless stated.
