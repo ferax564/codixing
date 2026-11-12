@@ -206,10 +206,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # Release-only build: keep it off the `ubuntu-latest` key. rust-cache
+      # keys are write-once, and this job finishes before Test (ubuntu-latest),
+      # so sharing that key replaced the test job's debug cache with a release
+      # one and every following run recompiled the whole dependency tree.
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1-rust
-          shared-key: ubuntu-latest
+          shared-key: ubuntu-latest-release
       - name: Install system deps
         run: sudo apt-get update && sudo apt-get install -y libclang-dev clang ripgrep
       - name: Install exact tokenizer
@@ -368,10 +372,11 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+      # Release builds share the retrieval gate's cache, not the test job's.
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1-rust
-          shared-key: ubuntu-latest
+          shared-key: ubuntu-latest-release
       - name: Install system deps
         run: sudo apt-get update && sudo apt-get install -y libclang-dev clang
 

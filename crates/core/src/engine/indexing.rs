@@ -1394,6 +1394,70 @@ pub(super) fn walk_source_directory(root: &Path, config: &IndexConfig) -> Result
     walk_source_files(root, &scoped)
 }
 
+/// The distinct files that define a symbol name, kept only as far as the
+/// edge heuristics need: an edge exists when exactly one file other than the
+/// referencing one defines the name, so a third file already rules it out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DefiningFiles {
+    Few(Vec<String>),
+    Many,
+}
+
+impl DefiningFiles {
+    fn of(symbols: &[crate::symbols::Symbol]) -> Self {
+        let mut files: Vec<String> = Vec::with_capacity(2);
+        for symbol in symbols {
+            if files.iter().any(|f| f == &symbol.file_path) {
+                continue;
+            }
+            if files.len() == 2 {
+                return Self::Many;
+            }
+            files.push(symbol.file_path.clone());
+        }
+        Self::Few(files)
+    }
+
+    /// The only defining file other than `exclude`, if there is exactly one.
+    fn sole_excluding(&self, exclude: &str) -> Option<&str> {
+        let Self::Few(files) = self else {
+            return None;
+        };
+        let mut others = files.iter().filter(|f| f.as_str() != exclude);
+        match (others.next(), others.next()) {
+            (Some(only), None) => Some(only.as_str()),
+            _ => None,
+        }
+    }
+}
+
+/// Names defined this many times or more are resolved once per pass and
+/// reused. Without it, a name such as `new` defined in every file of a large
+/// repository is looked up (and every definition cloned) at each call site,
+/// which made graph construction quadratic in the number of files.
+const DEFINING_FILES_CACHE_MIN_SYMBOLS: usize = 16;
+
+type DefiningFilesCache = HashMap<String, DefiningFiles>;
+
+/// Resolve `name` to the single file other than `from_file` that defines it.
+fn sole_defining_file(
+    cache: &mut DefiningFilesCache,
+    symbols: &SymbolTable,
+    name: &str,
+    from_file: &str,
+) -> Option<String> {
+    if let Some(cached) = cache.get(name) {
+        return cached.sole_excluding(from_file).map(str::to_string);
+    }
+    let syms = symbols.lookup(name);
+    let files = DefiningFiles::of(&syms);
+    let target = files.sole_excluding(from_file).map(str::to_string);
+    if syms.len() >= DEFINING_FILES_CACHE_MIN_SYMBOLS {
+        cache.insert(name.to_string(), files);
+    }
+    target
+}
+
 /// Resolve call-site names against the symbol table and add `EdgeKind::Calls`
 /// edges to the graph.
 ///
@@ -1406,6 +1470,7 @@ pub(super) fn add_call_edges(
     pending_calls: &DashMap<String, Vec<String>>,
 ) {
     let mut total = 0usize;
+    let mut defining = DefiningFilesCache::default();
     for entry in pending_calls.iter() {
         let from_file = entry.key();
         let call_names = entry.value();
@@ -1416,21 +1481,13 @@ pub(super) fn add_call_edges(
 
         let mut seen_targets = std::collections::HashSet::new();
         for name in call_names {
-            let syms = symbols.lookup(name);
-            // Collect unique defining files, excluding the caller itself.
-            let target_files: std::collections::HashSet<&str> = syms
-                .iter()
-                .map(|s| s.file_path.as_str())
-                .filter(|&fp| fp != from_file.as_str())
-                .collect();
-            if target_files.len() == 1 {
-                let target = *target_files.iter().next().unwrap();
-                if seen_targets.insert(target.to_string()) {
-                    let target_lang =
-                        detect_language(std::path::Path::new(target)).unwrap_or(from_lang);
-                    graph.add_call_edge(from_file, target, name, from_lang, target_lang);
-                    total += 1;
-                }
+            if let Some(target) = sole_defining_file(&mut defining, symbols, name, from_file)
+                && seen_targets.insert(target.clone())
+            {
+                let target_lang =
+                    detect_language(std::path::Path::new(&target)).unwrap_or(from_lang);
+                graph.add_call_edge(from_file, &target, name, from_lang, target_lang);
+                total += 1;
             }
         }
     }
@@ -1450,6 +1507,7 @@ pub(super) fn add_doc_edges(
     pending_doc_refs: &DashMap<String, Vec<crate::language::doc::SymbolRef>>,
 ) {
     let mut total = 0usize;
+    let mut defining = DefiningFilesCache::default();
     for entry in pending_doc_refs.iter() {
         let doc_file = entry.key();
         let refs = entry.value();
@@ -1461,23 +1519,15 @@ pub(super) fn add_doc_edges(
 
         let mut seen_targets = std::collections::HashSet::new();
         for sym_ref in refs.iter() {
-            let syms = symbols.lookup(&sym_ref.name);
-            // Collect unique defining files, excluding the doc file itself.
-            let target_files: std::collections::HashSet<&str> = syms
-                .iter()
-                .map(|s| s.file_path.as_str())
-                .filter(|&fp| fp != doc_file.as_str())
-                .collect();
-
             // Only add edge if unambiguous (exactly 1 defining file).
-            if target_files.len() == 1 {
-                let target = *target_files.iter().next().unwrap();
-                if seen_targets.insert(target.to_string()) {
-                    let target_lang =
-                        detect_language(std::path::Path::new(target)).unwrap_or(Language::Rust);
-                    graph.add_doc_edge(doc_file, target, &sym_ref.name, doc_lang, target_lang);
-                    total += 1;
-                }
+            if let Some(target) =
+                sole_defining_file(&mut defining, symbols, &sym_ref.name, doc_file)
+                && seen_targets.insert(target.clone())
+            {
+                let target_lang =
+                    detect_language(std::path::Path::new(&target)).unwrap_or(Language::Rust);
+                graph.add_doc_edge(doc_file, &target, &sym_ref.name, doc_lang, target_lang);
+                total += 1;
             }
         }
     }
@@ -1501,26 +1551,38 @@ pub(super) fn populate_symbol_graph(graph: &mut CodeGraph, symbol_data: PendingS
     // retaining only function line/node pairs plus call references for phase 2.
     // This releases definition names/kinds and the DashMap allocation while the
     // graph grows instead of overlapping both corpus-wide representations.
-    let mut name_to_indices: HashMap<String, Vec<petgraph::graph::NodeIndex>> = HashMap::new();
+    //
+    // Each file gets a dense id in iteration order, and every name's
+    // definitions are appended file by file, so each `name_to_indices` list is
+    // sorted by file id. Phase 2 then finds a caller's same-file candidates
+    // with a binary search instead of scanning every same-named definition in
+    // the corpus: a name such as `new` defined in 10,000 files used to cost
+    // 10,000 comparisons per call site.
+    let mut name_to_indices: HashMap<String, Vec<(u32, petgraph::graph::NodeIndex)>> =
+        HashMap::new();
     let mut pending_references = Vec::with_capacity(symbol_data.len());
 
-    for (rel_str, (definitions, references)) in symbol_data {
+    for (file_id, (rel_str, (definitions, references))) in symbol_data.into_iter().enumerate() {
+        let file_id = u32::try_from(file_id).unwrap_or(u32::MAX);
         let mut func_defs = Vec::new();
         for def in definitions {
             let is_function = def.kind == SymbolKind::Function;
             let idx = graph.add_symbol_with_line(&def.name, &rel_str, def.kind, def.line);
-            name_to_indices.entry(def.name).or_default().push(idx);
+            name_to_indices
+                .entry(def.name)
+                .or_default()
+                .push((file_id, idx));
             if is_function {
                 func_defs.push((def.line, idx));
             }
         }
         func_defs.sort_by_key(|(line, _)| *line);
-        pending_references.push((rel_str, func_defs, references));
+        pending_references.push((file_id, func_defs, references));
     }
 
     // Phase 2: consume references and wire call edges.
     let mut total_edges = 0usize;
-    for (rel_str, func_defs, references) in pending_references {
+    for (file_id, func_defs, references) in pending_references {
         for r in references {
             // Find the enclosing function for this call site.
             let caller_idx = find_enclosing_function(&func_defs, r.line);
@@ -1534,39 +1596,7 @@ pub(super) fn populate_symbol_graph(graph: &mut CodeGraph, symbol_data: PendingS
             // back to cross-file if no same-file match exists.
             let callee_base = r.target_name.rsplit("::").next().unwrap_or(&r.target_name);
             if let Some(target_indices) = name_to_indices.get(callee_base) {
-                // Same-file candidates (excluding the caller itself).
-                let same_file: Vec<_> = target_indices
-                    .iter()
-                    .filter(|&&idx| {
-                        graph
-                            .inner
-                            .node_weight(idx)
-                            .is_some_and(|n| n.file == rel_str)
-                    })
-                    .filter(|&&idx| {
-                        // Exclude the caller node itself to avoid self-edges later.
-                        idx != caller_idx
-                    })
-                    .collect();
-                // Cross-file candidates.
-                let cross_file: Vec<_> = target_indices
-                    .iter()
-                    .filter(|&&idx| {
-                        graph
-                            .inner
-                            .node_weight(idx)
-                            .is_some_and(|n| n.file != rel_str)
-                    })
-                    .collect();
-                let target = if same_file.len() == 1 {
-                    Some(**same_file.first().unwrap())
-                } else if cross_file.len() == 1 {
-                    Some(**cross_file.first().unwrap())
-                } else if target_indices.len() == 1 {
-                    Some(target_indices[0])
-                } else {
-                    None
-                };
+                let target = resolve_call_target(target_indices, file_id, caller_idx);
                 if let Some(target_idx) = target {
                     // Avoid self-edges
                     if caller_idx != target_idx {
@@ -1584,6 +1614,35 @@ pub(super) fn populate_symbol_graph(graph: &mut CodeGraph, symbol_data: PendingS
             symbol_edges = total_edges,
             "populated symbol-level call graph"
         );
+    }
+}
+
+/// Pick the definition a call resolves to, or `None` when it is ambiguous.
+///
+/// `candidates` are every definition sharing the callee's name, as
+/// `(file_id, node)` pairs sorted by file id; `file_id` is the caller's file.
+/// The rules, in order: exactly one definition in the caller's file other than
+/// the caller itself; else exactly one definition in other files; else the
+/// only definition there is. Same-file candidates are found by binary search,
+/// so the cost does not grow with how many files define the name.
+fn resolve_call_target(
+    candidates: &[(u32, petgraph::graph::NodeIndex)],
+    file_id: u32,
+    caller_idx: petgraph::graph::NodeIndex,
+) -> Option<petgraph::graph::NodeIndex> {
+    let start = candidates.partition_point(|(f, _)| *f < file_id);
+    let end = start + candidates[start..].partition_point(|(f, _)| *f == file_id);
+    let in_file = &candidates[start..end];
+
+    let mut same_file = in_file.iter().filter(|(_, idx)| *idx != caller_idx);
+    if let (Some((_, only)), None) = (same_file.next(), same_file.next()) {
+        return Some(*only);
+    }
+    match candidates.len() - in_file.len() {
+        1 if start == 1 => Some(candidates[0].1),
+        1 => Some(candidates[end].1),
+        _ if candidates.len() == 1 => Some(candidates[0].1),
+        _ => None,
     }
 }
 
@@ -2022,5 +2081,88 @@ mod init_hash_tests {
         let files = walk_source_files(&root, &config).unwrap();
 
         assert_eq!(files, vec![src.join("inside.rs").canonicalize().unwrap()]);
+    }
+}
+
+#[cfg(test)]
+mod edge_resolution_tests {
+    use super::{DefiningFiles, resolve_call_target};
+    use petgraph::graph::NodeIndex;
+
+    fn n(i: u32) -> NodeIndex {
+        NodeIndex::new(i as usize)
+    }
+
+    #[test]
+    fn call_prefers_the_single_definition_in_the_callers_file() {
+        // `new` defined in files 0, 1 and 2; the caller lives in file 1.
+        let candidates = [(0, n(10)), (1, n(11)), (2, n(12))];
+        assert_eq!(resolve_call_target(&candidates, 1, n(99)), Some(n(11)));
+    }
+
+    #[test]
+    fn call_falls_back_to_the_single_definition_elsewhere() {
+        // Only the caller itself is in file 1, so the cross-file one wins,
+        // whether it sorts before or after the caller's file.
+        assert_eq!(
+            resolve_call_target(&[(0, n(10)), (1, n(11))], 1, n(11)),
+            Some(n(10))
+        );
+        assert_eq!(
+            resolve_call_target(&[(1, n(11)), (4, n(14))], 1, n(11)),
+            Some(n(14))
+        );
+        // A caller whose file defines nothing by that name.
+        assert_eq!(resolve_call_target(&[(4, n(14))], 2, n(99)), Some(n(14)));
+    }
+
+    #[test]
+    fn ambiguous_calls_resolve_to_nothing() {
+        let candidates = [(0, n(10)), (2, n(12)), (3, n(13))];
+        assert_eq!(resolve_call_target(&candidates, 1, n(99)), None);
+        // Two definitions in the caller's own file are ambiguous too.
+        let same_file_pair = [(1, n(11)), (1, n(21)), (2, n(12)), (3, n(13))];
+        assert_eq!(resolve_call_target(&same_file_pair, 1, n(99)), None);
+    }
+
+    #[test]
+    fn a_lone_recursive_definition_resolves_to_itself() {
+        // The caller is the only definition; the caller skips the self-edge.
+        assert_eq!(resolve_call_target(&[(1, n(11))], 1, n(11)), Some(n(11)));
+    }
+
+    fn symbol_in(file: &str) -> crate::symbols::Symbol {
+        crate::symbols::Symbol {
+            name: "new".to_string(),
+            kind: crate::language::EntityKind::Function,
+            language: crate::language::Language::Rust,
+            file_path: file.to_string(),
+            line_start: 0,
+            line_end: 1,
+            byte_start: 0,
+            byte_end: 0,
+            signature: None,
+            scope: Vec::new(),
+            doc_comment: None,
+            visibility: crate::language::Visibility::Public,
+            type_relations: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn defining_files_keep_only_what_the_edge_rule_needs() {
+        let one = DefiningFiles::of(&[symbol_in("a.rs"), symbol_in("a.rs")]);
+        assert_eq!(one.sole_excluding("caller.rs"), Some("a.rs"));
+        assert_eq!(one.sole_excluding("a.rs"), None);
+
+        let two = DefiningFiles::of(&[symbol_in("a.rs"), symbol_in("b.rs")]);
+        assert_eq!(two.sole_excluding("a.rs"), Some("b.rs"));
+        assert_eq!(two.sole_excluding("c.rs"), None);
+
+        let many = DefiningFiles::of(&[symbol_in("a.rs"), symbol_in("b.rs"), symbol_in("c.rs")]);
+        assert_eq!(many, DefiningFiles::Many);
+        assert_eq!(many.sole_excluding("a.rs"), None);
+
+        assert_eq!(DefiningFiles::of(&[]).sole_excluding("a.rs"), None);
     }
 }

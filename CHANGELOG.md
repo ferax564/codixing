@@ -175,6 +175,16 @@ size, and cold-start cost on very large repositories. Measured on Linux 6.6
 
 ### Performance
 
+- **Graph construction is no longer quadratic in repository size.** Call-site
+  and doc edges looked up (and cloned) every definition of a name at each
+  reference, the symbol-level call graph scanned every same-named definition
+  per call, and the concept index revisited a name's clusters once per
+  definition. A name defined in every file, such as `new`, therefore cost
+  O(files²). Each is now linear, with identical edges and artifacts: `init` on
+  the 10,000-file Criterion corpus drops from 103 s to 9 s (4,000 files: 18 s
+  to 2.7 s), and the `large_repo_init/10000` bench no longer dominates the
+  Benchmarks CI job.
+
 - **Index open no longer re-validates the symbol table.** Writers stamp
   `symbols_v2.bin` with its length and xxh3 digest after a full validation;
   readers verify the digest instead of walking every record (2.55 s → 27 ms).
@@ -204,6 +214,13 @@ size, and cold-start cost on very large repositories. Measured on Linux 6.6
   (at least 64 and at most 4,096 files).
 - With a warm daemon on the same index: `search` 10 ms, `ask` 98 ms, `symbols`
   73 ms, `usages` 75 ms, `graph --map` 76 ms, `impact` 351 ms.
+
+### CI
+
+- The retrieval gate and Benchmarks jobs, which build only release binaries,
+  use their own `ubuntu-latest-release` Rust cache. They shared the test job's
+  write-once `ubuntu-latest` key and, finishing first, replaced its debug cache,
+  so `Test (ubuntu-latest)` recompiled every dependency on each run.
 
 ## [0.48.0] - 2026-07-22
 

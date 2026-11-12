@@ -657,13 +657,21 @@ impl ConceptIndexBuilder {
             if target_count == 0 {
                 return Vec::new();
             }
-            let mut cluster_counts: HashMap<usize, usize> = HashMap::new();
+            // Count each distinct name once, with its multiplicity, before
+            // walking its clusters. A name such as `new` can be defined in
+            // every file and belong to thousands of clusters; visiting those
+            // clusters once per definition made this quadratic in repo size.
+            let mut name_counts: HashMap<&str, usize> = HashMap::new();
             for &sym_idx in sym_indices {
-                if let Some(name) = self.symbols.get(sym_idx).map(|s| s.name.as_str())
-                    && let Some(cluster_indices) = name_to_clusters.get(name)
-                {
+                if let Some(symbol) = self.symbols.get(sym_idx) {
+                    *name_counts.entry(symbol.name.as_str()).or_insert(0) += 1;
+                }
+            }
+            let mut cluster_counts: HashMap<usize, usize> = HashMap::new();
+            for (name, multiplicity) in name_counts {
+                if let Some(cluster_indices) = name_to_clusters.get(name) {
                     for &c_idx in cluster_indices {
-                        *cluster_counts.entry(c_idx).or_insert(0) += 1;
+                        *cluster_counts.entry(c_idx).or_insert(0) += multiplicity;
                     }
                 }
             }
