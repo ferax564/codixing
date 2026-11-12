@@ -3,7 +3,8 @@
 #
 # Triggered after Edit, Write, NotebookEdit. Reads the Claude Code
 # hook stdin JSON (.tool_input field), extracts the edited file path, and
-# runs `codixing update --file <path>` to keep the symbol index fresh.
+# queues it for a single background `codixing update --file <path>` (or one
+# `codixing sync .` when several files changed) to keep the index fresh.
 #
 # SILENT NO-OP when:
 #   - No .codixing/ index in CWD (non-codixing projects)
@@ -58,8 +59,41 @@ if [[ "$FILE_PATH" = /* ]]; then
   fi
 fi
 
-# Run async in background so the next tool call is not blocked.
-codixing update --file "$REL_PATH" >/dev/null 2>&1 &
+# Coalesce: a burst of edits must not start one indexing process per edit.
+# On a large repository each update reopens the index (seconds, and over a
+# gigabyte of memory), so N quick edits used to queue N such processes behind
+# the writer lock. Instead every edit records its path and a single background
+# runner drains the queue, looping while new paths keep arriving.
+QUEUE=".codixing/hook-update.queue"
+LOCK=".codixing/hook-update.lock"
+
+printf '%s\n' "$REL_PATH" >>"$QUEUE" 2>/dev/null || exit 0
+
+(
+  # A runner that was killed leaves its lock behind; reclaim it after 10 min.
+  find "$LOCK" -maxdepth 0 -mmin +10 -exec rmdir {} \; 2>/dev/null
+
+  while :; do
+    # `mkdir` is atomic: exactly one runner holds the lock.
+    mkdir "$LOCK" 2>/dev/null || exit 0
+
+    while [ -s "$QUEUE" ]; do
+      BATCH="$QUEUE.$$"
+      mv "$QUEUE" "$BATCH" 2>/dev/null || break
+      if [ "$(sort -u "$BATCH" | wc -l)" -eq 1 ]; then
+        codixing update --file "$(head -n 1 "$BATCH")"
+      else
+        # Several files changed: one sync covers them all.
+        codixing sync .
+      fi
+      rm -f "$BATCH"
+    done
+
+    rmdir "$LOCK" 2>/dev/null
+    # A path queued between the last check and the unlock gets another pass.
+    [ -s "$QUEUE" ] || break
+  done
+) >/dev/null 2>&1 &
 disown
 
 exit 0

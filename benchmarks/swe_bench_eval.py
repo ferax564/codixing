@@ -312,7 +312,11 @@ def search_codixing_find_symbol(repo_path: Path, symbol: str) -> str | None:
         pass
     # Fallback: parse text output
     for line in result.stdout.decode(errors="replace").split("\n"):
-        m = re.match(r"\s*(\S+?\.\w+)\s+\[L\d+", line.strip())
+        # Current: `N. path:start-end ...` (search) or `path:line:kind: ...`
+        # (usages); earlier: `path [Lstart-Lend] ...`.
+        m = re.match(
+            r"\s*(?:\d+\.\s+)?(\S+?\.\w+)(?:\s+\[L\d+|:\d+[-:])", line.strip()
+        )
         if m:
             return m.group(1).lstrip("./")
     return None
@@ -334,7 +338,11 @@ def search_codixing_usages(repo_path: Path, symbol: str, limit: int = 10) -> lis
     seen = set()
     for line in result.stdout.decode(errors="replace").split("\n"):
         # CLI format: "django/db/models/query.py [L42-L45]   0.850  preview..."
-        m = re.match(r"\s*(\S+?\.\w+)\s+\[L\d+", line.strip())
+        # Current: `N. path:start-end ...` (search) or `path:line:kind: ...`
+        # (usages); earlier: `path [Lstart-Lend] ...`.
+        m = re.match(
+            r"\s*(?:\d+\.\s+)?(\S+?\.\w+)(?:\s+\[L\d+|:\d+[-:])", line.strip()
+        )
         if m:
             fp = m.group(1).lstrip("./")
             if fp and fp not in seen:

@@ -8,27 +8,8 @@ use tracing::warn;
 
 use crate::error::{CodixingError, Result};
 use crate::index::trigram::build_query_plan;
-use crate::language::EntityKind;
 
 use super::{Engine, GrepMatch, GrepOptions};
-
-/// Lower is better. Used to prefer real definitions over import noise when
-/// multiple symbols share a name.
-fn definition_rank(kind: &EntityKind) -> u8 {
-    match kind {
-        EntityKind::Struct
-        | EntityKind::Class
-        | EntityKind::Enum
-        | EntityKind::Trait
-        | EntityKind::Interface
-        | EntityKind::TypeAlias
-        | EntityKind::Type => 0,
-        EntityKind::Function | EntityKind::Method | EntityKind::Impl => 1,
-        EntityKind::Constant | EntityKind::Static | EntityKind::Variable => 2,
-        EntityKind::Module | EntityKind::Namespace => 3,
-        EntityKind::Import => 9,
-    }
-}
 
 /// Hard ceiling for the source body returned by [`Engine::read_file_range`].
 ///
@@ -105,7 +86,10 @@ impl Engine {
             .map(|(path, ids)| (path.clone(), ids.len()))
             .collect();
 
-        if files.is_empty() && !self.chunk_meta.is_empty() {
+        // A file list without postings has no counts: derive them from the
+        // chunk metadata (decoding it if needed).
+        if (files.is_empty() || self.file_list_only) && !self.chunk_meta.is_empty() {
+            files.values_mut().for_each(|count| *count = 0);
             for entry in self.chunk_meta.iter() {
                 *files.entry(entry.value().file_path.clone()).or_insert(0) += 1;
             }
@@ -218,18 +202,19 @@ impl Engine {
     /// Returns `None` if no matching symbol is found or the file is not on disk.
     pub fn read_symbol_source(&self, name: &str, file: Option<&str>) -> Result<Option<String>> {
         let mut matches = self.symbols.filter(name, file);
-        // Prefer primary definitions over imports / incidental name hits so
-        // `read_symbol("IndexStore")` returns `pub struct IndexStore`, not a
-        // random `use IndexStore` line.
-        matches.sort_by_key(|s| definition_rank(&s.kind));
+        // Exact name first, then the strongest definition kind, so
+        // `read_symbol("Engine")` returns `pub struct Engine` and not
+        // `EngineSlot` (a substring match) or an `impl Engine` block.
+        crate::symbols::sort_for_lookup(&mut matches, name);
         let sym = match matches.into_iter().next() {
             Some(s) => s,
             None => return Ok(None),
         };
+        // `line_end` is exclusive; the range read is inclusive.
         self.read_file_range(
             &sym.file_path,
             Some(sym.line_start as u64),
-            Some(sym.line_end as u64),
+            Some(sym.line_end.saturating_sub(1).max(sym.line_start) as u64),
         )
     }
 

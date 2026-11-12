@@ -2129,3 +2129,49 @@ fn check_staleness_suggests_cli_sync_when_engine_read_only() {
          right suggestion, got: {out}"
     );
 }
+
+/// Line numbers are 1-based and agree across tools: the line `find_symbol`
+/// reports for a definition is the line `read_file` returns for it.
+#[test]
+fn read_file_ranges_use_the_line_numbers_other_tools_print() {
+    let dir = tempdir().unwrap();
+    // The fixture defines `pub fn compute` on line 8 of src/main.rs, right
+    // below its doc comment on line 7.
+    let engine = make_engine(dir.path());
+
+    let (found, err) =
+        dispatch_tool_ref(&engine, "find_symbol", &json!({ "name": "compute" }), None);
+    assert!(!err, "find_symbol failed: {found}");
+    assert!(
+        found.contains("Function compute  src/main.rs:8-"),
+        "find_symbol should report the definition on line 8: {found}"
+    );
+
+    let (read, err) = dispatch_tool_ref(
+        &engine,
+        "read_file",
+        &json!({ "file": "src/main.rs", "line_start": 8, "line_end": 8 }),
+        None,
+    );
+    assert!(!err, "read_file failed: {read}");
+    assert!(
+        read.contains("pub fn compute(a: i32, b: i32) -> i32 {"),
+        "line 8 must be the definition: {read}"
+    );
+    assert!(
+        !read.contains("Compute the sum") && !read.contains("if a > 0"),
+        "exactly the requested line is returned: {read}"
+    );
+
+    let (usages, err) = dispatch_tool_ref(
+        &engine,
+        "search_usages",
+        &json!({ "symbol": "compute" }),
+        None,
+    );
+    assert!(!err, "search_usages failed: {usages}");
+    assert!(
+        usages.contains("src/main.rs:8:definition:"),
+        "search_usages should agree on line 8: {usages}"
+    );
+}

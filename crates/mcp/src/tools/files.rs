@@ -17,11 +17,25 @@ pub(crate) fn call_read_file(engine: &Engine, args: &Value) -> (String, bool) {
         None => return ("Missing required argument: file".to_string(), true),
     };
 
-    let line_start = args.get("line_start").and_then(|v| v.as_u64());
-    let line_end = args.get("line_end").and_then(|v| v.as_u64());
+    // 1-based inclusive, like every line number the tools print: a range
+    // copied from code_search / find_symbol / grep_code reads exactly those
+    // lines. `0` (or omission) means "from the beginning" / "to the end".
+    let line_start = args
+        .get("line_start")
+        .and_then(|v| v.as_u64())
+        .filter(|&line| line > 0);
+    let line_end = args
+        .get("line_end")
+        .and_then(|v| v.as_u64())
+        .filter(|&line| line > 0);
     let token_budget = requested_tool_token_budget(args);
 
-    match engine.read_file_range(file, line_start, line_end) {
+    // The engine reads 0-based inclusive ranges.
+    match engine.read_file_range(
+        file,
+        line_start.map(|line| line - 1),
+        line_end.map(|line| line - 1),
+    ) {
         Ok(None) => (
             format!(
                 "File not found: '{file}'. \

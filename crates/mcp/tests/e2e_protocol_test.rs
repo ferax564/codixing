@@ -150,9 +150,16 @@ fn e2e_initialize_and_tools_list() {
         .as_array()
         .expect("tools should be an array");
     assert!(
-        tools.len() <= 12,
+        tools.len() <= 14,
         "default minimal profile should keep the tool catalog narrow, got {}",
         tools.len()
+    );
+    // The catalog is paid for on every turn of an agent session, so its size
+    // is part of the contract, not just its length.
+    let catalog_bytes = serde_json::to_string(tools).unwrap().len();
+    assert!(
+        catalog_bytes <= 13_500,
+        "default minimal catalog grew to {catalog_bytes} bytes; trim tool or parameter descriptions"
     );
 
     // Spot-check a few well-known tools.
@@ -164,6 +171,10 @@ fn e2e_initialize_and_tools_list() {
         names.contains(&"agent_context_pack"),
         "missing agent_context_pack tool"
     );
+    // The exact-answer tools agents use constantly are part of the default.
+    for tool in ["grep_code", "search_usages", "change_impact"] {
+        assert!(names.contains(&tool), "missing {tool} tool");
+    }
     assert!(
         !names.contains(&"write_file"),
         "default minimal profile should hide write_file"
@@ -171,6 +182,67 @@ fn e2e_initialize_and_tools_list() {
     assert!(
         !names.contains(&"read_file"),
         "default minimal profile should hide specialist read tools"
+    );
+}
+
+/// `minimal` narrows what is *advertised*. Every read-only tool stays
+/// callable, so an agent that discovers one through `search_tools` does not
+/// have to switch profile (and load the full schema) to use it. Mutating
+/// tools remain blocked.
+#[test]
+fn e2e_minimal_profile_can_call_unlisted_read_only_tools() {
+    let project = setup_indexed_project();
+    let root = project.path().to_str().unwrap();
+
+    let call = |id: u64, name: &str, arguments: Value| {
+        json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": { "name": name, "arguments": arguments },
+        })
+    };
+    let responses = run_mcp(
+        &["--root", root, "--profile", "minimal"],
+        &[
+            initialize_request(1),
+            call(2, "read_file", json!({ "file": "lib.rs" })),
+            call(
+                3,
+                "write_file",
+                json!({ "file": "new.rs", "content": "fn x() {}" }),
+            ),
+        ],
+    );
+
+    let text_of = |id: u64| -> (String, bool) {
+        let resp = responses
+            .iter()
+            .find(|r| r["id"] == id)
+            .unwrap_or_else(|| panic!("missing response {id}"));
+        (
+            resp["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            resp["result"]["isError"].as_bool().unwrap_or(false),
+        )
+    };
+
+    let (read, read_err) = text_of(2);
+    assert!(
+        !read_err && read.contains("greet"),
+        "an unlisted read-only tool must be callable under minimal: {read}"
+    );
+
+    let (write, write_err) = text_of(3);
+    assert!(
+        write_err && write.contains("blocked by MCP profile 'minimal'"),
+        "mutating tools stay blocked under minimal: {write}"
+    );
+    assert!(
+        !project.path().join("new.rs").exists(),
+        "a blocked write must not touch the project"
     );
 }
 

@@ -218,7 +218,11 @@ def codixing_symbols(repo_path: Path, symbol: str, top_k: int = 10) -> tuple[lis
         # The NAME column may contain spaces (e.g. multi-line import blocks),
         # but the FILE column always ends with a file extension + space + "L"
         # We look for the pattern: <file.ext> L<start>-L<end> or L<single>
-        m = re.search(r'(\S+\.\w+)\s+L(\d+)(?:-L?(\d+))?', line)
+        m = (
+            # Current: `Kind name  path:start-end`; earlier: `KIND NAME FILE Lstart-Lend`.
+            re.search(r'(\S+\.\w+):(\d+)-(\d+)\s*$', line)
+            or re.search(r'(\S+\.\w+)\s+L(\d+)(?:-L?(\d+))?', line)
+        )
         if not m:
             continue
         fp = m.group(1)
@@ -273,11 +277,15 @@ def codixing_usages(repo_path: Path, symbol: str, top_k: int = 10) -> tuple[list
         # Skip header, separator, summary, and empty lines
         if not line.strip() or line.startswith("FILE ") or line.startswith("---") or "usage location(s) found" in line:
             continue
-        # Extract file path: everything before " [L"
+        # Current: `path:line:kind: source`; earlier: `path [Lstart-Lend] score preview`.
+        row = re.match(r"(\S+?):\d+:[a-z_]+: ", line)
         bracket_idx = line.find(" [L")
-        if bracket_idx < 0:
+        if row:
+            fp = row.group(1)
+        elif bracket_idx >= 0:
+            fp = line[:bracket_idx].strip()
+        else:
             continue
-        fp = line[:bracket_idx].strip()
         if fp and fp not in seen:
             seen.add(fp)
             files.append(fp)

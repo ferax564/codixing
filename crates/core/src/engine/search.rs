@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tracing::{debug, warn};
@@ -68,8 +69,312 @@ fn collect_explore_neighbour_files(
     neighbour_files
 }
 
+/// Queries with at least this many content terms are re-ranked by coverage.
+const MIN_COVERAGE_TERMS: usize = 3;
+/// Candidate pool retrieved for a coverage re-rank.
+const COVERAGE_POOL: usize = 300;
+/// Candidates kept after the coverage re-rank for the boost pipeline.
+const COVERAGE_KEEP: usize = 30;
+
+/// Content terms of a query for coverage scoring: lower-cased, without
+/// function words, each reduced to a crude stem so `selects` matches `select`
+/// and `handlers` matches `handler`.
+fn coverage_terms(query: &str) -> Vec<String> {
+    const FUNCTION_WORDS: &[&str] = &[
+        "a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "does", "for", "from", "how",
+        "in", "into", "is", "it", "its", "of", "on", "or", "over", "that", "the", "this", "to",
+        "what", "when", "where", "which", "why", "with",
+    ];
+    let mut terms: Vec<String> = Vec::new();
+    for raw in query.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+        let lower = raw.to_ascii_lowercase();
+        if lower.len() < 2 || FUNCTION_WORDS.contains(&lower.as_str()) {
+            continue;
+        }
+        let stem = crude_stem(&lower).to_string();
+        if !terms.contains(&stem) {
+            terms.push(stem);
+        }
+    }
+    terms
+}
+
+/// Strip a common English inflection from words long enough to survive it.
+fn crude_stem(word: &str) -> &str {
+    if word.len() < 5 || !word.is_ascii() {
+        return word;
+    }
+    for suffix in ["ing", "ed", "es", "s"] {
+        if let Some(stem) = word.strip_suffix(suffix)
+            && stem.len() >= 3
+        {
+            return stem;
+        }
+    }
+    word
+}
+
+/// Weight of each query term found among a path's components.
+const PATH_TERM_WEIGHT: f32 = 0.5;
+/// Weight of each query term, past the first, found inside one identifier
+/// anywhere in the chunk.
+const IDENTIFIER_TERM_WEIGHT: f32 = 0.5;
+/// Weight of each query term, past the first, found inside one identifier
+/// of the chunk's signature.
+const SIGNATURE_TERM_WEIGHT: f32 = 0.5;
+/// Prose competes with code for a task-shaped query; code wins a near tie.
+const DOC_DEMOTION: f32 = 0.7;
+/// Tests restate the behaviour of the code a task is about.
+const TEST_CODE_DEMOTION: f32 = 0.5;
+/// Each further matching chunk of a file adds half as much as the previous.
+const FILE_EVIDENCE_DECAY: f32 = 0.5;
+/// Chunks of one file that count as evidence for it.
+const FILE_EVIDENCE_CHUNKS: usize = 3;
+
+/// A query term matches a token when they are equal, or when one is a
+/// prefix of the other and both are long enough for that to mean something
+/// (`congestion` and `cong`, `event` and `eventpoll`).
+fn term_matches_token(term: &str, token: &str) -> bool {
+    term == token
+        || (term.len() >= 4
+            && token.len() >= 4
+            && (token.starts_with(term) || term.starts_with(token)))
+}
+
+/// Lower-cased, stemmed words of an identifier: `load_elf_binary` and
+/// `LoadElfBinary` both give `load`, `elf`, `binary`.
+fn identifier_words(identifier: &str, out: &mut Vec<String>) {
+    out.clear();
+    let bytes = identifier.as_bytes();
+    let mut start = 0;
+    let push = |from: usize, to: usize, out: &mut Vec<String>| {
+        if to > from {
+            let word = identifier[from..to].to_ascii_lowercase();
+            out.push(crude_stem(&word).to_string());
+        }
+    };
+    for i in 0..bytes.len() {
+        let c = bytes[i];
+        if !c.is_ascii_alphanumeric() {
+            push(start, i, out);
+            start = i + 1;
+            continue;
+        }
+        if i > start {
+            let prev = bytes[i - 1];
+            let next_is_lower = bytes.get(i + 1).is_some_and(u8::is_ascii_lowercase);
+            // aB, 1a, a1, and the last capital of an acronym: HTTPServer.
+            let boundary = (prev.is_ascii_lowercase() && c.is_ascii_uppercase())
+                || (prev.is_ascii_digit() != c.is_ascii_digit())
+                || (prev.is_ascii_uppercase() && c.is_ascii_uppercase() && next_is_lower);
+            if boundary {
+                push(start, i, out);
+                start = i;
+            }
+        }
+    }
+    push(start, bytes.len(), out);
+}
+
+/// How many query terms the best single identifier in `text` covers.
+/// Identifiers with fewer than `min_words` words are ignored, and so are
+/// test names unless `allow_test_names` is set.
+fn best_identifier_coverage(
+    text: &str,
+    terms: &[String],
+    min_words: usize,
+    allow_test_names: bool,
+) -> usize {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut words = Vec::new();
+    let mut best = 0;
+    for identifier in text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+        if identifier.len() < 4
+            || identifier.as_bytes()[0].is_ascii_digit()
+            || !seen.insert(identifier)
+        {
+            continue;
+        }
+        identifier_words(identifier, &mut words);
+        if words.len() < min_words {
+            continue;
+        }
+        // A test name is a sentence about behaviour
+        // (`rename_symbol_renames_across_file`), so it covers a task
+        // description better than the code under test does.
+        if !allow_test_names && words.iter().any(|word| word == "test") {
+            continue;
+        }
+        let covered = terms
+            .iter()
+            .filter(|term| words.iter().any(|word| term_matches_token(term, word)))
+            .count();
+        best = best.max(covered);
+        if best == terms.len() {
+            break;
+        }
+    }
+    best
+}
+
+/// How many query terms appear among the components of `path`.
+fn path_term_matches(path: &str, terms: &[String]) -> usize {
+    let lower = path.to_ascii_lowercase();
+    let tokens: Vec<&str> = lower
+        .split(['/', '_', '.', '-'])
+        .filter(|t| !t.is_empty())
+        .map(crude_stem)
+        .collect();
+    terms
+        .iter()
+        .filter(|term| tokens.iter().any(|token| term_matches_token(term, token)))
+        .count()
+}
+
+/// Re-rank a BM25 candidate pool for a natural-language query.
+///
+/// BM25 with OR semantics rewards a chunk that repeats one common word. On a
+/// large repository that buries the answer even when its path or its function
+/// names nearly spell the query out. Each chunk's score is therefore scaled by:
+///
+/// - the square of the fraction of query terms it covers (path, signature and
+///   content), so coverage dominates and BM25 orders chunks of equal coverage;
+/// - the query terms found in its path: "x86 page fault handler" names
+///   `arch/x86/mm/fault.c`;
+/// - the query terms found together in one identifier: "load an elf binary"
+///   names `load_elf_binary`, and more so when that identifier is in the
+///   chunk's signature, which makes the chunk its definition.
+///
+/// Documentation is demoted slightly. Finally the best chunk of each file
+/// absorbs part of the score of that file's next chunks: a file where several
+/// chunks match is a better answer than a file where one does.
+fn rerank_natural_language(results: &mut [SearchResult], terms: &[String]) {
+    if terms.is_empty() || results.is_empty() {
+        return;
+    }
+    let asks_about_tests = terms.iter().any(|term| term == "test");
+    for result in results.iter_mut() {
+        let mut haystack = String::with_capacity(
+            result.content.len() + result.file_path.len() + result.signature.len() + 2,
+        );
+        haystack.push_str(&result.file_path);
+        haystack.push('\n');
+        haystack.push_str(&result.signature);
+        haystack.push('\n');
+        haystack.push_str(&result.content);
+        haystack.make_ascii_lowercase();
+
+        let covered = terms
+            .iter()
+            .filter(|t| haystack.contains(t.as_str()))
+            .count();
+        let fraction = covered as f32 / terms.len() as f32;
+        let mut factor = (fraction * fraction).max(0.01);
+
+        factor *= 1.0 + PATH_TERM_WEIGHT * path_term_matches(&result.file_path, terms) as f32;
+        // Identifier evidence counts for the code that implements something,
+        // not for the tests that describe it. Tests are also demoted here,
+        // before file evidence is summed and the pool is cut, so that they do
+        // not crowd implementation chunks out of it.
+        let test_code = is_test_file(&result.file_path) || is_test_chunk(result);
+        if test_code && !asks_about_tests {
+            factor *= TEST_CODE_DEMOTION;
+        }
+        if !test_code {
+            let in_content = best_identifier_coverage(&result.content, terms, 2, asks_about_tests);
+            factor *= 1.0 + IDENTIFIER_TERM_WEIGHT * in_content.saturating_sub(1) as f32;
+            let in_signature =
+                best_identifier_coverage(&result.signature, terms, 1, asks_about_tests);
+            factor *= 1.0 + SIGNATURE_TERM_WEIGHT * in_signature.saturating_sub(1) as f32;
+        }
+        if result.is_doc() {
+            factor *= DOC_DEMOTION;
+        }
+        result.score *= factor;
+    }
+    let by_score = |a: &SearchResult, b: &SearchResult| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    };
+    results.sort_by(by_score);
+
+    // File-level evidence: results are in score order, so the first chunk
+    // seen for a file is its best one.
+    let mut best_of_file: HashMap<String, (usize, usize, f32)> = HashMap::new();
+    for (index, result) in results.iter().enumerate() {
+        match best_of_file.get_mut(&result.file_path) {
+            None => {
+                best_of_file.insert(result.file_path.clone(), (index, 1, 0.0));
+            }
+            Some((_, seen, extra)) if *seen < FILE_EVIDENCE_CHUNKS => {
+                *extra += result.score * FILE_EVIDENCE_DECAY.powi(*seen as i32);
+                *seen += 1;
+            }
+            Some(_) => {}
+        }
+    }
+    for (index, _, extra) in best_of_file.into_values() {
+        results[index].score += extra;
+    }
+    results.sort_by(by_score);
+}
+
+/// Same-named definitions hydrated for [`Engine::search_goto`] before the
+/// best ones are chosen.
+const GOTO_REFINE_CANDIDATES: usize = 32;
+
+/// A definition found by name, with what decides its place among others of
+/// the same name.
+struct GotoCandidate {
+    tier: u8,
+    test_like: bool,
+    /// A prototype or forward declaration: no body.
+    declaration_only: bool,
+    /// Files that import the defining file.
+    dependents: usize,
+    line_start: usize,
+    result: SearchResult,
+}
+
+/// True when the symbol spanning `symbol_start..symbol_end` (0-based, end
+/// exclusive) is a declaration without a body: its text has no `{` and ends
+/// in `;`. `chunk` is the chunk holding it, which starts at `chunk_start`.
+///
+/// This separates a C prototype in a header from the definition in a source
+/// file, and a trait method signature from its implementations. Languages
+/// that have no such form (Python) never match.
+fn is_declaration_only(
+    chunk: &str,
+    chunk_start: usize,
+    symbol_start: usize,
+    symbol_end: usize,
+) -> bool {
+    let skip = symbol_start.saturating_sub(chunk_start);
+    let take = symbol_end.saturating_sub(symbol_start).max(1);
+    let mut last = "";
+    let mut any = false;
+    for line in chunk.lines().skip(skip).take(take) {
+        if line.contains('{') {
+            return false;
+        }
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            last = trimmed;
+            any = true;
+        }
+    }
+    any && last.ends_with(';')
+}
+
 impl Engine {
     fn ensure_read_profile_supports(&self, query: &SearchQuery) -> Result<()> {
+        if !self.read_only_load_mode.supports_search() {
+            return Err(CodixingError::Config(format!(
+                "this engine was opened in {:?} mode, which does not load the search index",
+                self.read_only_load_mode
+            )));
+        }
         if self.read_only_load_mode != ReadOnlyLoadMode::Lexical {
             return Ok(());
         }
@@ -103,6 +408,36 @@ impl Engine {
     /// - `Thorough` → hybrid + MMR deduplication
     /// - `Exact`   → Trigram index fast-path with BM25 fallback
     pub fn search(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
+        // Ranked strategies re-order candidates *after* retrieval (definition
+        // boost, test demotion, graph/recency boosts). Retrieving exactly
+        // `limit` candidates meant those stages could only shuffle what BM25
+        // already put on top, so `--limit 1` returned a different (worse)
+        // first hit than `--limit 10`. Always rank a pool of at least the
+        // default size and truncate afterwards: a smaller limit now returns a
+        // prefix of the default result list.
+        let requested = query.limit;
+        let overfetch = requested > 0
+            && matches!(
+                query.strategy,
+                Strategy::Instant | Strategy::Fast | Strategy::Thorough
+            );
+        if !overfetch {
+            return self.search_ranked(query);
+        }
+        let fetch_limit = requested.max(Self::MIN_RANKING_CANDIDATES);
+        let mut results = self.search_ranked(SearchQuery {
+            limit: fetch_limit,
+            ..query
+        })?;
+        results.truncate(requested);
+        Ok(results)
+    }
+
+    /// Smallest candidate pool handed to the post-retrieval ranking pipeline
+    /// (the default result limit, which the boost weights are tuned against).
+    const MIN_RANKING_CANDIDATES: usize = 10;
+
+    fn search_ranked(&self, query: SearchQuery) -> Result<Vec<SearchResult>> {
         self.ensure_read_profile_supports(&query)?;
 
         // Expand CamelCase/snake_case identifiers in the query for better BM25 matching.
@@ -170,7 +505,26 @@ impl Engine {
         let mut results = match strategy {
             Strategy::Instant => {
                 let retriever = BM25Retriever::new(&self.tantivy);
-                retriever.search(&query)?
+                let terms = coverage_terms(&query.query);
+                if terms.len() >= MIN_COVERAGE_TERMS {
+                    // Multi-word query: BM25 with OR semantics favours a chunk
+                    // that repeats one common word over a chunk that mentions
+                    // most of what was asked. Take a wider pool and prefer
+                    // chunks covering more distinct query terms.
+                    let pool = SearchQuery {
+                        limit: query.limit.max(COVERAGE_POOL),
+                        ..query.clone()
+                    };
+                    let mut results = retriever.search(&pool)?;
+                    rerank_natural_language(&mut results, &terms);
+                    // Hand the pipeline more than it returns: its path and
+                    // definition boosts regularly lift the right chunk from
+                    // just outside the first page.
+                    results.truncate(query.limit.max(COVERAGE_KEEP));
+                    results
+                } else {
+                    retriever.search(&query)?
+                }
             }
             Strategy::Fast => {
                 // Multi-query RRF fusion for 3+ word natural language queries.
@@ -352,7 +706,8 @@ impl Engine {
             Strategy::Instant => instant_pipeline(),
             Strategy::Fast => fast_pipeline(),
             Strategy::Thorough => thorough_pipeline(),
-            Strategy::Exact | Strategy::Goto => exact_pipeline(),
+            Strategy::Exact => exact_pipeline(),
+            Strategy::Goto => goto_pipeline(),
             // Semantic returns early from search() — pipeline is not applied,
             // but we still need a valid pipeline for the match arm.
             Strategy::Semantic => SearchPipeline::new(),
@@ -383,7 +738,16 @@ impl Engine {
         SearchContext {
             query,
             symbols: &self.symbols,
-            graph: self.graph.as_ref(),
+            // Only the Fast/Thorough/Explore/Deep stages read the graph;
+            // the others get it if it happens to be resident.
+            graph: match strategy {
+                Strategy::Fast | Strategy::Thorough | Strategy::Explore | Strategy::Deep => {
+                    self.graph_ref()
+                }
+                Strategy::Instant | Strategy::Exact | Strategy::Goto | Strategy::Semantic => {
+                    self.graph.as_ref()
+                }
+            },
             graph_boost_weight: self.config.graph.boost_weight,
             recency_map: match strategy {
                 Strategy::Fast | Strategy::Thorough => Some(self.get_recency_map()),
@@ -394,7 +758,18 @@ impl Engine {
                 | Strategy::Explore
                 | Strategy::Deep => None,
             },
-            chunk_meta: Some(&self.chunk_meta),
+            // Only graph propagation (Fast/Thorough) reads chunk metadata.
+            // Handing it to every strategy would decode the table for a
+            // BM25 search that never looks at it.
+            chunk_meta: match strategy {
+                Strategy::Fast | Strategy::Thorough => Some(&self.chunk_meta),
+                Strategy::Instant
+                | Strategy::Exact
+                | Strategy::Goto
+                | Strategy::Semantic
+                | Strategy::Explore
+                | Strategy::Deep => None,
+            },
             tantivy: Some(&self.tantivy),
             concepts,
         }
@@ -475,30 +850,30 @@ impl Engine {
         let flush_candidates =
             |candidate_files: &mut Vec<String>, results: &mut Vec<SearchResult>| -> Result<()> {
                 self.tantivy
-                    .visit_chunks_by_file_paths(candidate_files, |chunk_id, content| {
-                        let Some(meta) = self.chunk_meta.get(&chunk_id) else {
+                    .visit_chunk_records_by_file_paths(candidate_files, |stored| {
+                        let Some(chunk) = self.chunk_view(stored) else {
                             return Ok(());
                         };
                         if let Some(ref filter) = query.file_filter
-                            && !meta.file_path.contains(filter.as_str())
+                            && !chunk.file_path.contains(filter.as_str())
                         {
                             return Ok(());
                         }
 
-                        let hit_count = content.matches(&query.query).count();
+                        let hit_count = chunk.content.matches(&query.query).count();
                         if hit_count == 0 {
                             return Ok(());
                         }
                         results.push(SearchResult {
-                            chunk_id: format!("{chunk_id}"),
-                            file_path: meta.file_path.clone(),
-                            language: meta.language.clone(),
+                            chunk_id: format!("{}", chunk.chunk_id),
+                            file_path: chunk.file_path,
+                            language: chunk.language,
                             score: hit_count as f32,
-                            line_start: meta.line_start,
-                            line_end: meta.line_end,
-                            signature: meta.signature.clone(),
-                            scope_chain: meta.scope_chain.clone(),
-                            content,
+                            line_start: chunk.line_start,
+                            line_end: chunk.line_end,
+                            signature: chunk.signature,
+                            scope_chain: chunk.scope_chain,
+                            content: chunk.content,
                         });
 
                         // Keep result bodies bounded even when one selected
@@ -603,6 +978,34 @@ impl Engine {
         Ok(results)
     }
 
+    /// Reconcile a stored chunk with the chunk-metadata table.
+    ///
+    /// When the table is in memory it is the authority: a chunk it does not
+    /// list is dropped, and its fields win over the stored ones (a writable
+    /// engine can be ahead of the committed Tantivy segments). When it has
+    /// not been decoded, which is the normal state of a read-only engine,
+    /// the stored fields are used as they are; they were written from the
+    /// same chunk.
+    fn chunk_view(
+        &self,
+        stored: crate::index::tantivy::StoredChunk,
+    ) -> Option<crate::index::tantivy::StoredChunk> {
+        if !self.chunk_meta.is_loaded() {
+            return Some(stored);
+        }
+        let meta = self.chunk_meta.get(&stored.chunk_id)?;
+        Some(crate::index::tantivy::StoredChunk {
+            chunk_id: stored.chunk_id,
+            file_path: meta.file_path.clone(),
+            language: meta.language.clone(),
+            line_start: meta.line_start,
+            line_end: meta.line_end,
+            signature: meta.signature.clone(),
+            scope_chain: meta.scope_chain.clone(),
+            content: stored.content,
+        })
+    }
+
     /// True when the symbol table has a primary definition for `name`
     /// (struct/class/fn/…, not import-only).
     fn has_primary_definition(&self, name: &str) -> bool {
@@ -619,7 +1022,7 @@ impl Engine {
     /// ranked so structs/classes/functions beat imports and impl blocks.
     /// Falls back to [`Self::search_exact`] when no defining symbol is indexed.
     fn search_goto(&self, query: &SearchQuery) -> Result<Vec<SearchResult>> {
-        use super::pipeline::is_primary_definition_kind;
+        use super::pipeline::{definition_tier, is_test_like_path};
         use crate::language::EntityKind;
 
         let name = query.query.trim();
@@ -637,21 +1040,25 @@ impl Engine {
             return self.search_exact(query);
         }
 
-        // Prefer primary definitions over impl/module noise.
+        // Types first, then functions/values, then impl/module blocks. Within
+        // a tier, production code beats tests; path/line keep it deterministic.
         symbols.sort_by(|a, b| {
-            let a_primary = is_primary_definition_kind(&a.kind);
-            let b_primary = is_primary_definition_kind(&b.kind);
-            b_primary
-                .cmp(&a_primary)
+            definition_tier(&b.kind)
+                .cmp(&definition_tier(&a.kind))
+                .then_with(|| is_test_like_path(&a.file_path).cmp(&is_test_like_path(&b.file_path)))
                 .then_with(|| a.file_path.cmp(&b.file_path))
                 .then_with(|| a.line_start.cmp(&b.line_start))
         });
 
         // Hydrate one chunk per defining symbol via the file-path visitor.
-        let mut results: Vec<SearchResult> = Vec::new();
+        // More than `limit` are hydrated so that the refinement below can
+        // choose among every same-named definition, not just the first few
+        // in path order.
+        let hydrate_limit = query.limit.max(GOTO_REFINE_CANDIDATES);
+        let mut candidates: Vec<GotoCandidate> = Vec::new();
         let mut seen_keys = std::collections::HashSet::new();
-        for (rank, symbol) in symbols.into_iter().enumerate() {
-            if results.len() >= query.limit {
+        for symbol in symbols {
+            if candidates.len() >= hydrate_limit {
                 break;
             }
             let key = (symbol.file_path.clone(), symbol.line_start, symbol.line_end);
@@ -659,39 +1066,33 @@ impl Engine {
                 continue;
             }
 
-            let score = if is_primary_definition_kind(&symbol.kind) {
-                1000.0 - rank as f32
-            } else {
-                100.0 - rank as f32
-            };
             let mut best: Option<SearchResult> = None;
             let paths = [symbol.file_path.clone()];
             let _ = self
                 .tantivy
-                .visit_chunks_by_file_paths(&paths, |chunk_id, content| {
-                    let Some(meta) = self.chunk_meta.get(&chunk_id) else {
+                .visit_chunk_records_by_file_paths(&paths, |stored| {
+                    let Some(chunk) = self.chunk_view(stored) else {
                         return Ok(());
                     };
-                    let overlaps = meta.line_start <= symbol.line_end as u64
-                        && meta.line_end >= symbol.line_start as u64;
-                    if !overlaps {
+                    // The chunk must contain the first line of the symbol:
+                    // for a 700-line `impl` any overlapping chunk used to
+                    // qualify, so an arbitrary inner fragment was shown.
+                    let holds_head = chunk.line_start <= symbol.line_start as u64
+                        && chunk.line_end >= symbol.line_start as u64;
+                    if !holds_head {
                         return Ok(());
                     }
-                    // Prefer the tightest chunk covering the definition.
-                    let span = meta.line_end.saturating_sub(meta.line_start);
+                    // Prefer the tightest chunk covering the definition head.
                     let candidate = SearchResult {
-                        chunk_id: format!("{chunk_id}"),
-                        file_path: meta.file_path.clone(),
-                        language: meta.language.clone(),
-                        score: score + 1.0 / (1.0 + span as f32),
-                        line_start: meta.line_start,
-                        line_end: meta.line_end,
-                        signature: symbol
-                            .signature
-                            .clone()
-                            .unwrap_or_else(|| meta.signature.clone()),
-                        scope_chain: meta.scope_chain.clone(),
-                        content,
+                        chunk_id: format!("{}", chunk.chunk_id),
+                        file_path: chunk.file_path,
+                        language: chunk.language,
+                        score: 0.0,
+                        line_start: chunk.line_start,
+                        line_end: chunk.line_end,
+                        signature: symbol.signature.clone().unwrap_or(chunk.signature),
+                        scope_chain: chunk.scope_chain,
+                        content: chunk.content,
                     };
                     match &best {
                         Some(prev)
@@ -702,22 +1103,82 @@ impl Engine {
                     Ok(())
                 });
 
-            if let Some(result) = best {
-                results.push(result);
-            } else {
-                results.push(SearchResult {
-                    chunk_id: format!("goto_{}_{}", symbol.file_path, symbol.line_start),
-                    file_path: symbol.file_path,
-                    language: symbol.language.name().to_string(),
-                    score,
-                    line_start: symbol.line_start as u64,
-                    line_end: symbol.line_end as u64,
-                    signature: symbol.signature.unwrap_or_default(),
-                    scope_chain: symbol.scope,
-                    content: String::new(),
-                });
+            let tier = definition_tier(&symbol.kind);
+            let test_like = is_test_like_path(&symbol.file_path);
+            let declaration_only = best.as_ref().is_some_and(|chunk| {
+                is_declaration_only(
+                    &chunk.content,
+                    chunk.line_start as usize,
+                    symbol.line_start,
+                    symbol.line_end,
+                )
+            });
+            let result = best.unwrap_or_else(|| SearchResult {
+                chunk_id: format!("goto_{}_{}", symbol.file_path, symbol.line_start),
+                file_path: symbol.file_path.clone(),
+                language: symbol.language.name().to_string(),
+                score: 0.0,
+                line_start: symbol.line_start as u64,
+                line_end: symbol.line_end as u64,
+                signature: symbol.signature.clone().unwrap_or_default(),
+                scope_chain: symbol.scope.clone(),
+                content: String::new(),
+            });
+            candidates.push(GotoCandidate {
+                tier,
+                test_like,
+                declaration_only,
+                dependents: 0,
+                line_start: symbol.line_start,
+                result,
+            });
+        }
+
+        // The graph is consulted only when two definitions are otherwise
+        // equal, which keeps a lookup of a unique name free of it.
+        let tied = candidates.iter().enumerate().any(|(index, a)| {
+            candidates[index + 1..].iter().any(|b| {
+                a.tier == b.tier
+                    && a.test_like == b.test_like
+                    && a.declaration_only == b.declaration_only
+            })
+        });
+        if tied && let Some(graph) = self.graph_ref() {
+            for candidate in &mut candidates {
+                candidate.dependents = graph.caller_count(&candidate.result.file_path);
             }
         }
+
+        // Among same-named definitions of one tier: the one with a body beats
+        // a prototype, then the one most of the code base depends on. On the
+        // Linux kernel `kmalloc` is defined in include/linux/slab.h and
+        // re-implemented by half a dozen test harnesses under tools/.
+        candidates.sort_by(|a, b| {
+            b.tier
+                .cmp(&a.tier)
+                .then_with(|| a.test_like.cmp(&b.test_like))
+                .then_with(|| a.declaration_only.cmp(&b.declaration_only))
+                .then_with(|| b.dependents.cmp(&a.dependents))
+                .then_with(|| a.result.file_path.cmp(&b.result.file_path))
+                .then_with(|| a.line_start.cmp(&b.line_start))
+        });
+
+        let mut results: Vec<SearchResult> = candidates
+            .into_iter()
+            .take(query.limit)
+            .enumerate()
+            .map(|(rank, candidate)| {
+                let tier_base = match candidate.tier {
+                    3 => 3000.0,
+                    2 => 2000.0,
+                    _ => 1000.0,
+                };
+                let test_penalty = if candidate.test_like { 500.0 } else { 0.0 };
+                let mut result = candidate.result;
+                result.score = tier_base - test_penalty - rank.min(400) as f32;
+                result
+            })
+            .collect();
 
         if results.is_empty() {
             return self.search_exact(query);
@@ -822,7 +1283,7 @@ impl Engine {
         self.apply_graph_boost(&mut results, self.config.graph.boost_weight);
 
         // Phase 2 — expand via import graph.
-        if let Some(ref graph) = self.graph {
+        if let Some(graph) = self.graph_ref() {
             // Anchor = files in the top-limit initial results.
             let mut anchor_files = Vec::new();
             let mut anchor_set = HashSet::new();
@@ -887,7 +1348,7 @@ impl Engine {
 
     /// Multiply each result's score by `1 + weight * pagerank` then re-sort descending.
     pub(super) fn apply_graph_boost(&self, results: &mut [SearchResult], weight: f32) {
-        if let Some(ref graph) = self.graph {
+        if let Some(graph) = self.graph_ref() {
             for r in results.iter_mut() {
                 let pr = graph.node(&r.file_path).map(|n| n.pagerank).unwrap_or(0.0);
                 r.score *= 1.0 + weight * pr;
@@ -1253,7 +1714,7 @@ impl Engine {
     /// and often more relevant to a broad concept query.  The boost is
     /// logarithmic to avoid letting mega-popular files dominate all results.
     pub(super) fn apply_popularity_boost(&self, results: &mut [SearchResult]) {
-        if let Some(ref graph) = self.graph {
+        if let Some(graph) = self.graph_ref() {
             let mut boosted = false;
             for r in results.iter_mut() {
                 let caller_count = graph.caller_count(&r.file_path);
@@ -1357,6 +1818,18 @@ pub(super) fn is_test_file(path: &str) -> bool {
     {
         return true;
     }
+    // Test trees with other conventional names: the kernel's
+    // tools/testing/selftests/, KUnit suites, Go's testdata/.
+    if path.contains("/selftests/")
+        || path.contains("/testing/")
+        || path.contains("/kunit/")
+        || path.contains("/testdata/")
+        || path.starts_with("selftests/")
+        || path.starts_with("testing/")
+        || path.starts_with("testdata/")
+    {
+        return true;
+    }
     // Benchmark/evaluation files: benchmarks/, bench/, *.bench.*, *_bench.*
     if path.contains("/benchmarks/")
         || path.contains("/bench/")
@@ -1376,6 +1849,31 @@ pub(super) fn is_test_file(path: &str) -> bool {
         || path.ends_with("_unittest.cpp")
     {
         return true;
+    }
+    // C: foo_test.c, foo-test.c, foo_kunit.c, test-foo.c, test_foo.c.
+    // Go: foo_test.go. Java/Kotlin: FooTest.java, FooTests.kt.
+    {
+        let basename = path.rsplit('/').next().unwrap_or(path);
+        if let Some((stem, ext)) = basename.rsplit_once('.') {
+            let c_like = matches!(ext, "c" | "h");
+            if c_like
+                && (stem.ends_with("_test")
+                    || stem.ends_with("-test")
+                    || stem.ends_with("_tests")
+                    || stem.ends_with("_kunit")
+                    || stem.ends_with("-kunit")
+                    || stem.starts_with("test-")
+                    || stem.starts_with("test_"))
+            {
+                return true;
+            }
+            if ext == "go" && stem.ends_with("_test") {
+                return true;
+            }
+            if matches!(ext, "java" | "kt") && (stem.ends_with("Test") || stem.ends_with("Tests")) {
+                return true;
+            }
+        }
     }
     // File named "tests.rs" or "tests.py" etc. — test module files
     let basename = path.rsplit('/').next().unwrap_or(path);
@@ -2206,6 +2704,169 @@ fn expand_query(query: &str) -> String {
 mod tests {
     use super::*;
 
+    fn coverage_candidate(path: &str, score: f32, content: &str) -> SearchResult {
+        SearchResult {
+            chunk_id: path.to_string(),
+            file_path: path.to_string(),
+            language: "C".to_string(),
+            score,
+            line_start: 0,
+            line_end: 10,
+            signature: String::new(),
+            scope_chain: Vec::new(),
+            content: content.to_string(),
+        }
+    }
+
+    #[test]
+    fn coverage_terms_drop_function_words_and_stem() {
+        assert_eq!(
+            coverage_terms("how does the scheduler pick the next task"),
+            vec!["scheduler", "pick", "next", "task"]
+        );
+        // Inflections collapse so `selects` covers `select_bad_process`.
+        assert_eq!(
+            coverage_terms("killer selects victims"),
+            vec!["killer", "select", "victim"]
+        );
+        // Short words are left alone.
+        assert_eq!(coverage_terms("bus pass"), vec!["bus", "pass"]);
+    }
+
+    #[test]
+    fn declaration_only_separates_prototypes_from_bodies() {
+        let header =
+            "#include <x.h>\n\nvoid *kmalloc(size_t size,\n\t\tgfp_t flags);\nint other;\n";
+        // The prototype spans lines 2..4 of a chunk starting at line 0.
+        assert!(is_declaration_only(header, 0, 2, 4));
+        let source = "void *kmalloc(size_t size, gfp_t flags)\n{\n\treturn 0;\n}\n";
+        assert!(!is_declaration_only(source, 10, 10, 14));
+        // One-line inline definition.
+        assert!(!is_declaration_only(
+            "static inline int f(void) { return 0; }\n",
+            0,
+            0,
+            1
+        ));
+        // A language without prototypes.
+        assert!(!is_declaration_only("def f():\n    return 1\n", 0, 0, 2));
+        // A macro is not a declaration.
+        assert!(!is_declaration_only(
+            "#define kmalloc(size, flags) malloc(size)\n",
+            5,
+            5,
+            6
+        ));
+    }
+
+    #[test]
+    fn identifier_words_split_snake_and_camel_case() {
+        let mut words = Vec::new();
+        identifier_words("load_elf_binary", &mut words);
+        assert_eq!(words, ["load", "elf", "binary"]);
+        identifier_words("HTTPServerConfig2", &mut words);
+        assert_eq!(words, ["http", "server", "config", "2"]);
+        identifier_words("jbd2_journal_commit_transaction", &mut words);
+        assert_eq!(words, ["jbd", "2", "journal", "commit", "transaction"]);
+    }
+
+    #[test]
+    fn path_terms_match_whole_components_and_long_prefixes() {
+        let terms = coverage_terms("x86 page fault handler");
+        assert_eq!(path_term_matches("arch/x86/mm/fault.c", &terms), 2);
+        assert_eq!(path_term_matches("arch/x86/kvm/emulate.h", &terms), 1);
+        // A short term must equal a component; `x86` is not in `x86_64`'s
+        // sibling `ia64`, and `page` is not a prefix match for `pager`
+        // unless both are long enough.
+        assert_eq!(path_term_matches("arch/ia64/mm/init.c", &terms), 0);
+        let terms = coverage_terms("cubic tcp congestion control");
+        assert_eq!(path_term_matches("net/ipv4/tcp_cubic.c", &terms), 2);
+        assert_eq!(path_term_matches("net/ipv4/tcp_cong.c", &terms), 2);
+    }
+
+    #[test]
+    fn rerank_prefers_the_chunk_whose_identifier_spells_the_query() {
+        let terms = coverage_terms("load an elf binary for exec");
+        let mut results = vec![
+            coverage_candidate(
+                "fs/exec.c",
+                20.0,
+                "/* load the binary; elf handled elsewhere; exec */ int do_execve(void);",
+            ),
+            coverage_candidate(
+                "fs/binfmt_elf.c",
+                14.0,
+                "static int load_elf_binary(struct linux_binprm *bprm) { /* exec */ }",
+            ),
+        ];
+        rerank_natural_language(&mut results, &terms);
+        assert_eq!(
+            results[0].file_path,
+            "fs/binfmt_elf.c",
+            "one identifier covering three terms must beat scattered words: {:?}",
+            results
+                .iter()
+                .map(|r| (&r.file_path, r.score))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn rerank_demotes_prose_and_rewards_files_with_several_matching_chunks() {
+        let terms = coverage_terms("journal commit transaction");
+        let body = "journal commit transaction";
+        let mut prose = coverage_candidate("docs/notes.md", 10.0, body);
+        prose.language = "Markdown".to_string();
+        let mut results = vec![prose, coverage_candidate("fs/a.c", 10.0, body)];
+        rerank_natural_language(&mut results, &terms);
+        assert_eq!(results[0].file_path, "fs/a.c", "code beats prose on a tie");
+
+        let mut results = vec![
+            coverage_candidate("fs/one.c", 10.0, body),
+            coverage_candidate("fs/many.c", 9.0, body),
+            coverage_candidate("fs/many.c", 8.0, body),
+        ];
+        rerank_natural_language(&mut results, &terms);
+        assert_eq!(
+            results[0].file_path, "fs/many.c",
+            "two matching chunks outweigh one slightly better chunk"
+        );
+        assert_eq!(results[0].score, 9.0 + 8.0 * FILE_EVIDENCE_DECAY);
+    }
+
+    #[test]
+    fn coverage_rerank_prefers_chunks_that_mention_more_of_the_query() {
+        let terms = coverage_terms("x86 page fault handler");
+        let mut results = vec![
+            // Highest BM25 score, but only repeats one term.
+            coverage_candidate(
+                "drivers/misc/pager.c",
+                30.0,
+                "page page page page page page page",
+            ),
+            // Covers every term: two through its path, two in the content.
+            coverage_candidate(
+                "arch/x86/mm/fault.c",
+                12.0,
+                "static void handle_page_fault(struct pt_regs *regs) { /* handler */ }",
+            ),
+            coverage_candidate("lib/fault-inject.c", 20.0, "fault injection page"),
+        ];
+
+        rerank_natural_language(&mut results, &terms);
+
+        assert_eq!(
+            results[0].file_path,
+            "arch/x86/mm/fault.c",
+            "full coverage must beat a higher raw score: {:?}",
+            results
+                .iter()
+                .map(|r| (&r.file_path, r.score))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(results[2].file_path, "drivers/misc/pager.c");
+    }
+
     #[test]
     fn explore_neighbours_preserve_anchor_rank_and_skip_covered_slots() {
         use crate::graph::CodeGraph;
@@ -2335,6 +2996,22 @@ mod tests {
 
         assert_eq!(results[0].file_path, "src/popular_hub.rs");
         assert!(results[0].score > results[1].score);
+    }
+
+    #[test]
+    fn detects_kernel_and_c_test_conventions() {
+        assert!(is_test_file(
+            "tools/testing/selftests/filesystems/epoll/epoll_wakeup_test.c"
+        ));
+        assert!(is_test_file("lib/list-test.c"));
+        assert!(is_test_file("lib/test_kmod.c"));
+        assert!(is_test_file("drivers/base/regmap/regmap-kunit.c"));
+        assert!(is_test_file("fs/ext4/inode_kunit.c"));
+        assert!(is_test_file("pkg/server_test.go"));
+        assert!(is_test_file("src/main/FooTest.java"));
+        assert!(!is_test_file("fs/eventpoll.c"));
+        assert!(!is_test_file("kernel/latest.c"));
+        assert!(!is_test_file("drivers/net/contest.c"));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use tree_sitter::{Node, Tree};
 
+use super::c_family::{macro_defined_function_name, mask_attribute_macros};
 use super::{
     EntityKind, Language, LanguageSupport, SemanticEntity, Visibility, extract_preceding_comments,
     find_name_node, node_line_range, node_text,
@@ -15,6 +16,7 @@ const ENTITY_KINDS: &[&str] = &[
     "type_definition",
     "declaration",
     "preproc_include",
+    "preproc_function_def",
 ];
 
 impl LanguageSupport for CLanguage {
@@ -44,6 +46,97 @@ impl LanguageSupport for CLanguage {
     fn extract_doc_comment(&self, node: &Node, source: &[u8]) -> Option<String> {
         extract_preceding_comments(node, source, "//")
     }
+
+    fn prepare_source<'a>(&self, source: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {
+        mask_attribute_macros(source)
+    }
+}
+
+/// Node kinds whose children are file-level declarations.
+pub(super) fn is_declaration_scope(kind: &str) -> bool {
+    matches!(
+        kind,
+        "translation_unit"
+            | "preproc_if"
+            | "preproc_ifdef"
+            | "preproc_else"
+            | "preproc_elif"
+            | "preproc_elifdef"
+            | "linkage_specification"
+            | "declaration_list"
+    )
+}
+
+/// Recognise a function defined through a macro, which the grammar sees as a
+/// call expression followed by a block:
+///
+/// ```c
+/// SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+/// {
+/// ```
+///
+/// `node` must be a file-level child. Returns the entity spanning the macro
+/// call and its body.
+pub(super) fn macro_defined_function(node: &Node, source: &[u8]) -> Option<SemanticEntity> {
+    if node.kind() != "expression_statement" {
+        return None;
+    }
+    let body = node.next_sibling()?;
+    if body.kind() != "compound_statement" {
+        return None;
+    }
+    let call = node.named_child(0)?;
+    if call.kind() != "call_expression" {
+        return None;
+    }
+    let function = call.child_by_field_name("function")?;
+    if function.kind() != "identifier" {
+        return None;
+    }
+    let macro_name = node_text(&function, source);
+    // Function-defining macros are spelled in capitals; anything else here
+    // is a parse artefact.
+    if !macro_name.bytes().any(|b| b.is_ascii_uppercase())
+        || macro_name.bytes().any(|b| b.is_ascii_lowercase())
+    {
+        return None;
+    }
+    let arguments = call.child_by_field_name("arguments")?;
+    let first = arguments.named_child(0)?;
+    let name = macro_defined_function_name(macro_name, node_text(&first, source))?;
+    let signature = node_text(&call, source)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(SemanticEntity {
+        kind: EntityKind::Function,
+        name,
+        signature: Some(signature),
+        doc_comment: extract_preceding_comments(node, source, "//"),
+        byte_range: node.start_byte()..body.end_byte(),
+        line_range: node.start_position().row..body.end_position().row + 1,
+        scope: Vec::new(),
+        visibility: Visibility::default(),
+        type_relations: Vec::new(),
+    })
+}
+
+/// Line range of a `#define`, whose node also covers the line break that
+/// ends the directive.
+pub(super) fn macro_line_range(node: &Node, source: &[u8]) -> std::ops::Range<usize> {
+    let start = node.start_position().row;
+    let lines = node_text(node, source).trim_end().lines().count().max(1);
+    start..start + lines
+}
+
+/// `#define name(params)`, without the replacement text.
+pub(super) fn macro_signature(node: &Node, source: &[u8]) -> Option<String> {
+    let name = node.child_by_field_name("name")?;
+    let params = node
+        .child_by_field_name("parameters")
+        .map(|p| node_text(&p, source))
+        .unwrap_or("()");
+    Some(format!("#define {}{}", node_text(&name, source), params))
 }
 
 fn collect_entities(
@@ -68,7 +161,11 @@ fn collect_entities(
                 signature: lang.extract_signature(node, source),
                 doc_comment: lang.extract_doc_comment(node, source),
                 byte_range: node.start_byte()..node.end_byte(),
-                line_range: node_line_range(node),
+                line_range: if kind_str == "preproc_function_def" {
+                    macro_line_range(node, source)
+                } else {
+                    node_line_range(node)
+                },
                 scope: scope.to_vec(),
                 visibility: Visibility::default(),
                 type_relations: Vec::new(),
@@ -77,11 +174,26 @@ fn collect_entities(
         }
     }
 
+    // A macro body is unparsed text: nothing to recurse into.
+    if kind_str == "preproc_function_def" {
+        return;
+    }
+
     // Recurse into children
+    let declaration_scope = is_declaration_scope(kind_str);
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
+        if declaration_scope && let Some(entity) = macro_defined_function(&child, source) {
+            entities.push(entity);
+        }
         collect_entities(lang, &child, source, scope, entities);
     }
+}
+
+/// True when a struct/enum/class specifier carries a body, i.e. it defines
+/// the type rather than merely naming it.
+fn has_body(node: &Node) -> bool {
+    node.child_by_field_name("body").is_some()
 }
 
 fn match_entity_kind(kind: &str, node: &Node, source: &[u8]) -> Option<EntityKind> {
@@ -94,12 +206,22 @@ fn match_entity_kind(kind: &str, node: &Node, source: &[u8]) -> Option<EntityKin
             {
                 return None; // Will be handled by type_definition
             }
+            // A specifier without a body (`struct foo *p;`, `struct foo;`) is a
+            // reference or forward declaration, not a definition.
+            if !has_body(node) {
+                return None;
+            }
             Some(EntityKind::Struct)
         }
         "enum_specifier" => {
             if let Some(parent) = node.parent()
                 && parent.kind() == "type_definition"
             {
+                return None;
+            }
+            // A specifier without a body (`struct foo *p;`, `struct foo;`) is a
+            // reference or forward declaration, not a definition.
+            if !has_body(node) {
                 return None;
             }
             Some(EntityKind::Enum)
@@ -114,6 +236,10 @@ fn match_entity_kind(kind: &str, node: &Node, source: &[u8]) -> Option<EntityKin
             }
         }
         "preproc_include" => Some(EntityKind::Import),
+        // Function-like macros are called like functions and looked up like
+        // functions. Object-like macros are left to text search: a kernel
+        // tree has millions of them.
+        "preproc_function_def" => Some(EntityKind::Function),
         _ => None,
     }
 }
@@ -166,6 +292,9 @@ fn extract_entity_name(node: &Node, source: &[u8], kind: &str) -> Option<String>
             let text = node_text(node, source);
             Some(text.trim().to_string())
         }
+        "preproc_function_def" => node
+            .child_by_field_name("name")
+            .map(|n| node_text(&n, source).to_string()),
         _ => find_name_node(node, source),
     }
 }
@@ -230,6 +359,7 @@ fn extract_c_signature(node: &Node, source: &[u8]) -> Option<String> {
                     .to_string(),
             )
         }
+        "preproc_function_def" => macro_signature(node, source),
         _ => None,
     }
 }
@@ -239,14 +369,118 @@ mod tests {
     use super::*;
 
     fn parse_c(source: &str) -> (Tree, Vec<SemanticEntity>) {
-        let mut parser = tree_sitter::Parser::new();
-        parser
-            .set_language(&tree_sitter_c::LANGUAGE.into())
-            .unwrap();
-        let tree = parser.parse(source.as_bytes(), None).unwrap();
         let lang = CLanguage;
+        let tree = lang.parse(source.as_bytes()).unwrap();
         let entities = lang.extract_entities(&tree, source.as_bytes());
         (tree, entities)
+    }
+
+    fn function<'a>(entities: &'a [SemanticEntity], name: &str) -> &'a SemanticEntity {
+        entities
+            .iter()
+            .find(|e| e.kind == EntityKind::Function && e.name == name)
+            .unwrap_or_else(|| {
+                let names: Vec<_> = entities.iter().map(|e| e.name.as_str()).collect();
+                panic!("no function `{name}` among {names:?}")
+            })
+    }
+
+    #[test]
+    fn function_behind_attribute_macro_with_arguments() {
+        // Regression: `kmalloc` in the Linux kernel. The grammar cannot parse
+        // `__alloc_size(1)` in a declaration prefix, so the definition was
+        // lost and its body scattered.
+        let src = r#"
+static __always_inline __alloc_size(1) void *kmalloc(size_t size, gfp_t flags)
+{
+	if (__builtin_constant_p(size) && size)
+		return kmalloc_large(size, flags);
+	return __kmalloc(size, flags);
+}
+
+void *__kmalloc(size_t size, gfp_t flags) __assume_kmalloc_alignment __alloc_size(1);
+extern void die(const char *, struct pt_regs *) __noreturn;
+"#;
+        let (_, entities) = parse_c(src);
+        let kmalloc = function(&entities, "kmalloc");
+        assert_eq!(kmalloc.line_range, 1..7, "spans the whole definition");
+        assert!(
+            kmalloc
+                .signature
+                .as_ref()
+                .unwrap()
+                .contains("__alloc_size(1) void *kmalloc(size_t size, gfp_t flags)"),
+            "signature keeps the original text: {:?}",
+            kmalloc.signature
+        );
+        function(&entities, "__kmalloc");
+        function(&entities, "die");
+        assert!(
+            entities.iter().all(|e| e.name != "__alloc_size"),
+            "the attribute macro is not a symbol"
+        );
+    }
+
+    #[test]
+    fn function_like_macro_is_a_symbol() {
+        let src = r#"
+#define PAGE_SIZE 4096
+/* Cast a member of a structure out to the containing structure. */
+#define container_of(ptr, type, member) ({ \
+	void *__mptr = (void *)(ptr); \
+	((type *)(__mptr - offsetof(type, member))); })
+int after(void);
+"#;
+        let (_, entities) = parse_c(src);
+        let mac = function(&entities, "container_of");
+        assert_eq!(mac.line_range, 3..6);
+        assert_eq!(
+            mac.signature.as_deref(),
+            Some("#define container_of(ptr, type, member)")
+        );
+        assert!(mac.doc_comment.as_ref().unwrap().contains("Cast a member"));
+        assert!(
+            entities.iter().all(|e| e.name != "PAGE_SIZE"),
+            "object-like macros are not indexed"
+        );
+        function(&entities, "after");
+    }
+
+    #[test]
+    fn macro_defined_function_is_a_symbol() {
+        let src = r#"
+SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+{
+	return ksys_read(fd, buf, count);
+}
+
+int caller(void)
+{
+	return 0;
+}
+EXPORT_SYMBOL(caller);
+DEFINE_MUTEX(big_lock);
+"#;
+        let (_, entities) = parse_c(src);
+        let sys_read = function(&entities, "sys_read");
+        assert_eq!(sys_read.line_range, 1..5);
+        assert!(
+            sys_read
+                .signature
+                .as_ref()
+                .unwrap()
+                .starts_with("SYSCALL_DEFINE3(read, unsigned int, fd")
+        );
+        function(&entities, "caller");
+        assert_eq!(
+            entities.iter().filter(|e| e.name == "caller").count(),
+            1,
+            "EXPORT_SYMBOL does not define anything"
+        );
+        assert!(
+            entities.iter().all(|e| e.name != "big_lock"),
+            "a macro call that ends in `;` has no body and is not a function"
+        );
     }
 
     #[test]
@@ -271,6 +505,35 @@ int add(int a, int b) {
                 .as_ref()
                 .unwrap()
                 .contains("Add two integers")
+        );
+    }
+
+    #[test]
+    fn struct_references_are_not_definitions() {
+        // Regression: every `struct task *p` field or parameter used to be
+        // indexed as a struct definition, burying the real one on large C
+        // codebases.
+        let src = r#"
+struct task;
+
+struct task {
+    int pid;
+    struct task *parent;
+    enum state st;
+};
+
+int run(struct task *t);
+"#;
+        let (_, entities) = parse_c(src);
+        let structs: Vec<_> = entities
+            .iter()
+            .filter(|e| e.kind == EntityKind::Struct)
+            .collect();
+        assert_eq!(structs.len(), 1, "only the bodied struct is a definition");
+        assert_eq!(structs[0].name, "task");
+        assert!(
+            entities.iter().all(|e| e.kind != EntityKind::Enum),
+            "bodiless enum reference must not be a definition"
         );
     }
 

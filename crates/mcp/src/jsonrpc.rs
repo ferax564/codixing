@@ -87,6 +87,13 @@ impl McpProfile {
         matches!(self, Self::Minimal | Self::Reviewer)
     }
 
+    /// Whether a tool may be *called* under this profile.
+    ///
+    /// `minimal` narrows what is advertised, not what is safe: it runs on a
+    /// read-only engine, so every read-only tool is callable. An agent that
+    /// finds `file_callers` through `search_tools` can use it directly instead
+    /// of switching to `reviewer` and paying for that profile's whole schema
+    /// (about 8K tokens) on every later turn.
     fn allows_tool(self, name: &str) -> bool {
         if is_profile_management_tool(name) {
             return true;
@@ -97,17 +104,28 @@ impl McpProfile {
         }
 
         match self {
-            Self::Minimal => is_minimal_tool(name),
-            Self::Reviewer => tools::is_read_only_tool(name),
+            Self::Minimal | Self::Reviewer => tools::is_read_only_tool(name),
             Self::Editor => tools::is_read_only_tool(name) || !is_dangerous_write_tool(name),
             Self::Dangerous => true,
+        }
+    }
+
+    /// Whether a tool is advertised by `tools/list` under this profile.
+    fn lists_tool(self, name: &str) -> bool {
+        match self {
+            Self::Minimal => {
+                is_profile_management_tool(name)
+                    || !tools::is_known_tool(name)
+                    || is_minimal_tool(name)
+            }
+            _ => self.allows_tool(name),
         }
     }
 
     fn blocked_message(self, name: &str) -> String {
         match self {
             Self::Minimal => format!(
-                "Tool '{name}' is not available in MCP profile 'minimal'. Call set_mcp_profile with profile='reviewer' to enable the full read-only tool set without restarting the MCP server."
+                "Tool '{name}' is blocked by MCP profile 'minimal' because it can mutate project state. Start codixing-mcp with --profile editor, or explicitly opt into runtime write-profile upgrades with --allow-profile-escalation."
             ),
             Self::Reviewer => format!(
                 "Tool '{name}' is blocked by MCP profile 'reviewer' because it can mutate project state. Start codixing-mcp with --profile editor, or explicitly opt into runtime write-profile upgrades with --allow-profile-escalation."
@@ -137,6 +155,11 @@ fn is_minimal_tool(name: &str) -> bool {
             | "find_symbol"
             | "read_symbol"
             | "get_repo_map"
+            // The exact-answer tools an agent reaches for constantly: a text
+            // scan, every reference to a symbol, and the blast radius.
+            | "grep_code"
+            | "search_usages"
+            | "change_impact"
     )
 }
 
@@ -526,7 +549,7 @@ fn handle_tools_list(id: Value, has_federation: bool, profile: McpProfile) -> Va
         arr.retain(|tool| {
             tool.get("name")
                 .and_then(|v| v.as_str())
-                .map(|name| profile.allows_tool(name))
+                .map(|name| profile.lists_tool(name))
                 .unwrap_or(true)
         });
     }

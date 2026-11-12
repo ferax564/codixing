@@ -53,7 +53,7 @@ impl Engine {
     /// Otherwise falls back to BM25 search + AST validation.
     pub fn symbol_callers_precise(&self, symbol: &str, limit: usize) -> Vec<SymbolReference> {
         // Phase 0: Check the pre-built symbol graph.
-        if let Some(ref graph) = self.graph {
+        if let Some(graph) = self.graph_ref() {
             let symbol_callers = graph.get_symbol_callers(symbol);
             if !symbol_callers.is_empty() {
                 let mut refs: Vec<SymbolReference> = symbol_callers
@@ -148,56 +148,108 @@ impl Engine {
             return self.symbol_callers_precise(symbol, limit);
         }
 
-        // Complete mode skips the symbol-graph fast path: the graph stores
-        // one edge per (caller_symbol → callee_symbol) pair, so five call
-        // sites inside one function collapse to a single row and non-call
-        // references never appear. The AST scan below visits every reference
-        // site individually — slower but actually complete.
-        const COMPLETE_CAP: usize = 100_000;
-        let candidates = match self.search_usages(symbol, COMPLETE_CAP) {
-            Ok(r) => r,
-            Err(_) => return Vec::new(),
-        };
-        if candidates.is_empty() {
+        // Complete mode is an exhaustive text scan. Candidates used to come
+        // from ranked BM25 retrieval, which silently dropped files (including
+        // production call sites) that did not rank; "complete" must mean
+        // every occurrence.
+        let mut refs = self.exact_symbol_references(symbol);
+        refs.sort_by(|a, b| a.file_path.cmp(&b.file_path).then(a.line.cmp(&b.line)));
+        refs
+    }
+
+    /// Upper bound on references collected for one symbol.
+    pub const MAX_EXACT_REFERENCES: usize = 100_000;
+
+    /// Every occurrence of `symbol` as a whole word in the indexed files.
+    ///
+    /// Candidate files come from the file trigram index, the same structure
+    /// `grep` uses, so recall equals a word-boundary text search and no call
+    /// site can be missed because of how a chunk ranked. Each hit is then
+    /// classified from the symbol table and the line itself:
+    ///
+    /// - `definition` — a symbol of this name is defined on that line
+    /// - `import` — `use` / `import` / `from … import` / `#include` / `require`
+    /// - `doc` — the file is prose (Markdown, reStructuredText, …)
+    /// - `comment` — the line is a comment
+    /// - `call` — the name is followed by `(`
+    /// - `reference` — anything else (type position, field, value)
+    ///
+    /// At most [`Self::MAX_EXACT_REFERENCES`] hits are returned, in
+    /// unspecified order.
+    pub fn exact_symbol_references(&self, symbol: &str) -> Vec<SymbolReference> {
+        use std::collections::{HashMap, HashSet};
+
+        let base = symbol.rsplit("::").next().unwrap_or(symbol).trim();
+        if base.is_empty() {
             return Vec::new();
         }
+        let opts = super::GrepOptions {
+            pattern: format!(r"\b{}\b", regex::escape(base)),
+            literal: false,
+            case_insensitive: false,
+            invert: false,
+            file_glob: None,
+            before_context: 0,
+            after_context: 0,
+            limit: Self::MAX_EXACT_REFERENCES,
+            count_mode: false,
+        };
+        let Ok(matches) = self.grep_code_opts(&opts) else {
+            return Vec::new();
+        };
 
-        let mut precise_refs: Vec<SymbolReference> = Vec::new();
-        let symbol_base = symbol.rsplit("::").next().unwrap_or(symbol);
+        // (file, 0-based first line) of every definition with this name.
+        let definitions: HashSet<(String, usize)> = self
+            .symbols
+            .lookup(base)
+            .into_iter()
+            .filter(|s| crate::symbols::definition_tier(&s.kind) >= 1)
+            .map(|s| (s.file_path, s.line_start))
+            .collect();
 
-        for candidate in &candidates {
-            let Some(abs_path) = self.config.resolve_path(&candidate.file_path) else {
+        // The line that *is* each definition: the first occurrence of the name
+        // at or just below the symbol's first line (attributes or decorators
+        // may precede the name). Only that line is the definition; a
+        // recursive call two lines further down is a call.
+        let mut occurrences: HashMap<&str, Vec<(usize, bool)>> = HashMap::new();
+        for m in &matches {
+            occurrences
+                .entry(m.file_path.as_str())
+                .or_default()
+                .push((m.line_number as usize, is_comment_like(&m.line)));
+        }
+        for lines in occurrences.values_mut() {
+            lines.sort_unstable();
+        }
+        let mut definition_lines: HashSet<(String, usize)> = HashSet::new();
+        for (file, start) in &definitions {
+            let Some(lines) = occurrences.get(file.as_str()) else {
                 continue;
             };
-
-            let source = match std::fs::read_to_string(&abs_path) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-
-            let lang = match detect_language(&abs_path) {
-                Some(l) => l,
-                None => continue,
-            };
-
-            let refs = extract_references(&source, &candidate.file_path, &lang);
-            for r in &refs {
-                let ref_base = r.target_name.rsplit("::").next().unwrap_or(&r.target_name);
-                if ref_base == symbol_base {
-                    let context_line = source.lines().nth(r.line).unwrap_or("").trim().to_string();
-                    precise_refs.push(SymbolReference {
-                        file_path: r.file.clone(),
-                        line: r.line,
-                        kind: reference_kind_str(&r.kind),
-                        context: context_line,
-                    });
-                }
+            let first = lines.partition_point(|(line, _)| line < start);
+            if let Some((line, _)) = lines[first..]
+                .iter()
+                .take_while(|(line, _)| *line <= start + DEFINITION_HEAD_WINDOW)
+                .find(|(_, comment)| !comment)
+            {
+                definition_lines.insert((file.clone(), *line));
             }
         }
 
-        precise_refs.sort_by(|a, b| a.file_path.cmp(&b.file_path).then(a.line.cmp(&b.line)));
-        precise_refs.dedup_by(|a, b| a.file_path == b.file_path && a.line == b.line);
-        precise_refs
+        matches
+            .into_iter()
+            .map(|m| {
+                let line_number = m.line_number as usize;
+                let is_definition = definition_lines.contains(&(m.file_path.clone(), line_number));
+                let kind = classify_reference(&m.file_path, &m.line, m.match_end, is_definition);
+                SymbolReference {
+                    file_path: m.file_path,
+                    line: line_number,
+                    kind: kind.to_string(),
+                    context: m.line.trim().to_string(),
+                }
+            })
+            .collect()
     }
 
     /// Find precise callees of a symbol using the pre-built symbol graph or
@@ -208,7 +260,7 @@ impl Engine {
     /// Otherwise falls back to reading and re-parsing the symbol's source.
     pub fn symbol_callees_precise(&self, symbol: &str, file_hint: Option<&str>) -> Vec<String> {
         // Phase 0: Check the pre-built symbol graph.
-        if let Some(ref graph) = self.graph {
+        if let Some(graph) = self.graph_ref() {
             let symbol_callees = graph.get_symbol_callees(symbol);
             if !symbol_callees.is_empty() {
                 return symbol_callees;
@@ -290,6 +342,87 @@ impl Engine {
 }
 
 /// Convert a `ReferenceKind` to a human-readable string.
+/// Lines below a symbol's first line in which its name may first appear
+/// (attributes or decorators can sit between the two).
+const DEFINITION_HEAD_WINDOW: usize = 3;
+
+/// Whether a line is a comment or an attribute/preprocessor line, which never
+/// holds the definition itself.
+fn is_comment_like(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("//")
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with('*')
+        // `#define name(...)` is where a macro is defined, not a comment.
+        || (trimmed.starts_with('#') && macro_name_end(line).is_none())
+}
+
+/// For a `#define NAME ...` line, the byte offset just past `NAME`.
+fn macro_name_end(line: &str) -> Option<usize> {
+    let rest = line.trim_start().strip_prefix('#')?;
+    let rest = rest.trim_start().strip_prefix("define")?;
+    if !rest.starts_with([' ', '\t']) {
+        return None;
+    }
+    let name = rest.trim_start();
+    let length = name
+        .bytes()
+        .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
+        .count();
+    (length > 0).then(|| line.len() - name.len() + length)
+}
+
+/// Classify one whole-word occurrence of a symbol. `is_definition` is true
+/// for the single line that declares the symbol.
+fn classify_reference(
+    file_path: &str,
+    line: &str,
+    match_end: usize,
+    is_definition: bool,
+) -> &'static str {
+    // `#define NAME` defines NAME whether or not the macro is in the symbol
+    // table (object-like macros are not indexed as symbols).
+    if is_definition || macro_name_end(line) == Some(match_end) {
+        return "definition";
+    }
+    let trimmed = line.trim_start();
+
+    let lower_path = file_path.to_ascii_lowercase();
+    if [".md", ".mdx", ".rst", ".txt", ".adoc", ".html", ".htm"]
+        .iter()
+        .any(|ext| lower_path.ends_with(ext))
+    {
+        return "doc";
+    }
+
+    if trimmed.starts_with("use ")
+        || trimmed.starts_with("pub use ")
+        || trimmed.starts_with("pub(crate) use ")
+        || trimmed.starts_with("import ")
+        || trimmed.starts_with("from ")
+        || trimmed.starts_with("#include")
+        || trimmed.contains("require(")
+    {
+        return "import";
+    }
+    if trimmed.starts_with("//")
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with('*')
+        || trimmed.starts_with('#')
+        || trimmed.starts_with("\"\"\"")
+        || trimmed.starts_with("--")
+    {
+        return "comment";
+    }
+
+    let after = line.get(match_end..).unwrap_or("").trim_start();
+    if after.starts_with('(') || after.starts_with("::<") || after.starts_with("!(") {
+        "call"
+    } else {
+        "reference"
+    }
+}
+
 fn reference_kind_str(kind: &ReferenceKind) -> String {
     match kind {
         ReferenceKind::Call => "call".to_string(),

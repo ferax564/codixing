@@ -6,6 +6,205 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+Follow-up to `codixing-review-2026-11-10.md`: retrieval correctness, output
+size, and cold-start cost on very large repositories. Measured on Linux 6.6
+(71K indexed files) unless stated.
+
+### Changed
+
+- **Line numbers are 1-based everywhere.** `search`, `symbols`, `usages`,
+  `ask`, `context`, and the MCP tools now print the same line numbers as
+  `grep` and editors. `codixing context --line N` and the MCP
+  `assemble_location_context` `line` argument are 1-based as well (they were
+  0-based). `search --json` gains `start_line`/`end_line` (1-based); the raw
+  `line_start`/`line_end` fields are unchanged.
+- **`codixing ask` prints compact text by default** (evidence as
+  `path:start-end` with a short query-focused source preview) at roughly a
+  third of the previous size. `--json` and `agent-context-pack` emit the stable
+  schema as compact JSON; MCP `agent_context_pack` accepts `format="text"` and
+  infers `mode` from the task when omitted.
+- **`codixing symbols` lists definitions only, best match first, 50 rows by
+  default** as `Kind name  path:start-end`. `--imports` adds import rows,
+  `--limit N` (`0` = all) changes the cap, and a cut listing says how much was
+  left out. `--defs-only` is still accepted. MCP `find_symbol` returns the same
+  listing with `limit` / `include_imports`.
+- **`codixing usages` is an exhaustive whole-word scan** through the file
+  trigram index, printed as `path:line:kind: source` (kind: definition, call,
+  reference, import, comment, doc), most useful first. `--complete` lists
+  everything by path. MCP `search_usages` uses the same engine.
+- **`codixing search` prints one line per hit** (`path:start-end  signature`)
+  plus a three-line snippet anchored on the definition or the best
+  query-matching lines, each with its real line number. Relevance scores are no
+  longer printed (they are not comparable between queries).
+- **`codixing context` defaults to `--budget-mode strict`** and selects the
+  innermost function or type containing the line instead of the enclosing
+  `impl` block or class.
+- **`codixing audit` shows the 15 oldest entries per tier** and a count of the
+  rest; `--full` lists everything. Build scripts, shell scripts and hook files
+  are treated as entry points rather than dead code.
+- **`codixing impact` lists code before documentation** and reports the blast
+  radius as code and docs separately; both compact and full modes are served
+  by a running daemon.
+- CLI diagnostics go to stderr without colour codes when stderr is not a
+  terminal; third-party crates log errors only.
+- **MCP `minimal` can call every read-only tool** and now also lists
+  `grep_code`, `search_usages` and `change_impact` (13 tools, about 2.7K schema
+  tokens against 8.6K for `reviewer`). Mutating tools stay blocked.
+- **MCP `read_file` line ranges are 1-based inclusive** (they were 0-based),
+  so a range printed by any other tool reads exactly those lines.
+- **`bench-tokens` reports exact cl100k token counts and checks answers**: each
+  step records whether its output contains the definition, and the command
+  fails when a Codixing step misses it. Report `schema_version` is now 2.
+- **`codixing context` and MCP `assemble_location_context` print the same
+  compact text** (one core renderer; no indentation or code fences around
+  snippets), and `context` is served by a running daemon.
+- **`codixing callers`, `callees` and `dependencies` print 100 paths by
+  default** with a trailer saying how many were left out; `--limit N` changes
+  the cap and `--limit 0` lists all. `callers include/linux/slab.h` on Linux
+  printed 8,254 tokens before.
+- **Function-like C and C++ macros are symbols** (`#define container_of(ptr,
+  type, member)`), and so are functions defined through a macro that is
+  followed by a body: `SYSCALL_DEFINE3(read, ...)` is indexed as `sys_read`.
+  Object-like macros are left to text search, where `usages` labels their
+  `#define` line as the definition. Rebuild an existing C or C++ index with
+  `codixing init` to pick these up.
+- **An incrementally synced index may be published as generation layout 2.**
+  Binaries older than this release refuse it with a message instead of
+  reading stale chunk metadata. A fresh `codixing init` still writes layout 1.
+
+### Added
+
+- **`codixing daemon start|status`** and automatic background start of a
+  read-only daemon on indexes of 20,000+ files (`CODIXING_NO_AUTO_DAEMON=1`
+  opts out). `ask` joins the commands served by the daemon; output is
+  identical to the in-process path.
+- **Term-coverage re-ranking for multi-word queries.** BM25-only searches with
+  three or more content terms take a 300-chunk pool and prefer chunks whose
+  content, path and signature cover more distinct query terms. Natural-language
+  MRR on the review's query sets: this repository 0.51 → 0.72, Django 0.42 →
+  0.55, Linux 0.20 → 0.31.
+- `code_search` accepts `compact=true` (one line per hit) and `find_symbol`
+  accepts `limit` and `include_imports`.
+- **Natural-language re-ranking for BM25-only search.** For queries of three
+  or more content terms each candidate is also scored by the query terms in
+  its path (`x86 page fault handler` names `arch/x86/mm/fault.c`), by the
+  terms that occur together in one identifier (`load an elf binary` names
+  `load_elf_binary`), more so in the chunk's own signature, and by how many
+  chunks of the same file match. Tests and prose are demoted, and test names
+  do not count as identifier evidence. Natural-language MRR, `search` / `ask`:
+  this repository 0.72 / 0.79 → 0.74 / 0.74, Django 0.55 / 0.53 → 0.70 / 0.63,
+  Linux 0.31 / 0.28 → 0.60 / 0.60.
+- **`benchmarks/retrieval_gate.py` and a `retrieval-gate` CI job.** Task sets
+  with expected files (`benchmarks/retrieval/`) are run against this
+  repository and a checksum-pinned Django 5.0.6 on every CI run. The gate
+  reports hit rates, MRR, tokens read until the answer is shown, and what
+  `rg -nw` prints for the same identifiers, and fails below the thresholds
+  stored with each task set or when `ask` falls behind `search`.
+- **`codixing init --dry-run` estimates peak memory** (about 2–3.5× source
+  bytes) next to the disk estimate, and warns when it exceeds physical memory.
+- **`CODIXING_NO_DAEMON=1`** answers every command in-process and never starts
+  a daemon, for benchmarks and bug reports.
+
+### Fixed
+
+- **`ask` ranked worse than `search`.** Any word of eight or more characters
+  was treated as an identifier and unrelated symbols containing it were pinned
+  above the real hits. Only identifier-shaped tokens, or ordinary words that
+  exactly name a specific production symbol, are merged in now, and the task
+  text goes through the same retrieval path as `search`.
+- **`impl` blocks outranked the type they extend.** Definition lookups rank
+  types, then functions and values, then `impl`/module blocks; production code
+  before tests; and show the chunk holding the definition's first line.
+  `symbols`, `find_symbol` and `read_symbol` order by exact name first.
+- **C and C++ type references indexed as definitions.** `struct foo *p;` and
+  forward declarations no longer count as a definition of `foo`
+  (`task_struct` on Linux: 6,735 symbols before, 64 after, real one first).
+- **A smaller `--limit` changed the first result.** Ranked strategies now rank
+  a pool of at least the default size and truncate afterwards, so `--limit N`
+  returns a prefix of the default results.
+- **`usages --complete` missed call sites** because its candidates came from
+  ranked retrieval. It now matches a word-boundary text search on every
+  indexed file.
+- **`find_tests` returned nothing for most files of a large repository**: the
+  project-wide map was capped at 200 entries before filtering. Tests are now
+  resolved per file.
+- Piping to `head` (or any reader that closes early) no longer panics with
+  "Broken pipe" and exit code 101.
+- `grep` no longer truncates silently at 50 matches (it says so on stderr),
+  clips very long lines around the match, makes `--file` match that exact path
+  when present, and hints at `a|b` when a pattern uses `\|`.
+- **The daemon could not start under a long repository path** (Unix socket
+  paths are limited to about 100 bytes) and clients silently fell back to cold
+  starts. The socket now moves to a private per-user runtime directory when
+  `.codixing/` is too deep.
+- **The post-edit hook started one indexing process per edit.** Edits are
+  queued and a single background runner drains them (one `sync` for several
+  files).
+- Strict token budgets overshot on dense code: the cheap estimate assumed four
+  bytes per token; it now assumes 3.2. **`context` in strict mode now never
+  exceeds its budget**: the renderer counts real tokens on the text it
+  returns, dropping usage examples, then callees and imports, then narrowing
+  the primary chunk around the requested line. `Used:` is that exact count.
+- **C and C++ definitions behind attribute macros were lost.** tree-sitter
+  cannot parse `static __always_inline __alloc_size(1) void *kmalloc(...)` or
+  `void die(...) __noreturn;`, so the definition became an error node. Such
+  macros are blanked before parsing (same length and line breaks, so every
+  offset stays valid for the original source). `kmalloc` on Linux: not found
+  before, first result now.
+- **The canonical definition of a common name ranked behind copies.** Among
+  same-named definitions a body now beats a prototype and then the file most
+  other files depend on wins, and headers are no longer demoted in a
+  definition lookup (`kmalloc` is defined in a header). Linux identifier MRR
+  0.92 → 1.00.
+- **A query containing `--flag` or other query-syntax characters failed with
+  "query parse error"** (`add a --json flag to the callers command`). Flags
+  are searched as words and unparseable text falls back to its plain words.
+- **`ask` pinned unrelated definitions for ordinary words on large
+  repositories** (`journal`, `commit`, `transaction` each name some driver
+  struct in Linux). A lower-case word is pinned only when the search results
+  include the defining file.
+- **`codixing audit` did not finish on Linux** (stopped after 150 s): orphan
+  detection scanned every symbol in the repository once per orphan file. It
+  uses the per-file postings now and takes about 2 s. The same change makes
+  every file-scoped symbol listing in the LSP, MCP and HTTP servers
+  proportional to the matching files instead of the whole table.
+- Test detection covers `selftests/`, `testing/`, `kunit/` and `testdata/`
+  trees and C, Go and Java test file names (`foo_test.c`, `test-foo.c`,
+  `foo_test.go`, `FooTest.java`).
+- The CLI no longer proxies to a daemon left running by a different release.
+
+### Performance
+
+- **Index open no longer re-validates the symbol table.** Writers stamp
+  `symbols_v2.bin` with its length and xxh3 digest after a full validation;
+  readers verify the digest instead of walking every record (2.55 s → 27 ms).
+  Existing indexes gain the stamp at their next `sync`.
+- **`grep`, `symbols` and `usages` load only what they need** (file list and
+  trigram index; symbol table), and one-shot read-only commands skip engine
+  teardown. Cold start per command: `grep --count` 4.8 s → 0.11 s, `symbols`
+  4.7 s → 0.10 s, `usages` 4.5 s → 0.21 s, `search` 4.7 s → 1.4 s.
+- **Test mapping is no longer quadratic** and per-file symbol lookups use the
+  file postings instead of scanning every symbol: `ask` 19.5 s → 1.4 s,
+  `context` 130 s → 1.6 s, `impact` 7.4 s → 1.8 s, `graph --map` 15 s → 1.8 s.
+- **The cl100k tokenizer is built once per process** instead of on every
+  count; trimming a repository map and checking daemon responses against the
+  output envelope no longer rebuild it each time.
+- **Read-only engines decode chunk metadata and the dependency graph on first
+  use.** Decoding them took 1.35 s of a 1.45 s cold `search` and most of its
+  800 MB; a BM25 search reads the same fields from stored Tantivy values and
+  consults the graph only to break a tie between same-named definitions.
+  Cold start per command, no daemon: `search` 1.4 s → 0.13 s (274 MB), `ask`
+  1.6 s → 0.25 s, `context` 1.7 s → 0.8 s, `impact` 1.8 s → 1.1 s,
+  `graph --map` 1.4 s → 0.8 s. `search --json` and `--count` take the same
+  0.13 s, so they are not proxied through the daemon.
+- **A small sync writes a changed-file overlay instead of the whole chunk
+  metadata table.** The persist phase of a one-file sync drops from 0.8 s
+  (93 MB rewritten) to 2 ms (1.6 KB). The overlay is cumulative and is folded
+  back into the base once it covers more than an eighth of the index
+  (at least 64 and at most 4,096 files).
+- With a warm daemon on the same index: `search` 10 ms, `ask` 98 ms, `symbols`
+  73 ms, `usages` 75 ms, `graph --map` 76 ms, `impact` 351 ms.
+
 ## [0.48.0] - 2026-07-22
 
 ### Added

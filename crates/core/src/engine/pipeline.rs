@@ -434,25 +434,11 @@ impl SearchStage for VisibilityBoostStage {
 /// above the file that *defines* it. Uses a 3.5x score multiplier.
 pub struct DefinitionBoostStage;
 
-/// Whether a symbol kind is a primary definition (not import/module noise).
+pub(super) use crate::symbols::{definition_tier, is_test_like_path};
+
+/// Whether a symbol kind is a primary definition (not import/impl/module noise).
 pub(super) fn is_primary_definition_kind(kind: &crate::language::EntityKind) -> bool {
-    use crate::language::EntityKind;
-    matches!(
-        kind,
-        EntityKind::Function
-            | EntityKind::Method
-            | EntityKind::Class
-            | EntityKind::Struct
-            | EntityKind::Enum
-            | EntityKind::Interface
-            | EntityKind::Trait
-            | EntityKind::TypeAlias
-            | EntityKind::Constant
-            | EntityKind::Static
-            | EntityKind::Impl
-            | EntityKind::Type
-            | EntityKind::Variable
-    )
+    definition_tier(kind) >= 2
 }
 
 /// A defining symbol span used for chunk-level definition ranking.
@@ -460,7 +446,6 @@ pub(super) fn is_primary_definition_kind(kind: &crate::language::EntityKind) -> 
 pub(super) struct DefiningSpan {
     pub file_path: String,
     pub line_start: u64,
-    pub line_end: u64,
     pub primary: bool,
 }
 
@@ -502,7 +487,6 @@ pub(super) fn defining_candidate_spans(
         spans.push(DefiningSpan {
             file_path: symbol.file_path,
             line_start: symbol.line_start as u64,
-            line_end: symbol.line_end as u64,
             primary: is_primary_definition_kind(&symbol.kind),
         });
     };
@@ -556,9 +540,14 @@ pub(super) fn defining_candidate_files(
         .collect()
 }
 
+/// True when the chunk holds the *head* of the defining span (its first
+/// line: the signature / `struct Foo {` / `impl Foo {` line).
+///
+/// Plain overlap is too generous for multi-hundred-line spans: every chunk
+/// inside a large `impl` block or function used to count as "the definition".
 fn chunk_overlaps_span(result: &SearchResult, span: &DefiningSpan) -> bool {
     result.file_path == span.file_path
-        && result.line_start <= span.line_end
+        && result.line_start <= span.line_start
         && result.line_end >= span.line_start
 }
 
@@ -895,28 +884,50 @@ pub struct TestDemotionStage;
 
 impl SearchStage for TestDemotionStage {
     fn apply(&self, results: &mut Vec<SearchResult>, ctx: &SearchContext<'_>) -> Result<()> {
-        use super::search::{apply_header_demotion, is_search_infra, is_test_chunk, is_test_file};
-
-        const TEST_DEMOTION: f32 = 0.5;
-        const INFRA_DEMOTION: f32 = 0.5;
-        let mut changed = false;
-
-        for r in results.iter_mut() {
-            if is_test_file(&r.file_path) || is_test_chunk(r) {
-                r.score *= TEST_DEMOTION;
-                changed = true;
-            } else if is_search_infra(&r.file_path, ctx.query) {
-                r.score *= INFRA_DEMOTION;
-                changed = true;
-            }
-        }
-
-        apply_header_demotion(results, &mut changed);
-
-        if changed {
-            sort_descending(results);
-        }
+        demote_tests(results, ctx, true);
         Ok(())
+    }
+}
+
+/// [`TestDemotionStage`] for definition lookups: tests are demoted, headers
+/// are not.
+///
+/// A definition lookup already orders same-named definitions (a body beats a
+/// prototype). Demoting headers on top of that buried inline functions,
+/// macros and types that are *defined* in a header, such as the kernel's
+/// `kmalloc`, under re-implementations in test harnesses.
+pub struct DefinitionTestDemotionStage;
+
+impl SearchStage for DefinitionTestDemotionStage {
+    fn apply(&self, results: &mut Vec<SearchResult>, ctx: &SearchContext<'_>) -> Result<()> {
+        demote_tests(results, ctx, false);
+        Ok(())
+    }
+}
+
+fn demote_tests(results: &mut [SearchResult], ctx: &SearchContext<'_>, demote_headers: bool) {
+    use super::search::{apply_header_demotion, is_search_infra, is_test_chunk, is_test_file};
+
+    const TEST_DEMOTION: f32 = 0.5;
+    const INFRA_DEMOTION: f32 = 0.5;
+    let mut changed = false;
+
+    for r in results.iter_mut() {
+        if is_test_file(&r.file_path) || is_test_chunk(r) {
+            r.score *= TEST_DEMOTION;
+            changed = true;
+        } else if is_search_infra(&r.file_path, ctx.query) {
+            r.score *= INFRA_DEMOTION;
+            changed = true;
+        }
+    }
+
+    if demote_headers {
+        apply_header_demotion(results, &mut changed);
+    }
+
+    if changed {
+        sort_descending(results);
     }
 }
 
@@ -1071,6 +1082,15 @@ pub fn exact_pipeline() -> SearchPipeline {
         .add(DefinitionBoostStage)
         .add(PathMatchBoostStage)
         .add(TestDemotionStage)
+        .add(FileDedupStage)
+}
+
+/// Build the post-retrieval pipeline for `Strategy::Goto`.
+pub fn goto_pipeline() -> SearchPipeline {
+    SearchPipeline::new()
+        .add(DefinitionBoostStage)
+        .add(PathMatchBoostStage)
+        .add(DefinitionTestDemotionStage)
         .add(FileDedupStage)
 }
 

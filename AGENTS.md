@@ -19,8 +19,8 @@
 ```bash
 codixing search "rate limiting"     # semantic code search
 codixing grep "TODO" --literal      # literal/regex text scan with line numbers
-codixing symbols Widget             # find symbol definitions
-codixing usages add_chunk           # find call sites and imports
+codixing symbols Widget             # definitions, exact match first (path:start-end)
+codixing usages add_chunk           # every reference as path:line:kind (exact, no misses)
 codixing callers src/engine/mod.rs  # who imports this file
 codixing callees src/engine/mod.rs  # what this file imports
 codixing graph --map                # repo architecture map
@@ -28,20 +28,25 @@ codixing impact src/engine/mod.rs   # blast radius analysis
 codixing api src/engine/mod.rs      # public API surface
 codixing types Engine               # type relationships
 codixing examples add_chunk         # usage examples from tests + callers
-codixing context src/engine/mod.rs  # cross-file context assembly
+codixing context src/engine/mod.rs --line 120  # innermost function + imports/callees (1-based line)
 codixing agent-context-pack "task"  # stable JSON context pack for agents
-codixing ask "task"                 # recommended agent entrypoint (context pack)
-codixing symbols Widget --defs-only # definitions only (no Import rows)
+codixing ask "task"                 # recommended agent entrypoint (compact text; --json for the schema)
+codixing symbols Widget --imports   # also list import rows (hidden by default)
 codixing impact path --full         # full blast radius (default is compact)
 codixing doctor --fix-path          # PATH binary version gate
 codixing doctor --check-update       # free space, lock owner, ONNX hints, optional release check
-codixing init --dry-run .            # inventory + disk estimate before writing an index
-codixing bench-tokens               # token-savings harness vs grep+read
+codixing init --dry-run .            # inventory + disk and peak-memory estimate before writing an index
+codixing bench-tokens               # token savings vs grep+read (exact counts, answer-checked)
+codixing daemon start .             # keep the index warm (automatic on 20K+ file indexes)
+CODIXING_NO_DAEMON=1 codixing ...   # force the in-process path (benchmarks, bug reports)
+python3 benchmarks/retrieval_gate.py benchmarks/retrieval/tasks_self.json .  # answer-checked retrieval gate
 ```
 
 The MCP server is also available when connected to an editor, but the CLI is preferred — it's simpler, works for subagents, and dogfoods the search quality directly.
 
 For broad codebase exploration, always try Codixing first. Fall back to Grep/Bash only if the CLI doesn't cover the case.
+
+**Line numbers are 1-based everywhere** (`search`, `symbols`, `usages`, `grep`, `ask`, `context --line`), so a number from any command can be passed straight to a file reader.
 
 **Before editing ANY file**, run `codixing impact <file>` to check downstream dependencies. This applies to all files — Rust, HTML, config, docs — not just code. Even "simple" changes like CSS updates can break references in other files.
 
@@ -57,13 +62,14 @@ For broad codebase exploration, always try Codixing first. Fall back to Grep/Bas
 - **Public API surface of a file** → `codixing api <file>`
 - **Type relationships for a symbol** → `codixing types <name>`
 - **Usage examples for a symbol** → `codixing examples <name>` (tests + callers + doc blocks)
-- **Cross-file context for understanding** → `codixing context <file> --line N`
+- **Cross-file context for understanding** → `codixing context <file> --line N` (1-based, as printed by `grep`/`search`)
 - **Task-local agent context pack** → `codixing ask "<task>"` or `agent-context-pack "<task>" --mode edit`
-- **Finding a definition** → `codixing search Name --strategy goto` or `symbols Name --defs-only`
+- **Finding a definition** → `codixing search Name --strategy goto` or `symbols Name`
 - **Architecture overview** → `codixing graph --map --token-budget 1500`
 - **Token-savings proof** → `codixing bench-tokens`
 - **Test coverage discovery** → `codixing search "test <name>"`
-- **Index freshness / stale files** → `codixing audit`
+- **Stale or orphaned source files** → `codixing audit` (top entries per tier; `--full` for all)
+- **Index health / freshness** → `codixing doctor`, then `codixing sync`
 - **Incremental re-index after changes** → `codixing sync`
 - **Code/config results only** → `codixing search "<query>" --code-only`
 - **Documentation results only** → `codixing search "<query>" --docs-only`
@@ -218,6 +224,14 @@ The CI workflow (`.github/workflows/ci.yml`) has the following jobs:
 - **msrv** — blocking Ubuntu check of all workspace targets at Rust 1.88 with `--no-default-features`.
 - **npm-installer** — blocking Ubuntu/Node 18 tests for release-version consistency and rollback, exact npm tarball comparison, downloader and signal forwarding, npm package contents, and the checksum-verified shell installer.
 - **audit** — blocking Ubuntu `cargo-audit` run. Its explicit advisory ignores are justified in `audit.toml`; there is no `continue-on-error` escape hatch.
+- **retrieval-gate** — blocking Ubuntu job. Builds the CLI, indexes this
+  repository and a checksum-pinned Django 5.0.6 source distribution, and runs
+  `benchmarks/retrieval_gate.py` against `benchmarks/retrieval/tasks_*.json`.
+  It fails when identifier or natural-language hit rates fall below the
+  thresholds stored in each task file, or when `ask` trails `search` by more
+  than the allowed margin, and uploads both reports as `retrieval-gate`.
+  `tasks_self.json` names files of this repository: update its `expect`
+  entries in the same change that renames or splits one of them.
 - **coverage** — blocking Ubuntu coverage generation and `coverage-report` artifact upload. The final Codecov upload alone is configured not to fail CI on a Codecov service error.
 - **release-build** — blocking three-platform matrix on `main` pushes only (never PRs or tag pushes). It has `needs: [test, npm-installer]`, builds the four binaries for Linux x86_64, macOS arm64, and Windows x86_64 (Windows uses `--no-default-features`), and uploads `binaries-<suffix>` artifacts with 14-day retention.
 - **benchmarks** — blocking Ubuntu job with no `needs` dependency. It runs the
@@ -334,6 +348,21 @@ mutable sidecars atomically, and make the active-generation manifest the last
 durable write. A no-op sync must not fork or publish. On filesystems without
 hard-link support, incremental fallback copying is capped at 64 MiB; use a full
 `codixing init` rather than duplicating a large index.
+
+Chunk metadata is persisted as `chunk_meta.bin` plus a cumulative changed-file
+overlay, `chunk_meta_delta.bin`. A checkpoint that touches few files writes
+only the overlay; the base is rewritten when the overlay would cover more than
+an eighth of the index (at least 64, at most 4,096 files). Always load through
+`indexing::load_chunk_meta`, never the base alone, and call
+`mark_chunk_meta_dirty` wherever a file's chunks are added or removed. A
+generation that carries an overlay is published as layout version 2 so that
+older binaries refuse it instead of reading stale metadata.
+
+Read-only engines decode chunk metadata and the dependency graph on first
+use (`LazyChunkMeta`, `Engine::graph_ref`). Read paths must use
+`self.graph_ref()`, not `self.graph`, and a BM25 search must not touch
+`self.chunk_meta` without checking `is_loaded()`: the test
+`read_only_search_decodes_neither_chunk_metadata_nor_graph` guards this.
 
 To rebuild from scratch (BgeSmallEn is the recommended model — fastest init, good retrieval):
 ```bash

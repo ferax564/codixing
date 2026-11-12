@@ -54,7 +54,7 @@ impl Engine {
             return Vec::new();
         }
 
-        let graph = match &self.graph {
+        let graph = match self.graph_ref() {
             Some(g) => g,
             None => return Vec::new(),
         };

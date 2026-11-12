@@ -249,6 +249,7 @@ const VECTORS_DIR: &str = "vectors";
 const VECTOR_INDEX_FILE: &str = "index.usearch";
 const FILE_CHUNKS_FILE: &str = "file_chunks.bin";
 const CHUNK_META_FILE: &str = "chunk_meta.bin";
+const CHUNK_META_DELTA_FILE: &str = "chunk_meta_delta.bin";
 const GRAPH_DIR: &str = "graph";
 const GRAPH_FILE: &str = "graph.bin";
 const SCHEMA_VERSION_FILE: &str = "schema.version";
@@ -264,6 +265,13 @@ const GENERATIONS_DIR: &str = "generations";
 const ACTIVE_GENERATION_FILE: &str = "active-generation.json";
 const GENERATION_PREFIX: &str = "gen-";
 const GENERATION_LAYOUT_VERSION: u32 = 1;
+/// Layout of a generation whose chunk metadata is a base plus a changed-file
+/// overlay (`chunk_meta_delta.bin`). A binary that only knows version 1
+/// would read the base alone and silently serve stale metadata for the
+/// changed files, so such generations announce themselves and older binaries
+/// refuse them. A generation without an overlay is still published as
+/// version 1.
+const GENERATION_LAYOUT_VERSION_CHUNK_OVERLAY: u32 = 2;
 const REBUILD_LOCK_FILE: &str = "rebuild.lock";
 const WRITER_LOCK_FILE: &str = "writer.lock";
 /// Sidecar next to `writer.lock` with advisory holder identity (pid + exe).
@@ -442,11 +450,15 @@ fn read_generation_manifest(control_dir: &Path) -> Result<Option<GenerationManif
             path.display()
         ))
     })?;
-    if manifest.layout_version != GENERATION_LAYOUT_VERSION {
+    if !(GENERATION_LAYOUT_VERSION..=GENERATION_LAYOUT_VERSION_CHUNK_OVERLAY)
+        .contains(&manifest.layout_version)
+    {
         return Err(CodixingError::Config(format!(
-            "unsupported index generation layout version {} in {}",
+            "unsupported index generation layout version {} in {} (this binary reads up to {}); \
+             upgrade codixing, or rebuild the index with `codixing init`",
             manifest.layout_version,
-            path.display()
+            path.display(),
+            GENERATION_LAYOUT_VERSION_CHUNK_OVERLAY
         )));
     }
     validate_generation_name(&manifest.active)?;
@@ -611,6 +623,7 @@ fn cleanup_legacy_artifacts(control_dir: &Path) {
         SYMBOLS_V2_FILE,
         SYMBOLS_DELTA_FILE,
         FILE_TRIGRAM_DELTA_FILE,
+        CHUNK_META_DELTA_FILE,
         TREE_HASHES_FILE,
         TREE_HASHES_V2_FILE,
         TREE_SIGNATURES_FILE,
@@ -1280,8 +1293,13 @@ impl IndexStore {
             .ok()
             .flatten()
             .map(|manifest| manifest.active);
+        let layout_version = if self.chunk_meta_delta_path().is_file() {
+            GENERATION_LAYOUT_VERSION_CHUNK_OVERLAY
+        } else {
+            GENERATION_LAYOUT_VERSION
+        };
         let manifest = GenerationManifest {
-            layout_version: GENERATION_LAYOUT_VERSION,
+            layout_version,
             active: generation.to_string(),
             file_trigram_delta_required: true,
         };
@@ -2551,6 +2569,36 @@ impl IndexStore {
     pub fn load_chunk_meta_bytes(&self) -> Result<Vec<u8>> {
         let bytes = fs::read(self.chunk_meta_path())?;
         Ok(bytes)
+    }
+
+    /// Path to the changed-file overlay over `chunk_meta.bin`.
+    pub fn chunk_meta_delta_path(&self) -> PathBuf {
+        self.codixing_dir().join(CHUNK_META_DELTA_FILE)
+    }
+
+    /// Atomically persist the changed-file overlay over `chunk_meta.bin`.
+    pub fn save_chunk_meta_delta_bytes(&self, bytes: &[u8]) -> Result<()> {
+        self.atomic_write_artifact(self.chunk_meta_delta_path(), bytes)?;
+        Ok(())
+    }
+
+    /// Load the overlay over `chunk_meta.bin`; `None` when the generation
+    /// has none, which means the base file is complete on its own.
+    pub fn load_chunk_meta_delta_bytes(&self) -> Result<Option<Vec<u8>>> {
+        match fs::read(self.chunk_meta_delta_path()) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Remove the overlay after `chunk_meta.bin` was rewritten in full.
+    pub fn remove_chunk_meta_delta(&self) -> Result<()> {
+        match fs::remove_file(self.chunk_meta_delta_path()) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 }
 

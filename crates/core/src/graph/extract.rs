@@ -39,15 +39,7 @@ pub fn extract_definitions(source: &str, file_path: &str, lang: &Language) -> Ve
         None => return Vec::new(),
     };
 
-    let mut parser = tree_sitter::Parser::new();
-    if parser
-        .set_language(&lang_support.tree_sitter_language())
-        .is_err()
-    {
-        return Vec::new();
-    }
-
-    let tree = match parser.parse(source.as_bytes(), None) {
+    let tree = match lang_support.parse(source.as_bytes()) {
         Some(t) => t,
         None => return Vec::new(),
     };
@@ -82,15 +74,7 @@ pub fn extract_references(source: &str, file_path: &str, lang: &Language) -> Vec
         None => return Vec::new(),
     };
 
-    let mut parser = tree_sitter::Parser::new();
-    if parser
-        .set_language(&lang_support.tree_sitter_language())
-        .is_err()
-    {
-        return Vec::new();
-    }
-
-    let tree = match parser.parse(source.as_bytes(), None) {
+    let tree = match lang_support.parse(source.as_bytes()) {
         Some(t) => t,
         None => return Vec::new(),
     };

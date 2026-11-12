@@ -1,0 +1,27 @@
+{
+ "corpus": "Linux 6.6 tarball from cdn.kernel.org",
+ "tasks": [
+  {"q": "task_struct", "kind": "id", "expect": ["include/linux/sched.h"]},
+  {"q": "sk_buff", "kind": "id", "expect": ["include/linux/skbuff.h"]},
+  {"q": "file_operations", "kind": "id", "expect": ["include/linux/fs.h"]},
+  {"q": "vfs_read", "kind": "id", "expect": ["fs/read_write.c"]},
+  {"q": "tcp_sendmsg", "kind": "id", "expect": ["net/ipv4/tcp.c"]},
+  {"q": "do_sys_openat2", "kind": "id", "expect": ["fs/open.c"]},
+  {"q": "ext4_file_write_iter", "kind": "id", "expect": ["fs/ext4/file.c"]},
+  {"q": "oom_kill_process", "kind": "id", "expect": ["mm/oom_kill.c"]},
+  {"q": "do_syscall_64", "kind": "id", "expect": ["arch/x86/entry/common.c"]},
+  {"q": "pick_next_task_fair", "kind": "id", "expect": ["kernel/sched/fair.c"]},
+  {"q": "kmalloc", "kind": "id", "expect": ["include/linux/slab.h"]},
+  {"q": "schedule", "kind": "id", "expect": ["kernel/sched/core.c"]},
+  {"q": "out of memory killer selects a victim process", "kind": "nl", "expect": ["mm/oom_kill.c"]},
+  {"q": "x86 page fault handler", "kind": "nl", "expect": ["arch/x86/mm/fault.c"]},
+  {"q": "cubic tcp congestion control", "kind": "nl", "expect": ["net/ipv4/tcp_cubic.c"]},
+  {"q": "journal commit transaction", "kind": "nl", "expect": ["fs/jbd2/commit.c"]},
+  {"q": "rcu grace period kthread", "kind": "nl", "expect": ["kernel/rcu/tree.c"]},
+  {"q": "epoll wait for events", "kind": "nl", "expect": ["fs/eventpoll.c"]},
+  {"q": "load an elf binary for exec", "kind": "nl", "expect": ["fs/binfmt_elf.c"]},
+  {"q": "copy on write page fault handling", "kind": "nl", "expect": ["mm/memory.c"]},
+  {"q": "futex wait and wake", "kind": "nl", "expect": ["kernel/futex/waitwake.c", "kernel/futex/core.c"]},
+  {"q": "completely fair scheduler pick next entity", "kind": "nl", "expect": ["kernel/sched/fair.c"]}
+ ]
+}

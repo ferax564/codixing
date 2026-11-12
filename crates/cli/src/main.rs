@@ -29,6 +29,26 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+enum DaemonAction {
+    /// Start the daemon in the background (no-op if one is running).
+    Start {
+        /// Project root (defaults to current directory).
+        #[arg(default_value = ".")]
+        path: PathBuf,
+
+        /// Wait until the daemon accepts connections (up to this many seconds).
+        #[arg(long, value_name = "SECONDS", default_value_t = 0)]
+        wait: u64,
+    },
+    /// Report whether a daemon is running and where it listens.
+    Status {
+        /// Project root (defaults to current directory).
+        #[arg(default_value = ".")]
+        path: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// Initialize a new code index for the current (or specified) directory.
     Init {
@@ -173,9 +193,19 @@ enum Command {
         #[arg(short, long)]
         file: Option<String>,
 
-        /// Only show primary definitions (exclude Import rows).
+        /// Definitions only. This is the default; the flag is kept so existing
+        /// invocations keep working.
         #[arg(long)]
         defs_only: bool,
+
+        /// Also list import/use rows (they name a symbol without defining it).
+        #[arg(long, conflicts_with = "defs_only")]
+        imports: bool,
+
+        /// Maximum rows to print; `0` lists everything. The best matches come
+        /// first (exact name, then types before functions before impl blocks).
+        #[arg(short, long, default_value_t = codixing_core::formatter::compact::DEFAULT_SYMBOL_LIMIT)]
+        limit: usize,
 
         /// Print only the result count, not the full results.
         #[arg(long)]
@@ -280,6 +310,19 @@ enum Command {
         fix: bool,
     },
 
+    /// Manage the background daemon that keeps the index in memory.
+    ///
+    /// With a daemon running, `search`, `ask`, `symbols`, `usages`, `impact`,
+    /// `callers`, `callees` and `graph --map` are answered over its socket in
+    /// milliseconds instead of reopening the index. On large indexes
+    /// (20,000+ files) the CLI starts one automatically; set
+    /// `CODIXING_NO_AUTO_DAEMON=1` to opt out. The daemon is read-only,
+    /// follows index updates, and exits after 30 idle minutes.
+    Daemon {
+        #[command(subcommand)]
+        action: DaemonAction,
+    },
+
     /// Find the shortest path between two files in the dependency graph.
     Path {
         /// Source file (relative path).
@@ -296,6 +339,11 @@ enum Command {
         /// Transitive depth (default 1 = direct callers only).
         #[arg(long, default_value = "1")]
         depth: usize,
+
+        /// Maximum paths to print (0 = all). A hub header can have
+        /// thousands of importers.
+        #[arg(long, default_value = "100")]
+        limit: usize,
     },
 
     /// Show files imported by the given file.
@@ -306,6 +354,11 @@ enum Command {
         /// Transitive depth (default 1 = direct callees only).
         #[arg(long, default_value = "1")]
         depth: usize,
+
+        /// Maximum paths to print (0 = all). A hub header can have
+        /// thousands of importers.
+        #[arg(long, default_value = "100")]
+        limit: usize,
     },
 
     /// Show transitive dependencies of the given file.
@@ -316,6 +369,10 @@ enum Command {
         /// Transitive depth.
         #[arg(long, default_value = "2")]
         depth: usize,
+
+        /// Maximum paths to print (0 = all).
+        #[arg(long, default_value = "100")]
+        limit: usize,
     },
 
     /// Find files in one directory that import from another directory.
@@ -648,6 +705,11 @@ enum Command {
         #[arg(long, value_enum, default_value_t = AuditProfileArg::Mixed)]
         profile: AuditProfileArg,
 
+        /// List every entry. By default each tier shows its oldest 15 files
+        /// and a count of the rest.
+        #[arg(long)]
+        full: bool,
+
         /// Project root directory (defaults to current directory).
         #[arg(default_value = ".")]
         path: PathBuf,
@@ -707,19 +769,21 @@ enum Command {
         /// File path (relative to project root).
         file: String,
 
-        /// Line number (0-indexed).
-        #[arg(long, default_value = "0")]
+        /// Line number (1-based, as printed by `grep`, `search` and `symbols`).
+        /// The innermost function or type containing it becomes the primary
+        /// chunk.
+        #[arg(long, default_value = "1")]
         line: u64,
 
         /// Token budget for context assembly.
         #[arg(long, default_value = "4096")]
         token_budget: usize,
 
-        /// How to treat `--token-budget`. `soft` (default) emits the
-        /// primary chunk in full even when it exceeds the budget and
-        /// reports the overshoot; `strict` slices the primary chunk to a
-        /// line window around `--line N` so the assembled context fits.
-        #[arg(long, value_enum, default_value_t = BudgetModeArg::Soft)]
+        /// How to treat `--token-budget`. `strict` (default) slices an
+        /// oversized primary chunk to a line window around `--line N` so the
+        /// assembled context fits; `soft` emits the primary chunk in full
+        /// even when it exceeds the budget and reports the overshoot.
+        #[arg(long, value_enum, default_value_t = BudgetModeArg::Strict)]
         budget_mode: BudgetModeArg,
 
         /// Output as JSON.
@@ -754,8 +818,10 @@ enum Command {
         risk_level: Option<String>,
     },
 
-    /// Shortcut for `agent-context-pack` — the recommended agent entrypoint.
+    /// Task-level context in one call — the recommended agent entrypoint.
     ///
+    /// Prints compact text (evidence as `path:start-end` with a short source
+    /// preview). Pass `--json` for the stable `agent-context-pack` schema.
     /// Defaults to mode=`locate` for short tasks and mode=`understand` otherwise;
     /// pass `--mode` to override.
     Ask {
@@ -781,12 +847,18 @@ enum Command {
         /// Optional caller risk label (for example: low, medium, high).
         #[arg(long)]
         risk_level: Option<String>,
+
+        /// Emit the stable JSON schema instead of compact text.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Measure token savings of Codixing workflows vs naive grep+read baselines.
     ///
-    /// Prints a JSON report with per-task token estimates (chars/4) and the
-    /// percentage saved by Codixing paths. Intended for release claims and CI.
+    /// Prints a JSON report with exact per-step token counts (cl100k), whether
+    /// each step's output contains the expected answer, and the percentage
+    /// saved by Codixing paths. Exits non-zero when a Codixing step misses the
+    /// answer. Intended for release claims and CI.
     #[command(name = "bench-tokens")]
     BenchTokens {
         /// Project root (defaults to current directory).
@@ -1003,10 +1075,6 @@ enum StrategyArg {
 }
 
 impl StrategyArg {
-    fn uses_lexical_read_profile(&self) -> bool {
-        matches!(self, Self::Exact | Self::Instant | Self::Goto)
-    }
-
     /// Resolve this argument to a concrete [`Strategy`], using auto-detection when `Auto`.
     fn resolve(self, engine: &Engine, query: &str) -> Strategy {
         match self {
@@ -1057,14 +1125,27 @@ fn run_cli() -> Result<()> {
 }
 
 async fn async_main() -> Result<()> {
+    // Diagnostics go to stderr so stdout stays pure command output: an agent
+    // capturing `codixing init` must not receive log lines (or ANSI colour
+    // codes) mixed into the result. Third-party crates are limited to errors;
+    // their warnings (for example the HTML parser's recovery notices) are not
+    // actionable for a Codixing user.
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
-        )
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new("error,codixing=warn,codixing_core=warn,codixing_server=warn")
+        }))
         .with_target(false)
+        .with_writer(std::io::stderr)
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
 
     let cli = Cli::parse();
+
+    // One-shot commands should end quietly when their reader goes away
+    // (`codixing symbols foo | head`). The HTTP server keeps the default.
+    if !matches!(cli.command, Command::Serve { .. }) {
+        codixing_core::process::restore_default_sigpipe();
+    }
 
     match cli.command {
         Command::Init {
@@ -1134,9 +1215,11 @@ async fn async_main() -> Result<()> {
         Command::Symbols {
             filter,
             file,
-            defs_only,
+            defs_only: _,
+            imports,
+            limit,
             count,
-        } => cmd_symbols(filter, file, defs_only, count),
+        } => cmd_symbols(filter, file, imports, limit, count),
         Command::Graph {
             path,
             token_budget,
@@ -1169,10 +1252,11 @@ async fn async_main() -> Result<()> {
             check_update,
             fix,
         } => cmd_doctor(path, json, fix_path, check_update, fix),
+        Command::Daemon { action } => cmd_daemon(action),
         Command::Path { from, to } => cmd_path(from, to),
-        Command::Callers { file, depth } => cmd_callers(file, depth),
-        Command::Callees { file, depth } => cmd_callees(file, depth),
-        Command::Dependencies { file, depth } => cmd_dependencies(file, depth),
+        Command::Callers { file, depth, limit } => cmd_callers(file, depth, limit),
+        Command::Callees { file, depth, limit } => cmd_callees(file, depth, limit),
+        Command::Dependencies { file, depth, limit } => cmd_dependencies(file, depth, limit),
         Command::CrossImports {
             from,
             to,
@@ -1244,8 +1328,9 @@ async fn async_main() -> Result<()> {
             include,
             exclude,
             profile,
+            full,
             path,
-        } => cmd_audit(path, threshold_days, include, exclude, profile.into()),
+        } => cmd_audit(path, threshold_days, include, exclude, profile.into(), full),
         Command::Impact { file, full, json } => cmd_impact(file, full, json),
         Command::Api { file, json } => cmd_api(file, json),
         Command::Types { symbol, json } => cmd_types(symbol, json),
@@ -1275,6 +1360,7 @@ async fn async_main() -> Result<()> {
             changed_files,
             branch,
             risk_level,
+            true,
         ),
         Command::Ask {
             task,
@@ -1283,6 +1369,7 @@ async fn async_main() -> Result<()> {
             changed_files,
             branch,
             risk_level,
+            json,
         } => {
             let mode = mode.unwrap_or_else(|| {
                 agent_mode_arg_from_core(AgentContextMode::infer_from_task(&task))
@@ -1294,6 +1381,7 @@ async fn async_main() -> Result<()> {
                 changed_files,
                 branch,
                 risk_level,
+                json,
             )
         }
         Command::BenchTokens { path, output } => cmd_bench_tokens(path, output),
@@ -1366,13 +1454,24 @@ fn default_thread_cap_for(cpus: usize) -> usize {
 /// Read commands must never probe the Tantivy writer lock first: doing so
 /// adds the writer retry backoff to every concurrent CLI invocation and can
 /// make a healthy read take more than a second while `sync` is running.
-fn open_read_engine(root: &Path) -> Result<Engine> {
-    Engine::open_read_only(root).with_context(|| {
-        format!(
-            "no index found at {} — run `codixing init` first",
-            root.display()
-        )
-    })
+/// A read-only engine that is never dropped.
+///
+/// A one-shot command exits right after printing. Dropping the engine first
+/// walks and frees every map it loaded (hundreds of megabytes on a large
+/// index), which is pure overhead when the process is about to return all of
+/// its memory to the OS anyway. Read-only engines hold no writer lock and have
+/// nothing to flush, so skipping the destructor is safe.
+type ReadEngine = std::mem::ManuallyDrop<Engine>;
+
+fn open_read_engine(root: &Path) -> Result<ReadEngine> {
+    Engine::open_read_only(root)
+        .map(std::mem::ManuallyDrop::new)
+        .with_context(|| {
+            format!(
+                "no index found at {} — run `codixing init` first",
+                root.display()
+            )
+        })
 }
 
 /// Check if an error indicates write-lock contention and print a helpful message.
@@ -1405,32 +1504,59 @@ fn handle_engine_err<E: std::fmt::Display>(e: E, ctx: impl FnOnce() -> String) -
 
 /// Print a non-empty list of file paths (one per line to stdout) with a count
 /// summary to stderr. Caller must guarantee the slice is non-empty.
-fn print_nonempty_file_list(items: &[String], count_label: &str) {
-    for item in items {
+///
+/// At most `limit` paths are printed (0 = all); a trailer on stdout says how
+/// many were left out, so a hub file does not cost thousands of tokens.
+fn print_nonempty_file_list(items: &[String], count_label: &str, limit: usize) {
+    let shown = if limit == 0 {
+        items.len()
+    } else {
+        limit.min(items.len())
+    };
+    for item in &items[..shown] {
         println!("{item}");
     }
+    print_file_list_trailer(shown, items.len());
     eprintln!("\n{} {count_label}.", items.len());
 }
 
+fn print_file_list_trailer(shown: usize, total: usize) {
+    if shown < total {
+        println!(
+            "… {} more (showing {shown} of {total}; raise --limit, or --limit 0 for all)",
+            total - shown
+        );
+    }
+}
+
 /// Print a file list or an empty-message if the list is empty.
-fn print_file_list(items: &[String], empty_msg: &str, count_label: &str) {
+fn print_file_list(items: &[String], empty_msg: &str, count_label: &str, limit: usize) {
     if items.is_empty() {
         eprintln!("{empty_msg}");
     } else {
-        print_nonempty_file_list(items, count_label);
+        print_nonempty_file_list(items, count_label, limit);
     }
 }
 
 /// Handle a daemon-proxy response for a file-list command (callers/callees).
 /// Takes the raw text blob returned by the daemon, prints it or an empty
-/// message, and returns `Ok(())`.
-fn emit_daemon_file_list(text: String, empty_msg: &str, count_label: &str) -> Result<()> {
+/// message, and returns `Ok(())`. The same `limit` applies as in-process.
+fn emit_daemon_file_list(
+    text: String,
+    empty_msg: &str,
+    count_label: &str,
+    limit: usize,
+) -> Result<()> {
     if text.is_empty() {
         eprintln!("{empty_msg}");
     } else {
-        print!("{text}");
-        let count = text.lines().count();
-        eprintln!("\n{count} {count_label}.");
+        let total = text.lines().count();
+        let shown = if limit == 0 { total } else { limit.min(total) };
+        for line in text.lines().take(shown) {
+            println!("{line}");
+        }
+        print_file_list_trailer(shown, total);
+        eprintln!("\n{total} {count_label}.");
     }
     Ok(())
 }
@@ -1563,6 +1689,8 @@ fn cmd_init_dry_run(root: &Path, config: &IndexConfig, json: bool) -> Result<()>
     // (chunks, symbols, graph, sidecars). Embeddings add substantially more.
     let estimate_low = inventory.total_bytes;
     let estimate_high = inventory.total_bytes.saturating_mul(2);
+    let (memory_low, memory_high) = estimate_init_peak_memory(inventory.total_bytes);
+    let physical_memory = physical_memory_bytes();
 
     if json {
         let report = serde_json::json!({
@@ -1579,6 +1707,12 @@ fn cmd_init_dry_run(root: &Path, config: &IndexConfig, json: bool) -> Result<()>
                 "note": "BM25+graph roughly 1–2× source bytes; --embed needs additional vector storage",
             },
             "available_disk_bytes": free_bytes,
+            "estimated_peak_memory_bytes": {
+                "low": memory_low,
+                "high": memory_high,
+                "note": "BM25+graph init: roughly 2–3.5× source bytes plus a fixed 0.1–0.3 GB; --embed adds the model",
+            },
+            "physical_memory_bytes": physical_memory,
         });
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
@@ -1636,8 +1770,60 @@ fn cmd_init_dry_run(root: &Path, config: &IndexConfig, json: bool) -> Result<()>
         }
         None => println!("Free disk space: (unavailable)"),
     }
+    println!(
+        "Estimated peak memory during init: {} – {} (about 2–3.5× source bytes)",
+        format_bytes(memory_low),
+        format_bytes(memory_high)
+    );
+    if let Some(physical) = physical_memory {
+        println!("Physical memory: {}", format_bytes(physical));
+        if physical < memory_high {
+            println!(
+                "warning: physical memory ({}) is below the high estimate ({}); init may swap or be killed. \
+                 Lower --threads, or exclude large generated files with --max-file-bytes",
+                format_bytes(physical),
+                format_bytes(memory_high)
+            );
+        }
+    }
     println!("No index written (dry-run).");
     Ok(())
+}
+
+/// Peak resident memory of a BM25+graph `init`, as a (low, high) range.
+///
+/// Fitted to measured runs: 6 MB of source peaked at 143 MB, 23 MB at
+/// 325 MB, and 1.2 GB (the Linux kernel, 71K files) at 3.3–4.0 GB. The
+/// bulk is proportional to source size (chunk bodies queued for Tantivy,
+/// symbols, trigram postings); the rest is a fixed floor.
+fn estimate_init_peak_memory(source_bytes: u64) -> (u64, u64) {
+    const MB: u64 = 1024 * 1024;
+    let low = (100 * MB).saturating_add(source_bytes.saturating_mul(2));
+    let high = (300 * MB).saturating_add(source_bytes.saturating_mul(7) / 2);
+    (low, high)
+}
+
+/// Total physical memory, when the platform makes it cheap to read.
+fn physical_memory_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let line = meminfo.lines().find(|line| line.starts_with("MemTotal:"))?;
+        let kilobytes: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+        Some(kilobytes.saturating_mul(1024))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+            .ok()?;
+        String::from_utf8(output.stdout).ok()?.trim().parse().ok()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
 }
 
 fn parse_embedding_model(s: &str) -> Result<EmbeddingModel> {
@@ -1711,21 +1897,18 @@ fn cmd_search(
             && source_filter.is_none()
             && matches!(strategy, StrategyArg::Auto);
         if can_use_daemon && let Some(text) = daemon_proxy::try_search(&root, &query, limit) {
-            print!("{text}");
+            if text.trim().is_empty() {
+                eprintln!("No results for \"{}\"", query);
+            } else {
+                print!("{text}");
+            }
             return Ok(());
         }
     }
 
-    let engine = if strategy.uses_lexical_read_profile() {
-        Engine::open_read_only_lexical(&root).with_context(|| {
-            format!(
-                "no index found at {} — run `codixing init` first",
-                root.display()
-            )
-        })?
-    } else {
-        open_read_engine(&root)?
-    };
+    // The read-only engine decodes chunk metadata and the dependency graph
+    // only when a strategy asks for them, so one open serves every strategy.
+    let engine = open_read_engine(&root)?;
 
     let resolved_strategy = strategy.resolve(&engine, &query);
     let mut sq = SearchQuery::new(&query)
@@ -1766,8 +1949,14 @@ fn cmd_search(
         let json_results: Vec<serde_json::Value> = results
             .iter()
             .map(|r| {
+                let (start_line, end_line) = r.display_lines();
                 serde_json::json!({
                     "file": r.file_path,
+                    // 1-based inclusive, same convention as `grep` and editors.
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    // Raw chunk coordinates (0-based start, exclusive end),
+                    // kept for existing consumers.
                     "line_start": r.line_start,
                     "line_end": r.line_end,
                     "language": r.language,
@@ -1784,50 +1973,15 @@ fn cmd_search(
         return Ok(());
     }
 
-    for (i, result) in results.iter().enumerate() {
-        let is_doc = result.is_doc();
-
-        if is_doc {
-            let breadcrumb = if result.scope_chain.is_empty() {
-                String::new()
-            } else {
-                format!(" \u{00a7} {}", result.scope_chain.join(" > "))
-            };
-            println!(
-                "{}. {}{} [doc] score={:.3}",
-                i + 1,
-                result.file_path,
-                breadcrumb,
-                result.score,
-            );
-        } else {
-            println!(
-                "{}. {} [L{}-L{}] ({}) score={:.3}",
-                i + 1,
-                result.file_path,
-                result.line_start,
-                result.line_end,
-                result.language,
-                result.score,
-            );
-            if !result.signature.is_empty() {
-                println!("   {}", result.signature);
-            }
-        }
-
-        // Snippet (3 lines) — same for both.
-        let snippet: String = result
-            .content
-            .lines()
-            .take(3)
-            .map(|l| format!("   | {l}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        if !snippet.is_empty() {
-            println!("{snippet}");
-        }
-        println!();
-    }
+    // One line per hit plus a query-focused snippet; identical to what the
+    // daemon proxy prints (both go through the same core formatter).
+    print!(
+        "{}",
+        codixing_core::formatter::compact::search_results(&results, &query)
+    );
+    // This command paid a cold index open; on a large index make sure the
+    // next one does not.
+    daemon_proxy::autostart_daemon_if_large(&root, engine.file_count());
 
     Ok(())
 }
@@ -1871,37 +2025,18 @@ fn cmd_grep(args: GrepArgs) -> Result<()> {
         (None, None) => None,
     };
 
-    // Fast path: daemon proxy. Aggregate modes deliberately stay in-process:
-    // MCP caps result-producing calls at 100 entries, while the CLI promises
-    // an exact total when --count / --files-with-matches has no explicit
-    // limit. Proxying those modes would make the answer depend on whether a
-    // warm daemon happened to be running.
-    if !args.json
-        && args.file.is_none()
-        && !args.count
-        && !args.files_with_matches
-        && let Some(text) = daemon_proxy::try_grep(
-            &root,
-            &args.pattern,
-            args.literal,
-            args.case_insensitive,
-            args.invert,
-            effective_glob.as_deref(),
-            before_context,
-            after_context,
-            args.count,
-            args.files_with_matches,
-            effective_limit,
-        )
-    {
-        print!("{text}");
-        if !text.ends_with('\n') {
-            println!();
-        }
-        return Ok(());
-    }
-
-    let engine = open_read_engine(&root)?;
+    // No daemon proxy: the grep-only engine below opens in milliseconds even
+    // on a kernel-sized index, and printing in-process keeps the output format
+    // identical whether or not a daemon happens to be running.
+    // A text scan needs the file list and the trigram index, nothing else.
+    let engine = Engine::open_read_only_files(&root)
+        .map(std::mem::ManuallyDrop::new)
+        .with_context(|| {
+            format!(
+                "no index found at {} — run `codixing init` first",
+                root.display()
+            )
+        })?;
 
     let opts = GrepOptions {
         pattern: args.pattern.clone(),
@@ -1915,9 +2050,19 @@ fn cmd_grep(args: GrepArgs) -> Result<()> {
         count_mode: args.count || args.files_with_matches,
     };
 
-    let matches = engine
+    let mut matches = engine
         .grep_code_opts(&opts)
         .map_err(|e| handle_engine_err(e, || "grep failed".into()))?;
+
+    // `--file` names one file. The glob it is matched with also accepts the
+    // same name in other directories (`README.md` vs `docs/README.md`); when
+    // the exact path is among the hits, keep only that file.
+    if let Some(file) = args.file.as_deref() {
+        let wanted = file.trim_start_matches("./");
+        if matches.iter().any(|m| m.file_path == wanted) {
+            matches.retain(|m| m.file_path == wanted);
+        }
+    }
 
     if args.count {
         let files: std::collections::BTreeSet<&str> =
@@ -1953,54 +2098,122 @@ fn cmd_grep(args: GrepArgs) -> Result<()> {
     }
 
     // Default format: path:line:col:text (1-indexed line/col to match grep -n).
+    // Very long lines (minified or generated code) are clipped around the
+    // match so a single hit cannot cost thousands of tokens.
+    const MAX_LINE_BYTES: usize = 240;
     for m in &matches {
         println!(
             "{}:{}:{}:{}",
             m.file_path,
             m.line_number + 1,
             m.match_start + 1,
-            m.line
+            clip_grep_line(&m.line, m.match_start, MAX_LINE_BYTES)
         );
     }
     if matches.is_empty() {
         eprintln!("No matches for `{}`.", args.pattern);
+        if !args.literal && args.pattern.contains("\\|") {
+            eprintln!(
+                "Hint: this is Rust regex syntax, where `\\|` is a literal pipe. Use `a|b` for alternation."
+            );
+        }
+        if args.glob.as_deref().is_some_and(|glob| glob.contains('{')) {
+            eprintln!(
+                "Hint: --glob does not expand braces (`{{a,b}}`); run one grep per directory or use a broader glob."
+            );
+        }
+    } else if args.limit.is_none() && matches.len() >= effective_limit {
+        // Never truncate silently: a caller must be able to tell a complete
+        // listing from the first page of one.
+        eprintln!(
+            "Showing the first {effective_limit} matches; there may be more. Use --limit N, --count, or --files-with-matches."
+        );
     }
 
     Ok(())
 }
 
-fn cmd_symbols(filter: String, file: Option<String>, defs_only: bool, count: bool) -> Result<()> {
-    use codixing_core::EntityKind;
+/// Clip `line` to about `max_bytes`, keeping the match at `match_start`
+/// visible and marking elided text with `…`.
+fn clip_grep_line(line: &str, match_start: usize, max_bytes: usize) -> std::borrow::Cow<'_, str> {
+    if line.len() <= max_bytes {
+        return std::borrow::Cow::Borrowed(line);
+    }
+    let mut start = match_start.saturating_sub(max_bytes / 4).min(line.len());
+    while start > 0 && !line.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = (start + max_bytes).min(line.len());
+    while end < line.len() && !line.is_char_boundary(end) {
+        end += 1;
+    }
+    let mut out = String::with_capacity(end - start + 8);
+    if start > 0 {
+        out.push('…');
+    }
+    out.push_str(&line[start..end]);
+    if end < line.len() {
+        out.push('…');
+    }
+    std::borrow::Cow::Owned(out)
+}
 
+fn cmd_symbols(
+    filter: String,
+    file: Option<String>,
+    include_imports: bool,
+    limit: usize,
+    count: bool,
+) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
 
-    // Fast path: proxy through the daemon if one is running.
-    // Skip daemon proxy for --count / --defs-only: we need the raw symbol list.
+    // Fast path: proxy through the daemon if one is running. `--count` and an
+    // unlimited listing need the complete symbol list, which MCP caps.
     if !filter.is_empty()
         && !count
-        && !defs_only
-        && let Some(text) = daemon_proxy::try_symbols(&root, &filter, file.as_deref())
+        && limit > 0
+        && limit <= 100
+        && let Some(text) =
+            daemon_proxy::try_symbols(&root, &filter, file.as_deref(), include_imports, limit)
     {
-        print!("{text}");
+        if text.trim().is_empty() {
+            eprintln!("No symbols matching \"{}\"", filter);
+        } else {
+            print!("{text}");
+        }
         return Ok(());
     }
 
-    let engine = open_read_engine(&root)?;
+    // A name lookup needs the symbol table, nothing else.
+    let engine = Engine::open_read_only_symbols(&root)
+        .map(std::mem::ManuallyDrop::new)
+        .with_context(|| {
+            format!(
+                "no index found at {} — run `codixing init` first",
+                root.display()
+            )
+        })?;
 
-    let mut symbols = engine
+    let symbols = engine
         .symbols(&filter, file.as_deref())
         .context("symbol lookup failed")?;
 
-    if defs_only {
-        symbols.retain(|s| !matches!(s.kind, EntityKind::Import));
-    }
+    // Exact name first, strongest definition kind next, production code before
+    // tests. Imports are hidden by default; the listing is limited so one
+    // lookup on a huge repository cannot flood the caller.
+    let listing = codixing_core::formatter::compact::symbol_lookup(
+        symbols,
+        &filter,
+        include_imports,
+        if count { 0 } else { limit },
+    );
 
     if count {
-        println!("{} symbol(s) found", symbols.len());
+        println!("{} symbol(s) found", listing.total);
         return Ok(());
     }
 
-    if symbols.is_empty() {
+    if listing.total == 0 {
         if filter.is_empty() {
             eprintln!("No symbols in index.");
         } else {
@@ -2009,19 +2222,8 @@ fn cmd_symbols(filter: String, file: Option<String>, defs_only: bool, count: boo
         return Ok(());
     }
 
-    println!("{:<12} {:<40} {:<30} LINES", "KIND", "NAME", "FILE");
-    println!("{}", "-".repeat(90));
-    for sym in &symbols {
-        println!(
-            "{:<12} {:<40} {:<30} L{}-L{}",
-            format!("{:?}", sym.kind),
-            sym.name,
-            sym.file_path,
-            sym.line_start,
-            sym.line_end,
-        );
-    }
-    eprintln!("\n{} symbol(s) found.", symbols.len());
+    print!("{}", listing.text);
+    eprintln!("\n{} symbol(s) found.", listing.total);
 
     Ok(())
 }
@@ -2288,7 +2490,7 @@ fn cmd_path(from: String, to: String) -> Result<()> {
     Ok(())
 }
 
-fn cmd_callers(file: String, depth: usize) -> Result<()> {
+fn cmd_callers(file: String, depth: usize, limit: usize) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
 
     // Fast path: proxy through the daemon when asking for direct callers only
@@ -2301,6 +2503,7 @@ fn cmd_callers(file: String, depth: usize) -> Result<()> {
             text,
             &format!("No callers found for \"{file}\"."),
             "caller(s) found",
+            limit,
         );
     }
 
@@ -2351,11 +2554,11 @@ fn cmd_callers(file: String, depth: usize) -> Result<()> {
     }
 
     // Empty case was returned above; this branch is always non-empty.
-    print_nonempty_file_list(&callers, "caller(s) found");
+    print_nonempty_file_list(&callers, "caller(s) found", limit);
     Ok(())
 }
 
-fn cmd_callees(file: String, depth: usize) -> Result<()> {
+fn cmd_callees(file: String, depth: usize, limit: usize) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
 
     // Fast path: proxy through the daemon when asking for direct callees only
@@ -2368,6 +2571,7 @@ fn cmd_callees(file: String, depth: usize) -> Result<()> {
             text,
             &format!("No dependencies found for \"{file}\""),
             "dependency/dependencies found",
+            limit,
         );
     }
 
@@ -2382,11 +2586,12 @@ fn cmd_callees(file: String, depth: usize) -> Result<()> {
         &callees,
         &format!("No dependencies found for \"{}\"", file),
         "dependency/dependencies found",
+        limit,
     );
     Ok(())
 }
 
-fn cmd_dependencies(file: String, depth: usize) -> Result<()> {
+fn cmd_dependencies(file: String, depth: usize, limit: usize) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
     let engine = open_read_engine(&root)?;
 
@@ -2395,6 +2600,7 @@ fn cmd_dependencies(file: String, depth: usize) -> Result<()> {
         &deps,
         &format!("No transitive dependencies found for \"{}\"", file),
         "transitive dependency/dependencies found",
+        limit,
     );
     Ok(())
 }
@@ -2487,89 +2693,63 @@ fn cmd_usages(
     count: bool,
     complete: bool,
 ) -> Result<()> {
+    use codixing_core::formatter::compact;
+
     let root = std::env::current_dir().context("cannot determine current directory")?;
 
-    // Fast path: proxy through the daemon when no file filter (the MCP
-    // search_usages tool doesn't expose a file filter parameter).
-    // Skip daemon proxy for --count / --complete: both need the raw result
-    // list (count for accuracy, complete for the full deterministic set).
-    if file.is_none() && !count && !complete {
-        let _ = limit; // MCP tool uses its own limit; CLI limit is approximated
-        if let Some(text) = daemon_proxy::try_usages(&root, &symbol) {
+    // Fast path: proxy the ranked listing through the daemon. `--count` and
+    // `--complete` need the whole reference set, which MCP pages.
+    if file.is_none()
+        && !count
+        && !complete
+        && (1..=100).contains(&limit)
+        && let Some(text) = daemon_proxy::try_usages(&root, &symbol, limit)
+    {
+        if text.trim().is_empty() {
+            eprintln!("No usages found for \"{}\"", symbol);
+        } else {
             print!("{text}");
-            return Ok(());
         }
-    }
-
-    let engine = open_read_engine(&root)?;
-
-    if complete {
-        use codixing_core::ReferenceOptions;
-        let mut refs = engine.symbol_references(
-            &symbol,
-            ReferenceOptions {
-                complete: true,
-                max_results: None,
-            },
-        );
-        if let Some(ref f) = file {
-            refs.retain(|r| r.file_path.contains(f.as_str()));
-        }
-        if count {
-            println!("{} usage(s) found", refs.len());
-            return Ok(());
-        }
-        if refs.is_empty() {
-            eprintln!("No usages found for \"{}\" (complete mode)", symbol);
-            return Ok(());
-        }
-        println!("{:<60} {:<8} CONTEXT", "FILE", "LINE");
-        println!("{}", "-".repeat(90));
-        for r in &refs {
-            let preview: String = r.context.chars().take(40).collect();
-            println!("{:<60} {:<8} {}", r.file_path, r.line + 1, preview);
-        }
-        eprintln!(
-            "\n{} usage location(s) found (complete, deterministic, no ranking).",
-            refs.len()
-        );
         return Ok(());
     }
 
-    let mut results = engine
-        .search_usages(&symbol, limit)
-        .context("usage search failed")?;
+    // An exact reference scan needs the file list, the trigram index and the
+    // symbol table; nothing else is loaded.
+    let engine = Engine::open_read_only_references(&root)
+        .map(std::mem::ManuallyDrop::new)
+        .with_context(|| {
+            format!(
+                "no index found at {} — run `codixing init` first",
+                root.display()
+            )
+        })?;
 
+    // Every whole-word occurrence, located through the trigram index. This
+    // has the recall of a text search, so no call site is missed because of
+    // how a chunk happened to rank.
+    let mut refs = engine.exact_symbol_references(&symbol);
     if let Some(ref f) = file {
-        results.retain(|r| r.file_path.contains(f.as_str()));
+        refs.retain(|r| r.file_path.contains(f.as_str()));
     }
 
     if count {
-        println!("{} usage(s) found", results.len());
+        println!("{} usage(s) found", refs.len());
         return Ok(());
     }
 
-    if results.is_empty() {
+    if refs.is_empty() {
         eprintln!("No usages found for \"{}\"", symbol);
+        eprintln!(
+            "Hint: usages matches whole identifiers. Try `codixing symbols {symbol}` for similarly named symbols or `codixing search {symbol}` for related code."
+        );
         return Ok(());
     }
 
-    println!("{:<50} {:<12} PREVIEW", "FILE [LINES]", "SCORE");
-    println!("{}", "-".repeat(90));
-    for r in &results {
-        let loc = format!("{} [L{}-L{}]", r.file_path, r.line_start, r.line_end);
-        let preview: String = r
-            .content
-            .lines()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("")
-            .trim()
-            .chars()
-            .take(40)
-            .collect();
-        println!("{:<50} {:<12.3} {}", loc, r.score, preview);
-    }
-    eprintln!("\n{} usage location(s) found.", results.len());
+    // Default: most useful first (definition, production code, imports,
+    // tests, comments, docs), limited. `--complete`: everything, by path.
+    let listing = compact::references(refs, if complete { 0 } else { limit }, !complete);
+    print!("{}", listing.text);
+    eprintln!("\n{} usage(s) in {} file(s).", listing.total, listing.files);
 
     Ok(())
 }
@@ -3189,8 +3369,8 @@ fn cmd_federation(action: FederationAction) -> Result<()> {
                     i + 1,
                     r.project,
                     r.result.file_path,
-                    r.result.line_start,
-                    r.result.line_end,
+                    r.result.display_lines().0,
+                    r.result.display_lines().1,
                     r.result.score,
                 );
                 let snippet: String = r
@@ -3304,6 +3484,7 @@ fn cmd_audit(
     include: Option<String>,
     exclude: Vec<String>,
     profile: codixing_core::AuditProfile,
+    full: bool,
 ) -> Result<()> {
     let root = path
         .canonicalize()
@@ -3351,44 +3532,54 @@ fn cmd_audit(
         .filter(|e| e.tier == FreshnessTier::Info)
         .collect();
 
-    if !critical.is_empty() {
-        println!("\nCritical (orphan + stale, {}+ days):", threshold_days);
+    // Each tier lists its oldest entries first. Without `--full` a tier is
+    // capped so an audit of a large repository stays readable (and cheap for
+    // an agent to consume); the remainder is reported as a count.
+    const DEFAULT_TIER_ROWS: usize = 15;
+    let print_tier = |title: String, tag: &str, entries: &[&codixing_core::FreshnessEntry]| {
+        if entries.is_empty() {
+            return;
+        }
+        println!("\n{title}");
         println!("{}", "-".repeat(80));
-        for e in &critical {
+        let mut ordered: Vec<_> = entries.to_vec();
+        ordered.sort_by(|a, b| {
+            b.days_old
+                .cmp(&a.days_old)
+                .then_with(|| a.file_path.cmp(&b.file_path))
+        });
+        let shown = if full {
+            ordered.len()
+        } else {
+            ordered.len().min(DEFAULT_TIER_ROWS)
+        };
+        for e in &ordered[..shown] {
             let days_str = if e.days_old == u64::MAX {
                 "very old".to_string()
             } else {
                 format!("{} days", e.days_old)
             };
-            println!("  [CRITICAL] {} ({}) — {}", e.file_path, days_str, e.reason);
+            println!("  [{tag}] {} ({}) — {}", e.file_path, days_str, e.reason);
         }
-    }
+        if shown < ordered.len() {
+            println!(
+                "  … {} more (pass --full to list all, or narrow with --include)",
+                ordered.len() - shown
+            );
+        }
+    };
 
-    if !warning.is_empty() {
-        println!("\nWarning (stale but connected, {}+ days):", threshold_days);
-        println!("{}", "-".repeat(80));
-        for e in &warning {
-            let days_str = if e.days_old == u64::MAX {
-                "very old".to_string()
-            } else {
-                format!("{} days", e.days_old)
-            };
-            println!("  [WARNING] {} ({}) — {}", e.file_path, days_str, e.reason);
-        }
-    }
-
-    if !info.is_empty() {
-        println!("\nInfo (recently orphaned):");
-        println!("{}", "-".repeat(80));
-        for e in &info {
-            let days_str = if e.days_old == u64::MAX {
-                "very old".to_string()
-            } else {
-                format!("{} days", e.days_old)
-            };
-            println!("  [INFO] {} ({}) — {}", e.file_path, days_str, e.reason);
-        }
-    }
+    print_tier(
+        format!("Critical (orphan + stale, {threshold_days}+ days):"),
+        "CRITICAL",
+        &critical,
+    );
+    print_tier(
+        format!("Warning (stale but connected, {threshold_days}+ days):"),
+        "WARNING",
+        &warning,
+    );
+    print_tier("Info (recently orphaned):".to_string(), "INFO", &info);
 
     eprintln!(
         "\nSummary: {} file(s) audited — {} critical, {} warning, {} info",
@@ -3406,13 +3597,10 @@ fn cmd_impact(file: String, full: bool, json: bool) -> Result<()> {
 
     let root = std::env::current_dir().context("cannot determine current directory")?;
 
-    // Fast path: proxy through the daemon only for full text dumps so we do
-    // not silently serve a pre-compact daemon response when the CLI now
-    // defaults to compact output.
-    if full
-        && !json
-        && let Some(text) = daemon_proxy::try_impact(&root, &file)
-    {
+    // Fast path: proxy through the daemon. The daemon renders with the same
+    // core formatter and honours `full`, so both modes are identical to the
+    // in-process output.
+    if !json && let Some(text) = daemon_proxy::try_impact(&root, &file, full) {
         print!("{text}");
         return Ok(());
     }
@@ -3466,7 +3654,7 @@ fn cmd_api(file: String, json: bool) -> Result<()> {
     println!("# Public API: {file}\n");
     for s in &symbols {
         let sig = s.signature.as_deref().unwrap_or(&s.name);
-        println!("  {:?} {} (line {})", s.kind, sig, s.line_start);
+        println!("  {:?} {} (line {})", s.kind, sig, s.line_start + 1);
     }
     Ok(())
 }
@@ -3568,92 +3756,46 @@ fn cmd_context(
     json: bool,
 ) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
+
+    // Fast path: a running daemon assembles the same context from its warm
+    // graph. Budgets above the tool's cap, and JSON, stay in-process.
+    if !json
+        && token_budget <= 12_000
+        && let Some(text) =
+            daemon_proxy::try_context(&root, &file, line, token_budget, budget_mode.as_str())
+    {
+        print!("{text}");
+        if !text.ends_with('\n') {
+            println!();
+        }
+        return Ok(());
+    }
+
     let engine = open_read_engine(&root)?;
 
-    let ctx =
-        engine.assemble_context_for_location_with_mode(&file, line, token_budget, budget_mode);
+    // `--line` is 1-based like every line number Codixing prints; the engine
+    // works with 0-based lines. `0` is accepted as "start of file".
+    let ctx = engine.assemble_context_for_location_with_mode(
+        &file,
+        line.saturating_sub(1),
+        token_budget,
+        budget_mode,
+    );
 
     if json {
         println!("{}", serde_json::to_string_pretty(&ctx)?);
         return Ok(());
     }
 
-    println!("# Context: {}:{}\n", ctx.primary.file_path, line);
-    let over_marker = if ctx.over_budget {
-        " ⚠ over budget"
-    } else {
-        ""
-    };
-    println!(
-        "Token budget: {} ({}) | Used: {}{}",
-        token_budget,
-        ctx.budget_mode.as_str(),
-        ctx.total_tokens,
-        over_marker
+    // One renderer for the CLI and the MCP tool; it also enforces a strict
+    // budget on the text that is actually printed.
+    print!(
+        "{}",
+        codixing_core::formatter::compact::location_context(&ctx, line.max(1))
     );
-    if let Some(reason) = &ctx.oversize_reason {
-        println!("Note: {reason}");
-    }
-    println!();
-
-    println!(
-        "## Primary chunk (L{}-L{})",
-        ctx.primary.line_start, ctx.primary.line_end
-    );
-    println!("```");
-    println!("{}", ctx.primary.content);
-    println!("```\n");
-
-    if !ctx.imports.is_empty() {
-        println!("## Imports ({}):", ctx.imports.len());
-        for imp in &ctx.imports {
-            println!(
-                "  {} (L{}-L{}, relevance: {:.2})",
-                imp.file_path, imp.line_start, imp.line_end, imp.relevance
-            );
-            for line_content in imp.content.lines() {
-                println!("    {line_content}");
-            }
-        }
-        println!();
-    }
-
-    if !ctx.callees.is_empty() {
-        println!("## Callees ({}):", ctx.callees.len());
-        for callee in &ctx.callees {
-            println!(
-                "  {} (L{}-L{}, relevance: {:.2})",
-                callee.file_path, callee.line_start, callee.line_end, callee.relevance
-            );
-            for line_content in callee.content.lines() {
-                println!("    {line_content}");
-            }
-        }
-        println!();
-    }
-
-    if !ctx.examples.is_empty() {
-        println!("## Usage examples ({}):", ctx.examples.len());
-        for (i, ex) in ctx.examples.iter().enumerate() {
-            let kind_label = match ex.kind {
-                codixing_core::engine::examples::ExampleKind::Test => "TEST",
-                codixing_core::engine::examples::ExampleKind::CallSite => "CALL",
-                codixing_core::engine::examples::ExampleKind::DocBlock => "DOC",
-            };
-            println!(
-                "  {}. [{}] {}:{}-{}",
-                i + 1,
-                kind_label,
-                ex.file_path,
-                ex.line_start,
-                ex.line_end
-            );
-            for line_content in ex.context.lines() {
-                println!("     {line_content}");
-            }
-            println!();
-        }
-    }
+    // This command paid a cold open and a graph decode; on a large index
+    // make sure the next one does not.
+    daemon_proxy::autostart_daemon_if_large(&root, engine.file_count());
 
     Ok(())
 }
@@ -3665,8 +3807,31 @@ fn cmd_agent_context_pack(
     changed_files: Vec<String>,
     branch: Option<String>,
     risk_level: Option<String>,
+    json: bool,
 ) -> Result<()> {
     let root = std::env::current_dir().context("cannot determine current directory")?;
+
+    // Fast path: a running daemon builds the pack with the same core code.
+    // Very large budgets stay in-process (the tool caps its response size).
+    if token_budget <= 9000
+        && let Some(text) = daemon_proxy::try_ask(
+            &root,
+            &task,
+            mode.as_str(),
+            token_budget,
+            &changed_files,
+            branch.as_deref(),
+            risk_level.as_deref(),
+            json,
+        )
+    {
+        print!("{text}");
+        if !text.ends_with('\n') {
+            println!();
+        }
+        return Ok(());
+    }
+
     let engine = open_read_engine(&root)?;
 
     let pack = engine.agent_context_pack(
@@ -3677,8 +3842,77 @@ fn cmd_agent_context_pack(
         branch,
         risk_level,
     )?;
-    println!("{}", serde_json::to_string_pretty(&pack)?);
+    if json {
+        // Compact: indentation costs ~40% more tokens and no consumer needs it.
+        println!("{}", serde_json::to_string(&pack)?);
+    } else {
+        print!("{}", pack.render_text());
+    }
+    daemon_proxy::autostart_daemon_if_large(&root, engine.file_count());
     Ok(())
+}
+
+fn cmd_daemon(action: DaemonAction) -> Result<()> {
+    let resolve = |path: PathBuf| -> Result<PathBuf> {
+        path.canonicalize()
+            .with_context(|| format!("path not found: {}", path.display()))
+    };
+    match action {
+        DaemonAction::Status { path } => {
+            let root = resolve(path)?;
+            let endpoint = daemon_proxy::default_daemon_endpoint(&root);
+            if daemon_proxy::daemon_is_alive(&root) {
+                println!("running  {}", endpoint_display(&endpoint));
+            } else {
+                println!("stopped  {}", endpoint_display(&endpoint));
+            }
+            Ok(())
+        }
+        DaemonAction::Start { path, wait } => {
+            let root = resolve(path)?;
+            let endpoint = daemon_proxy::default_daemon_endpoint(&root);
+            if daemon_proxy::daemon_is_alive(&root) {
+                println!("already running  {}", endpoint_display(&endpoint));
+                return Ok(());
+            }
+            if !root.join(".codixing").is_dir() {
+                anyhow::bail!(
+                    "no index found at {} — run `codixing init` first",
+                    root.display()
+                );
+            }
+            daemon_proxy::spawn_daemon(&root).map_err(|e| anyhow::anyhow!("{e}"))?;
+            if wait == 0 {
+                println!(
+                    "starting  {} (ready once the index is loaded)",
+                    endpoint_display(&endpoint)
+                );
+                return Ok(());
+            }
+            let deadline = Instant::now() + std::time::Duration::from_secs(wait);
+            while Instant::now() < deadline {
+                if daemon_proxy::daemon_is_alive(&root) {
+                    println!("running  {}", endpoint_display(&endpoint));
+                    return Ok(());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            anyhow::bail!(
+                "daemon did not accept connections within {wait}s at {}",
+                endpoint_display(&endpoint)
+            )
+        }
+    }
+}
+
+#[cfg(unix)]
+fn endpoint_display(endpoint: &Path) -> String {
+    endpoint.display().to_string()
+}
+
+#[cfg(windows)]
+fn endpoint_display(endpoint: &str) -> String {
+    endpoint.to_string()
 }
 
 fn cmd_doctor(
@@ -4163,87 +4397,97 @@ fn print_path_fix_instructions() {
 
 /// Token-savings harness: Codixing workflows vs naive grep+read baselines.
 fn cmd_bench_tokens(path: PathBuf, output: Option<PathBuf>) -> Result<()> {
-    use std::time::Instant;
-
     let root = path
         .canonicalize()
         .with_context(|| format!("path not found: {}", path.display()))?;
 
-    // Pick a representative symbol/file from the index when possible.
+    // Pick a representative definition from the index.
     let engine = open_read_engine(&root)?;
-    let (symbol, file) = pick_bench_targets(&engine);
+    let target = pick_bench_target(&engine);
+    let BenchTarget { symbol, file, line } = &target;
 
     let codixing_bin = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("codixing"));
+    let cx = codixing_bin.display();
 
-    // Task 1: locate definition + usages + impact via Codixing
-    let cx_cmds = [
-        format!("{} symbols {symbol} --defs-only", codixing_bin.display()),
-        format!("{} usages {symbol}", codixing_bin.display()),
-        format!("{} impact {file}", codixing_bin.display()),
-        format!(
-            "{} context {file} --line 0 --token-budget 1000",
-            codixing_bin.display()
+    // What a correct answer must contain: the definition's file and line.
+    let definition = format!("{file}:{line}");
+
+    // Workflow: locate a definition, its usages and its blast radius.
+    // Each step records whether its output actually contains the answer;
+    // saving tokens on a wrong answer is not a saving.
+    let cx_steps: Vec<(String, Option<&str>)> = vec![
+        (format!("{cx} symbols {symbol}"), Some(definition.as_str())),
+        (format!("{cx} usages {symbol}"), Some(definition.as_str())),
+        (format!("{cx} impact {file}"), None),
+        (
+            format!("{cx} context {file} --line {line} --token-budget 1000"),
+            Some(symbol.as_str()),
         ),
-        format!(
-            "{} ask \"where is {symbol} defined and what depends on it\" --token-budget 2500",
-            codixing_bin.display()
+        (
+            format!(
+                "{cx} ask \"where is {symbol} defined and what depends on it\" --token-budget 2500"
+            ),
+            Some(file.as_str()),
         ),
     ];
-    let naive_cmds = [
-        format!(
-            "grep -rn \"{symbol}\" --include='*.rs' --include='*.py' --include='*.ts' --include='*.go' . | head -120"
+    // Baseline: grep for the name, then read around the definition.
+    let read_from = line.saturating_sub(20).max(1);
+    let naive_steps: Vec<(String, Option<&str>)> = vec![
+        (
+            format!(
+                "grep -rn \"{symbol}\" --include='*.rs' --include='*.py' --include='*.ts' --include='*.go' --include='*.c' --include='*.h' --include='*.java' . | head -120"
+            ),
+            Some(definition.as_str()),
         ),
-        format!("sed -n '1,250p' {file}"),
-        format!("sed -n '250,500p' {file}"),
+        (
+            format!("sed -n '{read_from},{}p' {file}", read_from + 250),
+            Some(symbol.as_str()),
+        ),
     ];
 
-    let mut cx_total_toks = 0usize;
-    let mut cx_total_ms = 0u128;
-    let mut cx_results = Vec::new();
-    for cmd in &cx_cmds {
-        let (ms, bytes, toks, rc) = run_shell_measure(cmd, &root);
-        cx_total_toks += toks;
-        cx_total_ms += ms;
-        cx_results.push(serde_json::json!({
-            "cmd": cmd,
-            "ms": ms,
-            "bytes": bytes,
-            "toks": toks,
-            "rc": rc,
-        }));
-    }
+    let run_steps = |steps: &[(String, Option<&str>)]| {
+        let mut total_toks = 0usize;
+        let mut total_ms = 0u128;
+        let mut answered = 0usize;
+        let mut checked = 0usize;
+        let mut results = Vec::new();
+        for (cmd, expect) in steps {
+            let run = run_shell_measure(cmd, &root);
+            total_toks += run.toks;
+            total_ms += run.ms;
+            let found = expect.map(|needle| run.output.contains(needle));
+            if let Some(found) = found {
+                checked += 1;
+                answered += usize::from(found);
+            }
+            results.push(serde_json::json!({
+                "cmd": cmd,
+                "ms": run.ms,
+                "bytes": run.bytes,
+                "toks": run.toks,
+                "rc": run.rc,
+                "expects": expect,
+                "answer_found": found,
+            }));
+        }
+        (total_toks, total_ms, answered, checked, results)
+    };
 
-    let mut naive_total_toks = 0usize;
-    let mut naive_total_ms = 0u128;
-    let mut naive_results = Vec::new();
-    for cmd in &naive_cmds {
-        let (ms, bytes, toks, rc) = run_shell_measure(cmd, &root);
-        naive_total_toks += toks;
-        naive_total_ms += ms;
-        naive_results.push(serde_json::json!({
-            "cmd": cmd,
-            "ms": ms,
-            "bytes": bytes,
-            "toks": toks,
-            "rc": rc,
-        }));
-    }
+    let (cx_total_toks, cx_total_ms, cx_answered, cx_checked, cx_results) = run_steps(&cx_steps);
+    let (naive_total_toks, naive_total_ms, naive_answered, naive_checked, naive_results) =
+        run_steps(&naive_steps);
 
     // Map / impact size gates
-    let (map_ms, map_bytes, map_toks, _) = run_shell_measure(
-        &format!("{} graph --map --token-budget 1500", codixing_bin.display()),
-        &root,
-    );
-    let (imp_ms, imp_bytes, imp_toks, _) =
-        run_shell_measure(&format!("{} impact {file}", codixing_bin.display()), &root);
-    let (imp_full_ms, imp_full_bytes, imp_full_toks, _) = run_shell_measure(
-        &format!("{} impact {file} --full", codixing_bin.display()),
-        &root,
-    );
-    let (search_ms, search_bytes, search_toks, _) = run_shell_measure(
-        &format!("{} search \"{symbol}\" --limit 5", codixing_bin.display()),
-        &root,
-    );
+    let map = run_shell_measure(&format!("{cx} graph --map --token-budget 1500"), &root);
+    let impact = run_shell_measure(&format!("{cx} impact {file}"), &root);
+    let impact_full = run_shell_measure(&format!("{cx} impact {file} --full"), &root);
+    let search = run_shell_measure(&format!("{cx} search \"{symbol}\" --limit 5"), &root);
+    // The first hit of an identifier search must be the definition's file.
+    let search_top_is_definition = search
+        .output
+        .lines()
+        .next()
+        .is_some_and(|first| first.contains(&format!(" {file}:")));
 
     let saved = naive_total_toks.saturating_sub(cx_total_toks);
     let pct = if naive_total_toks == 0 {
@@ -4253,42 +4497,46 @@ fn cmd_bench_tokens(path: PathBuf, output: Option<PathBuf>) -> Result<()> {
     };
 
     let report = serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "binary_version": env!("CARGO_PKG_VERSION"),
         "root": root.display().to_string(),
-        "targets": { "symbol": symbol, "file": file },
+        "tokenizer": "cl100k_base",
+        "targets": { "symbol": symbol, "file": file, "line": line },
         "workflow": {
             "name": "locate_definition_and_blast_radius",
             "codixing": {
                 "total_toks": cx_total_toks,
                 "total_ms": cx_total_ms,
+                "answers_found": cx_answered,
+                "answers_checked": cx_checked,
                 "steps": cx_results,
             },
             "naive": {
                 "total_toks": naive_total_toks,
                 "total_ms": naive_total_ms,
+                "answers_found": naive_answered,
+                "answers_checked": naive_checked,
                 "steps": naive_results,
             },
             "tokens_saved": saved,
             "percent_saved": pct,
         },
         "gates": {
-            "graph_map_1500": { "ms": map_ms, "bytes": map_bytes, "toks": map_toks, "budget": 1500 },
-            "impact_compact": { "ms": imp_ms, "bytes": imp_bytes, "toks": imp_toks },
-            "impact_full": { "ms": imp_full_ms, "bytes": imp_full_bytes, "toks": imp_full_toks },
-            "search_symbol": { "ms": search_ms, "bytes": search_bytes, "toks": search_toks },
+            "graph_map_1500": { "ms": map.ms, "bytes": map.bytes, "toks": map.toks, "budget": 1500 },
+            "impact_compact": { "ms": impact.ms, "bytes": impact.bytes, "toks": impact.toks },
+            "impact_full": { "ms": impact_full.ms, "bytes": impact_full.bytes, "toks": impact_full.toks },
+            "search_symbol": {
+                "ms": search.ms,
+                "bytes": search.bytes,
+                "toks": search.toks,
+                "top_hit_is_definition": search_top_is_definition,
+            },
         },
-        "timestamp_unix": Instant::now().elapsed().as_secs(), // placeholder; overwritten below
-    });
-
-    // Prefer wall-clock timestamp when available.
-    let mut report = report;
-    report["timestamp_unix"] = serde_json::json!(
-        std::time::SystemTime::now()
+        "timestamp_unix": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
-            .unwrap_or(0)
-    );
+            .unwrap_or(0),
+    });
 
     let pretty = serde_json::to_string_pretty(&report)?;
     if let Some(path) = output {
@@ -4300,61 +4548,127 @@ fn cmd_bench_tokens(path: PathBuf, output: Option<PathBuf>) -> Result<()> {
     println!("# Codixing bench-tokens");
     println!("Version: {}", env!("CARGO_PKG_VERSION"));
     println!("Root: {}", root.display());
-    println!("Targets: symbol={symbol} file={file}");
+    println!("Target: {symbol} at {definition}");
+    println!("Tokens: cl100k_base");
     println!();
     println!("## Workflow: locate definition + blast radius");
-    println!("  Codixing: ~{cx_total_toks} toks in {cx_total_ms} ms");
-    println!("  Naive:    ~{naive_total_toks} toks in {naive_total_ms} ms");
-    println!("  Saved:    ~{saved} toks ({pct:.1}%)");
+    println!(
+        "  Codixing: {cx_total_toks} toks in {cx_total_ms} ms, answer present in {cx_answered}/{cx_checked} steps"
+    );
+    println!(
+        "  Naive:    {naive_total_toks} toks in {naive_total_ms} ms, answer present in {naive_answered}/{naive_checked} steps"
+    );
+    println!("  Saved:    {saved} toks ({pct:.1}%)");
     println!();
     println!("## Gates");
-    println!("  graph --map --token-budget 1500 → ~{map_toks} toks (budget 1500)");
-    println!("  impact compact → ~{imp_toks} toks");
-    println!("  impact --full  → ~{imp_full_toks} toks");
-    println!("  search {symbol} → ~{search_toks} toks");
+    println!(
+        "  graph --map --token-budget 1500 → {} toks (budget 1500)",
+        map.toks
+    );
+    println!("  impact compact → {} toks", impact.toks);
+    println!("  impact --full  → {} toks", impact_full.toks);
+    println!(
+        "  search {symbol} → {} toks, top hit is the definition: {search_top_is_definition}",
+        search.toks
+    );
     println!();
     println!("{pretty}");
+
+    // A saving only counts when every Codixing step found the answer.
+    if cx_answered < cx_checked {
+        anyhow::bail!(
+            "{} of {cx_checked} Codixing steps did not contain the expected answer",
+            cx_checked - cx_answered
+        );
+    }
 
     Ok(())
 }
 
-fn pick_bench_targets(engine: &Engine) -> (String, String) {
-    // Prefer a well-known struct if present, else first public struct/fn.
-    for candidate in ["IndexStore", "Engine", "SearchQuery", "CodeGraph"] {
-        let syms = engine.symbols(candidate, None).unwrap_or_default();
-        if let Some(s) = syms
-            .iter()
-            .find(|s| !matches!(s.kind, codixing_core::EntityKind::Import))
-        {
-            return (s.name.clone(), s.file_path.clone());
-        }
-    }
-    let all = engine.symbols("", None).unwrap_or_default();
-    if let Some(s) = all
-        .iter()
-        .find(|s| !matches!(s.kind, codixing_core::EntityKind::Import))
-    {
-        return (s.name.clone(), s.file_path.clone());
-    }
-    ("main".into(), "src/main.rs".into())
+/// The definition `bench-tokens` measures against.
+struct BenchTarget {
+    symbol: String,
+    file: String,
+    /// 1-based line of the definition.
+    line: usize,
 }
 
-fn run_shell_measure(cmd: &str, root: &Path) -> (u128, usize, usize, i32) {
+fn pick_bench_target(engine: &Engine) -> BenchTarget {
+    let from = |s: &codixing_core::Symbol| BenchTarget {
+        symbol: s.name.clone(),
+        file: s.file_path.clone(),
+        line: s.display_lines().0,
+    };
+    let is_type_or_fn = |s: &&codixing_core::Symbol| codixing_core::definition_tier(&s.kind) >= 2;
+
+    // Prefer a well-known type if present, else the first definition by name.
+    for candidate in ["IndexStore", "Engine", "SearchQuery", "CodeGraph"] {
+        let mut syms = engine.symbols(candidate, None).unwrap_or_default();
+        codixing_core::sort_for_lookup(&mut syms, candidate);
+        if let Some(s) = syms
+            .iter()
+            .filter(is_type_or_fn)
+            .find(|s| s.name == candidate)
+        {
+            return from(s);
+        }
+    }
+    let mut all = engine.symbols("", None).unwrap_or_default();
+    all.retain(|s| {
+        codixing_core::definition_tier(&s.kind) == 3
+            && !codixing_core::is_test_like_path(&s.file_path)
+            && s.name.len() >= 6
+    });
+    all.sort_by(|a, b| a.name.cmp(&b.name).then(a.file_path.cmp(&b.file_path)));
+    if let Some(s) = all.first() {
+        return from(s);
+    }
+    BenchTarget {
+        symbol: "main".into(),
+        file: "src/main.rs".into(),
+        line: 1,
+    }
+}
+
+/// Outcome of one measured shell command.
+struct ShellRun {
+    ms: u128,
+    bytes: usize,
+    /// Exact cl100k token count of stdout + stderr.
+    toks: usize,
+    rc: i32,
+    output: String,
+}
+
+fn run_shell_measure(cmd: &str, root: &Path) -> ShellRun {
     let start = std::time::Instant::now();
     let output = std::process::Command::new("sh")
         .arg("-c")
         .arg(cmd)
         .current_dir(root)
+        // Measure this binary, not whatever daemon happens to be running.
+        .env("CODIXING_NO_AUTO_DAEMON", "1")
         .output();
     let ms = start.elapsed().as_millis();
     match output {
         Ok(out) => {
-            let bytes = out.stdout.len() + out.stderr.len();
-            let toks = bytes.div_ceil(4).max(1);
-            let rc = out.status.code().unwrap_or(1);
-            (ms, bytes, toks, rc)
+            let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+            text.push_str(&String::from_utf8_lossy(&out.stderr));
+            ShellRun {
+                ms,
+                bytes: text.len(),
+                toks: codixing_core::formatter::count_tokens(&text).max(1),
+                rc: out.status.code().unwrap_or(1),
+                output: text,
+            }
         }
-        Err(_) => (ms, 0, 1, 1),
+        Err(_) => ShellRun {
+            ms,
+            bytes: 0,
+            toks: 1,
+            rc: 1,
+            output: String::new(),
+        },
     }
 }
 
@@ -4762,6 +5076,23 @@ mod tests {
     use super::*;
     use clap::Parser;
 
+    #[test]
+    fn init_peak_memory_estimate_brackets_measured_runs() {
+        const MB: u64 = 1024 * 1024;
+        // (source bytes, measured peak RSS of `codixing init`)
+        for (source, measured) in [
+            (6 * MB, 143 * MB),       // this repository
+            (23 * MB, 325 * MB),      // Django 5.0.6
+            (1_229 * MB, 3_410 * MB), // Linux 6.6
+        ] {
+            let (low, high) = estimate_init_peak_memory(source);
+            assert!(
+                low <= measured && measured <= high,
+                "{measured} outside {low}..{high} for {source} source bytes"
+            );
+        }
+    }
+
     /// `--threads N` flows through to the `Init` variant. Issue #107 regression
     /// guard: if the flag is dropped from the clap variant, `cmd_init` falls
     /// back to Rayon's uncapped default and Windows users hit the NTFS race
@@ -4852,22 +5183,5 @@ mod tests {
             Err("simulated shared-process pool".to_string())
         })
         .expect("tests may share an already initialized global pool");
-    }
-
-    #[test]
-    fn only_explicit_lexical_strategies_use_the_lean_read_profile() {
-        assert!(StrategyArg::Exact.uses_lexical_read_profile());
-        assert!(StrategyArg::Instant.uses_lexical_read_profile());
-
-        for strategy in [
-            StrategyArg::Auto,
-            StrategyArg::Fast,
-            StrategyArg::Thorough,
-            StrategyArg::Explore,
-            StrategyArg::Deep,
-            StrategyArg::Semantic,
-        ] {
-            assert!(!strategy.uses_lexical_read_profile(), "{strategy:?}");
-        }
     }
 }

@@ -348,8 +348,12 @@ fn default_socket_path(
     } else {
         ""
     };
-    root.join(".codixing")
-        .join(format!("daemon-{}{policy_suffix}.sock", profile.as_str()))
+    // In the index directory when the path is short enough to bind, else in a
+    // short per-user runtime directory keyed by the root.
+    codixing_core::process::daemon_socket_path(
+        root,
+        &format!("daemon-{}{policy_suffix}.sock", profile.as_str()),
+    )
 }
 
 // ---------------------------------------------------------------------------

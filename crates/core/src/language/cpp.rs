@@ -1,5 +1,7 @@
 use tree_sitter::{Node, Tree};
 
+use super::c::{macro_line_range, macro_signature};
+use super::c_family::mask_attribute_macros;
 use super::{
     EntityKind, Language, LanguageSupport, SemanticEntity, Visibility, extract_preceding_comments,
     find_name_node, node_line_range, node_text,
@@ -18,6 +20,7 @@ const ENTITY_KINDS: &[&str] = &[
     "type_definition",
     "declaration",
     "preproc_include",
+    "preproc_function_def",
 ];
 
 impl LanguageSupport for CppLanguage {
@@ -46,6 +49,10 @@ impl LanguageSupport for CppLanguage {
 
     fn extract_doc_comment(&self, node: &Node, source: &[u8]) -> Option<String> {
         extract_preceding_comments(node, source, "//")
+    }
+
+    fn prepare_source<'a>(&self, source: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {
+        mask_attribute_macros(source)
     }
 }
 
@@ -76,7 +83,11 @@ fn collect_entities(
                 signature: lang.extract_signature(node, source),
                 doc_comment: lang.extract_doc_comment(node, source),
                 byte_range: node.start_byte()..node.end_byte(),
-                line_range: node_line_range(node),
+                line_range: if kind_str == "preproc_function_def" {
+                    macro_line_range(node, source)
+                } else {
+                    node_line_range(node)
+                },
                 scope: scope.to_vec(),
                 visibility: Visibility::default(),
                 type_relations: Vec::new(),
@@ -111,6 +122,11 @@ fn collect_entities(
         }
     }
 
+    // A macro body is unparsed text: nothing to recurse into.
+    if kind_str == "preproc_function_def" {
+        return;
+    }
+
     // For template_declaration, recurse into the inner declaration
     if kind_str == "template_declaration" {
         // Already handled as an entity if matched, but we need to recurse
@@ -124,6 +140,12 @@ fn collect_entities(
     }
 }
 
+/// True when a struct/enum/class specifier carries a body, i.e. it defines
+/// the type rather than merely naming it.
+fn has_body(node: &Node) -> bool {
+    node.child_by_field_name("body").is_some()
+}
+
 fn match_entity_kind(kind: &str, node: &Node, source: &[u8]) -> Option<EntityKind> {
     match kind {
         "function_definition" => Some(EntityKind::Function),
@@ -131,6 +153,11 @@ fn match_entity_kind(kind: &str, node: &Node, source: &[u8]) -> Option<EntityKin
             if let Some(parent) = node.parent()
                 && parent.kind() == "type_definition"
             {
+                return None;
+            }
+            // A specifier without a body (`struct foo *p;`, `struct foo;`) is a
+            // reference or forward declaration, not a definition.
+            if !has_body(node) {
                 return None;
             }
             Some(EntityKind::Class)
@@ -141,12 +168,22 @@ fn match_entity_kind(kind: &str, node: &Node, source: &[u8]) -> Option<EntityKin
             {
                 return None;
             }
+            // A specifier without a body (`struct foo *p;`, `struct foo;`) is a
+            // reference or forward declaration, not a definition.
+            if !has_body(node) {
+                return None;
+            }
             Some(EntityKind::Struct)
         }
         "enum_specifier" => {
             if let Some(parent) = node.parent()
                 && parent.kind() == "type_definition"
             {
+                return None;
+            }
+            // A specifier without a body (`struct foo *p;`, `struct foo;`) is a
+            // reference or forward declaration, not a definition.
+            if !has_body(node) {
                 return None;
             }
             Some(EntityKind::Enum)
@@ -180,6 +217,8 @@ fn match_entity_kind(kind: &str, node: &Node, source: &[u8]) -> Option<EntityKin
             }
         }
         "preproc_include" => Some(EntityKind::Import),
+        // Function-like macros are looked up like functions.
+        "preproc_function_def" => Some(EntityKind::Function),
         _ => None,
     }
 }
@@ -293,6 +332,7 @@ fn find_declarator_name(node: &Node, source: &[u8]) -> Option<String> {
 fn extract_cpp_signature(node: &Node, source: &[u8]) -> Option<String> {
     let kind = node.kind();
     match kind {
+        "preproc_function_def" => macro_signature(node, source),
         "function_definition" => {
             let text = node_text(node, source);
             if let Some(brace) = text.find('{') {

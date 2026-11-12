@@ -49,6 +49,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 const DEFAULT_DAEMON_PROFILE: &str = "minimal";
 const REVIEWER_PROFILE: &str = "reviewer";
+const INITIALIZE_RESPONSE_ID: u64 = 1;
 const PROFILE_RESPONSE_ID: u64 = 2;
 const CALL_RESPONSE_ID: u64 = 3;
 
@@ -61,9 +62,12 @@ const CALL_RESPONSE_ID: u64 = 3;
 ///   returned an error, or any I/O step failed. The caller should fall back
 ///   to its existing in-process path.
 pub fn try_tools_call(root: &Path, tool_name: &str, arguments: Value) -> Option<String> {
+    if daemon_disabled() {
+        return None;
+    }
     let initialize = json!({
         "jsonrpc": "2.0",
-        "id": 1,
+        "id": INITIALIZE_RESPONSE_ID,
         "method": "initialize",
         "params": { "capabilities": {} }
     });
@@ -96,6 +100,13 @@ pub fn try_tools_call(root: &Path, tool_name: &str, arguments: Value) -> Option<
     parse_response(response_reader)
 }
 
+/// `CODIXING_NO_DAEMON=1`: answer every command in-process and never start
+/// a daemon. For benchmarks and bug reports, where the result must not
+/// depend on what an earlier command left running.
+pub fn daemon_disabled() -> bool {
+    std::env::var_os("CODIXING_NO_DAEMON").is_some_and(|value| !value.is_empty() && value != "0")
+}
+
 /// Parse the daemon's response stream, looking for the tools/call reply.
 fn parse_response<R: BufRead>(mut reader: R) -> Option<String> {
     let mut line = String::new();
@@ -107,6 +118,19 @@ fn parse_response<R: BufRead>(mut reader: R) -> Option<String> {
             return None;
         }
         let resp: Value = serde_json::from_str(line.trim()).ok()?;
+        // A daemon left running by another release ranks and formats with
+        // that release's code, and may not understand this release's index.
+        // Answer in-process instead; the old daemon exits when idle.
+        if resp.get("id") == Some(&json!(INITIALIZE_RESPONSE_ID))
+            && let Some(version) = resp
+                .get("result")
+                .and_then(|r| r.get("serverInfo"))
+                .and_then(|info| info.get("version"))
+                .and_then(|v| v.as_str())
+            && version != env!("CARGO_PKG_VERSION")
+        {
+            return None;
+        }
         // Skip notifications plus initialize/profile-switch responses.
         if resp.get("id") != Some(&json!(CALL_RESPONSE_ID)) {
             continue;
@@ -159,8 +183,12 @@ fn send_jsonrpc(root: &Path, request: &[u8]) -> Option<Box<dyn BufRead + Send>> 
 
 #[cfg(unix)]
 pub(crate) fn default_daemon_endpoint(root: &Path) -> std::path::PathBuf {
-    root.join(".codixing")
-        .join(format!("daemon-{DEFAULT_DAEMON_PROFILE}.sock"))
+    // Same derivation as the daemon (`codixing-mcp`): the index directory
+    // when the path is short enough to bind, else a per-user runtime path.
+    codixing_core::process::daemon_socket_path(
+        root,
+        &format!("daemon-{DEFAULT_DAEMON_PROFILE}.sock"),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -292,14 +320,204 @@ pub fn try_search(root: &Path, query: &str, limit: usize) -> Option<String> {
         json!({
             "query": query,
             "limit": limit,
+            // Same one-line-per-hit rendering as the in-process path.
+            "compact": true,
         }),
     )
 }
 
+/// Proxy `codixing ask` through the daemon's `agent_context_pack` tool.
+///
+/// The daemon renders with the same core code as the in-process command.
+/// `token_budget` is the budget of the pack itself; the tool reserves a
+/// quarter of its own budget for the response envelope, so it is scaled up
+/// here to give the pack the same room either way.
+#[allow(clippy::too_many_arguments)]
+pub fn try_ask(
+    root: &Path,
+    task: &str,
+    mode: &str,
+    token_budget: usize,
+    changed_files: &[String],
+    branch: Option<&str>,
+    risk_level: Option<&str>,
+    json_output: bool,
+) -> Option<String> {
+    let mut args = serde_json::Map::new();
+    args.insert("task".into(), json!(task));
+    args.insert("mode".into(), json!(mode));
+    args.insert(
+        "token_budget".into(),
+        json!(token_budget.saturating_mul(4).div_ceil(3)),
+    );
+    args.insert(
+        "format".into(),
+        json!(if json_output { "json" } else { "text" }),
+    );
+    if !changed_files.is_empty() {
+        args.insert("changed_files".into(), json!(changed_files));
+    }
+    if let Some(branch) = branch {
+        args.insert("branch".into(), json!(branch));
+    }
+    if let Some(risk_level) = risk_level {
+        args.insert("risk_level".into(), json!(risk_level));
+    }
+    try_tools_call(root, "agent_context_pack", Value::Object(args))
+}
+
+// ---------------------------------------------------------------------------
+// Daemon lifecycle (Unix)
+// ---------------------------------------------------------------------------
+
+/// Indexes with at least this many files get a background daemon started
+/// automatically: below it a cold process is fast enough, above it every
+/// command pays seconds to reopen the index.
+pub const AUTO_DAEMON_MIN_FILES: usize = 20_000;
+
+/// Whether a daemon for `root` is accepting connections.
+#[cfg(unix)]
+pub fn daemon_is_alive(root: &Path) -> bool {
+    let socket_path = default_daemon_endpoint(root);
+    socket_path.exists() && std::os::unix::net::UnixStream::connect(&socket_path).is_ok()
+}
+
+#[cfg(not(unix))]
+pub fn daemon_is_alive(_root: &Path) -> bool {
+    false
+}
+
+/// Locate the `codixing-mcp` binary: next to this executable, else on `PATH`.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn find_mcp_binary() -> Option<std::path::PathBuf> {
+    let name = if cfg!(windows) {
+        "codixing-mcp.exe"
+    } else {
+        "codixing-mcp"
+    };
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let sibling = dir.join(name);
+        if sibling.is_file() {
+            return Some(sibling);
+        }
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Why a daemon could not be started.
+#[derive(Debug)]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub enum DaemonStartError {
+    /// `codixing-mcp` was found neither next to the CLI nor on `PATH`.
+    BinaryNotFound,
+    /// Spawning the process failed.
+    Spawn(std::io::Error),
+    /// Background daemons are only managed on Unix.
+    #[cfg(not(unix))]
+    Unsupported,
+}
+
+impl std::fmt::Display for DaemonStartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BinaryNotFound => write!(
+                f,
+                "codixing-mcp not found next to the codixing binary or on PATH"
+            ),
+            Self::Spawn(error) => write!(f, "failed to start codixing-mcp: {error}"),
+            #[cfg(not(unix))]
+            Self::Unsupported => write!(f, "background daemons are managed on Unix only"),
+        }
+    }
+}
+
+/// Start a detached read-only daemon for `root`.
+///
+/// The daemon keeps the index in memory, serves CLI commands over its
+/// socket, follows index updates, and exits by itself after 30 idle minutes.
+/// Returns once the process is spawned; it needs as long as a cold index
+/// open before it accepts connections.
+#[cfg(unix)]
+pub fn spawn_daemon(root: &Path) -> Result<(), DaemonStartError> {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    let binary = find_mcp_binary().ok_or(DaemonStartError::BinaryNotFound)?;
+    // Own process group: the daemon must outlive this command and must not
+    // receive the terminal's Ctrl-C.
+    Command::new(binary)
+        .arg("--root")
+        .arg(root)
+        .arg("--daemon")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .map(|_| ())
+        .map_err(DaemonStartError::Spawn)
+}
+
+#[cfg(not(unix))]
+pub fn spawn_daemon(_root: &Path) -> Result<(), DaemonStartError> {
+    Err(DaemonStartError::Unsupported)
+}
+
+/// Start a daemon in the background when the index is large and none is
+/// running, so the *next* command is served warm.
+///
+/// Never blocks and never fails the calling command. Opt out with
+/// `CODIXING_NO_AUTO_DAEMON=1`. A start marker keeps concurrent commands from
+/// each launching their own daemon while the first one is still loading.
+pub fn autostart_daemon_if_large(root: &Path, indexed_files: usize) {
+    if indexed_files < AUTO_DAEMON_MIN_FILES
+        || daemon_disabled()
+        || std::env::var_os("CODIXING_NO_AUTO_DAEMON").is_some_and(|v| !v.is_empty() && v != "0")
+        || daemon_is_alive(root)
+    {
+        return;
+    }
+
+    // One start attempt per minute at most.
+    let marker = root.join(".codixing").join("daemon-start.marker");
+    let recently_started = std::fs::metadata(&marker)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age < std::time::Duration::from_secs(60));
+    if recently_started {
+        return;
+    }
+    if std::fs::write(&marker, b"").is_err() {
+        return;
+    }
+
+    if spawn_daemon(root).is_ok() {
+        eprintln!(
+            "codixing: large index ({indexed_files} files) — started a background daemon so the next commands answer in milliseconds. It exits after 30 idle minutes; set CODIXING_NO_AUTO_DAEMON=1 to disable."
+        );
+    }
+}
+
 /// Proxy `codixing symbols <name>` through the daemon's `find_symbol` tool.
-pub fn try_symbols(root: &Path, name: &str, file_filter: Option<&str>) -> Option<String> {
+pub fn try_symbols(
+    root: &Path,
+    name: &str,
+    file_filter: Option<&str>,
+    include_imports: bool,
+    limit: usize,
+) -> Option<String> {
     let mut args = serde_json::Map::new();
     args.insert("name".into(), json!(name));
+    args.insert("include_imports".into(), json!(include_imports));
+    args.insert("limit".into(), json!(limit));
+    // Bare listing, exactly as the in-process command prints it.
+    args.insert("cli".into(), json!(true));
     if let Some(f) = file_filter {
         args.insert("file".into(), json!(f));
     }
@@ -307,13 +525,18 @@ pub fn try_symbols(root: &Path, name: &str, file_filter: Option<&str>) -> Option
 }
 
 /// Proxy `codixing usages <symbol>` through the daemon's `search_usages` tool.
-pub fn try_usages(root: &Path, symbol: &str) -> Option<String> {
-    try_tools_call(root, "search_usages", json!({ "symbol": symbol }))
+pub fn try_usages(root: &Path, symbol: &str, limit: usize) -> Option<String> {
+    try_tools_call(
+        root,
+        "search_usages",
+        // Bare listing, exactly as the in-process command prints it.
+        json!({ "symbol": symbol, "limit": limit, "cli": true }),
+    )
 }
 
 /// Proxy `codixing impact <file>` through the daemon's `change_impact` tool.
-pub fn try_impact(root: &Path, file: &str) -> Option<String> {
-    try_tools_call(root, "change_impact", json!({ "file": file }))
+pub fn try_impact(root: &Path, file: &str, full: bool) -> Option<String> {
+    try_tools_call(root, "change_impact", json!({ "file": file, "full": full }))
 }
 
 /// Proxy `codixing graph --map` through the daemon's `get_repo_map` tool.
@@ -323,6 +546,28 @@ pub fn try_repo_map(root: &Path, token_budget: Option<usize>) -> Option<String> 
         args.insert("token_budget".into(), json!(b));
     }
     try_tools_call(root, "get_repo_map", Value::Object(args))
+}
+
+/// Proxy `codixing context <file> --line N` through the daemon's
+/// `assemble_location_context` tool. Both sides render with the same core
+/// formatter, so the text is identical to the in-process command.
+pub fn try_context(
+    root: &Path,
+    file: &str,
+    line: u64,
+    token_budget: usize,
+    budget_mode: &str,
+) -> Option<String> {
+    try_tools_call(
+        root,
+        "assemble_location_context",
+        json!({
+            "file": file,
+            "line": line,
+            "token_budget": token_budget,
+            "budget_mode": budget_mode,
+        }),
+    )
 }
 
 /// Proxy `codixing callers <file>` through the daemon's `file_callers` tool.
@@ -339,56 +584,6 @@ pub fn try_callers(root: &Path, file: &str) -> Option<String> {
 /// not running or does not respond.
 pub fn try_callees(root: &Path, file: &str) -> Option<String> {
     try_tools_call(root, "file_callees", json!({ "path": file }))
-}
-
-/// Proxy `codixing grep <pattern>` through the daemon's `grep_code` tool.
-///
-/// The daemon handler formats matches itself; on success we hand back the
-/// pre-rendered text body. Returns `None` if no daemon is running or the
-/// tool call failed — caller should fall back to in-process.
-#[allow(clippy::too_many_arguments)]
-pub fn try_grep(
-    root: &Path,
-    pattern: &str,
-    literal: bool,
-    case_insensitive: bool,
-    invert: bool,
-    file_glob: Option<&str>,
-    before_context: usize,
-    after_context: usize,
-    count_only: bool,
-    files_with_matches: bool,
-    limit: usize,
-) -> Option<String> {
-    let mut args = serde_json::Map::new();
-    args.insert("pattern".into(), json!(pattern));
-    if literal {
-        args.insert("literal".into(), json!(true));
-    }
-    if case_insensitive {
-        args.insert("case_insensitive".into(), json!(true));
-    }
-    if invert {
-        args.insert("invert".into(), json!(true));
-    }
-    if let Some(g) = file_glob {
-        args.insert("file_glob".into(), json!(g));
-    }
-    if before_context > 0 {
-        args.insert("before_context".into(), json!(before_context));
-    }
-    if after_context > 0 {
-        args.insert("after_context".into(), json!(after_context));
-    }
-    if count_only {
-        args.insert("count_only".into(), json!(true));
-    }
-    if files_with_matches {
-        args.insert("files_with_matches".into(), json!(true));
-    }
-    args.insert("limit".into(), json!(limit));
-
-    try_tools_call(root, "grep_code", Value::Object(args))
 }
 
 #[cfg(test)]

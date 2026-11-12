@@ -114,9 +114,10 @@ exposing the whole surface at once:
 | Find relevant code from a concept | `code_search` / `codixing search` | Minimal | Ranked, token-bounded retrieval for natural language and code terms |
 | Jump to a known definition | `find_symbol` / `codixing symbols` | Minimal | Definitions only, not every textual mention |
 | Get a compact architecture map | `get_repo_map` / `codixing graph --map` | Minimal | A bounded orientation pass before deeper traversal |
-| Check blast radius before editing | `search_usages --complete` or `predict_impact` / `codixing impact` | Reviewer | Deterministic bounded scan instead of top-K guesses; follow `next_offset` pages |
+| Find every reference before changing a symbol | `search_usages` / `codixing usages` | Minimal | Exhaustive whole-word scan (`path:line:kind`), definition first; `complete=true` pages the full set |
+| Check blast radius before editing | `change_impact` / `codixing impact` | Minimal | Dependent code and tests, code before docs; `full=true` for everything |
 | Understand a feature | `feature_hub` or `get_context_for_task` | Reviewer | One call combines search, dependencies, dependents, and tests |
-| Inspect exact text | `grep_code` / `codixing grep` | Reviewer | Literal/regex scan for strings, errors, TODOs, and generated names |
+| Inspect exact text | `grep_code` / `codixing grep` | Minimal | Literal/regex scan for strings, errors, TODOs, and generated names |
 | Focus on current work | `focus_map` / `codixing graph --map` | Reviewer | Graph-ranked context biased toward changed or seed files |
 
 Minimal is the startup default. Call `set_mcp_profile` with `reviewer` before
@@ -205,8 +206,8 @@ The most common commands (run `codixing --help` for the full list):
 ```bash
 codixing search "query"          # Ranked code search
 codixing grep "pattern"          # Literal/regex text scan (path:line:col:text)
-codixing symbols Widget          # Find symbol definitions
-codixing usages add_chunk        # Find call sites and imports
+codixing symbols Widget          # Definitions, exact match first (path:start-end)
+codixing usages add_chunk        # Every reference as path:line:kind (exact; --complete for all)
 codixing callers src/engine.rs   # Who imports this file
 codixing callees src/engine.rs   # What this file imports
 codixing graph --map             # Architecture overview
@@ -219,15 +220,16 @@ codixing impact src/engine.rs    # Blast radius (compact by default; --full for 
 codixing api src/engine.rs       # Public API surface
 codixing types Engine            # Type relationships
 codixing examples add_chunk      # Usage examples from tests + callers
-codixing context src/engine.rs   # Cross-file context assembly
-codixing ask "task: inspect auth" # Recommended agent entrypoint; punctuation-safe
+codixing context src/engine.rs --line 120  # Innermost function + imports/callees (1-based line)
+codixing ask "task: inspect auth" # Recommended agent entrypoint: compact text pack (--json for the schema)
 codixing agent-context-pack "task" # Stable JSON context pack for agents
-codixing symbols Widget --defs-only  # Definitions only (no Import rows)
+codixing symbols Widget --imports  # Also list import rows (hidden by default)
 codixing search IndexStore --strategy goto  # Definition-first symbol jump
-codixing init --dry-run .         # Inventory + disk estimate before writing an index
+codixing init --dry-run .         # Inventory + disk and peak-memory estimate before writing an index
 codixing doctor --check-update    # Free space, lock owner, ONNX hints, optional release check
 codixing doctor --fix-path       # PATH binary version gate + install hints
-codixing bench-tokens            # Prove token savings vs grep+read
+codixing bench-tokens            # Token savings vs grep+read, with exact counts and answer checks
+codixing daemon start .          # Keep the index warm (automatic on 20K+ file indexes)
 codixing init .                  # Index a project
 codixing sync                    # Incremental re-index
 codixing import github issues.json  # Import GitHub issues/PRs as searchable context
@@ -266,8 +268,21 @@ refresh `tools/list`.
 
 ### Daemon mode
 
-Daemon mode loads the engine once and serves calls over a Unix socket (or named pipe on Windows) — **4-5x faster**.
-The daemon auto-starts on first connection and self-terminates after 30 minutes idle:
+Daemon mode loads the engine once and serves calls over a Unix socket (or named pipe on Windows).
+The daemon auto-starts on first MCP connection and self-terminates after 30 minutes idle.
+
+The CLI uses the same daemon. `search`, `ask`, `symbols`, `usages`, `impact`, `context`,
+`callers`, `callees` and `graph --map` are answered over the socket with output identical to the
+in-process path (`grep` always runs in-process: it opens in milliseconds on its own). On indexes of 20,000+ files the CLI starts a read-only daemon in the background after the
+first cold command (opt out with `CODIXING_NO_AUTO_DAEMON=1`); `codixing daemon start` and
+`codixing daemon status` manage it explicitly. On Linux 6.6 (71K files) a warm `search` takes
+about 10 ms and `ask` about 100 ms. When the repository path is too long for a Unix socket in
+`.codixing/`, the socket moves to a private per-user runtime directory automatically.
+
+Without a daemon a read-only command opens only what it uses: chunk metadata and the dependency
+graph are decoded on first use. On the same kernel index a cold `search` takes about 0.13 s and
+`ask` about 0.25 s. `CODIXING_NO_DAEMON=1` forces the in-process path and never starts a daemon;
+use it for benchmarks. The CLI ignores a daemon left running by a different release.
 
 ```bash
 codixing-mcp --root /path/to/project          # auto-starts daemon
@@ -341,7 +356,7 @@ Raw results: [external_competitor_benchmark.md](benchmarks/results/external_comp
 
 **Large codebase** (368K LoC, 7,607 files): Init 7.9s, search 94ms, 99% token reduction vs grep.
 
-**Linux kernel** (63K C/H files, 30M+ lines, 84K-node dependency graph): 1.57s cold-start search, 0.79s warm via the MCP daemon path. Zero-deserialization mmap for instant startup. Note: fresh-process CLI invocations on a 2GB+ hybrid index pay startup cost on every call — prefer the MCP daemon or a BM25-only index (`codixing init .` without `--embed`) for the CLI path.
+**Linux kernel** (Linux 6.6, 71K indexed files, BM25-only index, 4 vCPU): 0.13 s cold-start `search` and 0.25 s cold `ask` from a fresh CLI process, about 10 ms and 100 ms through a warm daemon (measured 2026-11-12; see `benchmarks/README.md` § Retrieval gate). An earlier measurement on a 63K-file hybrid index reported 1.57s cold-start search, 0.79s warm via the MCP daemon path. Zero-deserialization mmap for instant startup. Note: fresh-process CLI invocations on a 2GB+ hybrid index pay startup cost on every call — prefer the MCP daemon or a BM25-only index (`codixing init .` without `--embed`) for the CLI path.
 
 **SWE-bench Lite** (300 tasks, 12 repos): Recall@5 = 74.3% (vs grep 41.3%).
 
@@ -359,7 +374,9 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Interactive graph dashboard** — `codixing graph --html` generates a self-contained HTML dashboard (no CDN, no framework): force-directed layout, color-by layer/language/directory, a node detail panel (PageRank, language, callers/callees), named architectural layers with show/hide, a deterministic guided tour of the codebase, a client-side path finder, fuzzy search-to-focus, surprise/anomaly edges, and a `--diff-base <ref>` diff-impact overlay that highlights changed files and their blast radius
 - **Graph exports for external tools** — `codixing graph --graphml` (Gephi/yEd), `--cypher` (Neo4j), `--obsidian` (markdown vault with one note per community) for downstream analysis and knowledge-base integration
 - **Git hooks** — `codixing hook install` wires post-commit hooks for automatic index sync after every commit; `codixing hook status` / `uninstall` manage the lifecycle
-- **Caller cascade** — `codixing callers <file> --depth N` walks the import graph N hops to surface the full transitive caller cascade
+- **Caller cascade** — `codixing callers <file> --depth N` walks the import graph N hops to surface the full transitive caller cascade (100 paths by default; `--limit N`, `--limit 0` for all)
+- **C and C++ behind macros** — attribute macros that break the grammar (`__alloc_size(1)`, `__printf(2, 3)`, trailing `__noreturn`) are masked before parsing, function-like `#define`s are symbols, and `SYSCALL_DEFINE3(read, ...)` is indexed as `sys_read`
+- **Retrieval gate** — `benchmarks/retrieval_gate.py` checks answers, hit rates and tokens-to-answer on real repositories; CI runs it on this repository and a pinned Django
 - **TOML output filter pipeline** — Project-local `.codixing/filter_rules.toml` compresses MCP tool output for token-tight agent loops, with tee recovery to disk for full output when agents need it
 - **Edge confidence** — Every dependency edge tagged Verified/High/Medium/Low based on extraction method (AST-resolved, call extraction, doc reference, external)
 - **Ranked cross-imports** — PageRank + git recency scoring for relevance-ranked graph queries across directory boundaries
@@ -394,7 +411,7 @@ See [benchmarks/](benchmarks/) for detailed methodology and reproduction scripts
 - **Git recency signal** — Mildly boosts recently modified files (+10% linear decay over 180 days) via lazy-loaded git log timestamps
 - **Overlapping chunks** — Bridge chunks at AST-aware chunk boundaries capture cross-function context; configurable `overlap_ratio` (default 0.0)
 - **File path boosting** — Detects explicit file paths and backtick code references in queries and boosts matching results (2.5×)
-- **Kernel-scale performance** — Tested on the Linux kernel (63K C/H files, 30M+ lines, 84K-node graph): 1.57s cold-start search, 0.79s warm via the MCP daemon. Mmap symbols, compact chunk metadata (11× smaller), and one lazy file-level trigram artifact serve both grep and exact search. Exact lookup streams candidate paths in bounded batches and hydrates only selected Tantivy chunks; fresh indexes no longer persist a duplicate chunk-level trigram corpus
+- **Kernel-scale performance** — Measured on Linux 6.6 (71K indexed files, 691K chunks) on a 4-vCPU machine: cold one-shot `grep` 0.11 s, `symbols` 0.10 s, `usages` 0.21 s, `search` 1.4 s; 10–350 ms for every command once the daemon is warm. `grep`, `symbols` and `usages` open only the artifacts they need, the mmap symbol table is verified by digest instead of re-validated on every open, and one lazy file-level trigram artifact serves grep, usages and exact search. Exact lookup streams candidate paths in bounded batches and hydrates only selected Tantivy chunks
 - **Trigram pre-filtering** — File-level trigram inverted index (Russ Cox/trigrep technique) skips files before disk I/O; **110× faster** literal grep at 1K files, **52× faster** at 10K files; persistent bitcode storage, regex HIR walking with OR-branch support, parallel rayon verification
 - **LSP rename + semantic tokens** — Cross-file rename refactoring with conflict detection; semantic highlighting for Rust, Python, TypeScript, Go
 - **Optional RustQueue embedding primitives** — Feature-gated, file-grouped job and bounded-channel worker implementation for embedding experiments; the supported CLI durability path is `codixing embed` with generation checkpoints

@@ -104,8 +104,16 @@ pub fn is_entry_point(path: &str) -> bool {
         // `main` field, never imported by other source files.
         "extension.ts",
         "extension.js",
+        // Cargo build scripts are run by the build system, never imported.
+        "build.rs",
     ];
+    // Shell scripts and git/agent hooks are executed, not imported.
+    let executed = filename.ends_with(".sh")
+        || filename.ends_with(".bash")
+        || path.contains("/hooks/")
+        || path.starts_with("hooks/");
     entry_names.contains(&filename)
+        || executed
         || filename.starts_with("main")
         || path.contains("/bin/")
         || path.starts_with("bin/")

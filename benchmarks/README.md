@@ -3,6 +3,51 @@
 This directory contains reproducible harnesses for Codixing retrieval,
 agent-loop, and indexing claims.
 
+## Retrieval gate on real repositories
+
+`retrieval_gate.py` runs a task set (queries with the files that answer them)
+against an indexed repository and fails when retrieval quality drops. It is
+the answer-checked benchmark: saving tokens on a wrong answer is not a saving.
+
+```bash
+cargo build --release -p codixing
+export PATH="$PWD/target/release:$PATH"
+
+codixing init .
+python3 benchmarks/retrieval_gate.py benchmarks/retrieval/tasks_self.json .
+
+# Django 5.0.6 (source distribution from PyPI) and Linux 6.6 (kernel.org)
+python3 benchmarks/retrieval_gate.py benchmarks/retrieval/tasks_django.json /path/to/django
+python3 benchmarks/retrieval_gate.py benchmarks/retrieval/tasks_linux.json /path/to/linux
+```
+
+For `codixing search` and `codixing ask` it reports, per task: the rank of the
+first expected file, the tokens an agent reads top-down until that file is
+shown (a miss costs the whole output), and wall time. Identifier tasks also
+record what `rg -n -w` prints for the same name. Commands run with
+`CODIXING_NO_DAEMON=1`, so the numbers are for the in-process path whatever is
+running. Token counts are exact (`cl100k_base`) when `tiktoken` is installed
+and a labelled estimate otherwise; only the standard library is required.
+
+Each task file carries its own thresholds under `gate`, for example
+`"nl": {"search_mrr": 0.6, "ask_within_of_search": 0.1}`: minimum MRR or hit
+counts per surface, and how far `ask` may trail `search`. The thresholds sit
+below the measured values so that ordinary ranking changes pass and a real
+regression does not.
+
+| Corpus | Identifier MRR (search / ask) | Natural-language MRR (search / ask) | Median tokens to answer, identifier | `rg -nw` median |
+|---|---|---|---:|---:|
+| This repository (8 + 12 tasks) | 1.00 / 1.00 | 0.74 / 0.74 | 59 | 5,127 |
+| Django 5.0.6 (10 + 10) | 1.00 / 1.00 | 0.70 / 0.63 | 42 | 2,909 |
+| Linux 6.6 (12 + 10) | 1.00 / 1.00 | 0.60 / 0.60 | 65 | 5,471 |
+
+Measured 2026-11-12 on a BM25-only index. The task sets are small and written
+by one reviewer; treat the figures as a regression baseline, not a claim.
+
+The `retrieval-gate` CI job runs the first two on every CI run. The task set
+for this repository names its own files: when one is renamed or split, update
+`expect` in `benchmarks/retrieval/tasks_self.json` in the same change.
+
 ## Direct Competitor Benchmark
 
 Use `competitor_benchmark.py` to compare Codixing against external local tools

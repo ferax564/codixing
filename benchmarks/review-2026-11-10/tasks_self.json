@@ -1,0 +1,25 @@
+{
+ "corpus": "this repository (pass ROOT=.)",
+ "tasks": [
+  {"q": "Engine", "kind": "id", "expect": ["crates/core/src/engine/mod.rs"], "line": 401},
+  {"q": "IndexStore", "kind": "id", "expect": ["crates/core/src/persistence/mod.rs"]},
+  {"q": "SearchQuery", "kind": "id", "expect": ["crates/core/src/retriever/mod.rs"]},
+  {"q": "CodeGraph", "kind": "id", "expect": ["crates/core/src/graph/mod.rs"]},
+  {"q": "cmd_callers", "kind": "id", "expect": ["crates/cli/src/main.rs"], "line": 2291},
+  {"q": "resolve_path", "kind": "id", "expect": ["crates/core/src/config.rs"]},
+  {"q": "is_primary_definition_kind", "kind": "id", "expect": ["crates/core/src/engine/pipeline.rs"], "line": 438},
+  {"q": "AgentContextPack", "kind": "id", "expect": ["crates/core/src/engine/context_assembly.rs"], "line": 251},
+  {"q": "how does incremental sync decide which files changed", "kind": "nl", "expect": ["crates/core/src/engine/sync.rs"]},
+  {"q": "add a --json flag to the callers command", "kind": "nl", "expect": ["crates/cli/src/main.rs"]},
+  {"q": "where is the final token budget enforced on MCP tool output", "kind": "nl", "expect": ["crates/mcp/src/tools/mod.rs", "crates/mcp/src/jsonrpc.rs"]},
+  {"q": "how is the search strategy auto-detected from the query", "kind": "nl", "expect": ["crates/core/src/engine/search.rs", "crates/cli/src/main.rs"]},
+  {"q": "reciprocal rank fusion of bm25 and vector results", "kind": "nl", "expect": ["crates/core/src/retriever/hybrid.rs", "crates/core/src/engine/search.rs"]},
+  {"q": "personalized pagerank computation", "kind": "nl", "expect": ["crates/core/src/graph/pagerank.rs", "crates/core/src/graph/mod.rs"]},
+  {"q": "path traversal and symlink protection when resolving file paths", "kind": "nl", "expect": ["crates/core/src/config.rs"]},
+  {"q": "find the tests that cover a source file", "kind": "nl", "expect": ["crates/core/src/engine/test_mapping.rs", "crates/core/src/test_mapping.rs"]},
+  {"q": "rename a symbol across the codebase", "kind": "nl", "expect": ["crates/mcp/src/tools/analysis.rs"]},
+  {"q": "single writer lease for the index", "kind": "nl", "expect": ["crates/core/src/persistence/mod.rs"]},
+  {"q": "hook that blocks grep and redirects to codixing", "kind": "nl", "expect": ["claude-plugin/hooks/pretool-codixing.sh", "claude-plugin/hooks/pretool-bash-codixing.sh", "crates/cli/src/main.rs"]},
+  {"q": "trigram prefilter for regex grep", "kind": "nl", "expect": ["crates/core/src/index/trigram.rs"]}
+ ]
+}

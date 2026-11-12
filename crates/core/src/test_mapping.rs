@@ -4,7 +4,7 @@
 //! bidirectional queries: "find tests for this code" and "find code tested
 //! by this test".
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// A single mapping between a test file and its corresponding source file.
@@ -119,10 +119,60 @@ pub fn strip_test_affixes(filename: &str) -> Option<String> {
     None
 }
 
+/// Constant-time lookups over the indexed file set.
+///
+/// Test mapping asks "is this exact path indexed?" and "which files have this
+/// basename?" once or more per test file. Answering by scanning the file list
+/// made the mapping quadratic, which is the difference between milliseconds
+/// and tens of seconds on a 70K-file repository.
+pub struct FileLookup<'a> {
+    paths: HashSet<&'a str>,
+    by_lower_name: HashMap<String, Vec<&'a str>>,
+}
+
+impl<'a> FileLookup<'a> {
+    /// Index `files` by exact path and by lower-cased basename.
+    pub fn new(files: &'a [String]) -> Self {
+        let mut paths = HashSet::with_capacity(files.len());
+        let mut by_lower_name: HashMap<String, Vec<&'a str>> = HashMap::new();
+        for file in files {
+            paths.insert(file.as_str());
+            let name = file.rsplit('/').next().unwrap_or(file).to_lowercase();
+            by_lower_name.entry(name).or_default().push(file.as_str());
+        }
+        Self {
+            paths,
+            by_lower_name,
+        }
+    }
+
+    /// Whether `path` is an indexed file.
+    pub fn contains(&self, path: &str) -> bool {
+        self.paths.contains(path)
+    }
+
+    /// Indexed files whose basename equals `lower_name` (already lower-cased),
+    /// in index order.
+    pub fn with_name(&self, lower_name: &str) -> &[&'a str] {
+        self.by_lower_name
+            .get(lower_name)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+}
+
 /// Find the best matching source file for a test file, given a list of all files.
 ///
 /// Returns `(source_file_path, confidence)` or `None` if no match is found.
 pub fn find_best_source_match(test_file: &str, all_files: &[String]) -> Option<(String, f32)> {
+    find_best_source_match_indexed(test_file, &FileLookup::new(all_files))
+}
+
+/// [`find_best_source_match`] against a prebuilt [`FileLookup`].
+pub fn find_best_source_match_indexed(
+    test_file: &str,
+    files: &FileLookup<'_>,
+) -> Option<(String, f32)> {
     let test_filename = test_file.rsplit('/').next().unwrap_or(test_file);
     let stripped = strip_test_affixes(test_filename)?;
 
@@ -133,7 +183,7 @@ pub fn find_best_source_match(test_file: &str, all_files: &[String]) -> Option<(
     } else {
         format!("{test_dir}/{stripped}")
     };
-    if all_files.iter().any(|f| f == &same_dir_candidate) {
+    if files.contains(&same_dir_candidate) {
         return Some((same_dir_candidate, 0.9));
     }
 
@@ -143,26 +193,173 @@ pub fn find_best_source_match(test_file: &str, all_files: &[String]) -> Option<(
     // test/foo_test.go -> foo.go, pkg/foo.go, internal/foo.go
     let directory_candidates = build_directory_candidates(test_file, &stripped);
     for candidate in &directory_candidates {
-        if all_files.iter().any(|f| f == candidate) {
+        if files.contains(candidate) {
             return Some((candidate.clone(), 0.8));
         }
     }
 
     // Strategy 3: Fuzzy filename match — find any file with the same basename.
-    let stripped_lower = stripped.to_lowercase();
     let mut best: Option<(String, f32)> = None;
-    for file in all_files {
-        let filename = file.rsplit('/').next().unwrap_or(file);
-        if filename.to_lowercase() == stripped_lower && file != test_file {
+    for file in files.with_name(&stripped.to_lowercase()) {
+        if *file != test_file {
             // Base confidence 0.7, boost slightly if paths share components.
             let shared = count_shared_path_components(test_file, file);
             let confidence = (0.7 + shared as f32 * 0.05).min(0.85);
             if best.as_ref().is_none_or(|(_, c)| confidence > *c) {
-                best = Some((file.clone(), confidence));
+                best = Some(((*file).to_string(), confidence));
             }
         }
     }
     best
+}
+
+/// Human-readable reason for a naming-convention match of the given confidence.
+fn naming_reason(confidence: f32) -> String {
+    if confidence >= 0.9 {
+        "Naming convention match (same directory)".to_string()
+    } else if confidence >= 0.8 {
+        "Directory convention match".to_string()
+    } else {
+        "Filename match (different directory)".to_string()
+    }
+}
+
+/// Sort mappings by confidence (highest first), then paths, for stable output.
+fn sort_mappings(mappings: &mut [TestMapping]) {
+    mappings.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.test_file.cmp(&b.test_file))
+            .then_with(|| a.source_file.cmp(&b.source_file))
+    });
+}
+
+/// Find the tests of one source file without building the project-wide map.
+///
+/// `importers` are the files that import `source_file` (from the dependency
+/// graph); `files` is the indexed file set. The result is exactly the subset
+/// of [`discover_test_mappings`] whose `source_file` is `source_file`, but it
+/// costs one pass over the file list instead of a whole-repository mapping,
+/// and it is not subject to that function's global result limit.
+pub fn tests_for_source(
+    source_file: &str,
+    files: &[String],
+    importers: &[String],
+) -> Vec<TestMapping> {
+    tests_for_source_indexed(source_file, files, &FileLookup::new(files), importers)
+}
+
+/// [`tests_for_source`] against a prebuilt [`FileLookup`] over `files`, for
+/// callers that resolve several source files in a row.
+pub fn tests_for_source_indexed(
+    source_file: &str,
+    files: &[String],
+    lookup: &FileLookup<'_>,
+    importers: &[String],
+) -> Vec<TestMapping> {
+    if is_test_file(source_file) || !lookup.contains(source_file) {
+        return Vec::new();
+    }
+    let mut best: HashMap<String, TestMapping> = HashMap::new();
+    let mut offer = |mapping: TestMapping| {
+        best.entry(mapping.test_file.clone())
+            .and_modify(|existing| {
+                if mapping.confidence > existing.confidence {
+                    *existing = mapping.clone();
+                }
+            })
+            .or_insert(mapping);
+    };
+
+    // Strategy A: tests that import the source file.
+    for importer in importers {
+        if is_test_file(importer) && lookup.contains(importer) {
+            offer(TestMapping {
+                test_file: importer.clone(),
+                source_file: source_file.to_string(),
+                confidence: 0.95,
+                reason: format!("Test file imports {source_file}"),
+            });
+        }
+    }
+
+    // Strategy B: tests named after the source file. Only test files whose
+    // stripped name equals this basename can map to it.
+    let source_name = source_file
+        .rsplit('/')
+        .next()
+        .unwrap_or(source_file)
+        .to_lowercase();
+    for file in files {
+        if !is_test_file(file) {
+            continue;
+        }
+        let test_name = file.rsplit('/').next().unwrap_or(file);
+        let Some(stripped) = strip_test_affixes(test_name) else {
+            continue;
+        };
+        if stripped.to_lowercase() != source_name {
+            continue;
+        }
+        if let Some((source, confidence)) = find_best_source_match_indexed(file, lookup)
+            && source == source_file
+        {
+            offer(TestMapping {
+                test_file: file.clone(),
+                source_file: source,
+                confidence,
+                reason: naming_reason(confidence),
+            });
+        }
+    }
+
+    let mut mappings: Vec<TestMapping> = best.into_values().collect();
+    sort_mappings(&mut mappings);
+    mappings
+}
+
+/// Find the source files one test file covers without building the
+/// project-wide map. `imports` are the files `test_file` imports.
+pub fn sources_for_test(test_file: &str, files: &[String], imports: &[String]) -> Vec<TestMapping> {
+    if !is_test_file(test_file) {
+        return Vec::new();
+    }
+    let lookup = FileLookup::new(files);
+    let mut best: HashMap<String, TestMapping> = HashMap::new();
+    for imported in imports {
+        if lookup.contains(imported) && !is_test_file(imported) {
+            best.insert(
+                imported.clone(),
+                TestMapping {
+                    test_file: test_file.to_string(),
+                    source_file: imported.clone(),
+                    confidence: 0.95,
+                    reason: format!("Test file imports {imported}"),
+                },
+            );
+        }
+    }
+    if let Some((source, confidence)) = find_best_source_match_indexed(test_file, &lookup)
+        && !is_test_file(&source)
+    {
+        let mapping = TestMapping {
+            test_file: test_file.to_string(),
+            source_file: source.clone(),
+            confidence,
+            reason: naming_reason(confidence),
+        };
+        best.entry(source)
+            .and_modify(|existing| {
+                if mapping.confidence > existing.confidence {
+                    *existing = mapping.clone();
+                }
+            })
+            .or_insert(mapping);
+    }
+    let mut mappings: Vec<TestMapping> = best.into_values().collect();
+    sort_mappings(&mut mappings);
+    mappings
 }
 
 /// Build directory-convention candidate paths for source file discovery.
@@ -245,6 +442,7 @@ pub fn discover_test_mappings(
     let mut mappings: Vec<TestMapping> = Vec::new();
     // Track best mapping per (test_file, source_file) pair.
     let mut best: HashMap<(String, String), TestMapping> = HashMap::new();
+    let lookup = FileLookup::new(files);
 
     for file in files {
         if !is_test_file(file) {
@@ -257,7 +455,7 @@ pub fn discover_test_mappings(
         {
             for imported in imports {
                 // Only map to files that are in our indexed set and not test files themselves.
-                if files.contains(imported) && !is_test_file(imported) {
+                if lookup.contains(imported) && !is_test_file(imported) {
                     let key = (file.clone(), imported.clone());
                     let mapping = TestMapping {
                         test_file: file.clone(),
@@ -277,17 +475,11 @@ pub fn discover_test_mappings(
         }
 
         // Strategy B: Naming/directory convention.
-        if let Some((source, confidence)) = find_best_source_match(file, files)
+        if let Some((source, confidence)) = find_best_source_match_indexed(file, &lookup)
             && !is_test_file(&source)
         {
             let key = (file.clone(), source.clone());
-            let reason = if confidence >= 0.9 {
-                "Naming convention match (same directory)".to_string()
-            } else if confidence >= 0.8 {
-                "Directory convention match".to_string()
-            } else {
-                "Filename match (different directory)".to_string()
-            };
+            let reason = naming_reason(confidence);
             let mapping = TestMapping {
                 test_file: file.clone(),
                 source_file: source,
@@ -308,13 +500,7 @@ pub fn discover_test_mappings(
 
     // Filter by min confidence and sort by confidence descending.
     mappings.retain(|m| m.confidence >= options.min_confidence);
-    mappings.sort_by(|a, b| {
-        b.confidence
-            .partial_cmp(&a.confidence)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.test_file.cmp(&b.test_file))
-            .then_with(|| a.source_file.cmp(&b.source_file))
-    });
+    sort_mappings(&mut mappings);
     mappings.truncate(options.limit);
     mappings
 }

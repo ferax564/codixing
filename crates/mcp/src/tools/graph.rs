@@ -245,7 +245,7 @@ pub(crate) fn call_symbol_callers(engine: &Engine, args: &Value) -> (String, boo
         usages.len()
     );
     for u in &usages {
-        out.push_str(&format!("  `{}` L{}", u.file_path, u.line_start));
+        out.push_str(&format!("  `{}` L{}", u.file_path, u.display_lines().0));
         if !u.signature.is_empty() {
             out.push_str(&format!("  \u{2014} {}", u.signature));
         }

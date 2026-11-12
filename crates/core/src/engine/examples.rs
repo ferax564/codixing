@@ -74,13 +74,29 @@ impl Engine {
     pub fn find_usage_examples(&self, symbol: &str, max: usize) -> Vec<UsageExample> {
         let mut examples = Vec::new();
 
-        // Look up the symbol definition(s).
-        let definitions = self.symbols.filter(symbol, None);
+        // Look up the symbol definition(s): the exact name first. A substring
+        // match is only a fallback, and either way a handful of definitions
+        // is enough — on a large repository a substring lookup can return
+        // thousands of symbols, each of which used to trigger a test lookup.
+        const MAX_DEFINITIONS: usize = 5;
+        let mut definitions = self.symbols.lookup(symbol);
+        if definitions.is_empty() {
+            definitions = self.symbols.filter(symbol, None);
+        }
+        definitions.retain(|s| !matches!(s.kind, crate::language::EntityKind::Import));
+        crate::symbols::sort_for_lookup(&mut definitions, symbol);
+        definitions.truncate(MAX_DEFINITIONS);
 
         // --- Source 1: Test examples ---
-        for def in &definitions {
-            let test_mappings = self.find_tests_for_file(&def.file_path);
+        let mut definition_files: Vec<&str> =
+            definitions.iter().map(|d| d.file_path.as_str()).collect();
+        definition_files.dedup();
+        let mut seen_tests = std::collections::HashSet::new();
+        for (_, test_mappings) in self.find_tests_for_files(&definition_files) {
             for mapping in &test_mappings {
+                if examples.len() >= max || !seen_tests.insert(mapping.test_file.clone()) {
+                    continue;
+                }
                 // Test mappings are persisted index state. Treat them as
                 // untrusted on load so a corrupt index cannot escape the
                 // configured roots while assembling a read-only MCP result.
@@ -117,7 +133,20 @@ impl Engine {
         }
 
         // --- Source 2: Call site examples ---
-        let callers = self.symbol_callers_precise(symbol, max * 2);
+        // Whole-word occurrences from the trigram index: exact, and far
+        // cheaper than re-parsing ranked candidate files.
+        let mut callers: Vec<_> = self
+            .exact_symbol_references(symbol)
+            .into_iter()
+            .filter(|r| r.kind == "call")
+            .collect();
+        callers.sort_by(|a, b| {
+            crate::symbols::is_test_like_path(&a.file_path)
+                .cmp(&crate::symbols::is_test_like_path(&b.file_path))
+                .then_with(|| a.file_path.cmp(&b.file_path))
+                .then_with(|| a.line.cmp(&b.line))
+        });
+        callers.truncate(max * 2);
         for caller in &callers {
             examples.push(UsageExample {
                 file_path: caller.file_path.clone(),
