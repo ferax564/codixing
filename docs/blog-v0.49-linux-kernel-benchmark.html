@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>v0.49.0 benchmark: Codixing on the Linux kernel</title>
+  <meta name="description" content="Measured on Linux 6.6 (71K files): cold search from 4.7 s to 0.14 s, natural-language MRR from 0.16 to 0.60, and a one-file sync persist from 4.7 s to 2 ms. What changed in Codixing v0.49.0 and how to reproduce it." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+  <style>
+    :root {
+      --bg: #000000;
+      --bg-1: #0a0a0f;
+      --bg-2: #0d1117;
+      --border: rgba(48, 54, 61, 0.8);
+      --cyan: #00d4aa;
+      --purple: #8b5cf6;
+      --text: #f0f6fc;
+      --text-muted: #8b949e;
+      --text-dim: #484f58;
+      --yellow: #e3b341;
+      --radius: 12px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: "Inter", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.8;
+    }
+    ::selection { background: rgba(0, 212, 170, 0.2); }
+
+    nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+    .nav-inner {
+      max-width: 800px; margin: 0 auto; padding: 16px 24px;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .nav-inner a { color: var(--text-muted); text-decoration: none; font-size: 0.9rem; }
+    .nav-inner a:hover { color: var(--cyan); }
+
+    article { max-width: 800px; margin: 0 auto; padding: 120px 24px 80px; }
+    .blog-meta { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 16px; }
+    article h1 {
+      font-size: clamp(2rem, 4vw, 2.8rem);
+      font-weight: 700; letter-spacing: -0.03em; line-height: 1.2;
+      margin-bottom: 24px;
+    }
+    .subtitle {
+      font-size: 1.15rem; color: var(--text-muted); line-height: 1.7;
+      margin-bottom: 44px; max-width: 65ch;
+    }
+    article h2 {
+      font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em;
+      margin-top: 56px; margin-bottom: 16px; color: var(--cyan);
+    }
+    article h3 { font-size: 1.15rem; font-weight: 600; margin-top: 36px; margin-bottom: 12px; }
+    article p { margin-bottom: 20px; color: var(--text); font-size: 1.02rem; }
+    article strong { color: var(--cyan); font-weight: 600; }
+    article code {
+      font-family: "JetBrains Mono", monospace; font-size: 0.88em;
+      background: var(--bg-2); padding: 2px 6px; border-radius: 4px; color: var(--cyan);
+    }
+    article a { color: var(--cyan); text-decoration: underline; text-underline-offset: 2px; }
+    article a:hover { color: var(--text); }
+    article ul, article ol { margin-bottom: 22px; padding-left: 24px; }
+    article li { margin-bottom: 10px; color: var(--text); }
+
+    pre {
+      background: var(--bg-2); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 20px 24px; overflow-x: auto; font-family: "JetBrains Mono", monospace;
+      font-size: 0.83rem; line-height: 1.7; margin: 20px 0 28px; color: var(--text-muted);
+    }
+    pre .cmd { color: var(--text); }
+    pre .val { color: var(--cyan); }
+    pre .key { color: var(--purple); }
+    pre .str { color: var(--yellow); }
+
+    .callout {
+      background: var(--bg-1); border-left: 3px solid var(--cyan);
+      padding: 20px 24px; border-radius: 0 var(--radius) var(--radius) 0; margin: 28px 0;
+    }
+    .callout p { margin-bottom: 0; color: var(--text-muted); }
+    .callout strong { color: var(--text); }
+
+    .stat-grid {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin: 32px 0;
+    }
+    .stat-card {
+      background: var(--bg-1); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 20px; text-align: center;
+    }
+    .stat-card .stat-val { font-size: 1.55rem; font-weight: 700; color: var(--cyan); }
+    .stat-card .stat-label { font-size: 0.8rem; color: var(--text-muted); margin-top: 4px; }
+
+    .workflow-table {
+      width: 100%; border-collapse: collapse; margin: 24px 0 32px; font-size: 0.92rem;
+    }
+    .workflow-table th {
+      text-align: left; padding: 10px 14px; background: var(--bg-2);
+      border: 1px solid var(--border); font-weight: 600; font-size: 0.8rem;
+      text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted);
+    }
+    .workflow-table td { padding: 12px 14px; border: 1px solid var(--border); color: var(--text); }
+    .workflow-table td:first-child {
+      font-family: "JetBrains Mono", monospace; color: var(--cyan); font-size: 0.86rem;
+      white-space: nowrap;
+    }
+
+    footer {
+      max-width: 800px; margin: 0 auto; padding: 40px 24px;
+      border-top: 1px solid var(--border);
+      color: var(--text-dim); font-size: 0.85rem;
+      display: flex; justify-content: space-between;
+    }
+    footer a { color: var(--text-muted); text-decoration: none; }
+
+    @media (max-width: 600px) {
+      article { padding-left: 16px; padding-right: 16px; }
+      article h1 { font-size: 2rem; }
+      .nav-inner { padding-left: 16px; padding-right: 16px; }
+      .stat-grid { grid-template-columns: repeat(2, 1fr); }
+      .workflow-table { display: block; overflow-x: auto; font-size: 0.84rem; }
+      .workflow-table th, .workflow-table td { padding: 9px 10px; }
+      footer { flex-direction: column; gap: 12px; }
+    }
+  </style>
+</head>
+<body>
+  <nav>
+    <div class="nav-inner">
+      <a href="/index.html" style="font-weight:600;color:var(--text)">Codixing</a>
+      <div style="display:flex;gap:20px">
+        <a href="/blog.html">Blog</a>
+        <a href="/docs.html">Docs</a>
+        <a href="https://github.com/ferax564/codixing">GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+    <article>
+    <a href="/blog.html" style="color:var(--text-muted);font-size:0.85rem;text-decoration:none;display:inline-block;margin-bottom:20px;">&larr; All Posts</a>
+    <div class="blog-meta">November 12, 2026 &bull; Benchmark</div>
+
+    <h1>v0.49.0 benchmark: Codixing on the Linux kernel</h1>
+
+    <p class="subtitle">
+      We pointed v0.48.0 at Linux 6.6 (71,025 indexed files) and measured what an agent actually waits for and reads. Most of it was too slow or too large. v0.49.0 is the result of fixing what we found. Here are the before-and-after numbers and how to reproduce them.
+    </p>
+
+    <div class="stat-grid">
+      <div class="stat-card">
+        <div class="stat-val">34&times;</div>
+        <div class="stat-label">faster cold <code>search</code> (4.7 s &rarr; 0.14 s)</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">0.60</div>
+        <div class="stat-label">natural-language MRR on Linux (was 0.16)</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">2 ms</div>
+        <div class="stat-label">one-file sync persist phase (was 4.7 s)</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">62.8%</div>
+        <div class="stat-label">fewer tokens than grep + read in <code>bench-tokens</code></div>
+      </div>
+    </div>
+
+    <h2>The setup</h2>
+
+    <p>Everything below was measured on a 4-vCPU, 15 GB Linux cloud container with a warm page cache, in BM25-only mode (no embeddings). We used three corpora: this repository (about 370 files), Django 5.0.6 (3,851 files) and Linux 6.6 (71,025 files). Times are the wall clock of the whole CLI process, with no daemon, unless stated. Token counts use <code>cl100k_base</code>.</p>
+
+    <p>Retrieval quality comes from 62 queries with known answers: 30 identifier lookups and 32 natural-language tasks. A hit means a result from the expected file appears at that rank or better.</p>
+
+    <div class="callout">
+      <p><strong>Read the numbers with that in mind:</strong> the query sets are small and written by one reviewer. The gaps are large relative to that noise, but treat the exact percentages as approximate. The harness is in the repository so you can run it on your own code.</p>
+    </div>
+
+    <h2>Cold start: every call used to reopen the whole index</h2>
+
+    <p>On the kernel, v0.48.0 spent about 4.5 s and 900 MB just opening the index for every CLI call. ripgrep answered the same literal query in 0.3 s. v0.49.0 opens read-only engines lazily: chunk metadata and the dependency graph are decoded only when a command needs them, and a BM25 search reads its hit fields from stored Tantivy values.</p>
+
+    <table class="workflow-table">
+      <thead>
+        <tr><th>Linux 6.6, one-shot</th><th>v0.48.0</th><th>v0.49.0</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>grep --count</td><td>4.8 s</td><td>0.15 s</td></tr>
+        <tr><td>symbols</td><td>4.7 s</td><td>0.13 s</td></tr>
+        <tr><td>usages</td><td>4.5 s</td><td>0.22 s</td></tr>
+        <tr><td>search</td><td>4.7 s</td><td>0.14 s</td></tr>
+        <tr><td>ask</td><td>19.5 s</td><td>0.28 s</td></tr>
+        <tr><td>impact</td><td>7.4 s</td><td>1.1 s</td></tr>
+        <tr><td>context</td><td>130&ndash;168 s</td><td>0.9 s</td></tr>
+        <tr><td>graph --map</td><td>15 s</td><td>0.75 s</td></tr>
+        <tr><td>audit</td><td>stopped after 6 min</td><td>1.9 s</td></tr>
+        <tr><td>search peak memory</td><td>~900 MB</td><td>276 MB</td></tr>
+      </tbody>
+    </table>
+
+    <p>On indexes of 20,000+ files the CLI now starts a read-only daemon in the background. Once it is warm, <code>search</code> takes 10&ndash;26 ms, <code>ask</code> 100&ndash;195 ms and <code>graph --map</code> 76 ms. Set <code>CODIXING_NO_AUTO_DAEMON=1</code> to opt out.</p>
+
+    <h2>Retrieval: the recommended entry point was the weakest one</h2>
+
+    <p>The biggest surprise was that <code>ask</code>, the command we tell agents to start with, found the right file far less often than plain <code>search</code>. It pinned symbols for ordinary long words and used a different retrieval path. Now it runs the task through the same path as <code>search</code>. Natural-language BM25 queries also gained a re-rank that rewards query terms in the path, terms that occur together in one identifier, and evidence spread across a file.</p>
+
+    <table class="workflow-table">
+      <thead>
+        <tr><th>MRR (search / ask)</th><th>v0.48.0</th><th>v0.49.0</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Codixing, identifier</td><td>0.89 / 0.81</td><td>1.00 / 1.00</td></tr>
+        <tr><td>Codixing, natural lang.</td><td>0.52 / 0.16</td><td>0.74 / 0.74</td></tr>
+        <tr><td>Django, identifier</td><td>0.95 / 0.82</td><td>1.00 / 1.00</td></tr>
+        <tr><td>Django, natural lang.</td><td>0.42 / 0.07</td><td>0.70 / 0.63</td></tr>
+        <tr><td>Linux, identifier</td><td>0.67 / &mdash;</td><td>1.00 / 1.00</td></tr>
+        <tr><td>Linux, natural lang.</td><td>0.16 / &mdash;</td><td>0.60 / 0.60</td></tr>
+      </tbody>
+    </table>
+
+    <p>On the kernel, identifier lookups needed C-specific work. Struct references without a body are no longer indexed as definitions. Attribute macros that break the grammar (<code>__alloc_size(1)</code>, <code>__printf(2, 3)</code>) are blanked before parsing, so <code>kmalloc</code> is found. Function-like <code>#define</code> macros and <code>SYSCALL_DEFINEn</code> bodies are now symbols.</p>
+
+    <p>Natural-language search without embeddings still depends on the query sharing words with the code. One of the ten Linux tasks, about the out-of-memory killer, is still missed because the code says <code>oom</code>.</p>
+
+    <h2>Output: tokens that carried no information</h2>
+
+    <p>A fast wrong answer is bad, and so is a correct answer buried in padding. On the kernel, a single v0.48.0 <code>symbols task_struct</code> call returned 126,278 tokens. v0.49.0 returns 1,158: definitions only, best match first, capped at 50 rows. <code>callers include/linux/slab.h</code> dropped from 8,254 to 1,151 tokens. <code>ask</code> now prints compact text by default, about a third of the previous size.</p>
+
+    <p>For identifier tasks, the median tokens an agent reads before it sees the expected file are now 59 on this repository, 42 on Django and 65 on Linux. <code>rg -nw</code> prints 5,127, 2,909 and 5,471 for the same names.</p>
+
+    <h2>Incremental sync</h2>
+
+    <p>Every checkpoint used to rewrite all chunk metadata, which is 93 MB on the kernel. A checkpoint that touches few files now writes a changed-file overlay, 1.6 KB for one file. The persist phase of a one-file sync went from 4.7 s to 2 ms.</p>
+
+    <p>A no-op <code>sync</code> on Linux still takes about 3.5 s because it opens a writable engine. That is the next thing to fix.</p>
+
+    <h2>Today's run on the release commit</h2>
+
+    <p>On the commit we released as v0.49.0, on the same kind of 4-vCPU host:</p>
+
+    <ul>
+      <li><strong>Retrieval gate</strong> on this repository: identifier hit@1 8/8 (MRR 1.00); natural-language hit@10 12/12 (MRR 0.73).</li>
+      <li><strong><code>bench-tokens</code></strong>, definition plus blast radius of <code>IndexStore</code>: 1,896 tokens against 5,092 for grep plus file reads, 62.8% fewer. The answer was present in every step.</li>
+      <li><strong>Criterion</strong>: BM25 identifier search in 116 &micro;s; search across a 10K-file repository in 10.8 ms; trigram grep on a selective literal 6.9&times; faster than a full scan at 10K files.</li>
+    </ul>
+
+    <p>Both checks now block CI. <code>benchmarks/retrieval_gate.py</code> runs answer-checked task sets against this repository and a checksum-pinned Django, and fails when hit rates drop or when <code>ask</code> trails <code>search</code>.</p>
+
+    <h2>Reproduce it</h2>
+
+    <pre><span class="cmd">curl --proto '=https' --proto-redir '=https' -fsSLo \
+  /tmp/codixing-install.sh https://codixing.com/install.sh &amp;&amp;
+sh /tmp/codixing-install.sh
+
+codixing init .
+codixing bench-tokens .
+python3 benchmarks/retrieval_gate.py \
+  benchmarks/retrieval/tasks_self.json .</span></pre>
+
+    <p>The full review, with the root cause of each finding, is <a href="https://github.com/ferax564/codixing/blob/main/codixing-review-2026-11-10.md">codixing-review-2026-11-10.md</a>. Its harness and task files are in <code>benchmarks/review-2026-11-10/</code>. Codixing v0.49.0 is on <a href="https://github.com/ferax564/codixing/releases/tag/v0.49.0">GitHub Releases</a> and as <code>codixing-mcp@0.49.0</code> on npm.</p>
+
+    <p>Heads-up if you upgrade: line numbers are now 1-based everywhere, including <code>context --line</code> and the MCP <code>read_file</code> ranges, and the default <code>search</code>, <code>symbols</code> and <code>ask</code> output formats changed. The <a href="https://github.com/ferax564/codixing/blob/main/CHANGELOG.md">changelog</a> lists every change.</p>
+  </article>
+
+  <footer>
+    <span>Open source &bull; Apache-2.0</span>
+    <a href="https://github.com/ferax564/codixing">GitHub</a>
+  </footer>
+</body>
+</html>
