@@ -2069,10 +2069,7 @@ pub(super) fn is_search_infra(path: &str, query: &str) -> bool {
         "search strategy",
         "search pipeline",
     ];
-    if search_terms.iter().any(|t| q.contains(t)) {
-        return false;
-    }
-    true
+    !search_terms.iter().any(|t| q.contains(t))
 }
 
 /// Demote C/C++ header files when implementation files (.c/.cc/.cpp) are also
